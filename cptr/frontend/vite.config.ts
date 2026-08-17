@@ -1,9 +1,14 @@
 import { sveltekit } from '@sveltejs/kit/vite';
-import tailwindcss from '@tailwindcss/vite';
+import tailwindcss from '@tailwindcss/postcss';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-	plugins: [tailwindcss(), sveltekit()],
+	plugins: [sveltekit()],
+	css: {
+		postcss: {
+			plugins: [tailwindcss()]
+		}
+	},
 	server: {
 		proxy: {
 			'/api': {
