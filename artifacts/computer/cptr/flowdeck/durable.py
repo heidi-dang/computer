@@ -931,7 +931,14 @@ class DurableFlowDeck:
                     db.add(lease)
                 return LeaseGrant(workspace, run_id, owner, epoch, now + ttl_ms)
 
-            return await self._transaction(operation)
+            try:
+                return await self._transaction(operation)
+            except IntegrityError:
+                # Two workers can both observe an empty lease table before
+                # either transaction inserts. The unique constraint is the
+                # authoritative arbiter; losing that race means the lease is
+                # unavailable, not that the caller should bypass fencing.
+                return None
 
     async def heartbeat_workspace_lease(
         self,

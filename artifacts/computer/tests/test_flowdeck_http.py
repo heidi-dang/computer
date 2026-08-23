@@ -1,5 +1,5 @@
-import hashlib
 import asyncio
+import hashlib
 import os
 import tempfile
 import unittest
@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.app import app
@@ -30,10 +30,14 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.root_a = Path(self.temp.name, "workspace-a").resolve()
         self.root_b = Path(self.temp.name, "workspace-b").resolve()
+        self.root_a_alias = Path(self.temp.name, "workspace-a-alias").resolve()
         self.root_a.mkdir()
         self.root_b.mkdir()
+        self.root_a_alias.symlink_to(self.root_a, target_is_directory=True)
         self.db_file = Path(self.temp.name, "http.db")
-        self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.db_file}")
+        self.engine = create_async_engine(
+            f"sqlite+aiosqlite:///{self.db_file}", connect_args={"timeout": 5}
+        )
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -93,13 +97,19 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
     def headers(self, user_id="user-a"):
         return {"Authorization": f"Bearer {self.tokens[user_id]}"}
 
-    async def request_run(self, user_id="user-a", key="retry-key-123", workspace=None):
+    async def request_run(
+        self,
+        user_id="user-a",
+        key="retry-key-123",
+        workspace=None,
+        objective="review the repository",
+    ):
         return await self.client.post(
             "/v1/flowdeck/orchestrations",
             headers={**self.headers(user_id), "Idempotency-Key": key},
             json={
                 "workspace": str(workspace or self.root_a),
-                "objective": "review the repository",
+                "objective": objective,
             },
         )
 
@@ -370,7 +380,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             )
 
             await self.set_workspace_mappings(
-                [("user-a", self.root_a), ("user-a", self.root_a)]
+                [("user-a", self.root_a), ("user-a", self.root_a_alias)]
             )
             response = await self.request_run(key="ambiguous-workspace-123")
             self.assertEqual(response.status_code, 403)
@@ -514,7 +524,9 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         ):
             for index, objective in enumerate(objectives):
                 response = await self.request_run(
-                    key=f"hostile-objective-{index}-123", workspace=self.root_a
+                    key=f"hostile-objective-{index}-123",
+                    workspace=self.root_a,
+                    objective=objective,
                 )
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(received[-1], objective)
@@ -655,7 +667,10 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json()["status"], state)
-            self.assertNotEqual(response.json()["status"], "succeeded" if state != "succeeded" else "failed")
+            self.assertNotEqual(
+                response.json()["status"],
+                "succeeded" if state != "succeeded" else "failed",
+            )
 
 
 if __name__ == "__main__":
