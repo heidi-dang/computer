@@ -9,9 +9,10 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -123,9 +124,8 @@ class DurableFlowDeck:
         last_error = None
         for attempt in range(self.busy_retries + 1):
             try:
-                async with self.session_factory() as db:
-                    async with db.begin():
-                        return await operation(db)
+                async with self.session_factory() as db, db.begin():
+                    return await operation(db)
             except OperationalError as exc:
                 last_error = exc
                 if "locked" not in str(exc).lower() or attempt >= self.busy_retries:
@@ -197,6 +197,20 @@ class DurableFlowDeck:
             run.heartbeat_at = now
             run.updated_at = now
             await self._event(db, run_id, "RUN_STARTED", {}, now)
+
+        await self._transaction(operation)
+
+    async def start_step(self, step_id: str, *, now: int | None = None) -> None:
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            step = await db.get(FlowDeckStep, step_id)
+            if not step:
+                raise LifecycleError("unknown step")
+            self._require(step.status, {StepStatus.PENDING.value})
+            step.status = StepStatus.RUNNING.value
+            step.updated_at = now
+            await self._event(db, step.run_id, "STEP_STARTED", {"step_id": step_id}, now)
 
         await self._transaction(operation)
 
@@ -344,6 +358,105 @@ class DurableFlowDeck:
                 "OUTCOME_UNKNOWN",
                 {"operation_id": op.id, "attempt_id": attempt_id},
                 now,
+            )
+
+        await self._transaction(operation)
+
+    async def finish_attempt(
+        self,
+        attempt_id: str,
+        *,
+        owner: str,
+        fencing_epoch: int,
+        outcome: str,
+        now: int | None = None,
+    ) -> None:
+        """Commit a positively observed attempt outcome under the current fence."""
+        if outcome not in {"succeeded", "failed"}:
+            raise LifecycleError("attempt outcome must be succeeded or failed")
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            attempt = await db.get(FlowDeckPhysicalAttempt, attempt_id)
+            if not attempt:
+                raise LifecycleError("unknown attempt")
+            op = await self._operation(db, attempt.operation_id)
+            self._require(op.status, {OperationStatus.RUNNING.value})
+            run = await self._run(db, op.run_id)
+            if run.workspace:
+                await self._assert_workspace_lease(
+                    db, run.workspace, run.id, owner, fencing_epoch, now
+                )
+            attempt.status = (
+                AttemptStatus.SUCCEEDED.value
+                if outcome == "succeeded"
+                else AttemptStatus.FAILED.value
+            )
+            attempt.outcome = outcome
+            attempt.ended_at = now
+            attempt.heartbeat_at = now
+            op.status = (
+                OperationStatus.SUCCEEDED.value
+                if outcome == "succeeded"
+                else OperationStatus.FAILED.value
+            )
+            op.outcome = outcome
+            op.updated_at = now
+            await self._event(
+                db,
+                op.run_id,
+                "ATTEMPT_FINISHED",
+                {"operation_id": op.id, "attempt_id": attempt_id, "outcome": outcome},
+                now,
+            )
+
+        await self._transaction(operation)
+
+    async def complete_run(
+        self,
+        run_id: str,
+        *,
+        status: RunStatus,
+        now: int | None = None,
+    ) -> None:
+        """Close a run only after its durable operations have terminal outcomes."""
+        if status not in {
+            RunStatus.SUCCEEDED,
+            RunStatus.FAILED,
+            RunStatus.MANUAL_REVIEW_REQUIRED,
+        }:
+            raise LifecycleError("run must complete with a terminal status")
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(
+                run.status,
+                {RunStatus.RUNNING.value, RunStatus.RECOVERING.value},
+            )
+            operations = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckLogicalOperation).where(
+                            FlowDeckLogicalOperation.run_id == run_id
+                        )
+                    )
+                ).all()
+            )
+            if any(
+                item.status
+                not in {
+                    OperationStatus.SUCCEEDED.value,
+                    OperationStatus.FAILED.value,
+                    OperationStatus.MANUAL_REVIEW_REQUIRED.value,
+                }
+                for item in operations
+            ):
+                raise LifecycleError("run has non-terminal operations")
+            run.status = status.value
+            run.updated_at = now
+            await self._event(
+                db, run_id, "RUN_COMPLETED", {"status": status.value}, now
             )
 
         await self._transaction(operation)
@@ -527,10 +640,15 @@ class DurableFlowDeck:
         async with self._process_lock:
             async def operation(db: AsyncSession):
                 run = await self._run(db, run_id)
-                if run.status != RunStatus.ORPHANED.value:
+                if run.status not in {
+                    RunStatus.ORPHANED.value,
+                    RunStatus.RECOVERING.value,
+                }:
                     return None
                 lease = await db.get(FlowDeckRecoveryLease, run_id)
                 if lease and lease.expires_at > now and lease.owner != owner:
+                    return None
+                if run.status == RunStatus.RECOVERING.value and lease and lease.expires_at > now:
                     return None
                 epoch = (lease.epoch + 1) if lease else 1
                 if lease:

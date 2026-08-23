@@ -17,37 +17,43 @@ from cptr.flowdeck.contracts import (
     RouteStrategy,
     ShadowDiagnostic,
 )
-from cptr.flowdeck.gateway import observe_request
 from cptr.flowdeck.durable import (
     AttemptStatus,
+    DuplicateRequestError,
     DurableFlowDeck,
+    LeaseUnavailableError,
     LifecycleError,
     OperationStatus,
+    RecoveryGrant,
     RunStatus,
     StaleWriterError,
 )
+from cptr.flowdeck.gateway import observe_request
 from cptr.flowdeck.registry import AGENT_REGISTRY, get_agent, validate_registry
 
 __all__ = [
     "AGENT_REGISTRY",
     "AgentDefinition",
     "AgentRole",
+    "AttemptStatus",
     "Capability",
     "DelegationRequest",
+    "DuplicateRequestError",
+    "DurableFlowDeck",
     "FlowDeckConfig",
     "FlowDeckMode",
     "GovernanceDecision",
     "GovernanceVerdict",
-    "RouteDecision",
-    "RouteStrategy",
-    "ShadowDiagnostic",
-    "get_agent",
-    "observe_request",
-    "AttemptStatus",
-    "DurableFlowDeck",
+    "LeaseUnavailableError",
     "LifecycleError",
     "OperationStatus",
+    "RecoveryGrant",
+    "RouteDecision",
+    "RouteStrategy",
     "RunStatus",
+    "ShadowDiagnostic",
     "StaleWriterError",
+    "get_agent",
+    "observe_request",
     "validate_registry",
 ]

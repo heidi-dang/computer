@@ -1,7 +1,33 @@
 # FlowDeck-C-PTR Phase 3 design freeze
 
-This document specifies future contracts only. It is not a durable runtime and
-none of the behavior below is implemented by Phase 0–2.
+This document specifies the durable foundation plus future contracts. The
+foundation is a state-and-recovery layer, not an execution runtime; future
+adapter and specialist behavior described below remains unimplemented.
+
+## Durable foundation delivered by Task #2
+
+The first durable foundation is now implemented as a state-and-recovery layer,
+not an execution engine. SQLite persists `runs`, `steps`, logical operation
+intents, physical attempts, versioned events, workspace mutation leases, and
+exclusive recovery leases. The layer never invokes a provider, tool, command,
+agent, adapter, or mutation; CPTR remains the execution owner.
+
+The durable lifecycle is:
+
+```text
+PENDING → RUNNING → SUCCEEDED | FAILED
+                    └→ ORPHANED → RECOVERING → terminal | MANUAL_REVIEW_REQUIRED
+```
+
+An operation is `INTENT_RECORDED` before an attempt can be prepared. Each retry
+keeps the logical operation ID and receives a new physical attempt ID. An
+interrupted attempt becomes `OUTCOME_UNKNOWN`; only verifier/runtime evidence
+with the operation-specific reconciliation contract can produce a terminal
+outcome. Otherwise it remains or becomes `MANUAL_REVIEW_REQUIRED`.
+
+The durable state is authoritative. CPTR's in-memory live task map may be used
+only as a liveness hint and cannot establish completion, retry safety, or
+reconciliation.
 
 ## Execution boundary
 
