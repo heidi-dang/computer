@@ -2,16 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from cptr.flowdeck.git import (
-    GitInspectionError,
-    GitInspectionRequest as SecureGitInspectionRequest,
-    inspect_git as secure_inspect_git,
-)
+
+from cptr.flowdeck.git import GitInspectionError
+from cptr.flowdeck.git import GitInspectionRequest as SecureGitInspectionRequest
+from cptr.flowdeck.git import inspect_git as secure_inspect_git
 
 
 class GitInspectionPolicyError(RuntimeError):

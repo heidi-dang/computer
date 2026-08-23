@@ -1,4 +1,3 @@
-import asyncio
 import os
 import stat
 import subprocess
@@ -10,7 +9,6 @@ from unittest.mock import patch
 from cptr.flowdeck.git import (
     GitInspectionError,
     GitInspectionRequest,
-    MAX_OUTPUT_BYTES,
     _git,
     inspect_git,
 )
@@ -59,16 +57,24 @@ class CanonicalGitSecurityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_hostile_local_config_hooks_fsmonitor_and_tools_have_no_effect(self):
         marker = str(self.marker)
+        side_effect = f"#!/bin/sh\ntouch {marker}\n"
+        fsmonitor = self._write_executable("fsmonitor", side_effect)
+        pager = self._write_executable("pager", side_effect)
+        editor = self._write_executable("editor", side_effect)
+        sequence_editor = self._write_executable("seq-editor", side_effect)
+        ssh = self._write_executable("ssh", side_effect)
+        external = self._write_executable("external", side_effect)
+        textconv = self._write_executable("textconv", side_effect)
         (self.root / ".git" / "config").write_text(
             "[core]\n"
-            f"fsmonitor = {self._write_executable('fsmonitor', f'#!/bin/sh\\ntouch {marker}\\n')}\n"
-            f"pager = {self._write_executable('pager', f'#!/bin/sh\\ntouch {marker}\\n')}\n"
-            f"editor = {self._write_executable('editor', f'#!/bin/sh\\ntouch {marker}\\n')}\n"
-            f"sequenceEditor = {self._write_executable('seq-editor', f'#!/bin/sh\\ntouch {marker}\\n')}\n"
-            f"sshCommand = {self._write_executable('ssh', f'#!/bin/sh\\ntouch {marker}\\n')}\n"
+            f"fsmonitor = {fsmonitor}\n"
+            f"pager = {pager}\n"
+            f"editor = {editor}\n"
+            f"sequenceEditor = {sequence_editor}\n"
+            f"sshCommand = {ssh}\n"
             "[diff]\n"
-            f"external = {self._write_executable('external', f'#!/bin/sh\\ntouch {marker}\\n')}\n"
-            f"command = {self._write_executable('textconv', f'#!/bin/sh\\ntouch {marker}\\n')}\n"
+            f"external = {external}\n"
+            f"command = {textconv}\n"
             "[alias]\n"
             f"status = !touch {marker}\n"
             "[credential]\n"

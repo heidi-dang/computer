@@ -18,8 +18,10 @@ class ReadOnlyGitTests(unittest.IsolatedAsyncioTestCase):
         (self.root / "file.txt").write_text("one\n")
         subprocess.run(["git", "-C", str(self.root), "add", "file.txt"], check=True)
         subprocess.run(
-            ["git", "-C", str(self.root), "-c", "user.name=Test", "-c", "user.email=test@example.com",
-             "commit", "-qm", "initial"],
+            [
+                "git", "-C", str(self.root), "-c", "user.name=Test",
+                "-c", "user.email=test@example.com", "commit", "-qm", "initial",
+            ],
             check=True,
         )
 
