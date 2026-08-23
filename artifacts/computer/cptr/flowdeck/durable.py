@@ -335,6 +335,14 @@ class DurableFlowDeck:
                     )
                 )
                 if existing:
+                    same = (
+                        existing.run_id == run_id
+                        and existing.capability == capability
+                        and existing.target == target
+                        and existing.reconcile_kind == reconcile_kind
+                    )
+                    if not same:
+                        raise DuplicateRequestError("idempotency key has incompatible intent")
                     return existing, False
             raise
 

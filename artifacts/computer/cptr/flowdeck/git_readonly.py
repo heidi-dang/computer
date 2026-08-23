@@ -7,6 +7,11 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from cptr.flowdeck.git import (
+    GitInspectionError,
+    GitInspectionRequest as SecureGitInspectionRequest,
+    inspect_git as secure_inspect_git,
+)
 
 
 class GitInspectionPolicyError(RuntimeError):
@@ -48,35 +53,27 @@ def _environment(root: Path) -> dict[str, str]:
     }
 
 
-async def inspect_git(request: GitInspectionRequest) -> str:
+async def inspect_git(request: GitInspectionRequest, *, authorized_workspace: str) -> str:
     """Run one fixed read-only Git operation with bounded output."""
     if request.operation not in _OPERATIONS:
         raise GitInspectionPolicyError("unsupported Git inspection operation")
     if request.limit < 1 or request.limit > 100_000:
         raise GitInspectionPolicyError("Git inspection output limit is unsafe")
-    root = _workspace(request.workspace)
-    executable = shutil.which("git")
-    if not executable:
-        raise GitInspectionPolicyError("Git executable is unavailable")
-    args = list(_OPERATIONS[request.operation])
-    if request.operation == "log":
-        args.extend(("--max-count", str(min(request.limit, 1000))))
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        *args,
-        cwd=str(root),
-        env=_environment(root),
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise GitInspectionPolicyError("Git inspection timed out") from None
-    if process.returncode != 0:
-        raise GitInspectionPolicyError(stderr.decode(errors="replace")[:1000] or "Git inspection failed")
-    return stdout.decode(errors="replace")[: request.limit]
+        result = await secure_inspect_git(
+            SecureGitInspectionRequest(
+                workspace=request.workspace,
+                operation="diff" if request.operation == "diff_stat" else request.operation,
+                limit=min(request.limit, 50),
+            ),
+            authorized_workspace=authorized_workspace,
+        )
+    except GitInspectionError as exc:
+        raise GitInspectionPolicyError(str(exc)) from exc
+    if request.operation == "status":
+        return "\n".join(result["lines"])
+    if request.operation == "log":
+        return "\n".join(
+            f'{entry["commit"][:12]} {entry["subject"]}' for entry in result["entries"]
+        )
+    return result["diff"]
