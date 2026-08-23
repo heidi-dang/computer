@@ -13,6 +13,7 @@ _READ_ONLY = frozenset(
         Capability.USE_BROWSER,
     }
 )
+_CODING = _READ_ONLY | frozenset({Capability.WRITE_FILES})
 
 AGENT_REGISTRY: tuple[AgentDefinition, ...] = (
     AgentDefinition(
@@ -33,6 +34,22 @@ AGENT_REGISTRY: tuple[AgentDefinition, ...] = (
         AgentRole.SPECIALIST,
         "Audits security boundaries without mutating the workspace.",
         _READ_ONLY,
+    ),
+    AgentDefinition(
+        "backend-coder", AgentRole.SPECIALIST,
+        "Applies controlled backend file changes.", _CODING,
+    ),
+    AgentDefinition(
+        "frontend-coder", AgentRole.SPECIALIST,
+        "Applies controlled frontend file changes.", _CODING,
+    ),
+    AgentDefinition(
+        "browser-debugger", AgentRole.SPECIALIST,
+        "Inspects the local preview without mutation.", _READ_ONLY,
+    ),
+    AgentDefinition(
+        "tester", AgentRole.SPECIALIST,
+        "Runs bounded structured repository checks.", frozenset({Capability.EXECUTE_COMMAND}),
     ),
     AgentDefinition(
         "debug-specialist",

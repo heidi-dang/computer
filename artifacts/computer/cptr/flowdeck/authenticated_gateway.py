@@ -38,6 +38,10 @@ class SpecialistDispatchRequest:
     model: str
     connection: dict[str, Any]
     parent_chat_id: str
+    check: str = "tests"
+    trusted_repository: bool = True
+    repository_identity: str = ""
+    timeout_seconds: float = 120
 
 
 def _auth_user_id(request: Any) -> str:
@@ -149,5 +153,24 @@ async def dispatch_authenticated_specialist(
             ),
             dispatch.role,
             store=store,
+        )
+    if dispatch.role == "tester":
+        from cptr.flowdeck.tester import TesterRequest, run_tester
+
+        return str(
+            await run_tester(
+                TesterRequest(
+                    request_key=dispatch.request_key,
+                    workspace=workspace,
+                    user_id=user_id,
+                    check=dispatch.check,
+                    trusted_repository=dispatch.trusted_repository,
+                    repository_identity=(
+                        dispatch.repository_identity or f"authenticated-workspace:{workspace}"
+                    ),
+                    timeout_seconds=dispatch.timeout_seconds,
+                ),
+                store=store,
+            )
         )
     raise AuthenticatedGatewayError("specialist is not enabled")

@@ -239,6 +239,54 @@ class DurableFlowDeck:
                 raise LifecycleError("unknown step")
             return step
 
+    async def create_child_step(
+        self,
+        *,
+        run_id: str,
+        name: str,
+        now: int | None = None,
+    ) -> FlowDeckStep:
+        """Create a durable child step in a running coordinator run."""
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(run.status, {RunStatus.RUNNING.value, RunStatus.RECOVERING.value})
+            sequence = await db.scalar(
+                select(func.max(FlowDeckStep.sequence)).where(FlowDeckStep.run_id == run_id)
+            )
+            step = FlowDeckStep(
+                id=_id(),
+                run_id=run_id,
+                sequence=(sequence or 0) + 1,
+                name=name,
+                status=StepStatus.PENDING.value,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(step)
+            await self._event(
+                db, run_id, "CHILD_STEP_CREATED", {"step_id": step.id, "name": name}, now
+            )
+            return step
+
+        return await self._transaction(operation)
+
+    async def get_run_by_request_key(self, request_key: str) -> FlowDeckRun | None:
+        async with self.session_factory() as db:
+            return await db.scalar(
+                select(FlowDeckRun).where(FlowDeckRun.request_key == request_key)
+            )
+
+    async def get_run_operations(self, run_id: str) -> list[FlowDeckLogicalOperation]:
+        async with self.session_factory() as db:
+            result = await db.scalars(
+                select(FlowDeckLogicalOperation).where(
+                    FlowDeckLogicalOperation.run_id == run_id
+                )
+            )
+            return list(result.all())
+
     async def finish_step(
         self,
         step_id: str,
