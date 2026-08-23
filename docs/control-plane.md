@@ -72,11 +72,17 @@ PENDING → WORKING → AGENT_COMPLETE → VERIFYING → VERIFIED
 
 The monitor reaches `COMPLETE` only when every required scope is `VERIFIED` and the final gate passes. A failed worker, failed verification, or failed final gate creates repair evidence and an explicit next action. Repeated normalized failures escalate through the configured attempt limit and then become `BLOCKED`.
 
+Independent verification records durable worker terminal state, repository status, and a fixed-argument `git diff --check` result. Worker prose is evidence presented to the director, not proof of completion. Verifier facts, worker output, director decisions, failures, approval requests, and final-gate decisions are appended to `autonomous_evidence` and exposed by the evidence endpoint.
+
 External or destructive actions pause in `APPROVAL_REQUIRED` with a persisted approval ID, operation, reason, timestamp, and status. Approval is accepted only for the currently pending approval record.
+
+Assignments containing push, deployment/release, destructive storage/database deletion, credential rotation, or costly external operations create a durable approval request and do not delegate until the matching pending approval is approved. Duplicate, stale, cross-monitor, and already-decided approvals are rejected. Approved operation prefixes are persisted so restart does not re-prompt or bypass the approval boundary.
 
 ## Restart recovery
 
 Monitor state, scope state, attempts, evidence, approvals, and worker task IDs are stored in SQLite. CPTR startup finds active monitors, claims a lease, reconciles worker task state from durable messages, and resumes eligible monitors. The lease and task idempotency key prevent duplicate worker delegation after concurrent resume or process restart.
+
+If CPTR restarts after creating a worker task but before saving the scope transition, recovery retries the same deterministic monitor/scope/attempt idempotency key and reuses the existing durable `ControlTask`. If the in-memory worker disappeared, `AgentService` reconciles its durable chat message as an interrupted failure and the supervisor diagnoses or retries it. Autonomous writer monitors also claim a persisted workspace lease so concurrent monitors targeting the same workspace wait rather than editing concurrently.
 
 ## Local verification
 

@@ -31,9 +31,10 @@ from pydantic import BaseModel
 
 from cptr.models import Auth, Chat, ChatMessage, Config
 from cptr.models.workspaces import Workspace
+from cptr.services.agent_service import AgentService
 from cptr.utils.agents.prompts import message_text
 from cptr.utils.config import AuthResult, now_ms
-from cptr.utils.runtime import Runtime, FileError
+from cptr.utils.runtime import FileError, Runtime
 
 logger = logging.getLogger(__name__)
 
@@ -207,10 +208,12 @@ async def create_chat_completion(request: Request, body: ChatCompletionRequest):
     # 5. Create output queue and start the agentic loop
     output_queue: asyncio.Queue = asyncio.Queue()
 
-    from cptr.utils.chat_task import start_task
-
-    start_task(
-        request,
+    agent_service = getattr(request.app.state, "gateway_agent_service", None)
+    if agent_service is None:
+        agent_service = AgentService()
+        request.app.state.gateway_agent_service = agent_service
+    await agent_service.start_existing_task(
+        request=request,
         message_id=assistant_msg.id,
         chat_id=chat_id,
         user_id=user_id,
@@ -742,8 +745,9 @@ async def _ensure_chat(
 
     if client_chat_id:
         # Search for a chat with this client chat ID in metadata
-        from cptr.utils.db import get_db
         from sqlalchemy import select
+
+        from cptr.utils.db import get_db
 
         async with await get_db() as db:
             result = await db.execute(select(Chat).where(Chat.user_id == user_id))

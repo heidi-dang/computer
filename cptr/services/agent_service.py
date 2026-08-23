@@ -122,6 +122,31 @@ class AgentService:
             raise
         return await self.get_task(task_id, user_id=user_id)
 
+    async def start_existing_task(
+        self,
+        *,
+        request: Any,
+        message_id: str,
+        chat_id: str,
+        user_id: str,
+        workspace: str,
+        target: Any,
+        output_queue: Any | None = None,
+    ) -> dict[str, str]:
+        """Start an already-materialized CPTR chat through the shared boundary."""
+        from cptr.utils.chat_task import start_task
+
+        start_task(
+            request,
+            message_id=message_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            workspace=workspace,
+            output_queue=output_queue,
+            target=target,
+        )
+        return {"chat_id": chat_id, "message_id": message_id, "status": "RUNNING"}
+
     async def get_task(self, task_id: str, *, user_id: str) -> dict[str, Any]:
         task = await self.store.get(task_id)
         if task is None or task.user_id != user_id:
@@ -130,13 +155,28 @@ class AgentService:
         if message is None:
             raise KeyError("task output not found")
         status = task.status
+        error = (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
         if message.done:
-            error = (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
             status = "CANCELLED" if status == "CANCELLED" else ("FAILED" if error else "COMPLETE")
         else:
             from cptr.utils.chat_task import is_running
 
-            status = "RUNNING" if is_running(message.id) else status
+            if is_running(message.id):
+                status = "RUNNING"
+            elif status in {"RUNNING", "PENDING"}:
+                status = "FAILED"
+                await ChatMessage.update(
+                    message.id,
+                    done=True,
+                    meta={"error": "interrupted by CPTR restart"},
+                )
+                error = "interrupted by CPTR restart"
+                await self.store.update(
+                    task.id,
+                    status=status,
+                    error="interrupted by CPTR restart",
+                    updated_at=int(time.time() * 1000),
+                )
         output = message.content or ""
         if status != task.status or task.output != output:
             await self.store.update(
@@ -155,9 +195,7 @@ class AgentService:
             "model_id": task.model_id,
             "output": output,
             "raw_output": message.output or [],
-            "error": (
-                (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
-            ),
+            "error": error,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
         }
@@ -201,8 +239,14 @@ class AgentService:
             raise KeyError("task not found")
         from cptr.utils.chat_task import cancel_task
 
-        await cancel_task(task.message_id)
+        found = await cancel_task(task.message_id)
         now = int(time.time() * 1000)
+        if not found:
+            await ChatMessage.update(
+                task.message_id,
+                done=True,
+                meta={"error": "cancelled"},
+            )
         await self.store.update(task.id, status="CANCELLED", cancelled_at=now, updated_at=now)
         return await self.get_task(task.id, user_id=user_id)
 
@@ -216,3 +260,17 @@ class AgentService:
 
         identity = await identity_for_user_id(user_id)
         return await diff(workspace.path, None, False, True, False, identity)
+
+    async def get_verification_evidence(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
+        async with await get_db() as db:
+            workspace = await db.get(Workspace, workspace_id)
+            if workspace is None or workspace.user_id != user_id:
+                raise KeyError("workspace not found")
+        from cptr.utils.git import diff_check, status
+        from cptr.utils.identity import identity_for_user_id
+
+        identity = await identity_for_user_id(user_id)
+        return {
+            "git_status": await status(workspace.path, identity),
+            "git_diff_check": await diff_check(workspace.path, identity),
+        }

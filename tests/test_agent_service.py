@@ -6,6 +6,26 @@ from cptr.services.agent_service import AgentService
 
 
 class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_existing_task_uses_shared_chat_task_boundary(self):
+        service = AgentService()
+        with patch("cptr.utils.chat_task.start_task") as start_task:
+            result = await service.start_existing_task(
+                request=object(),
+                message_id="message-1",
+                chat_id="chat-1",
+                user_id="user-1",
+                workspace="/workspace",
+                target=object(),
+                output_queue=object(),
+            )
+
+        self.assertEqual(
+            result, {"chat_id": "chat-1", "message_id": "message-1", "status": "RUNNING"}
+        )
+        start_task.assert_called_once()
+        self.assertEqual(start_task.call_args.kwargs["message_id"], "message-1")
+        self.assertEqual(start_task.call_args.kwargs["chat_id"], "chat-1")
+
     async def test_get_task_reads_durable_message_state(self):
         service = AgentService()
         task = SimpleNamespace(
@@ -95,6 +115,46 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "CANCELLED")
         self.assertEqual(update.await_count, 2)
+
+    async def test_reconciles_disappeared_worker_after_restart(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do work",
+            model_id="model-1",
+            output=None,
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        message = SimpleNamespace(
+            id="message-1",
+            chat_id="chat-1",
+            done=False,
+            content="partial output",
+            output=[],
+            meta=None,
+        )
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
+            patch("cptr.utils.chat_task.is_running", return_value=False),
+            patch("cptr.models.ChatMessage.update", new=AsyncMock()) as message_update,
+            patch.object(service.store, "update", new=AsyncMock()) as update,
+        ):
+            result = await service.get_task("task-1", user_id="user-1")
+
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["error"], "interrupted by CPTR restart")
+        message_update.assert_awaited_once()
+        self.assertTrue(
+            any(call.kwargs.get("status") == "FAILED" for call in update.await_args_list)
+        )
 
 
 if __name__ == "__main__":

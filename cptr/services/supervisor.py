@@ -17,6 +17,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
+from cptr.services.verification import DefaultIndependentVerifier, IndependentVerifier
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,6 +44,16 @@ class MonitorStatus(StrEnum):
 
 
 TERMINAL_TASK_STATUSES = {"COMPLETE", "COMPLETED", "SUCCEEDED", "FAILED", "ERROR", "CANCELLED"}
+APPROVAL_PATTERNS = (
+    re.compile(r"\bgit\s+push\b", re.IGNORECASE),
+    re.compile(r"\b(?:production|prod)\s+deploy(?:ment)?\b", re.IGNORECASE),
+    re.compile(r"\b(?:deploy|release)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:drop|delete|purge|destroy)\b.*\b(?:database|all|bucket|storage)\b", re.IGNORECASE
+    ),
+    re.compile(r"\bcredential(?:s)?\s+rotation\b", re.IGNORECASE),
+    re.compile(r"\b(?:purchase|paid|costly)\b", re.IGNORECASE),
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,7 @@ class ScopeRecord:
     worker_task_ids: list[str] = field(default_factory=list)
     verification_evidence: list[dict[str, Any]] = field(default_factory=list)
     failure_evidence: list[dict[str, Any]] = field(default_factory=list)
+    failure_signature_counts: dict[str, int] = field(default_factory=dict)
     last_decision: dict[str, Any] = field(default_factory=dict)
     next_action: str | None = None
     history: list[ScopeStatus] = field(default_factory=list)
@@ -91,9 +104,32 @@ class MonitorState:
     status: MonitorStatus = MonitorStatus.RUNNING
     current_scope_id: str | None = None
     approval_id: str | None = None
+    approved_operations: list[str] = field(default_factory=list)
     director_state: dict[str, Any] = field(default_factory=dict)
     created_at: int = field(default_factory=lambda: int(time.time() * 1000))
     updated_at: int = field(default_factory=lambda: int(time.time() * 1000))
+
+
+@dataclass
+class EvidenceRecord:
+    evidence_id: str
+    monitor_id: str
+    scope_id: str | None
+    kind: str
+    payload: dict[str, Any]
+    created_at: int
+
+
+@dataclass
+class ApprovalRecord:
+    approval_id: str
+    monitor_id: str
+    operation: str
+    reason: str
+    status: str = "PENDING"
+    requested_at: int = field(default_factory=lambda: int(time.time() * 1000))
+    decided_at: int | None = None
+    decided_by: str | None = None
 
 
 class SupervisorStore(Protocol):
@@ -109,6 +145,26 @@ class SupervisorStore(Protocol):
 
     async def release_monitor(self, monitor_id: str) -> None: ...
 
+    async def append_evidence(
+        self, monitor_id: str, scope_id: str | None, kind: str, payload: dict[str, Any]
+    ) -> EvidenceRecord: ...
+
+    async def list_evidence(self, monitor_id: str) -> list[EvidenceRecord]: ...
+
+    async def create_approval(
+        self, monitor_id: str, operation: str, reason: str
+    ) -> ApprovalRecord: ...
+
+    async def get_approval(self, approval_id: str) -> ApprovalRecord | None: ...
+
+    async def decide_approval(
+        self, approval_id: str, *, status: str, decided_by: str
+    ) -> ApprovalRecord: ...
+
+    async def claim_workspace(self, workspace_id: str, monitor_id: str) -> bool: ...
+
+    async def release_workspace(self, workspace_id: str, monitor_id: str) -> None: ...
+
 
 class InMemorySupervisorStore:
     """Small deterministic store used by unit tests and local service wiring."""
@@ -117,6 +173,9 @@ class InMemorySupervisorStore:
         self.monitors: dict[str, MonitorState] = {}
         self.idempotency: dict[str, str] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self.evidence: list[EvidenceRecord] = []
+        self.approvals: dict[str, ApprovalRecord] = {}
+        self._workspace_leases: dict[str, str] = {}
 
     async def create_monitor(
         self, monitor: MonitorState, idempotency_key: str | None
@@ -147,6 +206,56 @@ class InMemorySupervisorStore:
         if lock and lock.locked():
             lock.release()
 
+    async def append_evidence(
+        self, monitor_id: str, scope_id: str | None, kind: str, payload: dict[str, Any]
+    ) -> EvidenceRecord:
+        record = EvidenceRecord(
+            evidence_id=f"evidence_{uuid.uuid4().hex[:20]}",
+            monitor_id=monitor_id,
+            scope_id=scope_id,
+            kind=kind,
+            payload=dict(payload),
+            created_at=int(time.time() * 1000),
+        )
+        self.evidence.append(record)
+        return record
+
+    async def list_evidence(self, monitor_id: str) -> list[EvidenceRecord]:
+        return [item for item in self.evidence if item.monitor_id == monitor_id]
+
+    async def create_approval(self, monitor_id: str, operation: str, reason: str) -> ApprovalRecord:
+        record = ApprovalRecord(
+            approval_id=f"approval_{uuid.uuid4().hex[:20]}",
+            monitor_id=monitor_id,
+            operation=operation,
+            reason=reason,
+        )
+        self.approvals[record.approval_id] = record
+        return record
+
+    async def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        return self.approvals.get(approval_id)
+
+    async def decide_approval(
+        self, approval_id: str, *, status: str, decided_by: str
+    ) -> ApprovalRecord:
+        record = self.approvals[approval_id]
+        record.status = status
+        record.decided_at = int(time.time() * 1000)
+        record.decided_by = decided_by
+        return record
+
+    async def claim_workspace(self, workspace_id: str, monitor_id: str) -> bool:
+        current = self._workspace_leases.get(workspace_id)
+        if current is not None and current != monitor_id:
+            return False
+        self._workspace_leases[workspace_id] = monitor_id
+        return True
+
+    async def release_workspace(self, workspace_id: str, monitor_id: str) -> None:
+        if self._workspace_leases.get(workspace_id) == monitor_id:
+            self._workspace_leases.pop(workspace_id, None)
+
 
 class SupervisorAgent(Protocol):
     async def start_task(self, **kwargs: Any) -> dict[str, Any]: ...
@@ -156,6 +265,10 @@ class SupervisorAgent(Protocol):
     async def get_output(self, task_id: str, **kwargs: Any) -> dict[str, Any]: ...
 
     async def get_diff(self, workspace_id: str, **kwargs: Any) -> dict[str, Any]: ...
+
+    async def get_verification_evidence(
+        self, workspace_id: str, **kwargs: Any
+    ) -> dict[str, Any]: ...
 
     async def cancel_task(self, task_id: str, **kwargs: Any) -> dict[str, Any]: ...
 
@@ -188,11 +301,13 @@ class AutonomousSupervisor:
         store: SupervisorStore,
         agent: SupervisorAgent,
         director: SupervisorDirector,
+        verifier: IndependentVerifier | None = None,
         max_attempts: int = 5,
     ) -> None:
         self.store = store
         self.agent = agent
         self.director = director
+        self.verifier = verifier or DefaultIndependentVerifier()
         self.max_attempts = max(1, max_attempts)
 
     async def create_goal(
@@ -234,10 +349,35 @@ class AutonomousSupervisor:
 
     async def approve(self, monitor_id: str, *, approval_id: str, approved: bool) -> MonitorState:
         monitor = await self._required_monitor(monitor_id)
-        if monitor.status != MonitorStatus.APPROVAL_REQUIRED or monitor.approval_id != approval_id:
+        approval = await self.store.get_approval(approval_id)
+        if (
+            monitor.status != MonitorStatus.APPROVAL_REQUIRED
+            or monitor.approval_id != approval_id
+            or approval is None
+            or approval.monitor_id != monitor_id
+            or approval.status != "PENDING"
+        ):
             raise ValueError("approval request is no longer pending")
+        await self.store.decide_approval(
+            approval_id,
+            status="APPROVED" if approved else "DENIED",
+            decided_by=monitor.user_id,
+        )
         monitor.approval_id = None
-        monitor.status = MonitorStatus.RUNNING if approved else MonitorStatus.BLOCKED
+        if approved:
+            if approval.operation not in monitor.approved_operations:
+                monitor.approved_operations.append(approval.operation)
+            monitor.status = MonitorStatus.RUNNING
+        else:
+            monitor.status = MonitorStatus.BLOCKED
+        if not approved:
+            scope = next(
+                (item for item in monitor.scopes if item.scope_id == monitor.current_scope_id), None
+            )
+            if scope:
+                scope.transition(ScopeStatus.BLOCKED)
+                scope.next_action = approval.reason
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
         await self.store.save_monitor(monitor)
         return monitor
 
@@ -254,6 +394,7 @@ class AutonomousSupervisor:
                     except Exception:  # noqa: BLE001 - cancellation remains durable
                         logger.warning("worker cancellation failed for task %s", task_id)
                 scope.transition(ScopeStatus.CANCELLED)
+        await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
         await self.store.save_monitor(monitor)
         return monitor
 
@@ -311,6 +452,7 @@ class AutonomousSupervisor:
             return
         task = await self.agent.get_task(task_id, user_id=monitor.user_id)
         task_status = str(task.get("status") or "").upper()
+        await self._append_evidence(monitor, scope, "worker_state", task)
         if task_status not in TERMINAL_TASK_STATUSES:
             scope.transition(ScopeStatus.WORKING)
             return
@@ -326,6 +468,43 @@ class AutonomousSupervisor:
             "task": await self.agent.get_output(task_id, user_id=monitor.user_id),
             "diff": await self.agent.get_diff(monitor.workspace_id, user_id=monitor.user_id),
         }
+        get_verification_evidence = getattr(self.agent, "get_verification_evidence", None)
+        evidence["independent"] = (
+            await get_verification_evidence(
+                monitor.workspace_id,
+                user_id=monitor.user_id,
+            )
+            if callable(get_verification_evidence)
+            else {}
+        )
+        await self._append_evidence(monitor, scope, "worker_output", evidence)
+        verification = await self.verifier.verify(
+            task=task,
+            evidence=evidence,
+            monitor=monitor,
+            scope=scope,
+        )
+        await self._append_evidence(
+            monitor,
+            scope,
+            "verification_result",
+            {
+                "passed": verification.passed,
+                "checks": verification.checks,
+                "failures": verification.failures,
+            },
+        )
+        if not verification.passed:
+            await self._repair_or_block(
+                monitor,
+                scope,
+                {
+                    "category": "independent_verification_failure",
+                    "scope_id": scope.scope_id,
+                    "message": "; ".join(verification.failures),
+                },
+            )
+            return
         try:
             decision = await self.director.evaluate(
                 monitor=monitor,
@@ -347,6 +526,7 @@ class AutonomousSupervisor:
             return
         self._sync_director_state(monitor)
         scope.last_decision = decision.__dict__.copy()
+        await self._append_evidence(monitor, scope, "director_decision", scope.last_decision)
         if decision.scope_satisfied and not decision.defects and not decision.regressions:
             scope.verification_evidence.append(evidence)
             scope.transition(ScopeStatus.VERIFIED)
@@ -376,10 +556,24 @@ class AutonomousSupervisor:
     ) -> None:
         scope.attempt_count += 1
         scope.failure_evidence.append(failure)
-        if scope.attempt_count >= self.max_attempts:
+        signature = str(failure.get("signature") or normalize_failure_signature(failure))
+        failure["signature"] = signature
+        same_signature_attempt = scope.failure_signature_counts.get(signature, 0) + 1
+        scope.failure_signature_counts[signature] = same_signature_attempt
+        failure["signature_attempt"] = same_signature_attempt
+        await self._append_evidence(monitor, scope, "failure", failure)
+        if scope.attempt_count >= self.max_attempts or same_signature_attempt >= self.max_attempts:
             scope.transition(ScopeStatus.BLOCKED)
             monitor.status = MonitorStatus.BLOCKED
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
             return
+        escalation = {
+            1: "normal repair",
+            2: "explicit root-cause re-analysis",
+            3: "alternative implementation strategy",
+            4: "independent verification/reviewer strategy",
+        }.get(same_signature_attempt, "escalated repair")
+        failure["escalation"] = escalation
         try:
             if decision is None:
                 decision = await self.director.diagnose(
@@ -407,12 +601,39 @@ class AutonomousSupervisor:
         scope.next_action = (
             plan.next_assignment or decision.next_assignment or "Re-evaluate the failed scope."
         )
+        scope.next_action = f"[{escalation}] {scope.next_action}"
         scope.transition(ScopeStatus.REPAIR_REQUIRED)
         await self._try_delegate(monitor, scope, scope.next_action)
 
     async def _try_delegate(
         self, monitor: MonitorState, scope: ScopeRecord, assignment: str
     ) -> None:
+        approval_operation = assignment[:120]
+        if (
+            self._requires_approval(assignment)
+            and approval_operation not in monitor.approved_operations
+        ):
+            approval = await self.store.create_approval(
+                monitor.monitor_id,
+                operation=approval_operation,
+                reason="This assignment may perform an external or destructive action.",
+            )
+            monitor.approval_id = approval.approval_id
+            monitor.status = MonitorStatus.APPROVAL_REQUIRED
+            await self._append_evidence(
+                monitor,
+                scope,
+                "approval_requested",
+                {
+                    "approval_id": approval.approval_id,
+                    "operation": approval.operation,
+                    "reason": approval.reason,
+                },
+            )
+            return
+        if not await self.store.claim_workspace(monitor.workspace_id, monitor.monitor_id):
+            scope.next_action = "Waiting for the workspace writer lease to be released."
+            return
         try:
             await self._delegate(monitor, scope, assignment)
         except Exception:  # noqa: BLE001 - a worker provider failure must be persisted
@@ -426,12 +647,26 @@ class AutonomousSupervisor:
                 ),
             }
             scope.failure_evidence.append(failure)
-            if scope.attempt_count >= self.max_attempts:
+            signature = failure["signature"]
+            signature_attempt = scope.failure_signature_counts.get(signature, 0) + 1
+            scope.failure_signature_counts[signature] = signature_attempt
+            failure["signature_attempt"] = signature_attempt
+            await self._append_evidence(monitor, scope, "failure", failure)
+            if scope.attempt_count >= self.max_attempts or signature_attempt >= self.max_attempts:
                 scope.transition(ScopeStatus.BLOCKED)
                 monitor.status = MonitorStatus.BLOCKED
+                await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
             else:
                 scope.transition(ScopeStatus.REPAIR_REQUIRED)
-                scope.next_action = "Resolve the worker-start failure and retry the assignment."
+                escalation = {
+                    1: "normal repair",
+                    2: "explicit root-cause re-analysis",
+                    3: "alternative implementation strategy",
+                    4: "independent verification/reviewer strategy",
+                }.get(signature_attempt, "escalated repair")
+                scope.next_action = (
+                    f"[{escalation}] Resolve the worker-start failure and retry the assignment."
+                )
 
     async def _delegate(self, monitor: MonitorState, scope: ScopeRecord, assignment: str) -> None:
         scope.transition(ScopeStatus.ASSIGNED)
@@ -443,6 +678,8 @@ class AutonomousSupervisor:
             model_id=monitor.model_id,
             idempotency_key=key,
         )
+        if str(task.get("status") or "").upper() in {"FAILED", "ERROR", "CANCELLED"}:
+            raise RuntimeError("idempotent worker task is already terminal and unsuccessful")
         task_id = str(task["id"])
         if task_id not in scope.worker_task_ids:
             scope.worker_task_ids.append(task_id)
@@ -470,13 +707,39 @@ class AutonomousSupervisor:
                 scope.transition(ScopeStatus.REPAIR_REQUIRED)
             return await self._save_and_return(monitor)
         self._sync_director_state(monitor)
+        await self._append_evidence(monitor, None, "final_gate", decision.__dict__.copy())
         if decision.goal_satisfied and not decision.defects and not decision.regressions:
             monitor.status = MonitorStatus.COMPLETE
-            return monitor
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
+            return await self._save_and_return(monitor)
         monitor.status = MonitorStatus.RUNNING
-        monitor.scopes[0].transition(ScopeStatus.REPAIR_REQUIRED)
-        monitor.scopes[0].next_action = decision.next_assignment or "Repair the final-gate failure."
+        scope = monitor.scopes[0]
+        await self._repair_or_block(
+            monitor,
+            scope,
+            {
+                "category": "final_gate_failure",
+                "scope_id": scope.scope_id,
+                "message": "; ".join(decision.defects + decision.regressions)
+                or "final gate did not accept the original goal",
+            },
+            decision=decision,
+        )
         return await self._save_and_return(monitor)
+
+    @staticmethod
+    def _requires_approval(assignment: str) -> bool:
+        return any(pattern.search(assignment) for pattern in APPROVAL_PATTERNS)
+
+    async def _append_evidence(
+        self, monitor: MonitorState, scope: ScopeRecord | None, kind: str, payload: dict[str, Any]
+    ) -> None:
+        await self.store.append_evidence(
+            monitor.monitor_id,
+            scope.scope_id if scope else None,
+            kind,
+            payload,
+        )
 
     def _sync_director_state(self, monitor: MonitorState) -> None:
         state_for = getattr(self.director, "state_for", None)

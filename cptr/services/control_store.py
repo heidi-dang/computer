@@ -6,15 +6,26 @@ import secrets
 import time
 from typing import Any
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from cptr.models import (
+    AutonomousApproval,
+    AutonomousEvidence,
     AutonomousMonitor,
     AutonomousScope,
+    AutonomousWorkspaceLease,
     ControlIdempotency,
     ControlTask,
 )
-from cptr.services.supervisor import MonitorState, MonitorStatus, ScopeRecord, ScopeStatus
+from cptr.services.supervisor import (
+    ApprovalRecord,
+    EvidenceRecord,
+    MonitorState,
+    MonitorStatus,
+    ScopeRecord,
+    ScopeStatus,
+)
 from cptr.utils.db import get_db
 
 
@@ -87,6 +98,7 @@ class SqlSupervisorStore:
             row.status = monitor.status.value
             row.current_scope_id = monitor.current_scope_id
             row.approval_id = monitor.approval_id
+            row.approved_operations = list(monitor.approved_operations)
             row.director_state = dict(monitor.director_state)
             row.updated_at = now
             result = await db.execute(
@@ -102,6 +114,7 @@ class SqlSupervisorStore:
                 target.worker_task_ids = list(scope.worker_task_ids)
                 target.verification_evidence = list(scope.verification_evidence)
                 target.failure_evidence = list(scope.failure_evidence)
+                target.failure_signature_counts = dict(scope.failure_signature_counts)
                 target.last_decision = dict(scope.last_decision)
                 target.next_action = scope.next_action
                 target.history = [item.value for item in scope.history]
@@ -132,6 +145,161 @@ class SqlSupervisorStore:
                 update(AutonomousMonitor)
                 .where(AutonomousMonitor.id == monitor_id)
                 .values(lock_token=None, lock_expires_at=None)
+            )
+            await db.commit()
+
+    async def append_evidence(
+        self, monitor_id: str, scope_id: str | None, kind: str, payload: dict[str, Any]
+    ) -> EvidenceRecord:
+        row = AutonomousEvidence(
+            monitor_id=monitor_id,
+            scope_id=scope_id,
+            kind=kind,
+            payload=dict(payload),
+            created_at=_now_ms(),
+        )
+        async with await get_db() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+        return EvidenceRecord(
+            evidence_id=row.id,
+            monitor_id=row.monitor_id,
+            scope_id=row.scope_id,
+            kind=row.kind,
+            payload=dict(row.payload or {}),
+            created_at=row.created_at,
+        )
+
+    async def list_evidence(self, monitor_id: str) -> list[EvidenceRecord]:
+        async with await get_db() as db:
+            result = await db.execute(
+                select(AutonomousEvidence)
+                .where(AutonomousEvidence.monitor_id == monitor_id)
+                .order_by(AutonomousEvidence.created_at, AutonomousEvidence.id)
+            )
+            return [
+                EvidenceRecord(
+                    evidence_id=item.id,
+                    monitor_id=item.monitor_id,
+                    scope_id=item.scope_id,
+                    kind=item.kind,
+                    payload=dict(item.payload or {}),
+                    created_at=item.created_at,
+                )
+                for item in result.scalars().all()
+            ]
+
+    async def create_approval(self, monitor_id: str, operation: str, reason: str) -> ApprovalRecord:
+        now = _now_ms()
+        row = AutonomousApproval(
+            monitor_id=monitor_id,
+            operation=operation,
+            reason=reason,
+            status="PENDING",
+            requested_at=now,
+        )
+        async with await get_db() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+        return ApprovalRecord(
+            approval_id=row.id,
+            monitor_id=row.monitor_id,
+            operation=row.operation,
+            reason=row.reason,
+            status=row.status,
+            requested_at=row.requested_at,
+        )
+
+    async def get_approval(self, approval_id: str) -> ApprovalRecord | None:
+        async with await get_db() as db:
+            row = await db.get(AutonomousApproval, approval_id)
+            if row is None:
+                return None
+            return ApprovalRecord(
+                approval_id=row.id,
+                monitor_id=row.monitor_id,
+                operation=row.operation,
+                reason=row.reason,
+                status=row.status,
+                requested_at=row.requested_at,
+                decided_at=row.decided_at,
+                decided_by=row.decided_by,
+            )
+
+    async def decide_approval(
+        self, approval_id: str, *, status: str, decided_by: str
+    ) -> ApprovalRecord:
+        async with await get_db() as db:
+            row = await db.get(AutonomousApproval, approval_id)
+            if row is None or row.status != "PENDING":
+                raise KeyError("approval is no longer pending")
+            row.status = status
+            row.decided_at = _now_ms()
+            row.decided_by = decided_by
+            await db.commit()
+            return ApprovalRecord(
+                approval_id=row.id,
+                monitor_id=row.monitor_id,
+                operation=row.operation,
+                reason=row.reason,
+                status=row.status,
+                requested_at=row.requested_at,
+                decided_at=row.decided_at,
+                decided_by=row.decided_by,
+            )
+
+    async def claim_workspace(self, workspace_id: str, monitor_id: str) -> bool:
+        now = _now_ms()
+        token = secrets.token_urlsafe(18)
+        async with await get_db() as db:
+            updated = await db.execute(
+                update(AutonomousWorkspaceLease)
+                .where(
+                    AutonomousWorkspaceLease.workspace_id == workspace_id,
+                    or_(
+                        AutonomousWorkspaceLease.monitor_id == monitor_id,
+                        AutonomousWorkspaceLease.expires_at < now,
+                    ),
+                )
+                .values(
+                    monitor_id=monitor_id,
+                    lock_token=token,
+                    acquired_at=now,
+                    expires_at=now + 300_000,
+                )
+            )
+            if updated.rowcount:
+                await db.commit()
+                return True
+            db.add(
+                AutonomousWorkspaceLease(
+                    workspace_id=workspace_id,
+                    monitor_id=monitor_id,
+                    lock_token=token,
+                    acquired_at=now,
+                    expires_at=now + 300_000,
+                )
+            )
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                return False
+            return True
+
+    async def release_workspace(self, workspace_id: str, monitor_id: str) -> None:
+        async with await get_db() as db:
+            await db.execute(
+                update(AutonomousWorkspaceLease)
+                .where(
+                    and_(
+                        AutonomousWorkspaceLease.workspace_id == workspace_id,
+                        AutonomousWorkspaceLease.monitor_id == monitor_id,
+                    )
+                )
+                .values(expires_at=0)
             )
             await db.commit()
 
@@ -172,6 +340,7 @@ class SqlSupervisorStore:
             status=MonitorStatus(row.status),
             current_scope_id=row.current_scope_id,
             approval_id=row.approval_id,
+            approved_operations=list(row.approved_operations or []),
             director_state=dict(row.director_state or {}),
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -193,6 +362,7 @@ class SqlSupervisorStore:
             worker_task_ids=list(scope.worker_task_ids),
             verification_evidence=list(scope.verification_evidence),
             failure_evidence=list(scope.failure_evidence),
+            failure_signature_counts=dict(scope.failure_signature_counts),
             last_decision=dict(scope.last_decision),
             next_action=scope.next_action,
             history=[item.value for item in scope.history],
@@ -212,6 +382,7 @@ class SqlSupervisorStore:
             worker_task_ids=list(row.worker_task_ids or []),
             verification_evidence=list(row.verification_evidence or []),
             failure_evidence=list(row.failure_evidence or []),
+            failure_signature_counts=dict(row.failure_signature_counts or {}),
             last_decision=dict(row.last_decision or {}),
             next_action=row.next_action,
             history=[ScopeStatus(item) for item in (row.history or [])],

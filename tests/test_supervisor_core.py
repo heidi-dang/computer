@@ -8,6 +8,7 @@ from cptr.services.supervisor import (
     ScopeStatus,
     normalize_failure_signature,
 )
+from cptr.services.verification import VerificationResult
 
 
 class FakeAgentService:
@@ -82,6 +83,30 @@ class FakeDirector:
 class FailingAgentService(FakeAgentService):
     async def start_task(self, **kwargs):
         raise RuntimeError("model unavailable")
+
+
+class AlwaysRejectingVerifier:
+    async def verify(self, **kwargs):
+        return VerificationResult(
+            passed=False,
+            checks=[{"name": "intentional_rejection", "passed": False}],
+            failures=["intentional verification failure"],
+        )
+
+
+class FinalGateRepairDirector(FakeDirector):
+    async def evaluate(self, **kwargs):
+        return Decision(scope_satisfied=True)
+
+    async def final_gate(self, **kwargs):
+        self.final_gates += 1
+        if self.final_gates == 1:
+            return Decision(
+                defects=["final acceptance failed"],
+                next_action_required=True,
+                next_assignment="Repair the final acceptance failure.",
+            )
+        return Decision(goal_satisfied=True)
 
 
 class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
@@ -192,6 +217,85 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, MonitorStatus.CANCELLED)
         self.assertEqual(agent.cancelled, ["task_1"])
         self.assertEqual(state.scopes[0].status, ScopeStatus.CANCELLED)
+
+    async def test_approval_is_persisted_enforced_and_resumed(self):
+        store = InMemorySupervisorStore()
+        agent = FakeAgentService()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=FakeDirector())
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Publish the change",
+            acceptance_criteria=["Run git push origin feature"],
+            model_id="model-1",
+        )
+
+        paused = await supervisor.run_once(monitor.monitor_id)
+        self.assertEqual(paused.status, MonitorStatus.APPROVAL_REQUIRED)
+        self.assertIsNotNone(paused.approval_id)
+        approval = await store.get_approval(paused.approval_id)
+        self.assertEqual(approval.status, "PENDING")
+        self.assertEqual(agent.started, [])
+
+        resumed = await supervisor.approve(
+            monitor.monitor_id,
+            approval_id=paused.approval_id,
+            approved=True,
+        )
+        self.assertEqual(resumed.status, MonitorStatus.RUNNING)
+        await supervisor.run_once(monitor.monitor_id)
+        self.assertEqual(len(agent.started), 1)
+        self.assertEqual((await store.get_approval(approval.approval_id)).status, "APPROVED")
+
+    async def test_evidence_is_persisted_and_repeated_signature_escalates(self):
+        store = InMemorySupervisorStore()
+        supervisor = AutonomousSupervisor(
+            store=store,
+            agent=FakeAgentService(),
+            director=FakeDirector(),
+            verifier=AlwaysRejectingVerifier(),
+            max_attempts=3,
+        )
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Add the feature",
+            acceptance_criteria=["The feature works"],
+            model_id="model-1",
+        )
+
+        await supervisor.run_once(monitor.monitor_id)
+        await supervisor.run_once(monitor.monitor_id)
+        state = await store.get_monitor(monitor.monitor_id)
+        self.assertEqual(state.scopes[0].failure_signature_counts.__len__(), 1)
+        self.assertIn("normal repair", state.scopes[0].next_action)
+        await supervisor.run_once(monitor.monitor_id)
+        state = await store.get_monitor(monitor.monitor_id)
+        self.assertIn("explicit root-cause re-analysis", state.scopes[0].next_action)
+        evidence = await store.list_evidence(monitor.monitor_id)
+        self.assertTrue(any(item.kind == "verification_result" for item in evidence))
+
+    async def test_final_gate_failure_creates_repair_work(self):
+        store = InMemorySupervisorStore()
+        agent = FakeAgentService()
+        director = FinalGateRepairDirector()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=director)
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Add the feature",
+            acceptance_criteria=["The feature works"],
+            model_id="model-1",
+        )
+
+        await supervisor.run_once(monitor.monitor_id)
+        await supervisor.run_once(monitor.monitor_id)
+        await supervisor.run_once(monitor.monitor_id)
+
+        state = await store.get_monitor(monitor.monitor_id)
+        self.assertEqual(state.status, MonitorStatus.COMPLETE)
+        self.assertEqual(len(agent.started), 2)
+        self.assertEqual(director.final_gates, 2)
 
 
 if __name__ == "__main__":

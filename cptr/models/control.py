@@ -51,6 +51,7 @@ class AutonomousMonitor(Base):
     status = Column(Text, nullable=False, default="RUNNING")
     current_scope_id = Column(Text, nullable=True)
     approval_id = Column(Text, nullable=True)
+    approved_operations = Column(JSON, nullable=True)
     lock_token = Column(Text, nullable=True)
     lock_expires_at = Column(BigInteger, nullable=True)
     director_state = Column(JSON, nullable=True)
@@ -76,6 +77,7 @@ class AutonomousScope(Base):
     worker_task_ids = Column(JSON, nullable=False, default=list)
     verification_evidence = Column(JSON, nullable=False, default=list)
     failure_evidence = Column(JSON, nullable=False, default=list)
+    failure_signature_counts = Column(JSON, nullable=False, default=dict)
     last_decision = Column(JSON, nullable=False, default=dict)
     next_action = Column(Text, nullable=True)
     history = Column(JSON, nullable=False, default=list)
@@ -111,6 +113,18 @@ class AutonomousApproval(Base):
     requested_at = Column(BigInteger, nullable=False)
     decided_at = Column(BigInteger, nullable=True)
     decided_by = Column(Text, nullable=True)
+
+
+class AutonomousWorkspaceLease(Base):
+    __tablename__ = "autonomous_workspace_leases"
+
+    workspace_id = Column(Text, ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    monitor_id = Column(
+        Text, ForeignKey("autonomous_monitors.id", ondelete="CASCADE"), nullable=False
+    )
+    lock_token = Column(Text, nullable=False)
+    acquired_at = Column(BigInteger, nullable=False)
+    expires_at = Column(BigInteger, nullable=False)
 
 
 class ControlIdempotency(Base):

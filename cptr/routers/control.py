@@ -54,6 +54,7 @@ def _monitor_summary(monitor: MonitorState) -> dict[str, Any]:
         "scope_count": len(monitor.scopes),
         "verified_count": verified,
         "current_scope": monitor.current_scope_id,
+        "approval_id": monitor.approval_id,
         "original_goal": monitor.original_goal,
         "acceptance_criteria": list(monitor.original_acceptance_criteria),
         "scopes": [
@@ -62,6 +63,7 @@ def _monitor_summary(monitor: MonitorState) -> dict[str, Any]:
                 "title": scope.title,
                 "status": scope.status.value,
                 "attempt_count": scope.attempt_count,
+                "failure_signature_counts": dict(scope.failure_signature_counts),
                 "worker_task_ids": list(scope.worker_task_ids),
                 "next_action": scope.next_action,
             }
@@ -309,7 +311,18 @@ async def get_autonomous(request: Request, monitor_id: str):
         monitor = None
     if monitor is None or monitor.user_id != user_id:
         raise HTTPException(status_code=404, detail="monitor not found")
-    return _monitor_summary(monitor)
+    summary = _monitor_summary(monitor)
+    if monitor.approval_id:
+        approval = await supervisor.store.get_approval(monitor.approval_id)
+        if approval:
+            summary["approval"] = {
+                "approval_id": approval.approval_id,
+                "operation": approval.operation,
+                "reason": approval.reason,
+                "status": approval.status,
+                "requested_at": approval.requested_at,
+            }
+    return summary
 
 
 @router.get("/autonomous/{monitor_id}/events")
@@ -334,15 +347,18 @@ async def get_autonomous_evidence(request: Request, monitor_id: str):
     monitor = await supervisor.store.get_monitor(monitor_id)
     if monitor is None or monitor.user_id != user_id:
         raise HTTPException(status_code=404, detail="monitor not found")
+    evidence = await supervisor.store.list_evidence(monitor_id)
     return {
         "monitor_id": monitor_id,
         "evidence": [
             {
-                "scope_id": scope.scope_id,
-                "verification": scope.verification_evidence,
-                "failures": scope.failure_evidence,
+                "evidence_id": item.evidence_id,
+                "scope_id": item.scope_id,
+                "kind": item.kind,
+                "payload": item.payload,
+                "created_at": item.created_at,
             }
-            for scope in monitor.scopes
+            for item in evidence
         ],
     }
 
@@ -390,5 +406,5 @@ async def approve_autonomous(request: Request, monitor_id: str, body: ApprovalRe
         if monitor.status == MonitorStatus.RUNNING:
             _schedule_monitor(request.app, monitor.monitor_id)
         return _monitor_summary(monitor)
-    except ValueError as exc:
+    except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
