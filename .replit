@@ -22,3 +22,11 @@ timeoutMs = 20000
 [nix]
 channel = "stable-25_05"
 packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc", "chromium"]
+
+[userenv]
+
+[userenv.shared]
+CPTR_FLOWDECK_COORDINATOR_ENABLED = "true"
+CPTR_FLOWDECK_ENABLED = "true"
+CPTR_FLOWDECK_GOVERNANCE = "strict"
+CPTR_FLOWDECK_MODE = "controlled"
