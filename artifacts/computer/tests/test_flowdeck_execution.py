@@ -59,18 +59,17 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
         os.unlink(self.db_path)
         self.workspace.cleanup()
 
-    def test_mapper_requires_enabled_strict_read_only_mode(self):
+    def test_mapper_requires_enabled_strict_read_only_or_controlled_mode(self):
         with self.assertRaises(MapperPolicyError):
             validate_mapper_request(self.request, FlowDeckConfig())
         validate_mapper_request(
             self.request,
             FlowDeckConfig(enabled=True, mode=FlowDeckMode.READ_ONLY, governance="strict"),
         )
-        with self.assertRaises(MapperPolicyError):
-            validate_mapper_request(
-                self.request,
-                FlowDeckConfig(enabled=True, mode=FlowDeckMode.CONTROLLED, governance="strict"),
-            )
+        validate_mapper_request(
+            self.request,
+            FlowDeckConfig(enabled=True, mode=FlowDeckMode.CONTROLLED, governance="strict"),
+        )
 
     def test_mapper_scope_guard_rejects_mutation_and_escape(self):
         context = {"workspace": self.workspace.name}

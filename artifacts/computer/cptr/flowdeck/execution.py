@@ -78,8 +78,10 @@ def mapper_tool_guard(name: str, args: dict, context: dict) -> bool:
 
 
 def validate_mapper_request(request: MapperRequest, config: FlowDeckConfig) -> None:
-    if not config.enabled or config.mode != FlowDeckMode.READ_ONLY:
-        raise MapperPolicyError("mapper execution requires enabled read-only FlowDeck mode")
+    if not config.enabled or config.mode not in {FlowDeckMode.READ_ONLY, FlowDeckMode.CONTROLLED}:
+        raise MapperPolicyError(
+            "mapper execution requires enabled read-only or controlled FlowDeck mode"
+        )
     if config.governance != "strict":
         raise MapperPolicyError("mapper execution requires strict governance")
     _workspace_root(request.workspace)
