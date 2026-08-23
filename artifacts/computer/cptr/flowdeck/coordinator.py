@@ -54,6 +54,8 @@ class CoordinatorResult:
     run_id: str
     children: tuple[dict[str, Any], ...]
     outputs: tuple[str, ...]
+    outcome: str = "completed"
+    message: str | None = None
 
 
 _HINTS: tuple[tuple[str, str], ...] = (
@@ -151,6 +153,14 @@ def _validate_plan(plan: tuple[PlannedDelegation, ...], config: FlowDeckConfig) 
                 raise CoordinatorPolicyError("coding specialist is not currently qualified")
 
 
+CLARIFICATION_MESSAGE = (
+    "I’m Heidi. I can coordinate qualified read-only work such as security audits, "
+    "workspace mapping, architecture review, research, browser checks, and test "
+    "verification. Tell me which of those you want reviewed and I’ll coordinate it. "
+    "No specialist was selected and no tools were run."
+)
+
+
 async def run_heidi_coordinator(
     request: CoordinatorRequest,
     *,
@@ -177,7 +187,6 @@ async def run_heidi_coordinator(
         requested_workspace=request.workspace,
     )
     plan = classify_coordinator_request(request.task, coding_role=config.coding_role)
-    _validate_plan(plan, config)
     run, created = await store.create_run(
         request_key=request.request_key,
         owner=user_id,
@@ -188,6 +197,24 @@ async def run_heidi_coordinator(
         return CoordinatorResult("succeeded", run.id, (), ())
     if run.status == RunStatus.CANCELLED.value:
         return CoordinatorResult("cancelled", run.id, (), ())
+    if not plan:
+        if run.status == RunStatus.PENDING.value:
+            await store.start_run(run.id)
+        parent_step = await store.get_step(run.id)
+        if parent_step.status == StepStatus.PENDING.value:
+            await store.start_step(parent_step.id)
+        await store.record_clarification(run.id, message=CLARIFICATION_MESSAGE)
+        await store.finish_step(parent_step.id, status=StepStatus.SUCCEEDED)
+        await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
+        return CoordinatorResult(
+            "succeeded",
+            run.id,
+            (),
+            (),
+            outcome="clarification",
+            message=CLARIFICATION_MESSAGE,
+        )
+    _validate_plan(plan, config)
     if run.status == RunStatus.PENDING.value:
         await store.start_run(run.id)
     parent_step = await store.get_step(run.id)

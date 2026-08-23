@@ -6,6 +6,8 @@ export interface FlowDeckOrchestration {
 	workspace?: string;
 	objective?: string;
 	status?: string;
+	outcome?: 'completed' | 'clarification';
+	message?: string;
 	state?: string;
 	created_at?: string;
 	updated_at?: string;

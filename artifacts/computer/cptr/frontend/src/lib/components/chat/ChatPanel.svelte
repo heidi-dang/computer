@@ -143,6 +143,7 @@
 	let flowdeckRunId = $state('');
 	let flowdeckPoller: ReturnType<typeof setInterval> | null = null;
 	let flowdeckEvents = $state<any[]>([]);
+	let flowdeckClarification = $state('');
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChatId);
@@ -753,6 +754,7 @@
 		flowdeckStatus = '';
 		flowdeckRunId = '';
 		flowdeckEvents = [];
+		flowdeckClarification = '';
 	}
 
 	function loadChatSettings(meta: Record<string, any> | null) {
@@ -1158,13 +1160,16 @@
 			flowdeckRunId = result.run_id || '';
 			if (Array.isArray(result.events)) flowdeckEvents = result.events;
 			flowdeckStatus = String(result.status || 'active').toLowerCase();
+			flowdeckClarification = result.outcome === 'clarification' ? result.message || '' : '';
 			if (
 				flowdeckRunId &&
 				!['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(flowdeckStatus)
 			) {
 				startFlowDeckPolling(flowdeckRunId);
 			}
-			if (flowdeckStatus === 'succeeded') {
+			if (result.outcome === 'clarification') {
+				flowdeckStatus = 'clarification';
+			} else if (flowdeckStatus === 'succeeded') {
 				toast.success('Heidi completed the FlowDeck orchestration.');
 			}
 		} catch (error) {

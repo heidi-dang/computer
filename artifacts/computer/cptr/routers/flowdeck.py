@@ -160,6 +160,8 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
         "run_id": result.run_id,
         "status": result.status,
         "children": list(result.children),
+        "outcome": result.outcome,
+        **({"message": result.message} if result.message else {}),
     }
 
 

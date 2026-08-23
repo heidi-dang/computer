@@ -783,6 +783,23 @@ class DurableFlowDeck:
 
         await self._transaction(operation)
 
+    async def record_clarification(self, run_id: str, *, message: str) -> None:
+        """Record a coordinator-owned non-executing clarification."""
+        now = self.clock()
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(run.status, {RunStatus.RUNNING.value, RunStatus.RECOVERING.value})
+            await self._event(
+                db,
+                run_id,
+                "RUN_CLARIFICATION",
+                {"outcome": "clarification", "message": message, "executed": False},
+                now,
+            )
+
+        await self._transaction(operation)
+
     async def reconcile_operation(
         self,
         operation_id: str,
