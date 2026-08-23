@@ -18,6 +18,14 @@ from cptr.flowdeck.contracts import (
     ShadowDiagnostic,
 )
 from cptr.flowdeck.gateway import observe_request
+from cptr.flowdeck.durable import (
+    AttemptStatus,
+    DurableFlowDeck,
+    LifecycleError,
+    OperationStatus,
+    RunStatus,
+    StaleWriterError,
+)
 from cptr.flowdeck.registry import AGENT_REGISTRY, get_agent, validate_registry
 
 __all__ = [
@@ -35,5 +43,11 @@ __all__ = [
     "ShadowDiagnostic",
     "get_agent",
     "observe_request",
+    "AttemptStatus",
+    "DurableFlowDeck",
+    "LifecycleError",
+    "OperationStatus",
+    "RunStatus",
+    "StaleWriterError",
     "validate_registry",
 ]
