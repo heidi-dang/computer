@@ -1,0 +1,593 @@
+Task
+Task #20 — Shared FlowDeck Evidence Verification Contract
+
+To dev
+
+Current accepted integration baseline:
+- Upstream CPTR control plane integrated from commit:
+  4dbdf221d1ddcb18f0908f976f3122fee35186f2
+- Full backend suite: 141/141 PASS
+- Original FlowDeck suite: 104/104 PASS
+- Control-plane/integration suites: PASS
+- Fresh database initialization: PASS
+- Python compilation: PASS
+- Targeted Ruff: PASS
+- Frontend production build: PASS
+- git diff --check: PASS
+- Control plane disabled by default
+- No GitHub push performed
+- Migrations currently:
+  - 0005 FlowDeck orchestration
+  - 0006 FlowDeck approvals
+  - 0007 control plane
+  - 0008 control hardening
+
+Goal:
+Make FlowDeck the single authoritative completion/evidence layer across both:
+1. native FlowDeck orchestration
+2. integrated CPTR control-plane supervisor/director flows
+
+The control plane may collect or project evidence, but it must NOT become a second independent verifier, completion authority, retry ledger, lease authority, or execution owner.
+
+Core invariant:
+
+CPTR owns model/tool execution.
+FlowDeck owns authoritative orchestration completion/evidence truth.
+
+Target architecture:
+
+Control API / Supervisor
+        ↓
+FlowDeck durable logical identity
+        ↓
+CPTR / qualified FlowDeck execution
+        ↓
+trusted runtime observations
+        ↓
+canonical FlowDeck evidence contract
+        ↓
+FlowDeck verifier/completion policy
+        ↓
+authoritative terminal state
+        ↓
+control-plane status projection only
+
+Do not create a second model/verifier/tool loop.
+
+Roadmap
+
+1. Baseline and authority audit
+
+Before changing anything:
+
+- Verify current 141/141 backend baseline.
+- Verify current 104/104 FlowDeck baseline.
+- Map every path that can:
+  - record evidence
+  - mark success
+  - mark failure
+  - complete a scope
+  - complete a task
+  - retry execution
+  - recover execution
+  - approve execution
+  - reconcile uncertain execution
+
+Inspect especially:
+- FlowDeck durable/verifier/completion code
+- control-plane verification service
+- supervisor
+- supervisor director
+- control store
+- agent service
+- control API
+- tester
+- coding postcondition verification
+- browser verification
+- Git verification
+- restart recovery
+
+Produce a before-change call graph.
+
+2. Classify all verification/completion sources
+
+Classify each existing path as:
+
+A. Authoritative FlowDeck state
+B. Control-plane projection/reference
+C. Competing authority
+
+Anything classified C must be removed, adapted, or made non-authoritative.
+
+Explicitly audit:
+- control verification evidence
+- failure evidence
+- scope status
+- task status
+- supervisor success decisions
+- director success decisions
+- retry decisions
+- approval decisions
+- restart/recovery decisions
+
+3. Define one canonical evidence contract
+
+Reuse existing FlowDeck evidence semantics.
+
+Authoritative evidence may come only from trusted observations such as:
+- structured CPTR tool result
+- independent filesystem postcondition
+- tester exit/result evidence
+- browser/runtime observation
+- hermetic Git result
+- durable reconciler result
+- authenticated approval result where policy allows
+
+Non-authoritative evidence:
+- agent prose
+- supervisor prose
+- director prose
+- model self-report
+- "done" claims
+- model-generated logs
+- stale evidence
+- inferred success
+- evidence from another operation/user/workspace/attempt
+
+4. Bind authoritative evidence to durable identity
+
+Every authoritative evidence item must bind to the relevant:
+- authenticated user
+- workspace
+- FlowDeck run
+- step
+- logical operation
+- physical attempt where applicable
+- specialist/worker
+- operation fingerprint
+- fencing epoch where applicable
+- evidence type
+- verifier/source
+- timestamp
+
+Evidence from one durable identity must never satisfy another.
+
+5. Make control-plane completion derive from FlowDeck truth
+
+For any control scope/task that depends on FlowDeck execution:
+
+Control-plane SUCCESS must require FlowDeck authoritative success.
+
+The control plane must never independently translate:
+
+FAILED → SUCCEEDED
+OUTCOME_UNKNOWN → SUCCEEDED
+MANUAL_REVIEW_REQUIRED → SUCCEEDED
+CANCELLED → SUCCEEDED
+NOT_RUN → SUCCEEDED
+
+If FlowDeck and control-plane state disagree:
+- FlowDeck wins
+- control-plane state must converge to FlowDeck
+- disagreement must not create success
+
+6. Adapt control-plane verification
+
+Audit the integrated verification service.
+
+Preferred behavior:
+
+control observation
+    → evidence adapter
+    → FlowDeck evidence API
+    → FlowDeck verifier
+
+Do not retain an independent "verification succeeded therefore task succeeded" pathway.
+
+If control-plane verification logic is useful, convert it into:
+- evidence producer
+- evidence formatter
+- policy adapter
+
+not a final authority.
+
+7. Mutation completion
+
+Preserve existing coding semantics:
+
+intent
+→ active physical attempt
+→ valid workspace lease/fencing
+→ mutation
+→ independent postcondition
+→ authoritative evidence
+→ FlowDeck terminal outcome
+
+Control supervisor must consume that outcome.
+
+A normal tool return or agent response is insufficient.
+
+8. Tester verification
+
+Do not duplicate tester execution.
+
+Control plane should consume existing structured tester evidence:
+- check identity
+- workspace/repository
+- physical attempt
+- exit code
+- timeout state
+- output bounds
+- termination state
+
+No arbitrary control-plane shell verification.
+
+9. Git evidence
+
+Use existing qualified hermetic read-only Git implementation.
+
+Preserve:
+- fixed read-only operations
+- no shell
+- no arbitrary args
+- no network mutation
+- no Git mutation
+
+Any control-plane `diff_check` behavior must map into the canonical Git evidence path.
+
+10. Browser evidence
+
+Preserve the distinction:
+
+browser operation succeeded
+≠
+model interpretation is verified fact
+
+Only trusted runtime/browser observations can become authoritative evidence.
+
+11. Retry/idempotency unification
+
+Audit control supervisor retry logic.
+
+Requirements:
+- reuse FlowDeck logical operation identity
+- retries create physical attempts, not unrelated logical mutations
+- OUTCOME_UNKNOWN is never blindly retried
+- duplicate request does not create duplicate mutation
+- failure-signature logic cannot override FlowDeck recovery policy
+
+12. Lease/fencing unification
+
+FlowDeck remains the only authoritative workspace lease/fencing system.
+
+Any stale supervisor or worker that loses the current fencing epoch must not publish authoritative completion evidence.
+
+Do not create a second lease authority.
+
+13. Cancellation
+
+Cancellation must converge through FlowDeck durable truth.
+
+After cancellation:
+- future execution stops
+- active uncertain side effects become OUTCOME_UNKNOWN when required
+- stale worker completion is rejected
+- control scope/task reflects FlowDeck outcome
+- no late success override
+
+14. Recovery/restart
+
+On restart:
+- reload FlowDeck durable state
+- do not trust stale in-memory control state
+- preserve logical operation and attempt identities
+- preserve fencing
+- preserve UNKNOWN
+- do not rerun successful work unnecessarily
+- do not blindly retry uncertain mutations
+
+The supervisor must recover from FlowDeck durable truth.
+
+15. Approval unification
+
+Audit:
+- FlowDeck approvals
+- control-plane approvals
+
+Execution-affecting approval must be:
+- authenticated
+- exact user/workspace
+- operation/fingerprint bound
+- one-shot
+- scoped to permission to attempt
+
+Approval does NOT prove successful execution.
+
+Avoid two independent approval authorities for the same operation.
+
+16. Control evidence storage
+
+Do not delete existing control-plane evidence tables blindly.
+
+Decide explicitly whether control evidence becomes:
+- projection
+- reference to FlowDeck evidence
+- display/status summary
+
+It must not remain a second source of final execution truth.
+
+17. State mapping
+
+Define deterministic mapping from FlowDeck terminal state to control-plane state.
+
+At minimum:
+
+FlowDeck SUCCEEDED
+→ control succeeded
+
+FlowDeck FAILED
+→ control failed
+
+FlowDeck CANCELLED
+→ control cancelled
+
+FlowDeck OUTCOME_UNKNOWN
+→ control uncertain / manual action required
+
+FlowDeck MANUAL_REVIEW_REQUIRED
+→ control manual review required
+
+Do not collapse uncertain/manual states into generic failure or success if their meaning is needed for recovery.
+
+18. Adversarial tests
+
+Add tests for:
+
+- agent says "done", no authoritative evidence
+- supervisor says "verified", FlowDeck verifier fails
+- director says complete, FlowDeck is UNKNOWN
+- wrong run evidence
+- wrong operation evidence
+- wrong user evidence
+- wrong workspace evidence
+- wrong attempt evidence
+- wrong operation fingerprint
+- stale evidence
+- stale fencing epoch
+- cancelled attempt returns late success
+- OUTCOME_UNKNOWN control retry
+- MANUAL_REVIEW_REQUIRED control completion attempt
+- approval treated as success evidence
+- duplicate evidence replay
+- forged control evidence
+- missing evidence
+- verifier exception
+- partial evidence persistence
+- restart during verification
+- control state says success while FlowDeck says failure
+- control state says success while FlowDeck says UNKNOWN
+- retry after already-successful FlowDeck operation
+- stale supervisor after lease transfer
+
+19. Migration policy
+
+Do NOT alter existing revisions:
+- 0005
+- 0006
+- 0007
+- 0008
+
+If persistence changes are required:
+- add 0009
+- keep migration graph linear
+- no duplicate revision IDs
+
+Verify:
+- fresh DB
+- upgrade from FlowDeck 0006
+- upgrade from integrated 0008
+
+20. Disabled behavior
+
+Control plane remains disabled by default.
+
+When disabled:
+- no supervisor verification loop
+- no control evidence generation
+- no duplicate retries
+- no change in native FlowDeck execution
+
+21. No authority expansion
+
+Do NOT enable:
+- FDX
+- devops
+- debug mutation
+- Git mutation
+- unrestricted shell
+- MCP
+- network writes
+- installation
+- deployment/publishing
+- secrets
+- unrestricted autonomy
+- orchestration UI
+
+22. Model policy
+
+Preserve one CPTR-owned model selection path.
+
+Do not introduce:
+- verifier model
+- control-specific model authority
+- automatic model swapping
+
+23. Stop after Task #20.
+
+Do not proceed automatically into UI or new authority.
+
+Commands
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git log -n 15 --oneline
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+grep -RInE \
+'verification|verification_evidence|failure_evidence|evidence|SUCCEEDED|FAILED|OUTCOME_UNKNOWN|MANUAL_REVIEW_REQUIRED|CANCELLED|retry|reconcile|complete|finalize|approval' \
+cptr tests \
+--exclude-dir='__pycache__'
+
+After implementation:
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+python3 -m compileall -q cptr
+
+CHANGED_PY="$(git diff --name-only -- '*.py' | tr '\n' ' ')"
+if [ -n "$CHANGED_PY" ]; then
+  python3 -m ruff check $CHANGED_PY
+fi
+
+git diff --check
+git status --short
+git diff --stat
+git diff
+
+Run established repository checks:
+- fresh migration initialization
+- upgrade from 0006
+- upgrade from 0008 if schema changed
+- API HTTP smoke
+- frontend production build
+
+Bug checks
+
+- Control plane independently marks execution success → FAIL
+- Supervisor prose becomes authoritative → FAIL
+- Director prose becomes authoritative → FAIL
+- Two verifier authorities remain → FAIL
+- Control verifier reruns mutation → FAIL
+- Wrong identity evidence accepted → FAIL
+- Stale evidence accepted → FAIL
+- Stale fenced worker publishes success → FAIL
+- Cancelled attempt publishes success → FAIL
+- UNKNOWN becomes success → FAIL
+- MANUAL_REVIEW_REQUIRED becomes success → FAIL
+- Approval becomes success proof → FAIL
+- Control retry creates duplicate logical mutation → FAIL
+- Control recovery trusts stale memory → FAIL
+- FlowDeck/control disagreement has two "authoritative" outcomes → FAIL
+- Second lease system becomes authoritative → FAIL
+- Second model/verifier/tool loop introduced → FAIL
+- Existing Git/browser/tester verification weakened → FAIL
+- Migration chain becomes ambiguous → FAIL
+- Control plane becomes enabled by default → FAIL
+- Any authority expansion → FAIL
+
+Tests before commit
+
+Acceptance requires:
+
+1. 141/141 backend baseline verified before changes.
+2. 104/104 FlowDeck baseline verified before changes.
+3. One authoritative evidence/completion contract documented in code/tests.
+4. FlowDeck is final truth for execution-derived outcomes.
+5. Control success requires FlowDeck authoritative success.
+6. Agent prose cannot prove success.
+7. Supervisor prose cannot prove success.
+8. Director prose cannot prove success.
+9. Approval cannot prove success.
+10. Wrong-run evidence rejected.
+11. Wrong-operation evidence rejected.
+12. Wrong-user evidence rejected.
+13. Wrong-workspace evidence rejected.
+14. Wrong-attempt evidence rejected.
+15. Wrong-fingerprint evidence rejected.
+16. Stale evidence rejected.
+17. Stale fencing evidence rejected.
+18. Late cancellation completion rejected.
+19. FAILED remains failure.
+20. OUTCOME_UNKNOWN remains non-success.
+21. MANUAL_REVIEW_REQUIRED remains non-success.
+22. CANCELLED remains non-success.
+23. Control retry reuses FlowDeck logical identity.
+24. Recovery reloads FlowDeck durable truth.
+25. Successful work is not replayed unnecessarily.
+26. Unknown mutation is not blindly retried.
+27. Coding postcondition verification remains independent.
+28. Tester verification remains structured.
+29. Git verification remains hermetic/read-only.
+30. Browser model interpretation remains non-authoritative.
+31. Control evidence storage is explicitly non-authoritative projection/reference.
+32. FlowDeck remains sole lease/fencing authority.
+33. No second verifier/model/tool loop exists.
+34. Control plane remains disabled by default.
+35. Fresh DB initialization passes.
+36. Upgrade from 0006 passes.
+37. Upgrade from 0008 passes if 0009 is introduced.
+38. Full backend suite passes.
+39. FlowDeck suite passes.
+40. Python compilation passes.
+41. Targeted Ruff passes.
+42. git diff --check passes.
+43. API HTTP smoke returns 200.
+44. Frontend build passes.
+45. No authority expansion.
+
+Evidence
+
+Closure report must include:
+
+- PASS / FAIL
+- final score
+- branch and HEAD
+- before/after verification architecture
+- duplicate authorities discovered
+- exact paths adapted/removed
+- canonical evidence contract
+- evidence trust hierarchy
+- control-plane → FlowDeck evidence mapping
+- state mapping
+- approval semantics
+- retry/idempotency behavior
+- lease/fencing behavior
+- cancellation behavior
+- recovery/restart behavior
+- migration impact
+- adversarial tests added
+- exact FlowDeck test count
+- exact full backend test count
+- migration results
+- API smoke
+- frontend build
+- confirmation CPTR remains sole model/tool execution owner
+- confirmation FlowDeck remains sole authoritative completion/evidence owner
+- confirmation no second verifier loop
+- confirmation control plane remains disabled by default
+- confirmation no authority expansion
+- remaining risks
+- final score
+
+Score
+>= 9/10 required.
+
+Below 9/10 = Task #20 NOT DONE.
+
+Commit/push
+
+Do NOT push to GitHub.
+
+Do NOT create a new commit automatically.
+
+Leave the final verified diff available for review.
+
+Only commit after explicit approval.
