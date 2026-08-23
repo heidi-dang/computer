@@ -1,6 +1,7 @@
 {
 	"private": true,
 	"scripts": {
+		"dev": "npm --prefix cptr/frontend run dev",
 		"format": "npm run format:frontend && npm run format:backend",
 		"format:check": "npm run format:check:frontend && npm run format:check:backend",
 		"format:frontend": "npm --prefix cptr/frontend run format:frontend",
