@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
+from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.services.verification import DefaultIndependentVerifier, IndependentVerifier
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class ScopeStatus(StrEnum):
 class MonitorStatus(StrEnum):
     RUNNING = "RUNNING"
     APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
+    CANCEL_REQUESTED = "CANCEL_REQUESTED"
     BLOCKED = "BLOCKED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
@@ -141,6 +143,12 @@ class SupervisorStore(Protocol):
 
     async def save_monitor(self, monitor: MonitorState) -> None: ...
 
+    async def request_cancel_monitor(self, monitor_id: str) -> bool: ...
+
+    async def finalize_cancel_monitor(self, monitor_id: str) -> bool: ...
+
+    async def block_cancel_monitor(self, monitor_id: str) -> bool: ...
+
     async def claim_monitor(self, monitor_id: str) -> bool: ...
 
     async def release_monitor(self, monitor_id: str) -> None: ...
@@ -191,8 +199,60 @@ class InMemorySupervisorStore:
         return self.monitors.get(monitor_id)
 
     async def save_monitor(self, monitor: MonitorState) -> None:
+        existing = self.monitors.get(monitor.monitor_id)
+        terminal = {
+            MonitorStatus.COMPLETE,
+            MonitorStatus.CANCELLED,
+            MonitorStatus.BLOCKED,
+            MonitorStatus.FAILED,
+            MonitorStatus.CANCEL_REQUESTED,
+        }
+        if existing and existing.status in terminal and monitor.status != existing.status:
+            return
         monitor.updated_at = int(time.time() * 1000)
         self.monitors[monitor.monitor_id] = monitor
+
+    async def request_cancel_monitor(self, monitor_id: str) -> bool:
+        monitor = self.monitors.get(monitor_id)
+        if monitor is None:
+            return False
+        if monitor.status in {
+            MonitorStatus.COMPLETE,
+            MonitorStatus.CANCELLED,
+            MonitorStatus.BLOCKED,
+            MonitorStatus.FAILED,
+            MonitorStatus.CANCEL_REQUESTED,
+        }:
+            return False
+        monitor.status = MonitorStatus.CANCEL_REQUESTED
+        return True
+
+    async def finalize_cancel_monitor(self, monitor_id: str) -> bool:
+        monitor = self.monitors.get(monitor_id)
+        if monitor is None or monitor.status != MonitorStatus.CANCEL_REQUESTED:
+            return False
+        monitor.status = MonitorStatus.CANCELLED
+        for scope in monitor.scopes:
+            if scope.status not in {ScopeStatus.VERIFIED, ScopeStatus.CANCELLED}:
+                scope.transition(ScopeStatus.CANCELLED)
+            scope.next_action = None
+        return True
+
+    async def cancel_monitor(self, monitor_id: str) -> bool:
+        if not await self.request_cancel_monitor(monitor_id):
+            return False
+        return await self.finalize_cancel_monitor(monitor_id)
+
+    async def block_cancel_monitor(self, monitor_id: str) -> bool:
+        monitor = self.monitors.get(monitor_id)
+        if monitor is None or monitor.status != MonitorStatus.CANCEL_REQUESTED:
+            return False
+        monitor.status = MonitorStatus.BLOCKED
+        for scope in monitor.scopes:
+            if scope.status not in {ScopeStatus.VERIFIED, ScopeStatus.CANCELLED}:
+                scope.transition(ScopeStatus.BLOCKED)
+            scope.next_action = "Owned execution did not quiesce within the cancellation bound."
+        return True
 
     async def claim_monitor(self, monitor_id: str) -> bool:
         lock = self._locks.setdefault(monitor_id, asyncio.Lock())
@@ -309,6 +369,7 @@ class AutonomousSupervisor:
         self.director = director
         self.verifier = verifier or DefaultIndependentVerifier()
         self.max_attempts = max(1, max_attempts)
+        self._active_runs: dict[str, asyncio.Task] = {}
 
     async def create_goal(
         self,
@@ -383,25 +444,85 @@ class AutonomousSupervisor:
 
     async def cancel(self, monitor_id: str) -> MonitorState:
         monitor = await self._required_monitor(monitor_id)
-        monitor.status = MonitorStatus.CANCELLED
+        request_cancel = getattr(self.store, "request_cancel_monitor", None)
+        if callable(request_cancel):
+            requested = await request_cancel(monitor_id)
+            current = await self._required_monitor(monitor_id)
+            if not requested and current.status != MonitorStatus.CANCEL_REQUESTED:
+                return current
+        else:
+            cancel_monitor = getattr(self.store, "cancel_monitor", None)
+            if callable(cancel_monitor) and not await cancel_monitor(monitor_id):
+                return await self._required_monitor(monitor_id)
+
+        active_run = self._active_runs.get(monitor_id)
+        if active_run and active_run is not asyncio.current_task() and not active_run.done():
+            active_run.cancel()
+
+        monitor = await self._required_monitor(monitor_id)
+        cancellation_blocked = False
         for scope in monitor.scopes:
-            if scope.status not in {ScopeStatus.VERIFIED, ScopeStatus.CANCELLED}:
-                task_id = scope.worker_task_ids[-1] if scope.worker_task_ids else None
-                cancel_task = getattr(self.agent, "cancel_task", None)
-                if task_id and callable(cancel_task):
+            task_ids = list(dict.fromkeys(scope.worker_task_ids))
+            cancel_task = getattr(self.agent, "cancel_task", None)
+            if callable(cancel_task):
+                for task_id in task_ids:
                     try:
-                        await cancel_task(task_id, user_id=monitor.user_id)
+                        result = await cancel_task(task_id, user_id=monitor.user_id)
+                        if isinstance(result, dict) and result.get("cancelled") is False:
+                            # A monitor may retain terminal worker attempts from an
+                            # earlier repair cycle.  Those tasks are already quiescent;
+                            # only an explicit non-terminal result means cancellation
+                            # failed to stop owned execution.
+                            result_status = str(result.get("status") or "").upper()
+                            if result_status not in {"COMPLETE", "FAILED", "CANCELLED"}:
+                                cancellation_blocked = True
                     except Exception:  # noqa: BLE001 - cancellation remains durable
                         logger.warning("worker cancellation failed for task %s", task_id)
+                        cancellation_blocked = True
+            if scope.status not in {ScopeStatus.VERIFIED, ScopeStatus.CANCELLED}:
                 scope.transition(ScopeStatus.CANCELLED)
+            scope.next_action = None
+
+        if active_run and active_run is not asyncio.current_task():
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(active_run), timeout=TASK_CANCELLATION_TIMEOUT_SECONDS
+                )
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                if not active_run.cancelled():
+                    logger.warning("supervisor run did not quiesce for monitor %s", monitor_id)
+
+        if cancellation_blocked:
+            block_cancel = getattr(self.store, "block_cancel_monitor", None)
+            if callable(block_cancel):
+                await block_cancel(monitor_id)
+            else:
+                monitor.status = MonitorStatus.BLOCKED
+                for scope in monitor.scopes:
+                    if scope.status not in {ScopeStatus.VERIFIED, ScopeStatus.CANCELLED}:
+                        scope.transition(ScopeStatus.BLOCKED)
+                    scope.next_action = (
+                        "Owned execution did not quiesce within the cancellation bound."
+                    )
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
+            return await self._required_monitor(monitor_id)
+
+        finalize_cancel = getattr(self.store, "finalize_cancel_monitor", None)
+        if callable(finalize_cancel):
+            await finalize_cancel(monitor_id)
+        monitor = await self._required_monitor(monitor_id)
+        monitor.status = MonitorStatus.CANCELLED
         await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
         await self.store.save_monitor(monitor)
-        return monitor
+        return await self._required_monitor(monitor_id)
 
     async def run_once(self, monitor_id: str) -> MonitorState:
         if not await self.store.claim_monitor(monitor_id):
             monitor = await self._required_monitor(monitor_id)
             return monitor
+        current_run = asyncio.current_task()
+        if current_run is not None:
+            self._active_runs[monitor_id] = current_run
         try:
             monitor = await self._required_monitor(monitor_id)
             if monitor.status != MonitorStatus.RUNNING:
@@ -442,15 +563,25 @@ class AutonomousSupervisor:
 
             return monitor
         finally:
+            if self._active_runs.get(monitor_id) is current_run:
+                self._active_runs.pop(monitor_id, None)
             await self.store.release_monitor(monitor_id)
 
+    async def _monitor_is_running(self, monitor_id: str) -> bool:
+        monitor = await self.store.get_monitor(monitor_id)
+        return monitor is not None and monitor.status == MonitorStatus.RUNNING
+
     async def _observe_and_verify(self, monitor: MonitorState, scope: ScopeRecord) -> None:
+        if not await self._monitor_is_running(monitor.monitor_id):
+            return
         task_id = scope.worker_task_ids[-1] if scope.worker_task_ids else None
         if not task_id:
             scope.transition(ScopeStatus.REPAIR_REQUIRED)
             scope.next_action = "Delegate the scope to a worker."
             return
         task = await self.agent.get_task(task_id, user_id=monitor.user_id)
+        if not await self._monitor_is_running(monitor.monitor_id):
+            return
         task_status = str(task.get("status") or "").upper()
         await self._append_evidence(monitor, scope, "worker_state", task)
         if task_status not in TERMINAL_TASK_STATUSES:
@@ -468,6 +599,8 @@ class AutonomousSupervisor:
             "task": await self.agent.get_output(task_id, user_id=monitor.user_id),
             "diff": await self.agent.get_diff(monitor.workspace_id, user_id=monitor.user_id),
         }
+        if not await self._monitor_is_running(monitor.monitor_id):
+            return
         get_verification_evidence = getattr(self.agent, "get_verification_evidence", None)
         evidence["independent"] = (
             await get_verification_evidence(
@@ -484,6 +617,8 @@ class AutonomousSupervisor:
             monitor=monitor,
             scope=scope,
         )
+        if not await self._monitor_is_running(monitor.monitor_id):
+            return
         for check in verification.checks:
             if check.get("verification_command"):
                 await self._append_evidence(monitor, scope, "verification_command", check)
@@ -509,6 +644,8 @@ class AutonomousSupervisor:
             )
             return
         try:
+            if not await self._monitor_is_running(monitor.monitor_id):
+                return
             decision = await self.director.evaluate(
                 monitor=monitor,
                 scope=scope,
@@ -516,6 +653,8 @@ class AutonomousSupervisor:
                 original_goal=monitor.original_goal,
                 original_acceptance_criteria=monitor.original_acceptance_criteria,
             )
+            if not await self._monitor_is_running(monitor.monitor_id):
+                return
         except Exception:
             logger.exception("supervisor director evaluate failed for scope %s", scope.scope_id)
             await self._repair_or_block(
@@ -615,6 +754,8 @@ class AutonomousSupervisor:
     async def _try_delegate(
         self, monitor: MonitorState, scope: ScopeRecord, assignment: str
     ) -> None:
+        if not await self._monitor_is_running(monitor.monitor_id):
+            return
         approval_operation = assignment[:120]
         if (
             self._requires_approval(assignment)
@@ -676,6 +817,8 @@ class AutonomousSupervisor:
                 )
 
     async def _delegate(self, monitor: MonitorState, scope: ScopeRecord, assignment: str) -> None:
+        if not await self._monitor_is_running(monitor.monitor_id):
+            return
         scope.transition(ScopeStatus.ASSIGNED)
         key = f"{monitor.monitor_id}:{scope.scope_id}:{scope.attempt_count + 1}"
         task = await self.agent.start_task(
@@ -688,11 +831,18 @@ class AutonomousSupervisor:
         if str(task.get("status") or "").upper() in {"FAILED", "ERROR", "CANCELLED"}:
             raise RuntimeError("idempotent worker task is already terminal and unsuccessful")
         task_id = str(task["id"])
+        if not await self._monitor_is_running(monitor.monitor_id):
+            cancel_task = getattr(self.agent, "cancel_task", None)
+            if callable(cancel_task):
+                await cancel_task(task_id, user_id=monitor.user_id)
+            return
         if task_id not in scope.worker_task_ids:
             scope.worker_task_ids.append(task_id)
         scope.transition(ScopeStatus.WORKING)
 
     async def _run_final_gate(self, monitor: MonitorState) -> MonitorState:
+        if not await self._monitor_is_running(monitor.monitor_id):
+            return await self._required_monitor(monitor.monitor_id)
         try:
             decision = await self.director.final_gate(
                 monitor=monitor,
@@ -700,6 +850,8 @@ class AutonomousSupervisor:
                 original_goal=monitor.original_goal,
                 original_acceptance_criteria=monitor.original_acceptance_criteria,
             )
+            if not await self._monitor_is_running(monitor.monitor_id):
+                return await self._required_monitor(monitor.monitor_id)
         except Exception:  # noqa: BLE001 - preserve a retryable state across provider outages
             monitor.status = MonitorStatus.RUNNING
             if monitor.scopes:

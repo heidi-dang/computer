@@ -29,6 +29,7 @@ class TaskCreateRequest(BaseModel):
 
 class MessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=50_000)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class AutonomousCreateRequest(BaseModel):
@@ -238,7 +239,12 @@ async def send_task_message(request: Request, task_id: str, body: MessageRequest
     user_id = await _user(request, "task:write")
     agent, _ = _services(request)
     try:
-        return await agent.send_message(task_id, user_id=user_id, content=body.content)
+        return await agent.send_message(
+            task_id,
+            user_id=user_id,
+            content=body.content,
+            idempotency_key=body.idempotency_key,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     except ValueError as exc:
@@ -377,7 +383,12 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
     if not task_id:
         raise HTTPException(status_code=409, detail="monitor has no active worker task")
     try:
-        return await agent.send_message(task_id, user_id=user_id, content=body.content)
+        return await agent.send_message(
+            task_id,
+            user_id=user_id,
+            content=body.content,
+            idempotency_key=body.idempotency_key,
+        )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="worker task not found") from exc
 

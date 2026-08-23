@@ -23,7 +23,12 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Optional, get_args, get_origin, get_type_hints
 
 from fastapi import Request
-from cptr.env import CHAT_TOOL_COMMAND_MAX_CHARS, CHAT_TOOL_MAX_CHARS, EXECUTE_TIMEOUT
+from cptr.env import (
+    CHAT_TOOL_COMMAND_MAX_CHARS,
+    CHAT_TOOL_MAX_CHARS,
+    EXECUTE_TIMEOUT,
+    TASK_CANCELLATION_TIMEOUT_SECONDS,
+)
 from cptr.utils.gitignore import is_gitignored, load_gitignore
 from cptr.utils.identity import (
     IdentityUnavailable,
@@ -450,6 +455,85 @@ def stop_command_session(
         return None
     _kill_process_group(session["proc"].pid, force=force)
     return None
+
+
+def _owned_command_sessions(message_id: str) -> list[dict[str, Any]]:
+    return [
+        session
+        for session in command_sessions.values()
+        if session.get("message_id") == message_id and not session.get("done")
+    ]
+
+
+def _command_session_quiescent(session: dict[str, Any]) -> bool:
+    if session.get("done"):
+        return True
+    proc = session.get("proc")
+    if proc is None:
+        return True
+    returncode = getattr(proc, "returncode", None)
+    if returncode is not None:
+        session["done"] = True
+        return True
+    poll = getattr(proc, "poll", None)
+    if callable(poll) and poll() is not None:
+        session["done"] = True
+        return True
+    return False
+
+
+async def wait_for_owned_command_sessions(
+    message_id: str, *, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS
+) -> bool:
+    """Wait until command sessions owned by one agent turn have exited."""
+    deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+    while True:
+        active = [
+            session
+            for session in _owned_command_sessions(message_id)
+            if not _command_session_quiescent(session)
+        ]
+        if not active:
+            return True
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.05, remaining))
+
+
+async def cancel_owned_command_sessions(
+    message_id: str, *, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS
+) -> bool:
+    """Terminate only the shell sessions owned by one agent turn."""
+    sessions = list(_owned_command_sessions(message_id))
+    for session in sessions:
+        proc = session.get("proc")
+        if proc is not None:
+            _kill_process_group(proc.pid, force=False)
+        if session.get("log_task") is None:
+            wait = getattr(proc, "wait", None) if proc is not None else None
+            if callable(wait):
+                try:
+                    result = wait()
+                    if inspect.isawaitable(result):
+                        await asyncio.wait_for(result, timeout=max(0.1, timeout))
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    pass
+            else:
+                session["done"] = True
+    if await wait_for_owned_command_sessions(message_id, timeout=timeout):
+        return True
+
+    remaining = [
+        session
+        for session in _owned_command_sessions(message_id)
+        if not _command_session_quiescent(session)
+    ]
+    for session in remaining:
+        proc = session.get("proc")
+        if proc is not None:
+            _kill_process_group(proc.pid, force=True)
+    return await wait_for_owned_command_sessions(message_id, timeout=min(1.0, timeout))
 
 
 # ── Image support ───────────────────────────────────────────
@@ -1317,7 +1401,9 @@ async def run_command(
         if _PTY_AVAILABLE:
             proc, master_fd = _spawn_pty(command, str(work_dir), env, preexec)
         else:
-            kwargs = {}
+            # Keep the fallback subprocess in its own process group so task
+            # cancellation cannot signal the CPTR parent or another task.
+            kwargs = {"start_new_session": True}
             if preexec is not None:
                 kwargs["preexec_fn"] = preexec
             proc = await asyncio.create_subprocess_shell(

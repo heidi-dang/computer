@@ -25,6 +25,7 @@ from cptr.utils.agents.events import (
 )
 from cptr.utils.agents.prompts import turn_prompt_text
 from cptr.utils.identity import env_for, preexec_for
+from cptr.utils.processes import terminate_process_group
 
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -95,6 +96,7 @@ async def _opencode_server(profile: dict[str, Any], workspace: str, identity=Non
         stderr=asyncio.subprocess.PIPE,
         cwd=workspace or os.getcwd(),
         env={**env, "OPENCODE_CONFIG_CONTENT": "{}"},
+        start_new_session=True,
         preexec_fn=preexec_for(identity) if identity and identity.is_pam else None,
     )
     stderr_task = asyncio.create_task(_drain_stderr(proc))
@@ -104,13 +106,7 @@ async def _opencode_server(profile: dict[str, Any], workspace: str, identity=Non
         stderr_task.cancel()
         with suppress(asyncio.CancelledError):
             await stderr_task
-        if proc.returncode is None:
-            proc.terminate()
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
+        await terminate_process_group(proc, timeout=2)
 
 
 async def _drain_stderr(proc: asyncio.subprocess.Process) -> None:

@@ -15,7 +15,9 @@ from cptr.models import (
     AutonomousMonitor,
     AutonomousScope,
     AutonomousWorkspaceLease,
+    ChatMessage,
     ControlIdempotency,
+    ControlMessage,
     ControlTask,
 )
 from cptr.services.supervisor import (
@@ -95,6 +97,16 @@ class SqlSupervisorStore:
             row = await db.get(AutonomousMonitor, monitor.monitor_id)
             if row is None:
                 raise KeyError(f"monitor not found: {monitor.monitor_id}")
+            terminal = {
+                MonitorStatus.COMPLETE.value,
+                MonitorStatus.CANCELLED.value,
+                MonitorStatus.BLOCKED.value,
+                MonitorStatus.FAILED.value,
+                MonitorStatus.CANCEL_REQUESTED.value,
+            }
+            if row.status in terminal and row.status != monitor.status.value:
+                await db.rollback()
+                return
             row.status = monitor.status.value
             row.current_scope_id = monitor.current_scope_id
             row.approval_id = monitor.approval_id
@@ -120,6 +132,88 @@ class SqlSupervisorStore:
                 target.history = [item.value for item in scope.history]
                 target.updated_at = scope.updated_at
             await db.commit()
+
+    async def request_cancel_monitor(self, monitor_id: str) -> bool:
+        async with await get_db() as db:
+            result = await db.execute(
+                update(AutonomousMonitor)
+                .where(
+                    AutonomousMonitor.id == monitor_id,
+                    AutonomousMonitor.status.not_in(
+                        [
+                            MonitorStatus.COMPLETE.value,
+                            MonitorStatus.CANCELLED.value,
+                            MonitorStatus.BLOCKED.value,
+                            MonitorStatus.FAILED.value,
+                            MonitorStatus.CANCEL_REQUESTED.value,
+                        ]
+                    ),
+                )
+                .values(status=MonitorStatus.CANCEL_REQUESTED.value, updated_at=_now_ms())
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def finalize_cancel_monitor(self, monitor_id: str) -> bool:
+        async with await get_db() as db:
+            result = await db.execute(
+                update(AutonomousMonitor)
+                .where(
+                    AutonomousMonitor.id == monitor_id,
+                    AutonomousMonitor.status == MonitorStatus.CANCEL_REQUESTED.value,
+                )
+                .values(status=MonitorStatus.CANCELLED.value, updated_at=_now_ms())
+            )
+            if result.rowcount == 1:
+                await db.execute(
+                    update(AutonomousScope)
+                    .where(
+                        AutonomousScope.monitor_id == monitor_id,
+                        AutonomousScope.status.not_in(
+                            [ScopeStatus.VERIFIED.value, ScopeStatus.CANCELLED.value]
+                        ),
+                    )
+                    .values(
+                        status=ScopeStatus.CANCELLED.value,
+                        next_action=None,
+                        updated_at=_now_ms(),
+                    )
+                )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def block_cancel_monitor(self, monitor_id: str) -> bool:
+        async with await get_db() as db:
+            result = await db.execute(
+                update(AutonomousMonitor)
+                .where(
+                    AutonomousMonitor.id == monitor_id,
+                    AutonomousMonitor.status == MonitorStatus.CANCEL_REQUESTED.value,
+                )
+                .values(status=MonitorStatus.BLOCKED.value, updated_at=_now_ms())
+            )
+            if result.rowcount == 1:
+                await db.execute(
+                    update(AutonomousScope)
+                    .where(
+                        AutonomousScope.monitor_id == monitor_id,
+                        AutonomousScope.status.not_in(
+                            [ScopeStatus.VERIFIED.value, ScopeStatus.CANCELLED.value]
+                        ),
+                    )
+                    .values(
+                        status=ScopeStatus.BLOCKED.value,
+                        next_action="Owned execution did not quiesce within the cancellation bound.",
+                        updated_at=_now_ms(),
+                    )
+                )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def cancel_monitor(self, monitor_id: str) -> bool:
+        if not await self.request_cancel_monitor(monitor_id):
+            return False
+        return await self.finalize_cancel_monitor(monitor_id)
 
     async def claim_monitor(self, monitor_id: str) -> bool:
         now = _now_ms()
@@ -419,3 +513,171 @@ class ControlTaskStore:
         async with await get_db() as db:
             await db.execute(update(ControlTask).where(ControlTask.id == task_id).values(**values))
             await db.commit()
+
+    async def transition_terminal(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        updated_at: int,
+        error: str | None = None,
+        cancelled_at: int | None = None,
+    ) -> bool:
+        """Atomically claim the one durable terminal transition for a task."""
+        values: dict[str, Any] = {"status": status, "updated_at": updated_at}
+        if error is not None:
+            values["error"] = error
+        if cancelled_at is not None:
+            values["cancelled_at"] = cancelled_at
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.status.not_in(
+                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED")
+                    ),
+                )
+                .values(**values)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def request_cancel(self, task_id: str, *, requested_at: int) -> bool:
+        """Atomically establish cancellation intent before stopping execution."""
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.status.not_in(
+                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED")
+                    ),
+                )
+                .values(status="CANCEL_REQUESTED", updated_at=requested_at)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def finalize_cancel(self, task_id: str, *, cancelled_at: int, updated_at: int) -> bool:
+        """Commit cancellation only after owned execution is quiescent."""
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.status == "CANCEL_REQUESTED",
+                )
+                .values(
+                    status="CANCELLED",
+                    cancelled_at=cancelled_at,
+                    updated_at=updated_at,
+                    error="cancelled",
+                )
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def invalidate_messages_for_task(self, task_id: str, *, now: int) -> int:
+        """Invalidate queued steering before a cancelled task can drain it."""
+        async with await get_db() as db:
+            result = await db.execute(
+                select(ControlMessage).where(
+                    ControlMessage.task_id == task_id,
+                    ControlMessage.status.not_in(("CONSUMED", "CANCELLED")),
+                )
+            )
+            messages = list(result.scalars().all())
+            for message in messages:
+                message.status = "CANCELLED"
+                message.updated_at = now
+                if message.chat_message_id:
+                    chat_message = await db.get(ChatMessage, message.chat_message_id)
+                    if chat_message is not None:
+                        meta = dict(chat_message.meta or {})
+                        meta["queued"] = False
+                        meta["delivery_status"] = "CANCELLED"
+                        await db.execute(
+                            update(ChatMessage)
+                            .where(ChatMessage.id == chat_message.id)
+                            .values(meta=meta)
+                        )
+            await db.commit()
+            return len(messages)
+
+    async def enqueue_message(
+        self,
+        *,
+        task_id: str,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        dedupe_key: str,
+        chat_message_id: str | None,
+        now: int,
+    ) -> ControlMessage:
+        """Create or return one durable follow-up message by its retry key."""
+        async with await get_db() as db:
+            result = await db.execute(
+                select(ControlMessage).where(
+                    ControlMessage.user_id == user_id,
+                    ControlMessage.task_id == task_id,
+                    ControlMessage.dedupe_key == dedupe_key,
+                )
+            )
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                return existing
+            message = ControlMessage(
+                user_id=user_id,
+                task_id=task_id,
+                chat_id=chat_id,
+                chat_message_id=chat_message_id,
+                content=content,
+                dedupe_key=dedupe_key,
+                status="QUEUED",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(message)
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                result = await db.execute(
+                    select(ControlMessage).where(
+                        ControlMessage.user_id == user_id,
+                        ControlMessage.task_id == task_id,
+                        ControlMessage.dedupe_key == dedupe_key,
+                    )
+                )
+                existing = result.scalar_one_or_none()
+                if existing is None:
+                    raise
+                return existing
+            await db.refresh(message)
+            return message
+
+    async def update_message(self, message_id: str, **values: Any) -> bool:
+        if not values:
+            return False
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlMessage).where(ControlMessage.id == message_id).values(**values)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def get_message(self, message_id: str) -> ControlMessage | None:
+        async with await get_db() as db:
+            return await db.get(ControlMessage, message_id)
+
+    async def repoint_task_message(self, task_id: str, message_id: str, *, now: int) -> bool:
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(ControlTask.id == task_id, ControlTask.status.not_in(("CANCELLED",)))
+                .values(message_id=message_id, status="RUNNING", updated_at=now)
+            )
+            await db.commit()
+            return result.rowcount == 1
