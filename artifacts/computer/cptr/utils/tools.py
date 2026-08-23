@@ -3214,7 +3214,11 @@ def _without_background_param(schema: dict) -> dict:
     return schema
 
 
-async def get_tool_list(builtin_tools: dict | None = None, workspace: str = "") -> list[dict]:
+async def get_tool_list(
+    builtin_tools: dict | None = None,
+    workspace: str = "",
+    allowed_tool_names: frozenset[str] | None = None,
+) -> list[dict]:
     """Return tool schemas for the LLM.
 
     Automatically includes browser tools when browser.enabled is true,
@@ -3266,6 +3270,9 @@ async def get_tool_list(builtin_tools: dict | None = None, workspace: str = "") 
     if disabled_tools:
         tools = {name: tool for name, tool in tools.items() if name not in disabled_tools}
 
+    if allowed_tool_names is not None:
+        tools = {name: tool for name, tool in tools.items() if name in allowed_tool_names}
+
     schemas = [_fn_to_schema(name, t["fn"]) for name, t in tools.items()]
     if not background_subagents_enabled:
         schemas = [_without_background_param(s) for s in schemas]
@@ -3283,6 +3290,12 @@ async def get_tool_list(builtin_tools: dict | None = None, workspace: str = "") 
 
 async def execute_tool(name: str, args: dict, __context__: dict) -> str:
     """Execute a tool by name, injecting execution context."""
+    allowed_tool_names = __context__.get("allowed_tool_names")
+    if allowed_tool_names is not None and name not in allowed_tool_names:
+        return f"Error: tool denied by execution policy: {name}"
+    tool_guard = __context__.get("tool_guard")
+    if tool_guard is not None and not tool_guard(name, args, __context__):
+        return f"Error: tool denied by execution scope: {name}"
     info = ALL_TOOLS.get(name)
     if info:
         if not __context__.get("workspace") and name in GLOBAL_CHAT_DISABLED_TOOLS:

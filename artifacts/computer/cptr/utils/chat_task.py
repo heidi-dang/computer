@@ -1405,6 +1405,8 @@ async def run_chat_task(
     workspace: str,
     regeneration_prompt: str | None = None,
     output_queue: asyncio.Queue | None = None,
+    allowed_tool_names: frozenset[str] | None = None,
+    tool_guard=None,
 ):
     """Plain async function. Makes raw API calls in a loop."""
     if request is None:
@@ -1916,7 +1918,11 @@ async def run_chat_task(
             system += f"\n\n[CONVERSATION SUMMARY]\n{loaded_summary}"
         if regeneration_prompt:
             messages.append({"role": "user", "content": regeneration_prompt})
-        tools = await get_tool_list(builtin_tools=builtin_tools, workspace=workspace)
+        tools = await get_tool_list(
+            builtin_tools=builtin_tools,
+            workspace=workspace,
+            allowed_tool_names=allowed_tool_names,
+        )
         if not skill_authoring_allowed:
             tools = [t for t in tools if t["name"] != "manage_skill"]
 
@@ -2129,6 +2135,8 @@ async def run_chat_task(
             "message_id": message_id,
             "connection": connection,
             "builtin_tools": builtin_tools,
+            "allowed_tool_names": allowed_tool_names,
+            "tool_guard": tool_guard,
         }
 
         resumed_calls = await run_queued_tool_calls(tool_ctx)
