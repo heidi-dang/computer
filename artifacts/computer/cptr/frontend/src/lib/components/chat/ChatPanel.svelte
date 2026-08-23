@@ -581,6 +581,10 @@
 		content?: string;
 	}) {
 		if (data.flowdeck_run_id) {
+			if (!flowdeckRunId && flowdeckMessageId && flowdeckStatus === 'active') {
+				flowdeckRunId = data.flowdeck_run_id;
+				startFlowDeckPolling(flowdeckRunId);
+			}
 			mergeFlowDeckEvent(data);
 		}
 
@@ -748,7 +752,7 @@
 	}
 
 	function flowDeckEventKey(event: any): string {
-		const run = String(event?.flowdeck_run_id || flowdeckRunId || '');
+		const run = String(event?.flowdeck_run_id || event?.run_id || flowdeckRunId || '');
 		if (event?.id || event?.event_id) return `${run}:id:${event.id || event.event_id}`;
 		const output = event?.output || {};
 		const payload = event?.payload || {};
@@ -770,12 +774,16 @@
 	}
 
 	function mergeFlowDeckEvent(event: any) {
-		if (!event?.flowdeck_run_id || event.flowdeck_run_id !== flowdeckRunId) return;
+		const normalized = event?.flowdeck_run_id
+			? event
+			: event?.run_id
+				? { ...event, flowdeck_run_id: event.run_id }
+				: null;
+		if (!normalized || normalized.flowdeck_run_id !== flowdeckRunId) return;
 		const next = [...flowdeckEvents];
-		const key = flowDeckEventKey(event);
+		const key = flowDeckEventKey(normalized);
 		const index = next.findIndex((item) => flowDeckEventKey(item) === key);
-		if (index >= 0) next[index] = { ...next[index], ...event };
-		else next.push(event);
+		if (index >= 0) next[index] = { ...next[index], ...normalized };
 		// Poll responses are authoritative and carry sequence numbers. Sort only
 		// when both records have durable sequence positions; otherwise retain
 		// arrival order so a socket update cannot jump ahead of an earlier call.
@@ -848,6 +856,24 @@
 					content: [{ type: 'output_text', text: activity }]
 				}
 			];
+		}
+		const eventStatus = String(event?.status || event?.payload?.status || '').toLowerCase();
+		const kind = String(event?.kind || event?.type || '').toUpperCase();
+		if (
+			kind === 'RUN_COMPLETED' ||
+			kind === 'RUN_CANCELLED' ||
+			kind === 'RUN_ORPHANED' ||
+			kind === 'RUN_FAILED'
+		) {
+			flowdeckStatus =
+				eventStatus ||
+				(kind === 'RUN_CANCELLED'
+					? 'cancelled'
+					: kind === 'RUN_FAILED' || kind === 'RUN_ORPHANED'
+						? 'failed'
+						: 'succeeded');
+			message.done = true;
+			stopFlowDeckPolling();
 		}
 		allMessages = [...allMessages];
 	}
@@ -1335,6 +1361,12 @@
 				!['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(flowdeckStatus)
 			) {
 				startFlowDeckPolling(flowdeckRunId);
+			} else if (flowdeckStatus !== 'clarification' && flowdeckMessageId) {
+				const message = allMessages.find((item) => item.id === flowdeckMessageId);
+				if (message) {
+					message.done = true;
+					allMessages = [...allMessages];
+				}
 			}
 			if (result.outcome === 'clarification') {
 				flowdeckStatus = 'clarification';
