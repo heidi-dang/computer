@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from starlette.requests import Request
@@ -35,7 +35,7 @@ class CoordinatorPolicyTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(
             [item.specialist_id for item in first],
-            ["architect", "reviewer", "tester"],
+            ["architect", "tester"],
         )
         self.assertLessEqual(len(first), 4)
 
@@ -197,9 +197,44 @@ class CoordinatorDurableWorkflowTests(unittest.IsolatedAsyncioTestCase):
                 request, authenticated_request=self.auth_request(), store=self.store
             )
         self.assertEqual(result.status, "succeeded")
-        self.assertEqual(len(result.children), 3)
+        self.assertEqual(len(result.children), 2)
         self.assertTrue(all(item["status"] == "succeeded" for item in result.children))
-        self.assertEqual(len(result.outputs), 3)
+        self.assertEqual(len(result.outputs), 2)
+
+    async def test_unmatched_prompt_is_durable_clarification_without_dispatch(self):
+        request = CoordinatorRequest(
+            request_key="clarification-request",
+            task="hi",
+            workspace=str(self.root),
+            model="global-cptr-model",
+            connection={},
+            parent_chat_id="chat",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "CPTR_FLOWDECK_ENABLED": "true",
+                "CPTR_FLOWDECK_MODE": "controlled",
+                "CPTR_FLOWDECK_GOVERNANCE": "strict",
+            },
+        ), patch(
+            "cptr.flowdeck.coordinator.dispatch_authenticated_specialist",
+            new=AsyncMock(),
+        ) as dispatch:
+            result = await run_heidi_coordinator(
+                request, authenticated_request=self.auth_request(), store=self.store
+            )
+
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.outcome, "clarification")
+        self.assertIn("No specialist was selected", result.message)
+        dispatch.assert_not_awaited()
+        run = await self.store.get_run_by_request_key(request.request_key)
+        self.assertIsNotNone(run)
+        self.assertEqual(run.status, RunStatus.SUCCEEDED.value)
+        self.assertEqual(await self.store.get_run_operations(run.id), [])
+        events = await self.store.list_events(run.id)
+        self.assertTrue(any(event.kind == "RUN_CLARIFICATION" for event in events))
 
     async def test_cancellation_preserves_unknown_and_blocks_finalization(self):
         run, _ = await self.store.create_run(

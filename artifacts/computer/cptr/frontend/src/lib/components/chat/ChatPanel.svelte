@@ -1912,6 +1912,15 @@
 					</h1>
 				</div>
 
+				{#if flowdeckClarification}
+					<div class="mx-auto mb-3 max-w-xl rounded-2xl border border-cyan-500/25 bg-cyan-500/5 px-4 py-3 text-left">
+						<div class="mb-1 flex items-center gap-2 text-xs font-semibold text-cyan-300">
+							<span class="size-2 rounded-full bg-cyan-400"></span>
+							Heidi · clarification
+						</div>
+						<p class="text-sm leading-6 text-gray-600 dark:text-gray-300">{flowdeckClarification}</p>
+					</div>
+				{/if}
 				{#if flowdeckEvents.length > 0}
 					<FlowDeckExecutionTimeline events={flowdeckEvents} status={flowdeckStatus} />
 				{/if}
@@ -2018,6 +2027,15 @@
 		<!-- Input area -->
 		<div class="px-4 py-3" style="background: var(--app-bg);">
 			<div class="{$widescreenMode ? 'max-w-full' : 'max-w-2xl'} mx-auto w-full relative">
+				{#if flowdeckClarification}
+					<div class="mb-3 rounded-2xl border border-cyan-500/25 bg-cyan-500/5 px-4 py-3">
+						<div class="mb-1 flex items-center gap-2 text-xs font-semibold text-cyan-300">
+							<span class="size-2 rounded-full bg-cyan-400"></span>
+							Heidi · clarification
+						</div>
+						<p class="text-sm leading-6 text-gray-600 dark:text-gray-300">{flowdeckClarification}</p>
+					</div>
+				{/if}
 				{#if !autoScroll && activePath.length > 0}
 					<div
 						class="absolute -top-10 left-0 right-0 pr-2 flex justify-end z-30 pointer-events-none"
