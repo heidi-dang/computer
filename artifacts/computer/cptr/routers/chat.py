@@ -1139,6 +1139,14 @@ async def send_message(request: Request, body: SendMessageRequest):
         )
 
     if queued_msg:
+        from cptr.flowdeck.gateway import observe_request
+
+        observe_request(
+            content=body.content,
+            model_id=body.model_id,
+            user_id=user_id,
+            workspace=workspace,
+        )
         await process_pending_chat_inputs(request, chat.id, user_id, workspace or "")
         return {"chat_id": chat.id, "message_id": queued_msg.id, "queued": True}
 
@@ -1149,6 +1157,17 @@ async def send_message(request: Request, body: SendMessageRequest):
     from cptr.utils.chat_export import export_chat_to_file
 
     await export_chat_to_file(request, chat.id)
+
+    # FlowDeck is advisory in this rollout. This call must remain before the
+    # native task starts and must never alter CPTR's authoritative execution.
+    from cptr.flowdeck.gateway import observe_request
+
+    observe_request(
+        content=body.content,
+        model_id=body.model_id,
+        user_id=user_id,
+        workspace=workspace,
+    )
 
     start_task(
         request,
