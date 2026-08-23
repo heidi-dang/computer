@@ -193,6 +193,7 @@ async def _native_run_coding_specialist(
     model: str,
     connection: dict[str, Any],
     parent_chat_id: str,
+    parent_flowdeck_run_id: str | None = None,
     store: DurableFlowDeck | None = None,
 ) -> str:
     config = FlowDeckConfig.from_env()
@@ -407,6 +408,7 @@ async def _native_run_coding_specialist(
             after_mutation=after_mutation,
             specialist_role=request.role,
 			flowdeck_run_id=run.id,
+            flowdeck_parent_run_id=parent_flowdeck_run_id,
         )
     except BaseException:
         await store.mark_attempt_unknown(root_attempt.id, error="coding session interrupted")
@@ -468,6 +470,7 @@ async def _native_run_browser_debugger(
     model: str,
     connection: dict[str, Any],
     parent_chat_id: str,
+    parent_flowdeck_run_id: str | None = None,
     store: DurableFlowDeck | None = None,
 ) -> str:
     """Run the minimum local-preview browser inspection through CPTR's loop."""
@@ -544,6 +547,7 @@ async def _native_run_browser_debugger(
             tool_guard=browser_tool_guard,
             specialist_role=request.role,
 			flowdeck_run_id=run.id,
+            flowdeck_parent_run_id=parent_flowdeck_run_id,
         )
     except BaseException:
         await store.mark_attempt_unknown(attempt.id)

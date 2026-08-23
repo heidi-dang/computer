@@ -38,6 +38,7 @@ class SpecialistDispatchRequest:
     model: str
     connection: dict[str, Any]
     parent_chat_id: str
+    parent_flowdeck_run_id: str | None = None
     check: str = "tests"
     trusted_repository: bool = True
     repository_identity: str = ""
@@ -124,6 +125,7 @@ async def dispatch_authenticated_specialist(
             model=dispatch.model,
             connection=dispatch.connection,
             parent_chat_id=dispatch.parent_chat_id,
+            parent_flowdeck_run_id=dispatch.parent_flowdeck_run_id,
             store=store,
         )
     if dispatch.role == "browser-debugger":
@@ -138,6 +140,7 @@ async def dispatch_authenticated_specialist(
             model=dispatch.model,
             connection=dispatch.connection,
             parent_chat_id=dispatch.parent_chat_id,
+            parent_flowdeck_run_id=dispatch.parent_flowdeck_run_id,
             store=store,
         )
     if dispatch.role in READ_ONLY_SPECIALIST_IDS:
@@ -150,6 +153,7 @@ async def dispatch_authenticated_specialist(
                 model=dispatch.model,
                 connection=dispatch.connection,
                 parent_chat_id=dispatch.parent_chat_id,
+                parent_flowdeck_run_id=dispatch.parent_flowdeck_run_id,
             ),
             dispatch.role,
             store=store,

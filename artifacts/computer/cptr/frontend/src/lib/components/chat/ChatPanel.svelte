@@ -573,6 +573,7 @@
 		updated_at?: number;
 		last_read_at?: number;
 		flowdeck_run_id?: string;
+		flowdeck_parent_run_id?: string;
 		kind?: string;
 		payload?: Record<string, unknown>;
 		sequence?: number;
@@ -580,9 +581,10 @@
 		status?: string;
 		content?: string;
 	}) {
-		if (data.flowdeck_run_id) {
+		const parentRunId = data.flowdeck_parent_run_id || data.flowdeck_run_id;
+		if (parentRunId) {
 			if (!flowdeckRunId && flowdeckMessageId && flowdeckStatus === 'active') {
-				flowdeckRunId = data.flowdeck_run_id;
+				flowdeckRunId = parentRunId;
 				startFlowDeckPolling(flowdeckRunId);
 			}
 			mergeFlowDeckEvent(data);
@@ -640,7 +642,7 @@
 
 		// FlowDeck specialist chats have their own chat IDs. Their authenticated
 		// events still belong in Heidi's native-looking assistant turn.
-		if (data.flowdeck_run_id && data.flowdeck_run_id === flowdeckRunId) {
+		if (parentRunId && parentRunId === flowdeckRunId) {
 			applyFlowDeckEventToMessage(data);
 			return;
 		}
@@ -745,7 +747,13 @@
 	}
 
 	function flowDeckEventKey(event: any): string {
-		const run = String(event?.flowdeck_run_id || event?.run_id || flowdeckRunId || '');
+		const run = String(
+			event?.flowdeck_parent_run_id ||
+				event?.flowdeck_run_id ||
+				event?.run_id ||
+				flowdeckRunId ||
+				''
+		);
 		if (event?.id || event?.event_id) return `${run}:id:${event.id || event.event_id}`;
 		const output = event?.output || {};
 		const payload = event?.payload || {};
@@ -767,12 +775,16 @@
 	}
 
 	function mergeFlowDeckEvent(event: any) {
-		const normalized = event?.flowdeck_run_id
-			? event
-			: event?.run_id
-				? { ...event, flowdeck_run_id: event.run_id }
-				: null;
-		if (!normalized || normalized.flowdeck_run_id !== flowdeckRunId) return;
+		const parentRunId =
+			event?.flowdeck_parent_run_id ||
+			event?.run_id ||
+			(event?.flowdeck_run_id && !event?.output && !event?.delta
+				? event.flowdeck_run_id
+				: null);
+		if (!parentRunId || parentRunId !== flowdeckRunId) return;
+		const normalized = event?.run_id
+			? { ...event, flowdeck_parent_run_id: event.run_id }
+			: event;
 		const next = [...flowdeckEvents];
 		const key = flowDeckEventKey(normalized);
 		const index = next.findIndex((item) => flowDeckEventKey(item) === key);

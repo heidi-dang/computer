@@ -1425,6 +1425,7 @@ async def run_chat_task(
     after_mutation=None,
     specialist_role: str | None = None,
     flowdeck_run_id: str | None = None,
+    flowdeck_parent_run_id: str | None = None,
 ):
     """Plain async function. Makes raw API calls in a loop."""
     if request is None:
@@ -1447,6 +1448,11 @@ async def run_chat_task(
                     "chat_id": chat_id,
                     "message_id": message_id,
                     **({"flowdeck_run_id": flowdeck_run_id} if flowdeck_run_id else {}),
+                    **(
+                        {"flowdeck_parent_run_id": flowdeck_parent_run_id}
+                        if flowdeck_parent_run_id
+                        else {}
+                    ),
                     **data,
                 },
             )

@@ -52,6 +52,7 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
             model="model-1",
             connection={"provider": "test"},
             parent_chat_id="parent-chat",
+            parent_flowdeck_run_id="parent-flowdeck-run",
         )
 
     async def asyncTearDown(self):
@@ -130,6 +131,8 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
         kwargs = run_chat.await_args.kwargs
         self.assertEqual(kwargs["allowed_tool_names"], MAPPER_TOOL_NAMES)
         self.assertIsNotNone(kwargs["tool_guard"])
+        self.assertTrue(kwargs["flowdeck_run_id"])
+        self.assertEqual(kwargs["flowdeck_parent_run_id"], "parent-flowdeck-run")
         events = await self.store.list_events("not-a-run")
         self.assertEqual(events, [])
 

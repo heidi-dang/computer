@@ -46,6 +46,7 @@ class MapperRequest:
     model: str
     connection: dict[str, Any]
     parent_chat_id: str
+    parent_flowdeck_run_id: str | None = None
 
 
 def _workspace_root(workspace: str) -> Path:
@@ -140,6 +141,7 @@ async def _native_run_read_only_specialist(
         model=request.model,
         connection=request.connection,
         parent_chat_id=request.parent_chat_id,
+        parent_flowdeck_run_id=request.parent_flowdeck_run_id,
     )
 
     run, created = await store.create_run(
@@ -203,6 +205,7 @@ async def _native_run_read_only_specialist(
             allowed_tool_names=READ_ONLY_TOOL_NAMES,
             tool_guard=mapper_tool_guard,
             flowdeck_run_id=run.id,
+            flowdeck_parent_run_id=request.parent_flowdeck_run_id,
         )
     except BaseException:
         await store.mark_attempt_unknown(attempt.id)
@@ -257,6 +260,7 @@ async def run_read_only_specialist(
             model=request.model,
             connection=request.connection,
             parent_chat_id=request.parent_chat_id,
+                parent_flowdeck_run_id=request.parent_flowdeck_run_id,
         ),
         store=store,
     )

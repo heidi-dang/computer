@@ -2767,6 +2767,7 @@ async def _run_existing_subagent_chat(
     after_mutation=None,
     specialist_role: str | None = None,
     flowdeck_run_id: str | None = None,
+    flowdeck_parent_run_id: str | None = None,
 ) -> str:
     """Run the agent loop for an already-created sub-agent chat."""
     from cptr.models import ChatMessage
@@ -2791,6 +2792,7 @@ async def _run_existing_subagent_chat(
         after_mutation=after_mutation,
         specialist_role=specialist_role,
         flowdeck_run_id=flowdeck_run_id,
+        flowdeck_parent_run_id=flowdeck_parent_run_id,
     )
 
     result_msg = await ChatMessage.get_by_id(assistant_msg_id)

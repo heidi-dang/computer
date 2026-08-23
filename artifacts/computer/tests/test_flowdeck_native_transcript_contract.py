@@ -46,7 +46,7 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
 
     def test_polling_normalizes_durable_run_identity_and_is_reconciliation_only(self):
         self.assertIn("event?.run_id", self.source)
-        self.assertIn("{ ...event, flowdeck_run_id: event.run_id }", self.source)
+        self.assertIn("{ ...event, flowdeck_parent_run_id: event.run_id }", self.source)
         self.assertIn("getFlowDeckOrchestration(runId, workspace)", self.source)
         self.assertIn("startFlowDeckPolling(flowdeckRunId)", self.source)
 
@@ -55,6 +55,11 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
             self.assertIn(f"kind === '{kind}'", self.source)
         self.assertIn("message.done = true;", self.source)
         self.assertIn("stopFlowDeckPolling();", self.source)
+
+    def test_parent_identity_is_used_for_child_native_events(self):
+        self.assertIn("flowdeck_parent_run_id?: string", self.source)
+        self.assertIn("const parentRunId = data.flowdeck_parent_run_id || data.flowdeck_run_id", self.source)
+        self.assertIn("parentRunId === flowdeckRunId", self.source)
 
 
 if __name__ == "__main__":
