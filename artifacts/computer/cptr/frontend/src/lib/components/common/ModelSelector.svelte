@@ -34,7 +34,9 @@
 
 	const filtered = $derived(
 		search.trim()
-			? $chatModels.filter((m) => m.name.toLowerCase().includes(search.toLowerCase()))
+			? $chatModels.filter((m) =>
+					`${m.provider} ${m.name}`.toLowerCase().includes(search.toLowerCase())
+				)
 			: $chatModels
 	);
 

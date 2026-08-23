@@ -761,7 +761,7 @@
 	}
 
 	async function persistChatSettings() {
-		if (!chatId || !selectedModel) return;
+		if (!chatId || (selectedAgent !== 'heidi' && !selectedModel)) return;
 		await updateChatSettings(chatId, selectedModel, getChatSendParams()).catch(() => {});
 	}
 
