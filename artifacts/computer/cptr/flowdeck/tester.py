@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import signal
 import sys
 import time
 from dataclasses import dataclass
@@ -92,6 +94,7 @@ async def _run_check(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+        start_new_session=True,
     )
     try:
         stdout, stderr = await asyncio.wait_for(
@@ -102,7 +105,10 @@ async def _run_check(
             timeout=timeout_seconds,
         )
     except (asyncio.TimeoutError, asyncio.CancelledError):
-        process.kill()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            process.kill()
         await process.wait()
         raise
     if len(stdout) > _MAX_OUTPUT_BYTES or len(stderr) > _MAX_OUTPUT_BYTES:
@@ -192,6 +198,7 @@ async def run_tester(
             root=root,
             timeout_seconds=request.timeout_seconds,
         )
+        budget.validate_wall_time(time.monotonic() - started)
     except BaseException:
         await store.mark_attempt_unknown(attempt.id, error="tester interrupted")
         await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
@@ -210,7 +217,6 @@ async def run_tester(
         )
 
     outcome = "succeeded" if exit_code == 0 else "failed"
-    budget.validate_wall_time(time.monotonic() - started)
     evidence = {
         "source": "runtime",
         "authoritative": True,

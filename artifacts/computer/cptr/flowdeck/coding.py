@@ -254,7 +254,10 @@ async def run_coding_specialist(
         context: dict[str, Any],
     ) -> bool:
         nonlocal mutation_failures, mutation_unknown
-        record = mutations.pop(str(context.get("call_id") or ""), None)
+        call_id = str(context.get("call_id") or "")
+        if not call_id and len(mutations) == 1:
+            call_id = next(iter(mutations))
+        record = mutations.pop(call_id, None)
         if record is None:
             mutation_unknown = True
             return False
@@ -331,7 +334,7 @@ async def run_coding_specialist(
             model=model,
             user_id=request.user_id,
             parent_chat_id=parent_chat_id,
-            child_type="flowdeck-backend-coder",
+            child_type=f"flowdeck-{request.role}",
             extra_meta={"flowdeck_run_id": run.id, "flowdeck_attempt_id": root_attempt.id},
         )
         result = await _run_existing_subagent_chat(
@@ -363,6 +366,13 @@ async def run_coding_specialist(
             epoch=lease.epoch,
         )
 
+    if mutations:
+        for record in mutations.values():
+            await store.mark_attempt_unknown(
+                record["attempt"].id,
+                error="coding loop returned before mutation verification",
+            )
+        mutation_unknown = True
     if mutation_unknown:
         await store.mark_attempt_unknown(root_attempt.id, error="mutation verification unknown")
         await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from cptr.flowdeck.budgets import BudgetExceeded
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
@@ -138,6 +139,37 @@ class TesterTests(unittest.IsolatedAsyncioTestCase):
             request_key=self.request.request_key,
             owner=self.request.user_id,
             workspace=self.request.workspace,
+        )
+        self.assertFalse(created)
+        self.assertEqual(run.status, RunStatus.ORPHANED.value)
+
+    async def test_tester_budget_overrun_orphans_attempt_and_run(self):
+        request = self.request.__class__(
+            **{**self.request.__dict__, "request_key": "tester-over-budget", "timeout_seconds": 2}
+        )
+        async def slow_check(*args, **kwargs):
+            await asyncio.sleep(1.05)
+            return 0, b"ok", b""
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CPTR_FLOWDECK_ENABLED": "true",
+                    "CPTR_FLOWDECK_MODE": "controlled",
+                    "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                    "CPTR_FLOWDECK_MAX_WALL_SECONDS": "1",
+                },
+                clear=False,
+            ),
+            patch("cptr.flowdeck.tester._run_check", new=slow_check),
+            self.assertRaises(BudgetExceeded),
+        ):
+            await run_tester(request, store=self.store)
+        run, created = await self.store.create_run(
+            request_key=request.request_key,
+            owner=request.user_id,
+            workspace=request.workspace,
         )
         self.assertFalse(created)
         self.assertEqual(run.status, RunStatus.ORPHANED.value)

@@ -33,6 +33,7 @@ class FDXConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
     max_input_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
+    read_only_verified: bool = False
 
     @classmethod
     def from_env(cls) -> FDXConfig:
@@ -61,6 +62,29 @@ class FDXResult:
     fallback_reason: str | None = None
 
 
+def _snapshot_files(root: Path) -> dict[str, bytes]:
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+
+def _restore_files(root: Path, snapshot: dict[str, bytes]) -> None:
+    current = {
+        str(path.relative_to(root)): path
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    for relative, path in current.items():
+        if relative not in snapshot:
+            path.unlink()
+    for relative, content in snapshot.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
 def _validate_config(config: FDXConfig) -> None:
     if not config.enabled:
         return
@@ -74,6 +98,8 @@ def _validate_config(config: FDXConfig) -> None:
         raise FDXPolicyError("FDX output bound is outside the safe limit")
     if config.max_input_bytes <= 0 or config.max_input_bytes > 1024 * 1024:
         raise FDXPolicyError("FDX input bound is outside the safe limit")
+    if not config.read_only_verified:
+        raise FDXPolicyError("FDX read-only parity is not verified")
 
 
 def validate_workspace_jail(workspace: str, configured_root: str | None = None) -> Path:
@@ -99,15 +125,26 @@ async def run_fdx(
     """Run only a structured FDX process and return bounded, untrusted output."""
     _validate_config(config)
     root = validate_workspace_jail(workspace, configured_root)
+    if not configured_root:
+        raise FDXPolicyError("FDX requires an explicit configured jail")
+    jail_root = Path(configured_root).expanduser().resolve()
     executable = str(Path(config.executable).expanduser())
     if not Path(executable).is_absolute():
         raise FDXPolicyError("FDX executable must be an absolute path")
+    if configured_root:
+        executable_path = Path(executable).resolve()
+        jail = Path(configured_root).expanduser().resolve()
+        try:
+            executable_path.relative_to(jail)
+        except ValueError as exc:
+            raise FDXPolicyError("FDX executable escapes configured jail") from exc
     try:
         encoded_request = json.dumps(payload, separators=(",", ":")).encode()
     except (TypeError, ValueError) as exc:
         raise FDXPolicyError("FDX payload is not structured JSON") from exc
     if len(encoded_request) > config.max_input_bytes:
         raise FDXPolicyError("FDX input exceeded configured bound")
+    before = _snapshot_files(jail_root)
 
     process = await asyncio.create_subprocess_exec(
         executable,
@@ -135,8 +172,18 @@ async def run_fdx(
             pass
         await process.wait()
         raise
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        await process.wait()
     if len(stdout) > config.max_output_bytes or len(stderr) > config.max_output_bytes:
         raise FDXPolicyError("FDX output exceeded configured bound")
+    after = _snapshot_files(jail_root)
+    if before != after:
+        _restore_files(jail_root, before)
+        raise FDXPolicyError("FDX produced a workspace side effect")
     if process.returncode != 0:
         raise FDXPolicyError(f"FDX exited with status {process.returncode}")
     try:
@@ -148,6 +195,12 @@ async def run_fdx(
         or response.get("protocol") != FDX_PROTOCOL
         or response.get("version") != FDX_VERSION
         or response.get("health") != "ok"
+        or response.get("capabilities") != {
+            "read_only": True,
+            "network_writes": False,
+            "workspace_mutation": False,
+            "process_persistence": False,
+        }
     ):
         raise FDXPolicyError("FDX response protocol mismatch")
     return FDXResult(

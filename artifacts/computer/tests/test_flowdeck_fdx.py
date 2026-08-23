@@ -1,3 +1,4 @@
+import asyncio
 import stat
 import tempfile
 import unittest
@@ -24,7 +25,8 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
             "#!/bin/sh\n"
             "read payload\n"
             "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
-            "\"health\":\"ok\",\"payload\":\"ok\"}'\n"
+            "\"health\":\"ok\",\"capabilities\":{\"read_only\":true,\"network_writes\":false,"
+            "\"workspace_mutation\":false,\"process_persistence\":false},\"payload\":\"ok\"}'\n"
         )
         self.executable.chmod(
             self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
@@ -40,6 +42,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
             "protocol": "flowdeck-fdx/1",
             "timeout_seconds": 2,
             "max_output_bytes": 1024,
+            "read_only_verified": True,
         }
         values.update(overrides)
         return FDXConfig(**values)
@@ -92,7 +95,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
                 {},
                 workspace=str(self.workspace),
                 configured_root=str(self.root),
-                config=self.config(),
+                config=self.config(read_only_verified=False),
             )
 
     async def test_fdx_rejects_oversized_input_and_timeout_falls_back(self):
@@ -107,7 +110,8 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
             "#!/bin/sh\n"
             "sleep 2\n"
             "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
-            "\"health\":\"ok\"}'\n"
+            "\"health\":\"ok\",\"capabilities\":{\"read_only\":true,\"network_writes\":false,"
+            "\"workspace_mutation\":false,\"process_persistence\":false}}'\n"
         )
         self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
 
@@ -153,6 +157,84 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.authoritative)
         self.assertEqual(result.output, {"native": True})
         self.assertIsNotNone(result.fallback_reason)
+
+    async def test_fdx_rejects_workspace_side_effect_and_falls_back(self):
+        self.executable.write_text(
+            "#!/bin/sh\n"
+            "read payload\n"
+            "printf side-effect > created.txt\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
+            "\"health\":\"ok\",\"capabilities\":{\"read_only\":true,\"network_writes\":false,"
+            "\"workspace_mutation\":false,\"process_persistence\":false}}'\n"
+        )
+        self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+
+        async def fallback():
+            return FDXResult(
+                status="succeeded",
+                output={"native": True},
+                authoritative=True,
+                used_fdx=False,
+            )
+
+        result = await run_optional_fdx(
+            {},
+            workspace=str(self.workspace),
+            configured_root=str(self.root),
+            config=self.config(read_only_verified=True),
+            fallback=fallback,
+        )
+        self.assertFalse(result.used_fdx)
+        self.assertTrue(result.authoritative)
+        self.assertFalse((self.workspace / "created.txt").exists())
+
+    async def test_fdx_rejects_configured_jail_escape_and_restores_it(self):
+        self.executable.write_text(
+            "#!/bin/sh\n"
+            "read payload\n"
+            "printf escape > ../escaped.txt\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
+            "\"health\":\"ok\",\"capabilities\":{\"read_only\":true,\"network_writes\":false,"
+            "\"workspace_mutation\":false,\"process_persistence\":false}}'\n"
+        )
+        self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        with self.assertRaises(FDXPolicyError):
+            await run_fdx(
+                {},
+                workspace=str(self.workspace),
+                configured_root=str(self.root),
+                config=self.config(read_only_verified=True),
+            )
+        self.assertFalse((self.root / "escaped.txt").exists())
+
+    async def test_fdx_kills_persistent_child_processes(self):
+        self.executable.write_text(
+            "#!/bin/sh\n"
+            "read payload\n"
+            "(sleep 0.3; printf child > child.txt) &\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
+            "\"health\":\"ok\",\"capabilities\":{\"read_only\":true,\"network_writes\":false,"
+            "\"workspace_mutation\":false,\"process_persistence\":false}}'\n"
+        )
+        self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        with self.assertRaises(FDXPolicyError):
+            await run_fdx(
+                {},
+                workspace=str(self.workspace),
+                configured_root=str(self.root),
+                config=self.config(read_only_verified=True),
+            )
+        await asyncio.sleep(0.5)
+        self.assertFalse((self.workspace / "child.txt").exists())
+
+    async def test_fdx_rejects_unverified_read_only_parity(self):
+        with self.assertRaises(FDXPolicyError):
+            await run_fdx(
+                {},
+                workspace=str(self.workspace),
+                configured_root=str(self.root),
+                config=self.config(read_only_verified=False),
+            )
 
     async def test_disabled_fdx_preserves_fallback_without_process(self):
         called = False

@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.flowdeck.budgets import BudgetExceeded, RunBudget
@@ -22,6 +23,8 @@ from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck
 from cptr.models.base import Base
+from cptr.models.flowdeck import FlowDeckLogicalOperation, FlowDeckPhysicalAttempt
+from cptr.utils.tools import execute_tool
 
 
 class CodingContractTests(unittest.IsolatedAsyncioTestCase):
@@ -154,6 +157,7 @@ class CodingContractTests(unittest.IsolatedAsyncioTestCase):
 class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.workspace = tempfile.TemporaryDirectory()
+        self.root = Path(self.workspace.name)
         db_fd, self.db_path = tempfile.mkstemp()
         os.close(db_fd)
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.db_path}")
@@ -210,6 +214,165 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(run_chat.await_args.kwargs["before_mutation"])
         self.assertIsNotNone(run_chat.await_args.kwargs["after_mutation"])
         self.assertEqual(run_chat.await_args.kwargs["specialist_role"], "backend-coder")
+
+    async def test_each_coding_role_executes_real_structured_mutation_with_durable_evidence(self):
+        for role in ("backend-coder", "frontend-coder"):
+            path = self.root / f"{role}.txt"
+            path.write_text("before\n")
+            request = self.request.__class__(
+                **{
+                    **self.request.__dict__,
+                    "role": role,
+                    "request_key": f"real-{role}",
+                }
+            )
+            fake_chat = type("Chat", (), {"id": f"{role}-chat"})()
+            fake_message = type("Message", (), {"id": f"{role}-message"})()
+
+            async def native_loop(*args, role=role, path=path, **kwargs):
+                context = {
+                    "workspace": self.workspace.name,
+                    "specialist_role": role,
+                    "allowed_tool_names": kwargs["allowed_tool_names"],
+                    "tool_guard": kwargs["tool_guard"],
+                    "before_mutation": kwargs["before_mutation"],
+                    "after_mutation": kwargs["after_mutation"],
+                    "mutation_tool_names": frozenset(
+                        {"edit_file", "multi_edit_file", "write_file"}
+                    ),
+                    "request": object(),
+                }
+                return await execute_tool(
+                    "edit_file",
+                    {
+                        "path": path.name,
+                        "target": "before\n",
+                        "replacement": "after\n",
+                    },
+                    context,
+                )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "CPTR_FLOWDECK_ENABLED": "true",
+                        "CPTR_FLOWDECK_MODE": "controlled",
+                        "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                        "CPTR_FLOWDECK_MUTATING_AGENTS": "true",
+                        "CPTR_FLOWDECK_CODING_ROLE": role,
+                    },
+                    clear=False,
+                ),
+                patch(
+                    "cptr.utils.tools._create_subagent_chat",
+                    new=AsyncMock(return_value=(fake_chat, None, fake_message)),
+                ),
+                patch(
+                    "cptr.utils.tools._run_existing_subagent_chat",
+                    new=native_loop,
+                ),
+                patch(
+                    "cptr.utils.tools.Runtime.read_file",
+                    new=AsyncMock(return_value={"content": "before\n", "binary": False}),
+                ),
+                patch(
+                    "cptr.utils.tools.Runtime.write_file",
+                    new=AsyncMock(
+                        side_effect=lambda request, full, content, path=path: path.write_text(content)
+                    ),
+                ),
+            ):
+                result = await run_coding_specialist(
+                    request,
+                    model="model",
+                    connection={"provider": "test"},
+                    parent_chat_id="parent",
+                    store=self.store,
+                )
+
+            self.assertIn("Edited", result)
+            self.assertEqual(path.read_text(), "after\n")
+            async with self.store.session_factory() as session:
+                operations = list(
+                    (
+                        await session.scalars(
+                            select(FlowDeckLogicalOperation).where(
+                                FlowDeckLogicalOperation.idempotency_key.like(
+                                    f"real-{role}:%"
+                                )
+                            )
+                        )
+                    ).all()
+                )
+                attempts = list(
+                    (
+                        await session.scalars(
+                            select(FlowDeckPhysicalAttempt).where(
+                                FlowDeckPhysicalAttempt.operation_id.in_(
+                                    [operation.id for operation in operations]
+                                )
+                            )
+                        )
+                    ).all()
+                )
+            self.assertEqual(len(operations), 2)
+            self.assertEqual(len(attempts), 2)
+            self.assertTrue(all(attempt.status == "SUCCEEDED" for attempt in attempts))
+            self.assertTrue(
+                all(
+                    operation.authoritative_evidence["authoritative"]
+                    for operation in operations
+                )
+            )
+
+    async def test_unverified_coding_mutation_becomes_manual_review(self):
+        fake_chat = type("Chat", (), {"id": "pending-chat"})()
+        fake_message = type("Message", (), {"id": "pending-message"})()
+        path = self.root / "pending.txt"
+        path.write_text("before\n")
+
+        async def interrupted_loop(*args, **kwargs):
+            context = {
+                "workspace": self.workspace.name,
+                "specialist_role": "backend-coder",
+                "call_id": "pending-call",
+            }
+            self.assertTrue(
+                await kwargs["before_mutation"](
+                    "write_file", {"path": path.name}, context
+                )
+            )
+            return "interrupted before verifier"
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CPTR_FLOWDECK_ENABLED": "true",
+                    "CPTR_FLOWDECK_MODE": "controlled",
+                    "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                    "CPTR_FLOWDECK_MUTATING_AGENTS": "true",
+                },
+                clear=False,
+            ),
+            patch(
+                "cptr.utils.tools._create_subagent_chat",
+                new=AsyncMock(return_value=(fake_chat, None, fake_message)),
+            ),
+            patch(
+                "cptr.utils.tools._run_existing_subagent_chat",
+                new=interrupted_loop,
+            ),
+            self.assertRaises(CodingPolicyError),
+        ):
+            await run_coding_specialist(
+                self.request,
+                model="model",
+                connection={"provider": "test"},
+                parent_chat_id="parent",
+                store=self.store,
+            )
 
     async def test_browser_debugger_reuses_native_loop_without_mutation_hooks(self):
         fake_chat = type("Chat", (), {"id": "browser-chat"})()
