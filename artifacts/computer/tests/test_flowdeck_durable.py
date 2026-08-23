@@ -155,7 +155,13 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
         status = await self.store.reconcile_operation(
             operation.id,
             outcome="succeeded",
-            evidence={"source": "verifier", "authoritative": True, "hash": "abc"},
+            evidence={
+                "source": "verifier",
+                "authoritative": True,
+                "observation": "verifier_check",
+                "observed_outcome": "succeeded",
+                "hash": "abc",
+            },
             now=self.now + 2,
         )
         self.assertEqual(status, OperationStatus.SUCCEEDED)
@@ -180,7 +186,13 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
             owner="worker-a",
             fencing_epoch=lease.epoch,
             outcome="failed",
-            evidence={"source": "runtime", "authoritative": True},
+            evidence={
+                "source": "runtime",
+                "authoritative": True,
+                "observation": "native_loop_return",
+                "observed_outcome": "failed",
+                "attempt_id": first.id,
+            },
             now=self.now + 1,
         )
         second = await self.store.prepare_attempt(
@@ -191,6 +203,38 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotEqual(first.id, second.id)
         self.assertEqual(second.attempt_no, 2)
+
+    async def test_specialist_claim_cannot_close_attempt(self):
+        run, operation = await self._run_and_intent()
+        lease = await self.store.acquire_workspace_lease(
+            workspace="/workspace",
+            run_id=run.id,
+            owner="worker-a",
+            ttl_ms=100,
+            now=self.now,
+        )
+        attempt = await self.store.prepare_attempt(
+            operation_id=operation.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            now=self.now,
+        )
+        with self.assertRaises(LifecycleError):
+            await self.store.finish_attempt(
+                attempt.id,
+                owner="worker-a",
+                fencing_epoch=lease.epoch,
+                outcome="succeeded",
+                evidence={
+                    "source": "specialist",
+                    "authoritative": True,
+                    "observed_outcome": "succeeded",
+                    "observation": "native_loop_return",
+                    "attempt_id": attempt.id,
+                    "specialist_claim": "I verified the mutation",
+                },
+                now=self.now + 1,
+            )
 
     async def test_run_cannot_complete_while_operation_is_ambiguous(self):
         run, operation = await self._run_and_intent()

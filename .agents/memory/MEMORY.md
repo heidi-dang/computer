@@ -1,2 +1,3 @@
 - [CPTR Replit runtime](cptr-replit-runtime.md) — CPTR keeps its original product in one repo but needs static web and dynamic runtime services for Replit publishing.
 - [FlowDeck read-only execution](flowdeck-readonly-execution.md) — read-only specialists share scopes without mutation leases and must reuse CPTR's native loop with runtime tool filtering.
+- [FlowDeck coding gates](flowdeck-coding-gates.md) — mutation roles qualify one at a time; every structured write needs durable intent, fencing, and independent verification.

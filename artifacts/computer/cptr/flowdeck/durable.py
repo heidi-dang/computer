@@ -18,6 +18,10 @@ from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from cptr.flowdeck.evidence import (
+    validate_reconciliation_evidence,
+    validate_terminal_evidence,
+)
 from cptr.models.flowdeck import (
     FlowDeckApproval,
     FlowDeckEvent,
@@ -27,10 +31,6 @@ from cptr.models.flowdeck import (
     FlowDeckRun,
     FlowDeckStep,
     FlowDeckWorkspaceLease,
-)
-from cptr.flowdeck.evidence import (
-    validate_reconciliation_evidence,
-    validate_terminal_evidence,
 )
 
 
@@ -596,6 +596,10 @@ class DurableFlowDeck:
                 for item in operations
             ):
                 raise LifecycleError("run requires authoritative evidence for every operation")
+            if status == RunStatus.SUCCEEDED and any(
+                item.status != OperationStatus.SUCCEEDED.value for item in operations
+            ):
+                raise LifecycleError("successful run requires every operation to succeed")
             run.status = status.value
             run.updated_at = now
             await self._event(
@@ -764,6 +768,30 @@ class DurableFlowDeck:
                     FlowDeckWorkspaceLease.expires_at >= now,
                 )
                 .values(heartbeat_at=now, expires_at=now + ttl_ms)
+            )
+            return result.rowcount == 1
+
+        return await self._transaction(operation)
+
+    async def release_workspace_lease(
+        self,
+        *,
+        workspace: str,
+        owner: str,
+        epoch: int,
+        now: int | None = None,
+    ) -> bool:
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            result = await db.execute(
+                update(FlowDeckWorkspaceLease)
+                .where(
+                    FlowDeckWorkspaceLease.workspace == workspace,
+                    FlowDeckWorkspaceLease.owner == owner,
+                    FlowDeckWorkspaceLease.epoch == epoch,
+                )
+                .values(expires_at=now)
             )
             return result.rowcount == 1
 

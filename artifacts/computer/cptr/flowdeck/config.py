@@ -28,6 +28,13 @@ class FlowDeckConfig:
     max_delegation_depth: int = 1
     max_diagnostic_chars: int = 2000
     mutating_agents: bool = False
+    max_steps: int = 20
+    max_attempts: int = 40
+    max_tool_calls: int = 200
+    max_model_turns: int = 100
+    max_wall_seconds: int = 1800
+    global_kill_switch: bool = False
+    disabled_specialists: frozenset[str] = frozenset()
 
     @classmethod
     def from_env(cls) -> FlowDeckConfig:
@@ -56,6 +63,12 @@ class FlowDeckConfig:
         max_depth = _nonnegative_int("CPTR_FLOWDECK_MAX_DELEGATION_DEPTH", 1)
         max_diagnostic_chars = _positive_int("CPTR_FLOWDECK_MAX_DIAGNOSTIC_CHARS", 2000)
         mutating_agents = _bool(os.environ.get("CPTR_FLOWDECK_MUTATING_AGENTS"), False)
+        global_kill_switch = _bool(os.environ.get("CPTR_FLOWDECK_KILL_SWITCH"), False)
+        disabled_specialists = frozenset(
+            item.strip()
+            for item in os.environ.get("CPTR_FLOWDECK_DISABLED_SPECIALISTS", "").split(",")
+            if item.strip()
+        )
         return cls(
             enabled=True,
             mode=mode,
@@ -64,6 +77,13 @@ class FlowDeckConfig:
             max_delegation_depth=max_depth,
             max_diagnostic_chars=max_diagnostic_chars,
             mutating_agents=mutating_agents,
+            max_steps=_positive_int("CPTR_FLOWDECK_MAX_STEPS", 20),
+            max_attempts=_positive_int("CPTR_FLOWDECK_MAX_ATTEMPTS", 40),
+            max_tool_calls=_positive_int("CPTR_FLOWDECK_MAX_TOOL_CALLS", 200),
+            max_model_turns=_positive_int("CPTR_FLOWDECK_MAX_MODEL_TURNS", 100),
+            max_wall_seconds=_positive_int("CPTR_FLOWDECK_MAX_WALL_SECONDS", 1800),
+            global_kill_switch=global_kill_switch,
+            disabled_specialists=disabled_specialists,
         )
 
 

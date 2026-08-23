@@ -2763,6 +2763,9 @@ async def _run_existing_subagent_chat(
     config: dict,
     allowed_tool_names: frozenset[str] | None = None,
     tool_guard=None,
+    before_mutation=None,
+    after_mutation=None,
+    specialist_role: str | None = None,
 ) -> str:
     """Run the agent loop for an already-created sub-agent chat."""
     from cptr.models import ChatMessage
@@ -2783,6 +2786,9 @@ async def _run_existing_subagent_chat(
         workspace=workspace,
         allowed_tool_names=allowed_tool_names,
         tool_guard=tool_guard,
+        before_mutation=before_mutation,
+        after_mutation=after_mutation,
+        specialist_role=specialist_role,
     )
 
     result_msg = await ChatMessage.get_by_id(assistant_msg_id)
@@ -3301,6 +3307,15 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
     tool_guard = __context__.get("tool_guard")
     if tool_guard is not None and not tool_guard(name, args, __context__):
         return f"Error: tool denied by execution scope: {name}"
+    mutation_tools = __context__.get("mutation_tool_names", frozenset())
+    before_mutation = __context__.get("before_mutation")
+    after_mutation = __context__.get("after_mutation")
+    if name in mutation_tools and before_mutation is not None:
+        permitted = before_mutation(name, args, __context__)
+        if inspect.isawaitable(permitted):
+            permitted = await permitted
+        if permitted is not True:
+            return f"Error: mutation intent denied: {name}"
     info = ALL_TOOLS.get(name)
     if info:
         if not __context__.get("workspace") and name in GLOBAL_CHAT_DISABLED_TOOLS:
@@ -3313,10 +3328,17 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
         try:
             sig = inspect.signature(fn)
             if "__context__" in sig.parameters:
-                return await fn(**args, __context__=__context__)
+                result = await fn(**args, __context__=__context__)
             else:
                 # Legacy tools: inject workspace directly
-                return await fn(**args, workspace=__context__["workspace"])
+                result = await fn(**args, workspace=__context__["workspace"])
+            if name in mutation_tools and after_mutation is not None:
+                verified = after_mutation(name, args, result, __context__)
+                if inspect.isawaitable(verified):
+                    verified = await verified
+                if verified is not True:
+                    return f"Error: mutation verification failed: {name}"
+            return result
         except Exception as e:
             return f"Error executing {name}: {e}"
 
