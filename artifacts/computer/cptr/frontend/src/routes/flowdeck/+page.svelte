@@ -41,7 +41,9 @@
 		'error',
 		'cancelled',
 		'canceled',
+		'outcome_unknown',
 		'manual_review',
+		'manual_review_required',
 		'approval_required',
 		'review_required'
 	]);
@@ -87,7 +89,13 @@
 		if (['succeeded', 'success', 'completed'].includes(status)) return 'success';
 		if (['failed', 'error'].includes(status)) return 'failure';
 		if (['cancelled', 'canceled'].includes(status)) return 'cancelled';
-		if (['manual_review', 'approval_required', 'review_required'].includes(status)) return 'manual';
+		if (
+			['manual_review', 'manual_review_required', 'approval_required', 'review_required'].includes(
+				status
+			)
+		)
+			return 'manual';
+		if (status === 'outcome_unknown' || status === 'unknown') return 'unknown';
 		if (!status) return 'unknown';
 		return terminalStatuses.has(status) ? 'unknown' : 'active';
 	}
@@ -176,6 +184,38 @@
 		if (runObjective) return runObjective;
 		const reported = field('objective');
 		return typeof reported === 'string' ? reported : 'Objective not reported';
+	}
+
+	function reportedNumber(keys: string[]): number | null {
+		for (const key of keys) {
+			const value = field(key);
+			if (typeof value === 'number' && Number.isFinite(value)) return value;
+		}
+		return null;
+	}
+
+	function tokenSummary(): string {
+		const total = reportedNumber(['total_tokens', 'tokens', 'token_count', 'cumulative_tokens']);
+		return total === null ? 'Not reported' : total.toLocaleString();
+	}
+
+	function progressSummary(): string {
+		const completed = reportedNumber(['completed_steps', 'steps_completed']);
+		const planned = reportedNumber(['total_steps', 'planned_steps', 'steps_total']);
+		if (completed !== null && planned !== null && planned > 0) {
+			return `${Math.min(completed, planned)} / ${planned} steps`;
+		}
+		const percent = reportedNumber(['progress_percent', 'progress_percentage']);
+		if (percent !== null && percent >= 0 && percent <= 100) return `${Math.round(percent)}%`;
+		return 'Indeterminate';
+	}
+
+	function currentAgent(): string {
+		for (const key of ['current_agent', 'current_specialist', 'active_specialist', 'agent']) {
+			const value = field(key);
+			if (typeof value === 'string' && value.trim()) return value;
+		}
+		return 'Not reported';
 	}
 
 	function persistOwnedRun() {
@@ -543,6 +583,24 @@
 						</div>
 					</div>
 
+				<div class="telemetry-grid" aria-label="Live telemetry">
+					<div class="telemetry-card">
+						<span class="telemetry-label">Progress</span>
+						<strong>{progressSummary()}</strong>
+						<small>Derived only from reported backend state</small>
+					</div>
+					<div class="telemetry-card">
+						<span class="telemetry-label">Tokens</span>
+						<strong>{tokenSummary()}</strong>
+						<small>Provider usage; never estimated</small>
+					</div>
+					<div class="telemetry-card">
+						<span class="telemetry-label">Current agent</span>
+						<strong>{currentAgent()}</strong>
+						<small>Specialist telemetry when available</small>
+					</div>
+				</div>
+
 					<div class="inspector-grid">
 						<article class="inspector-card">
 							<div class="inspector-heading"><Icon name="list-ordered" size={16} /><h3>Plan</h3></div>
@@ -788,6 +846,11 @@
 	.state-meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.8rem; padding: 0.9rem 1.3rem 1.1rem; border-top: 1px solid var(--fd-line); background: color-mix(in oklab, var(--app-bg) 25%, transparent); }
 	.state-meta span { display: block; margin-bottom: 0.35rem; color: var(--fd-faint); font-size: 0.58rem; }
 	.state-meta strong { display: block; overflow: hidden; color: var(--fd-ink); font-size: 0.7rem; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
+	.telemetry-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.7rem; }
+	.telemetry-card { min-width: 0; padding: 0.95rem 1rem; border: 1px solid var(--fd-line); border-radius: 12px; background: color-mix(in oklab, var(--fd-panel) 70%, transparent); }
+	.telemetry-label { display: block; color: var(--fd-faint); font-family: var(--font-mono); font-size: 0.55rem; letter-spacing: 0.11em; text-transform: uppercase; }
+	.telemetry-card strong { display: block; overflow: hidden; margin-top: 0.42rem; color: var(--fd-ink); font-size: 0.84rem; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+	.telemetry-card small { display: block; margin-top: 0.36rem; color: var(--fd-muted); font-size: 0.61rem; line-height: 1.35; }
 	.inspector-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 	.inspector-card, .evidence-card { min-height: 160px; padding: 1.1rem; }
 	.inspector-heading { gap: 0.55rem; color: var(--fd-teal); }
@@ -834,6 +897,7 @@
 		.state-card-top { grid-template-columns: auto 1fr; }
 		.state-connection { grid-column: 2; }
 		.state-meta { grid-template-columns: 1fr; gap: 0.7rem; }
+		.telemetry-grid { grid-template-columns: 1fr; }
 		.inspector-grid { grid-template-columns: 1fr; }
 		.reconnect-banner { align-items: flex-start; flex-direction: column; }
 		.activity-item { grid-template-columns: 13px 1fr; }
