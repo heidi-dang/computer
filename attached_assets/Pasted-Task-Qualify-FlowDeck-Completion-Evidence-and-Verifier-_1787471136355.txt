@@ -1,0 +1,236 @@
+Task
+Qualify FlowDeck Completion, Evidence, and Verifier Policy
+
+Goal:
+Establish one authoritative completion policy across every currently qualified FlowDeck specialist before enabling Heidi orchestration.
+
+Current accepted baseline:
+- Authenticated specialist boundary: PASS, 9.2/10
+- Hermetic read-only Git: PASS, 9.3/10
+- Full FlowDeck suite: 78/78
+- CPTR remains sole model/tool execution owner
+- No production specialist execution route
+- FDX, devops, debug mutation, Git mutation, unrestricted shell, MCP, network writes, install/deploy/publish, secrets, unrestricted Heidi autonomy, and orchestration UI remain disabled
+
+To dev
+1. Audit every currently qualified specialist execution path:
+   - backend-coder
+   - frontend-coder
+   - browser-debugger
+   - debug-specialist
+   - mapper
+   - researcher
+   - architect
+   - reviewer
+   - security-auditor
+   - tester
+
+2. Identify exactly how each path currently determines:
+   - SUCCEEDED
+   - FAILED
+   - OUTCOME_UNKNOWN
+   - MANUAL_REVIEW_REQUIRED
+   - cancellation
+   - orphan/recovery result
+
+3. Establish one authoritative completion rule:
+   Agent/model text is NEVER authoritative proof of success.
+
+   Explicitly preserve:
+   UNKNOWN != PASS
+   NOT_RUN != PASS
+   self-reported completion != PASS
+
+4. Define evidence classes and trust levels.
+
+   Authoritative evidence may include only trusted runtime/verifier observations such as:
+   - structured CPTR tool result
+   - filesystem postcondition observed independently
+   - process exit status from trusted tester runner
+   - bounded build/test/typecheck/lint result
+   - authenticated browser/runtime observation when relevant
+   - durable mutation postcondition
+   - hermetic Git inspection evidence
+   - explicit operation reconciler result
+
+   Non-authoritative evidence:
+   - agent prose
+   - specialist self-report
+   - prompt claims
+   - unverified logs supplied by the model
+   - inferred success without execution
+   - stale evidence from another operation
+
+5. Bind evidence to the correct durable identities:
+   - run ID
+   - step ID
+   - logical operation ID where applicable
+   - physical attempt ID where applicable
+   - workspace
+   - authenticated user
+   - specialist
+   - operation fingerprint
+   - verifier/version where relevant
+
+   Evidence from one operation must not satisfy another.
+
+6. Review coding specialist completion.
+   For mutating operations require:
+   intent
+   → attempt
+   → mutation
+   → independent postcondition verification
+   → authoritative evidence
+   → terminal success
+
+   Never mark success merely because edit/write returned without raising.
+
+7. Review read-only specialists.
+   Define what success means without fabricating verification.
+
+   Example:
+   Successful native execution can establish that the specialist ran successfully, but factual assertions in its prose are not automatically verified facts.
+
+   Keep execution success separate from semantic correctness where appropriate.
+
+8. Review browser-debugger evidence.
+   Distinguish:
+   - browser tool invocation success
+   - page navigation success
+   - observed page state
+   - model interpretation
+
+9. Review tester completion.
+   Require trusted structured runner evidence:
+   - exact check identity
+   - process exit status
+   - timeout/termination state
+   - bounded output
+   - execution workspace
+   - attempt identity
+
+10. Review cancellation and interruption behavior.
+    Prove interrupted execution cannot be converted into SUCCEEDED without reconciliation.
+
+11. Review OUTCOME_UNKNOWN.
+    Confirm:
+    - never blindly retried
+    - operation-specific reconciliation required
+    - unreconcilable state becomes MANUAL_REVIEW_REQUIRED
+    - stale physical attempt cannot supply authoritative completion evidence
+
+12. Review MANUAL_REVIEW_REQUIRED.
+    It must remain terminal unless the architecture explicitly creates a new separately identified recovery operation.
+    Do not silently rewrite manual-review results into success.
+
+13. Review verifier independence.
+    For mutations, verification should not merely trust the same agent assertion that performed the mutation.
+
+14. Review evidence freshness.
+    Reject:
+    - evidence from an earlier attempt
+    - evidence for another workspace
+    - evidence for another user
+    - evidence created before the current intent where inappropriate
+    - evidence after lease/fencing ownership was lost
+
+15. Review lease/fencing interaction.
+    A stale writer must not be able to publish completion evidence after losing its fencing epoch.
+
+16. Add adversarial tests for:
+    - agent says “done” but verifier fails
+    - tool succeeds but expected postcondition absent
+    - stale evidence
+    - wrong operation evidence
+    - wrong workspace evidence
+    - wrong-user evidence
+    - stale fencing epoch
+    - cancelled attempt later returns success
+    - timed-out attempt later returns success
+    - OUTCOME_UNKNOWN direct retry
+    - self-report presented as verifier evidence
+    - NOT_RUN interpreted as success
+    - UNKNOWN interpreted as success
+    - manual-review state reconciled illegally
+    - duplicate completion event/idempotent replay
+
+17. Preserve current runtime architecture.
+    Do NOT create a second verifier agent/model loop unless the existing design explicitly requires one.
+    Prefer deterministic/runtime verification.
+
+18. If there are duplicated completion rules in multiple specialist implementations, consolidate only enough to establish one canonical policy.
+    Avoid broad unrelated refactors.
+
+Roadmap
+1. Baseline audit
+2. Evidence/trust model
+3. Canonical completion policy
+4. Specialist-by-specialist integration
+5. Recovery/cancellation/fencing qualification
+6. Adversarial tests
+7. Full regression
+8. Read-only acceptance audit
+9. Stop
+
+Bug checks
+- Agent prose can mark operation successful → FAIL
+- UNKNOWN becomes PASS → FAIL
+- NOT_RUN becomes PASS → FAIL
+- Stale attempt evidence accepted → FAIL
+- Wrong-operation evidence accepted → FAIL
+- Cross-workspace evidence accepted → FAIL
+- Cross-user evidence accepted → FAIL
+- Stale fenced worker can finalize success → FAIL
+- Cancelled operation later becomes success without reconciliation → FAIL
+- OUTCOME_UNKNOWN blindly retries → FAIL
+- MANUAL_REVIEW_REQUIRED is silently changed to success → FAIL
+- Mutation succeeds without independent postcondition verification → FAIL
+- Evidence is not durably associated with its operation → FAIL
+- New agent/model verification loop introduced unnecessarily → FAIL
+- Authority expanded → FAIL
+
+Tests before commit
+Acceptance requires:
+1. Existing 78-test baseline remains passing.
+2. New completion/evidence adversarial tests pass.
+3. All currently qualified specialist types have explicit completion semantics.
+4. Mutation completion requires authoritative postcondition evidence.
+5. Agent self-report is rejected as authoritative evidence.
+6. UNKNOWN and NOT_RUN cannot satisfy success.
+7. Wrong/stale/cross-user/cross-workspace evidence is rejected.
+8. Stale fencing epoch cannot finalize.
+9. Cancellation and timeout remain fail-closed.
+10. OUTCOME_UNKNOWN reconciliation behavior remains correct.
+11. MANUAL_REVIEW_REQUIRED remains terminal.
+12. Durable/idempotency/recovery tests remain passing.
+13. Python compilation passes.
+14. Targeted Ruff passes.
+15. git diff --check passes.
+16. Migration initialization passes.
+17. API smoke returns HTTP 200.
+18. Frontend production build passes.
+19. No authority expansion occurs.
+
+Evidence
+Closure report must include:
+- Before/after completion model
+- Evidence trust hierarchy
+- Exact authoritative evidence sources
+- Specialist-by-specialist completion semantics
+- Mutation verifier behavior
+- Recovery/cancellation/fencing behavior
+- Adversarial test list
+- Exact test counts
+- Remaining risks
+- Confirmation no new model/tool loop
+- Confirmation no authority expansion
+- Final score
+
+Score
+>= 9/10 required.
+Below 9/10 = NOT DONE.
+
+Commit/push
+Do NOT push to GitHub.
+Do NOT commit automatically.
+Leave the verified diff available for review.
