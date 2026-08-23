@@ -1,5 +1,6 @@
 {
-  "buildCommand": "npm run build",
+  "buildCommand": "npm --prefix cptr/frontend run build",
   "outputDirectory": "cptr/frontend/build",
-  "framework": "sveltekit"
+  "framework": null,
+  "installCommand": "npm --prefix cptr/frontend install"
 }
