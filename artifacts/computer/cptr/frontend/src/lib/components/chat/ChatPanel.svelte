@@ -58,7 +58,6 @@
 	} from '$lib/stores/audio';
 
 	import ChatInput from './ChatInput.svelte';
-	import FlowDeckExecutionTimeline from './FlowDeckExecutionTimeline.svelte';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ChatHistory from './ChatHistory.svelte';
@@ -144,6 +143,8 @@
 	let flowdeckPoller: ReturnType<typeof setInterval> | null = null;
 	let flowdeckEvents = $state<any[]>([]);
 	let flowdeckClarification = $state('');
+	let flowdeckMessageId = $state<string | null>(null);
+	const FLOWDECK_EVENT_LIMIT = 200;
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChatId);
@@ -570,20 +571,11 @@
 		flowdeck_run_id?: string;
 		kind?: string;
 		payload?: Record<string, unknown>;
+		sequence?: number;
+		created_at?: number;
 	}) {
 		if (data.flowdeck_run_id) {
-			flowdeckEvents = [
-				...flowdeckEvents.filter(
-					(event) =>
-						!(
-							event.flowdeck_run_id === data.flowdeck_run_id &&
-							event.message_id === data.message_id &&
-							event.output?.call_id === data.output?.call_id &&
-							event.output?.type === data.output?.type
-						)
-				),
-				data
-			];
+			mergeFlowDeckEvent(data);
 		}
 
 		// On the landing page, update the chat list in place from socket events
@@ -636,6 +628,12 @@
 			}
 		}
 
+		// FlowDeck specialist chats have their own chat IDs. Their authenticated
+		// events still belong in Heidi's native-looking assistant turn.
+		if (data.flowdeck_run_id && data.flowdeck_run_id === flowdeckRunId) {
+			applyFlowDeckEventToMessage(data);
+			return;
+		}
 		if (data.chat_id !== chatId) return;
 
 		if (data.type === 'chat:tasks') {
@@ -737,6 +735,84 @@
 		}
 	}
 
+	function flowDeckEventKey(event: any): string {
+		const run = String(event?.flowdeck_run_id || flowdeckRunId || '');
+		if (event?.id || event?.event_id) return `${run}:id:${event.id || event.event_id}`;
+		const output = event?.output || {};
+		const payload = event?.payload || {};
+		return [
+			run,
+			event?.sequence ?? '',
+			event?.message_id ?? '',
+			event?.kind || event?.type || '',
+			output.type || '',
+			output.call_id || output.id || '',
+			output.status || '',
+			payload.step_id || payload.specialist_id || '',
+			event?.delta || ''
+		].join('|');
+	}
+
+	function mergeFlowDeckEvents(events: any[]) {
+		for (const event of events) mergeFlowDeckEvent(event);
+	}
+
+	function mergeFlowDeckEvent(event: any) {
+		if (!event?.flowdeck_run_id || event.flowdeck_run_id !== flowdeckRunId) return;
+		const next = [...flowdeckEvents];
+		const key = flowDeckEventKey(event);
+		const index = next.findIndex((item) => flowDeckEventKey(item) === key);
+		if (index >= 0) next[index] = { ...next[index], ...event };
+		else next.push(event);
+		// Poll responses are authoritative and carry sequence numbers. Sort only
+		// when both records have durable sequence positions; otherwise retain
+		// arrival order so a socket update cannot jump ahead of an earlier call.
+		if (next.every((item) => Number.isFinite(Number(item?.sequence)))) {
+			next.sort((a, b) => Number(a.sequence) - Number(b.sequence));
+		}
+		flowdeckEvents = next.slice(-FLOWDECK_EVENT_LIMIT);
+	}
+
+	function flowDeckActivityText(event: any): string | null {
+		const kind = String(event?.kind || event?.type || '').toUpperCase();
+		const payload = event?.payload || {};
+		if (kind === 'SPECIALIST_DISPATCHED' || kind.includes('DELEGAT')) {
+			return `Specialist handoff · ${String(payload.specialist_id || payload.child_agent_id || 'qualified specialist')}`;
+		}
+		if (kind.includes('VERIF') || kind.includes('OUTCOME') || kind.includes('REVIEW')) {
+			return `Verification · ${String(payload.status || payload.observed_outcome || 'activity recorded')}`;
+		}
+		if (kind.includes('STEP_STARTED')) return 'Planning · specialist step started';
+		if (kind.includes('STEP_COMPLETED')) return 'Working · specialist step completed';
+		if (kind === 'RUN_CLARIFICATION') return null;
+		return null;
+	}
+
+	function applyFlowDeckEventToMessage(event: any) {
+		if (!flowdeckMessageId) return;
+		const message = allMessages.find((item) => item.id === flowdeckMessageId);
+		if (!message) return;
+		if (event.delta) message.content += event.delta;
+		if (event.output) {
+			const output = [...(message.output || [])];
+			const item = event.output;
+			const key = item.type === 'reasoning' ? item.id : `${item.type}:${item.call_id || item.id || ''}`;
+			const index = output.findIndex(
+				(existing: any) =>
+					(existing.type === 'reasoning' && item.type === 'reasoning' && existing.id === item.id) ||
+					(existing.type === item.type && item.call_id && existing.call_id === item.call_id)
+			);
+			if (index >= 0) output[index] = { ...output[index], ...item };
+			else if (key) output.push(item);
+			message.output = output;
+		}
+		const activity = flowDeckActivityText(event);
+		if (activity && !message.content.includes(activity)) {
+			message.content = message.content ? `${message.content}\n\n${activity}` : activity;
+		}
+		allMessages = [...allMessages];
+	}
+
 	function handleReconnect() {
 		if (chatId) loadChat(chatId);
 	}
@@ -755,6 +831,7 @@
 		flowdeckRunId = '';
 		flowdeckEvents = [];
 		flowdeckClarification = '';
+		flowdeckMessageId = null;
 	}
 
 	function loadChatSettings(meta: Record<string, any> | null) {
@@ -1124,12 +1201,20 @@
 			try {
 				const state = await getFlowDeckOrchestration(runId, workspace);
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
-				if (Array.isArray(state.events)) flowdeckEvents = state.events;
+				if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events);
+				for (const event of state.events || []) applyFlowDeckEventToMessage(event);
 				if (
 					['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(
 						flowdeckStatus
 					)
 				) {
+					if (flowdeckMessageId) {
+						const message = allMessages.find((item) => item.id === flowdeckMessageId);
+						if (message) {
+							message.done = true;
+							allMessages = [...allMessages];
+						}
+					}
 					stopFlowDeckPolling();
 				}
 			} catch {
@@ -1148,6 +1233,40 @@
 		flowdeckStatus = 'active';
 		flowdeckRunId = '';
 		flowdeckEvents = [];
+		flowdeckClarification = '';
+		autoScroll = true;
+		const parentId = activePath.length ? activePath[activePath.length - 1].msg.id : null;
+		const userId = `heidi-user-${Date.now()}`;
+		const assistantId = `heidi-assistant-${Date.now()}`;
+		flowdeckMessageId = assistantId;
+		allMessages = [
+			...allMessages,
+			{
+				id: userId,
+				parent_id: parentId,
+				role: 'user',
+				content: text,
+				model: selectedModel,
+				done: true,
+				output: null,
+				usage: null,
+				meta: { agent: 'heidi', flowdeck: true },
+				created_at: Date.now() / 1000
+			},
+			{
+				id: assistantId,
+				parent_id: userId,
+				role: 'assistant',
+				content: '',
+				model: selectedModel,
+				done: false,
+				output: [],
+				usage: null,
+				meta: { agent: 'heidi', flowdeck: true },
+				created_at: Date.now() / 1000
+			}
+		];
+		currentMessageId = assistantId;
 		try {
 			const result = await createFlowDeckOrchestration(
 				{
@@ -1158,9 +1277,20 @@
 				`chat-flowdeck-${crypto.randomUUID()}`
 			);
 			flowdeckRunId = result.run_id || '';
-			if (Array.isArray(result.events)) flowdeckEvents = result.events;
+			if (Array.isArray(result.events)) {
+				mergeFlowDeckEvents(result.events);
+				for (const event of result.events) applyFlowDeckEventToMessage(event);
+			}
 			flowdeckStatus = String(result.status || 'active').toLowerCase();
 			flowdeckClarification = result.outcome === 'clarification' ? result.message || '' : '';
+			if (flowdeckClarification && flowdeckMessageId) {
+				const message = allMessages.find((item) => item.id === flowdeckMessageId);
+				if (message) {
+					message.content = flowdeckClarification;
+					message.done = true;
+					allMessages = [...allMessages];
+				}
+			}
 			if (
 				flowdeckRunId &&
 				!['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(flowdeckStatus)
@@ -1912,18 +2042,6 @@
 					</h1>
 				</div>
 
-				{#if flowdeckClarification}
-					<div class="mx-auto mb-3 max-w-xl rounded-2xl border border-cyan-500/25 bg-cyan-500/5 px-4 py-3 text-left">
-						<div class="mb-1 flex items-center gap-2 text-xs font-semibold text-cyan-300">
-							<span class="size-2 rounded-full bg-cyan-400"></span>
-							Heidi · clarification
-						</div>
-						<p class="text-sm leading-6 text-gray-600 dark:text-gray-300">{flowdeckClarification}</p>
-					</div>
-				{/if}
-				{#if flowdeckEvents.length > 0}
-					<FlowDeckExecutionTimeline events={flowdeckEvents} status={flowdeckStatus} />
-				{/if}
 				<ChatInput
 					bind:this={chatInputEl}
 					bind:inputText
@@ -1975,14 +2093,14 @@
 		{:else}
 			<div
 				bind:this={messagesEl}
-				class="flex-1 overflow-y-auto"
+				class="min-h-0 flex-1 overflow-y-auto"
 				style="background: var(--app-bg); color: var(--app-fg);"
 				onscroll={handleMessagesScroll}
 			>
 				<div
 					class="{$widescreenMode
 						? 'max-w-full'
-						: 'max-w-2xl'} mx-auto w-full px-4 pt-16 pb-16 flex flex-col gap-4"
+						: 'max-w-2xl'} mx-auto w-full px-4 pt-16 pb-32 flex flex-col gap-4"
 				>
 					{#if hasHiddenMessages}
 						<div bind:this={loadSentinelEl} class="h-1 w-full" aria-hidden="true"></div>
@@ -2025,17 +2143,11 @@
 		{/if}
 
 		<!-- Input area -->
-		<div class="px-4 py-3" style="background: var(--app-bg);">
+		<div
+			class="shrink-0 px-4 py-3"
+			style="background: var(--app-bg); padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));"
+		>
 			<div class="{$widescreenMode ? 'max-w-full' : 'max-w-2xl'} mx-auto w-full relative">
-				{#if flowdeckClarification}
-					<div class="mb-3 rounded-2xl border border-cyan-500/25 bg-cyan-500/5 px-4 py-3">
-						<div class="mb-1 flex items-center gap-2 text-xs font-semibold text-cyan-300">
-							<span class="size-2 rounded-full bg-cyan-400"></span>
-							Heidi · clarification
-						</div>
-						<p class="text-sm leading-6 text-gray-600 dark:text-gray-300">{flowdeckClarification}</p>
-					</div>
-				{/if}
 				{#if !autoScroll && activePath.length > 0}
 					<div
 						class="absolute -top-10 left-0 right-0 pr-2 flex justify-end z-30 pointer-events-none"
@@ -2062,9 +2174,6 @@
 							</svg>
 						</button>
 					</div>
-				{/if}
-				{#if flowdeckEvents.length > 0}
-					<FlowDeckExecutionTimeline events={flowdeckEvents} status={flowdeckStatus} />
 				{/if}
 				<ChatInput
 					bind:this={chatInputEl}
