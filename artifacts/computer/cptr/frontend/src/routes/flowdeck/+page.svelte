@@ -316,7 +316,7 @@
 			updateRunUrl();
 			startPolling();
 		} catch (error) {
-			if (error instanceof ApiError && [403, 404, 405, 501].includes(error.status)) {
+			if (error instanceof ApiError && [404, 405, 501].includes(error.status)) {
 				orchestrationDisabled = true;
 			}
 			startError =
