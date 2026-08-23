@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
-from cptr.services.verification import DefaultIndependentVerifier, IndependentVerifier
+from cptr.services.verification import FlowDeckEvidenceVerifier, IndependentVerifier
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ class ScopeStatus(StrEnum):
     VERIFIED = "VERIFIED"
     BLOCKED = "BLOCKED"
     CANCELLED = "CANCELLED"
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
 
 
 class MonitorStatus(StrEnum):
@@ -41,6 +42,7 @@ class MonitorStatus(StrEnum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     COMPLETE = "COMPLETE"
+    MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
 
 
 TERMINAL_TASK_STATUSES = {"COMPLETE", "COMPLETED", "SUCCEEDED", "FAILED", "ERROR", "CANCELLED"}
@@ -307,7 +309,7 @@ class AutonomousSupervisor:
         self.store = store
         self.agent = agent
         self.director = director
-        self.verifier = verifier or DefaultIndependentVerifier()
+        self.verifier = verifier or FlowDeckEvidenceVerifier()
         self.max_attempts = max(1, max_attempts)
 
     async def create_goal(
@@ -411,7 +413,12 @@ class AutonomousSupervisor:
                 (
                     item
                     for item in monitor.scopes
-                    if item.status not in {ScopeStatus.VERIFIED, ScopeStatus.CANCELLED}
+                    if item.status
+                    not in {
+                        ScopeStatus.VERIFIED,
+                        ScopeStatus.CANCELLED,
+                        ScopeStatus.MANUAL_REVIEW_REQUIRED,
+                    }
                 ),
                 None,
             )
@@ -456,7 +463,12 @@ class AutonomousSupervisor:
         if task_status not in TERMINAL_TASK_STATUSES:
             scope.transition(ScopeStatus.WORKING)
             return
-        if task_status in {"FAILED", "ERROR", "CANCELLED"}:
+        if task_status == "CANCELLED":
+            scope.transition(ScopeStatus.CANCELLED)
+            monitor.status = MonitorStatus.CANCELLED
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
+            return
+        if task_status in {"FAILED", "ERROR"}:
             await self._repair_or_block(
                 monitor, scope, {"category": "worker_failure", "message": task.get("error")}
             )
@@ -493,10 +505,16 @@ class AutonomousSupervisor:
             "verification_result",
             {
                 "passed": verification.passed,
+                "outcome": verification.outcome,
                 "checks": verification.checks,
                 "failures": verification.failures,
             },
         )
+        if verification.outcome in {"unknown", "manual_review_required"}:
+            scope.transition(ScopeStatus.MANUAL_REVIEW_REQUIRED)
+            monitor.status = MonitorStatus.MANUAL_REVIEW_REQUIRED
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
+            return
         if not verification.passed:
             await self._repair_or_block(
                 monitor,

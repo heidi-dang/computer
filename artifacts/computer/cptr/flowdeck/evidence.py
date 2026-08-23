@@ -5,6 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 
+TERMINAL_EVIDENCE_OUTCOMES = frozenset(
+    {"succeeded", "failed", "cancelled", "unknown", "manual_review_required"}
+)
+
+
 class EvidenceValidationError(ValueError):
     """Raised when evidence cannot authoritatively decide a lifecycle gate."""
 
@@ -41,6 +46,8 @@ def validate_terminal_evidence(
     attempt_id: str,
 ) -> dict[str, Any]:
     """Validate runtime/verifier evidence; specialist claims are never enough."""
+    if outcome not in TERMINAL_EVIDENCE_OUTCOMES:
+        raise EvidenceValidationError(f"unsupported terminal outcome: {outcome}")
     if not isinstance(evidence, dict):
         raise EvidenceValidationError("terminal evidence is required")
     if evidence.get("authoritative") is not True:

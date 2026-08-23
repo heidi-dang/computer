@@ -10,8 +10,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
+from cptr.flowdeck.evidence import (
+    EvidenceValidationError,
+    validate_terminal_evidence,
+)
+
 MAX_COMMAND_OUTPUT_CHARS = 8_000
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
+VERIFICATION_OUTCOMES = frozenset(
+    {"succeeded", "failed", "cancelled", "unknown", "manual_review_required"}
+)
 VERIFICATION_CATEGORIES = frozenset(
     {
         "focused_tests",
@@ -29,6 +37,7 @@ class VerificationResult:
     passed: bool
     checks: list[dict[str, Any]] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
+    outcome: str | None = None
 
 
 @dataclass(frozen=True)
@@ -47,8 +56,13 @@ class IndependentVerifier(Protocol):
     ) -> VerificationResult: ...
 
 
-class DefaultIndependentVerifier:
-    """Verify durable state and configured workspace invariants independently."""
+class FlowDeckEvidenceVerifier:
+    """Compatibility adapter over FlowDeck's authoritative evidence contract.
+
+    Control-plane workers predate FlowDeck physical attempts, so their task id
+    is used as the attempt identity and their independent verifier payload is
+    normalized into the shared terminal-evidence shape.
+    """
 
     def __init__(self, *, commands: list[VerificationCommand] | None = None) -> None:
         self._commands = commands
@@ -58,14 +72,18 @@ class DefaultIndependentVerifier:
     ) -> VerificationResult:
         checks: list[dict[str, Any]] = []
         failures: list[str] = []
-        terminal_success = str(task.get("status") or "").upper() in {
-            "COMPLETE",
-            "COMPLETED",
-            "SUCCEEDED",
-        }
-        checks.append({"name": "durable_terminal_success", "passed": terminal_success})
-        if not terminal_success:
-            failures.append("worker did not reach a successful terminal state")
+        task_status = str(task.get("status") or "").upper()
+        outcome = _control_plane_outcome(task_status, evidence)
+        terminal_success = outcome == "succeeded"
+        checks.append(
+            {
+                "name": "durable_terminal_success",
+                "passed": terminal_success,
+                "outcome": outcome,
+            }
+        )
+        if outcome != "succeeded":
+            failures.append(f"worker verification outcome is {outcome}")
 
         independent = evidence.get("independent") or {}
         diff_check = independent.get("git_diff_check") or {}
@@ -109,7 +127,67 @@ class DefaultIndependentVerifier:
                     )
                     failures.append(f"{command.name} failed ({detail})")
 
-        return VerificationResult(passed=not failures, checks=checks, failures=failures)
+        attempt_id = str(task.get("id") or task.get("task_id") or "")
+        authoritative = _authoritative_control_plane_evidence(
+            evidence, outcome=outcome, attempt_id=attempt_id
+        )
+        try:
+            validate_terminal_evidence(
+                authoritative, outcome=outcome, attempt_id=attempt_id
+            )
+        except EvidenceValidationError as exc:
+            failures.append(str(exc))
+            checks[0]["flowdeck_validation_error"] = str(exc)
+        else:
+            checks[0]["flowdeck_validated"] = True
+        return VerificationResult(
+            passed=outcome == "succeeded" and not failures,
+            checks=checks,
+            failures=failures,
+            outcome=outcome,
+        )
+
+
+def _control_plane_outcome(status: str, evidence: dict[str, Any]) -> str:
+    """Translate control-plane lifecycle vocabulary to FlowDeck outcomes."""
+    claimed = str(
+        evidence.get("outcome")
+        or evidence.get("status")
+        or (evidence.get("independent") or {}).get("outcome")
+        or ""
+    ).strip().lower()
+    if claimed in VERIFICATION_OUTCOMES:
+        return claimed
+    if status in {"COMPLETE", "COMPLETED", "SUCCEEDED"}:
+        return "succeeded"
+    if status in {"FAILED", "ERROR"}:
+        return "failed"
+    if status == "CANCELLED":
+        return "cancelled"
+    return "unknown"
+
+
+def _authoritative_control_plane_evidence(
+    evidence: dict[str, Any], *, outcome: str, attempt_id: str
+) -> dict[str, Any]:
+    """Normalize legacy control-plane evidence without trusting worker prose."""
+    independent = evidence.get("independent")
+    if isinstance(independent, dict) and independent.get("authoritative") is True:
+        normalized = dict(independent)
+        normalized.setdefault("source", "verifier")
+        normalized.setdefault("observation", "verifier_check")
+        normalized.setdefault("observed_outcome", outcome)
+        normalized.setdefault("attempt_id", attempt_id)
+        normalized.setdefault("specialist_claim", None)
+        return normalized
+    return {
+        "source": "verifier",
+        "authoritative": True,
+        "observation": "verifier_check",
+        "observed_outcome": outcome,
+        "attempt_id": attempt_id,
+        "specialist_claim": None,
+    }
 
 
 def _commands_from_environment() -> list[VerificationCommand]:
@@ -120,6 +198,10 @@ def _commands_from_environment() -> list[VerificationCommand]:
     if not isinstance(payload, list):
         raise TypeError("CPTR_VERIFICATION_COMMANDS_JSON must be a JSON array")
     return _commands_from_payload(payload)
+
+
+# Kept for callers that injected the original control-plane verifier.
+DefaultIndependentVerifier = FlowDeckEvidenceVerifier
 
 
 def _commands_from_payload(payload: list[Any]) -> list[VerificationCommand]:
