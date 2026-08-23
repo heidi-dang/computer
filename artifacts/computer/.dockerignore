@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+.cptr
+.claude
+__pycache__
+*.pyc
+*.egg-info
+dist/
+build/
+cptr/frontend/node_modules/
+cptr/frontend/.svelte-kit/
+cptr/frontend/build/
+CONTRIBUTOR_LICENSE_AGREEMENT
+.DS_Store

@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>cptr unreachable</title>
+		<style>
+			:root {
+				color-scheme: light dark;
+				font-family:
+					Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+			}
+			body {
+				margin: 0;
+				min-height: 100vh;
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				padding: 24px;
+				box-sizing: border-box;
+				background: #fff;
+				color: #111827;
+			}
+			main {
+				width: min(448px, 100%);
+			}
+			h1 {
+				font-size: 18px;
+				line-height: 1.4;
+				font-weight: 400;
+				margin: 0 0 12px;
+			}
+			p {
+				font-size: 12px;
+				line-height: 1.5;
+				color: #9ca3af;
+				margin: -8px 0 12px;
+			}
+			.actions {
+				display: flex;
+				align-items: center;
+				gap: 16px;
+				margin-top: 8px;
+			}
+			button {
+				border: 0;
+				padding: 0;
+				font: inherit;
+				font-size: 13px;
+				font-weight: 400;
+				color: #4b5563;
+				background: transparent;
+				cursor: pointer;
+			}
+			button:hover {
+				color: #111827;
+			}
+			@media (prefers-color-scheme: dark) {
+				body {
+					background: #000;
+					color: #fff;
+				}
+				p {
+					color: #4b5563;
+				}
+				button {
+					color: #9ca3af;
+				}
+				button:hover {
+					color: #fff;
+				}
+			}
+		</style>
+	</head>
+	<body>
+		<main>
+			<h1>Computer is unreachable</h1>
+			<p>Reconnect and refresh before continuing.</p>
+			<div class="actions">
+				<button onclick="location.reload()">Refresh</button>
+			</div>
+		</main>
+	</body>
+</html>

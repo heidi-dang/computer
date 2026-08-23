@@ -1,0 +1,29 @@
+kind = "web"
+previewPath = "/"
+title = "Computer"
+description = "A faithful Replit-hosted adaptation of the Computer application from its public GitHub source, preserving its original frontend, backend, workspace, terminal, and session behavior wherever the platform permits."
+version = "1.0.0"
+id = "artifacts/computer"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21823
+
+[services.development]
+run = "npm --prefix cptr/frontend run dev -- --host 0.0.0.0 --port $PORT"
+
+[services.production]
+build = [ "bash", "-lc", "cd artifacts/computer/cptr/frontend && npm ci && npm run build" ]
+serve = "static"
+publicDir = "artifacts/computer/cptr/frontend/build"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21823"
+BASE_PATH = "/"
+CPTR_BACKEND_URL = "http://127.0.0.1:8080"

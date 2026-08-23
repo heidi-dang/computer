@@ -1,0 +1,1 @@
+- [CPTR Replit runtime](cptr-replit-runtime.md) — CPTR keeps its original product in one repo but needs static web and dynamic runtime services for Replit publishing.
