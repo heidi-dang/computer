@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cptr.flowdeck.budgets import RunBudget
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import Capability, FlowDeckMode
 from cptr.flowdeck.durable import (
@@ -159,6 +161,17 @@ async def run_tester(
         owner=_TESTER_OWNER,
         fencing_epoch=lease.epoch,
     )
+    budget = RunBudget(
+        max_steps=config.max_steps,
+        max_attempts=config.max_attempts,
+        max_delegations=config.max_specialists,
+        max_tool_calls=config.max_tool_calls,
+        max_model_turns=config.max_model_turns,
+        max_wall_seconds=min(config.max_wall_seconds, int(request.timeout_seconds)),
+    )
+    budget.consume_step()
+    budget.consume_attempt()
+    started = time.monotonic()
 
     async def heartbeat() -> None:
         while True:
@@ -197,6 +210,7 @@ async def run_tester(
         )
 
     outcome = "succeeded" if exit_code == 0 else "failed"
+    budget.validate_wall_time(time.monotonic() - started)
     evidence = {
         "source": "runtime",
         "authoritative": True,

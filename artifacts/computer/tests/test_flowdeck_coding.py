@@ -11,8 +11,11 @@ from cptr.flowdeck.coding import (
     CODING_SPECIALIST_ROLES,
     CodingPolicyError,
     CodingRequest,
+    browser_tool_guard,
     coding_tool_guard,
+    run_browser_debugger,
     run_coding_specialist,
+    validate_browser_request,
     validate_coding_request,
 )
 from cptr.flowdeck.config import FlowDeckConfig
@@ -46,8 +49,15 @@ class CodingContractTests(unittest.IsolatedAsyncioTestCase):
 
     def test_only_one_role_is_eligible_and_policy_is_explicit(self):
         validate_coding_request(self.request, self.config)
+        frontend_request = self.request.__class__(
+            **{**self.request.__dict__, "role": "frontend-coder"}
+        )
+        frontend_config = self.config.__class__(
+            **{**self.config.__dict__, "coding_role": "frontend-coder"}
+        )
+        validate_coding_request(frontend_request, frontend_config)
         for role in CODING_SPECIALIST_ROLES:
-            if role == "backend-coder":
+            if role in {"backend-coder", "frontend-coder"}:
                 continue
             with self.assertRaises(CodingPolicyError):
                 validate_coding_request(
@@ -84,6 +94,32 @@ class CodingContractTests(unittest.IsolatedAsyncioTestCase):
                 {**context, "specialist_role": "backend-coder"},
             )
         )
+
+    def test_browser_debugger_is_local_preview_read_only(self):
+        request = self.request.__class__(
+            **{**self.request.__dict__, "role": "browser-debugger"}
+        )
+        config = self.config.__class__(
+            **{
+                **self.config.__dict__,
+                "coding_role": "browser-debugger",
+                "mutating_agents": False,
+            }
+        )
+        validate_browser_request(request, config)
+        context = {"workspace": self.workspace.name}
+        self.assertTrue(browser_tool_guard("browser_snapshot", {}, context))
+        self.assertTrue(
+            browser_tool_guard(
+                "browser_navigate",
+                {"url": "http://127.0.0.1:8080/"},
+                context,
+            )
+        )
+        self.assertFalse(
+            browser_tool_guard("browser_navigate", {"url": "https://example.com"}, context)
+        )
+        self.assertFalse(browser_tool_guard("browser_click", {"ref": "x"}, context))
 
     async def test_native_mutation_stays_gated_until_per_write_hooks_exist(self):
         with self.assertRaises(CodingPolicyError):
@@ -174,3 +210,52 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(run_chat.await_args.kwargs["before_mutation"])
         self.assertIsNotNone(run_chat.await_args.kwargs["after_mutation"])
         self.assertEqual(run_chat.await_args.kwargs["specialist_role"], "backend-coder")
+
+    async def test_browser_debugger_reuses_native_loop_without_mutation_hooks(self):
+        fake_chat = type("Chat", (), {"id": "browser-chat"})()
+        fake_message = type("Message", (), {"id": "browser-message"})()
+        request = self.request.__class__(
+            **{**self.request.__dict__, "role": "browser-debugger"}
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CPTR_FLOWDECK_ENABLED": "true",
+                    "CPTR_FLOWDECK_MODE": "controlled",
+                    "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                    "CPTR_FLOWDECK_MUTATING_AGENTS": "false",
+                    "CPTR_FLOWDECK_CODING_ROLE": "browser-debugger",
+                },
+                clear=False,
+            ),
+            patch(
+                "cptr.utils.tools._create_subagent_chat",
+                new=AsyncMock(return_value=(fake_chat, None, fake_message)),
+            ),
+            patch(
+                "cptr.utils.tools._run_existing_subagent_chat",
+                new=AsyncMock(return_value="browser result"),
+            ) as run_chat,
+        ):
+            result = await run_browser_debugger(
+                request,
+                model="model",
+                connection={"provider": "test"},
+                parent_chat_id="parent",
+                store=self.store,
+            )
+        self.assertEqual(result, "browser result")
+        self.assertEqual(
+            run_chat.await_args.kwargs["allowed_tool_names"],
+            frozenset(
+                {
+                    "read_file",
+                    "search_files",
+                    "browser_navigate",
+                    "browser_snapshot",
+                    "browser_screenshot",
+                }
+            ),
+        )
+        self.assertNotIn("before_mutation", run_chat.await_args.kwargs)

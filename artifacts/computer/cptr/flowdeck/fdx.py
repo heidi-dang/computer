@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 FDX_PROTOCOL = "flowdeck-fdx/1"
+FDX_VERSION = "1"
 DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
 
@@ -30,6 +32,7 @@ class FDXConfig:
     protocol: str = FDX_PROTOCOL
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_output_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
+    max_input_bytes: int = DEFAULT_MAX_OUTPUT_BYTES
 
     @classmethod
     def from_env(cls) -> FDXConfig:
@@ -42,6 +45,9 @@ class FDXConfig:
             ),
             max_output_bytes=int(
                 os.getenv("CPTR_FLOWDECK_FDX_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
+            ),
+            max_input_bytes=int(
+                os.getenv("CPTR_FLOWDECK_FDX_MAX_INPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
             ),
         )
 
@@ -66,6 +72,8 @@ def _validate_config(config: FDXConfig) -> None:
         raise FDXPolicyError("FDX timeout is outside the safe bound")
     if config.max_output_bytes <= 0 or config.max_output_bytes > 1024 * 1024:
         raise FDXPolicyError("FDX output bound is outside the safe limit")
+    if config.max_input_bytes <= 0 or config.max_input_bytes > 1024 * 1024:
+        raise FDXPolicyError("FDX input bound is outside the safe limit")
 
 
 def validate_workspace_jail(workspace: str, configured_root: str | None = None) -> Path:
@@ -94,6 +102,12 @@ async def run_fdx(
     executable = str(Path(config.executable).expanduser())
     if not Path(executable).is_absolute():
         raise FDXPolicyError("FDX executable must be an absolute path")
+    try:
+        encoded_request = json.dumps(payload, separators=(",", ":")).encode()
+    except (TypeError, ValueError) as exc:
+        raise FDXPolicyError("FDX payload is not structured JSON") from exc
+    if len(encoded_request) > config.max_input_bytes:
+        raise FDXPolicyError("FDX input exceeded configured bound")
 
     process = await asyncio.create_subprocess_exec(
         executable,
@@ -106,15 +120,19 @@ async def run_fdx(
         stderr=asyncio.subprocess.PIPE,
         cwd=str(root),
         env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+        limit=config.max_output_bytes + 1,
+        start_new_session=True,
     )
-    request = json.dumps(payload, separators=(",", ":")).encode()
     try:
         stdout, stderr = await asyncio.wait_for(
-            process.communicate(request),
+            process.communicate(encoded_request),
             timeout=config.timeout_seconds,
         )
     except (asyncio.TimeoutError, asyncio.CancelledError):
-        process.kill()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         await process.wait()
         raise
     if len(stdout) > config.max_output_bytes or len(stderr) > config.max_output_bytes:
@@ -125,7 +143,12 @@ async def run_fdx(
         response = json.loads(stdout.decode())
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise FDXPolicyError("FDX returned invalid structured output") from exc
-    if not isinstance(response, dict) or response.get("protocol") != FDX_PROTOCOL:
+    if (
+        not isinstance(response, dict)
+        or response.get("protocol") != FDX_PROTOCOL
+        or response.get("version") != FDX_VERSION
+        or response.get("health") != "ok"
+    ):
         raise FDXPolicyError("FDX response protocol mismatch")
     return FDXResult(
         status="succeeded",
@@ -153,7 +176,7 @@ async def run_optional_fdx(
             config=config,
             configured_root=configured_root,
         )
-    except (FDXPolicyError, OSError):
+    except (FDXPolicyError, OSError, asyncio.TimeoutError):
         fallback_result = await fallback()
         return FDXResult(
             status=fallback_result.status,

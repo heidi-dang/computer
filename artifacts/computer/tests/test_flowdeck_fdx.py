@@ -23,7 +23,8 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         self.executable.write_text(
             "#!/bin/sh\n"
             "read payload\n"
-            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"payload\":\"ok\"}'\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
+            "\"health\":\"ok\",\"payload\":\"ok\"}'\n"
         )
         self.executable.chmod(
             self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP
@@ -78,6 +79,56 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.used_fdx)
         self.assertFalse(result.authoritative)
         self.assertEqual(result.output["protocol"], "flowdeck-fdx/1")
+
+    async def test_fdx_requires_health_and_version(self):
+        self.executable.write_text(
+            "#!/bin/sh\n"
+            "read payload\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"payload\":\"ok\"}'\n"
+        )
+        self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+        with self.assertRaises(FDXPolicyError):
+            await run_fdx(
+                {},
+                workspace=str(self.workspace),
+                configured_root=str(self.root),
+                config=self.config(),
+            )
+
+    async def test_fdx_rejects_oversized_input_and_timeout_falls_back(self):
+        with self.assertRaises(FDXPolicyError):
+            await run_fdx(
+                {"payload": "x" * 2048},
+                workspace=str(self.workspace),
+                configured_root=str(self.root),
+                config=self.config(max_input_bytes=32),
+            )
+        self.executable.write_text(
+            "#!/bin/sh\n"
+            "sleep 2\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
+            "\"health\":\"ok\"}'\n"
+        )
+        self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+
+        async def fallback():
+            return FDXResult(
+                status="succeeded",
+                output={"native": True},
+                authoritative=True,
+                used_fdx=False,
+            )
+
+        result = await run_optional_fdx(
+            {},
+            workspace=str(self.workspace),
+            configured_root=str(self.root),
+            config=self.config(timeout_seconds=0.05),
+            fallback=fallback,
+        )
+        self.assertFalse(result.used_fdx)
+        self.assertTrue(result.authoritative)
+        self.assertEqual(result.output, {"native": True})
 
     async def test_enabled_fdx_failure_falls_back_to_native_result(self):
         async def fallback():
