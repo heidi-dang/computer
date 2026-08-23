@@ -56,6 +56,11 @@ from cptr.flowdeck.execution import (
     validate_mapper_request,
 )
 from cptr.flowdeck.fdx import FDXConfig, FDXPolicyError, FDXResult, run_fdx, run_optional_fdx
+from cptr.flowdeck.git_readonly import (
+    GitInspectionPolicyError,
+    GitInspectionRequest,
+    inspect_git,
+)
 from cptr.flowdeck.gateway import observe_request
 from cptr.flowdeck.registry import AGENT_REGISTRY, get_agent, validate_registry
 from cptr.flowdeck.tester import (
@@ -91,6 +96,8 @@ __all__ = [
     "FDXResult",
     "FlowDeckConfig",
     "FlowDeckMode",
+    "GitInspectionPolicyError",
+    "GitInspectionRequest",
     "GovernanceDecision",
     "GovernanceVerdict",
     "LeaseUnavailableError",
@@ -111,6 +118,7 @@ __all__ = [
     "coding_tool_guard",
     "coding_tool_names",
     "get_agent",
+    "inspect_git",
     "mapper_tool_guard",
     "observe_request",
     "run_browser_debugger",
