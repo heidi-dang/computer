@@ -75,6 +75,19 @@ async def is_repo(root: str, identity: ExecutionIdentity | None = None) -> bool:
     return code == 0
 
 
+async def diff_check(root: str, identity: ExecutionIdentity | None = None) -> dict[str, Any]:
+    """Run Git's whitespace/error check with fixed arguments."""
+    code, stdout, stderr = await _run(
+        "diff", "--check", cwd=root, check=False, identity=identity
+    )
+    return {
+        "passed": code == 0,
+        "returncode": code,
+        "stdout": stdout[-20_000:],
+        "stderr": stderr[-20_000:],
+    }
+
+
 async def version(root: str, identity: ExecutionIdentity | None = None) -> str | None:
     """Return the installed git version, if git is available."""
     cwd = root if os.path.isdir(root) else "/"

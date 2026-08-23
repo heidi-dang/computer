@@ -63,9 +63,7 @@ ENABLE_CHAT_RECONCILE_ON_STARTUP: bool = os.environ.get(
 CHAT_TOOL_MAX_CHARS = int(os.environ.get("CHAT_TOOL_MAX_CHARS", "50000"))
 CHAT_TOOL_COMMAND_MAX_CHARS = int(os.environ.get("CHAT_TOOL_COMMAND_MAX_CHARS", "8000"))
 CHAT_COMPACT_TOKEN_THRESHOLD = int(os.environ.get("CHAT_COMPACT_TOKEN_THRESHOLD", "80000"))
-AGENT_SEED_TRANSCRIPT_MAX_CHARS = max(
-    0, _env_int("CHAT_AGENT_SEED_TRANSCRIPT_MAX_CHARS", 12000)
-)
+AGENT_SEED_TRANSCRIPT_MAX_CHARS = max(0, _env_int("CHAT_AGENT_SEED_TRANSCRIPT_MAX_CHARS", 12000))
 # Claude SDK stdout JSON buffer; chat/tool output caps apply later after parsing.
 CLAUDE_CODE_MAX_BUFFER_SIZE = _env_int("CPTR_CLAUDE_CODE_MAX_BUFFER_SIZE", 128 * 1024 * 1024)
 
@@ -89,6 +87,12 @@ STREAM_WRITE_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_WRITE_TIMEOUT",
 # ── Automation scheduler ────────────────────────────────────
 AUTOMATION_POLL_INTERVAL = int(os.environ.get("AUTOMATION_POLL_INTERVAL", "10"))
 TIMER_POLL_INTERVAL = int(os.environ.get("TIMER_POLL_INTERVAL", "1"))
+
+# ── Autonomous supervisor ──────────────────────────────────
+SUPERVISOR_POLL_INTERVAL = float(os.environ.get("CPTR_SUPERVISOR_POLL_INTERVAL", "2"))
+SUPERVISOR_MAX_ATTEMPTS = _env_int("CPTR_SUPERVISOR_MAX_ATTEMPTS", 5)
+SUPERVISOR_OPENAI_MODEL = os.environ.get("CPTR_SUPERVISOR_OPENAI_MODEL", "")
+SUPERVISOR_OPENAI_API_KEY = os.environ.get("CPTR_SUPERVISOR_OPENAI_API_KEY", "")
 
 # ── CORS ────────────────────────────────────────────────────
 # Socket.IO CORS allowed origins.

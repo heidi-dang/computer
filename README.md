@@ -120,6 +120,10 @@ Ask it to check a build, push a fix, or explain a file. Switch workspaces with `
 
 Turn each workspace into an OpenAI-compatible agent model with real machine access. Open WebUI Computer exposes `/v1/chat/completions`, so any client that speaks OpenAI, including [Open WebUI](https://github.com/open-webui/open-webui), can use a workspace with full agent capabilities: file access, terminal, web search, tools.
 
+## ChatGPT Control API
+
+The companion ChatGPT MCP adapter uses the authenticated, versioned `/api/control/v1` API for durable tasks and autonomous monitoring. See [the control-plane documentation](docs/control-plane.md) for endpoint contracts, scope-based credentials, supervisor states, approval boundaries, recovery behavior, and ChatGPT Developer Mode setup.
+
 ## More
 
 | | |
