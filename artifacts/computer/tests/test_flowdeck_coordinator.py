@@ -201,6 +201,55 @@ class CoordinatorDurableWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item["status"] == "succeeded" for item in result.children))
         self.assertEqual(len(result.outputs), 2)
 
+    async def test_late_child_result_after_parent_cancellation_is_terminal(self):
+        request = CoordinatorRequest(
+            request_key="late-child-cancel",
+            task="review the architecture",
+            workspace=str(self.root),
+            model="global-cptr-model",
+            connection={},
+            parent_chat_id="chat",
+        )
+
+        async def late_child(_request, dispatch, *, store):
+            parent = await store.get_run_by_request_key(request.request_key)
+            self.assertIsNotNone(parent)
+            await store.cancel_run(
+                run_id=parent.id,
+                owner="owner",
+                workspace=str(self.root),
+            )
+            child, _ = await store.create_run(
+                request_key=dispatch.request_key,
+                owner="owner",
+                workspace=str(self.root),
+                step_name=dispatch.role,
+            )
+            await store.start_run(child.id)
+            return "late child output"
+
+        with patch.dict(
+            os.environ,
+            {
+                "CPTR_FLOWDECK_ENABLED": "true",
+                "CPTR_FLOWDECK_MODE": "controlled",
+                "CPTR_FLOWDECK_GOVERNANCE": "strict",
+            },
+        ), patch(
+            "cptr.flowdeck.coordinator.dispatch_authenticated_specialist",
+            side_effect=late_child,
+        ):
+            result = await run_heidi_coordinator(
+                request,
+                authenticated_request=self.auth_request(),
+                store=self.store,
+            )
+
+        self.assertEqual(result.status, "cancelled")
+        self.assertEqual(result.outputs, ("late child output",))
+        run = await self.store.get_run_by_request_key(request.request_key)
+        self.assertEqual(run.status, RunStatus.CANCELLED.value)
+
     async def test_unmatched_prompt_is_durable_clarification_without_dispatch(self):
         request = CoordinatorRequest(
             request_key="clarification-request",

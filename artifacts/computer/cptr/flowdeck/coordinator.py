@@ -17,6 +17,7 @@ from cptr.flowdeck.contracts import Capability, DelegationRequest, FlowDeckMode
 from cptr.flowdeck.delegation import validate_delegation
 from cptr.flowdeck.durable import (
     DurableFlowDeck,
+    LifecycleError,
     OperationStatus,
     RunStatus,
     StepStatus,
@@ -231,10 +232,19 @@ async def run_heidi_coordinator(
     budget.consume_step()
     children: list[dict[str, Any]] = []
     outputs: list[str] = []
+
+    async def cancelled_result() -> CoordinatorResult | None:
+        current = await store.get_run_by_request_key(request.request_key)
+        if current and current.status == RunStatus.CANCELLED.value:
+            return CoordinatorResult(
+                "cancelled", current.id, tuple(children), tuple(outputs)
+            )
+        return None
+
     for index, item in enumerate(plan):
-        current_run = await store.get_run_by_request_key(request.request_key)
-        if current_run and current_run.status == RunStatus.CANCELLED.value:
-            return CoordinatorResult("cancelled", current_run.id, tuple(children), tuple(outputs))
+        terminal = await cancelled_result()
+        if terminal:
+            return terminal
         budget.consume_step()
         budget.consume_delegation()
         child_key = f"{request.request_key}:child:{index}:{item.specialist_id}"
@@ -299,50 +309,61 @@ async def run_heidi_coordinator(
                     for op in child_operations
                 )
             )
-            if child_ok:
-                await store.finish_attempt(
-                    attempt.id,
-                    owner=user_id,
-                    fencing_epoch=0,
-                    outcome="succeeded",
-                    evidence={
-                        "source": "verifier",
-                        "authoritative": True,
-                        "observation": "verifier_check",
-                        "observed_outcome": "succeeded",
-                        "attempt_id": attempt.id,
-                        "child_run_id": child_run.id,
-                        "specialist_claim": None,
-                    },
-                )
-                await store.finish_step(child_step.id, status=StepStatus.SUCCEEDED)
-                children.append({"specialist": item.specialist_id, "status": "succeeded"})
-            elif child_run and child_run.status == RunStatus.FAILED.value:
-                await store.finish_attempt(
-                    attempt.id, owner=user_id, fencing_epoch=0, outcome="failed",
-                    evidence={
-                        "source": "verifier", "authoritative": True,
-                        "observation": "verifier_check", "observed_outcome": "failed",
-                        "attempt_id": attempt.id, "child_run_id": child_run.id,
-                        "specialist_claim": None,
-                    },
-                )
-                await store.finish_step(child_step.id, status=StepStatus.FAILED)
-                children.append({"specialist": item.specialist_id, "status": "failed"})
-                break
-            else:
-                await store.mark_attempt_unknown(
-                    attempt.id, error="child outcome was not authoritative"
-                )
-                await store.finish_step(child_step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
-                children.append(
-                    {
-                        "specialist": item.specialist_id,
-                        "status": "manual_review_required",
-                    }
-                )
-                break
+            try:
+                if child_ok:
+                    await store.finish_attempt(
+                        attempt.id,
+                        owner=user_id,
+                        fencing_epoch=0,
+                        outcome="succeeded",
+                        evidence={
+                            "source": "verifier",
+                            "authoritative": True,
+                            "observation": "verifier_check",
+                            "observed_outcome": "succeeded",
+                            "attempt_id": attempt.id,
+                            "child_run_id": child_run.id,
+                            "specialist_claim": None,
+                        },
+                    )
+                    await store.finish_step(child_step.id, status=StepStatus.SUCCEEDED)
+                    children.append({"specialist": item.specialist_id, "status": "succeeded"})
+                elif child_run and child_run.status == RunStatus.FAILED.value:
+                    await store.finish_attempt(
+                        attempt.id, owner=user_id, fencing_epoch=0, outcome="failed",
+                        evidence={
+                            "source": "verifier", "authoritative": True,
+                            "observation": "verifier_check", "observed_outcome": "failed",
+                            "attempt_id": attempt.id, "child_run_id": child_run.id,
+                            "specialist_claim": None,
+                        },
+                    )
+                    await store.finish_step(child_step.id, status=StepStatus.FAILED)
+                    children.append({"specialist": item.specialist_id, "status": "failed"})
+                    break
+                else:
+                    await store.mark_attempt_unknown(
+                        attempt.id, error="child outcome was not authoritative"
+                    )
+                    await store.finish_step(
+                        child_step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED
+                    )
+                    children.append(
+                        {
+                            "specialist": item.specialist_id,
+                            "status": "manual_review_required",
+                        }
+                    )
+                    break
+            except LifecycleError:
+                terminal = await cancelled_result()
+                if terminal:
+                    return terminal
+                raise
         except BaseException:
+            terminal = await cancelled_result()
+            if terminal:
+                return terminal
             await store.mark_attempt_unknown(attempt.id, error="coordinator child interrupted")
             await store.finish_step(child_step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
             await store.orphan_run(run.id)
@@ -355,11 +376,19 @@ async def run_heidi_coordinator(
         status = RunStatus.MANUAL_REVIEW_REQUIRED
     else:
         status = RunStatus.SUCCEEDED
-    await store.finish_step(
-        parent_step.id,
-        status=StepStatus.SUCCEEDED if status == RunStatus.SUCCEEDED else (
-            StepStatus.FAILED if status == RunStatus.FAILED else StepStatus.MANUAL_REVIEW_REQUIRED
-        ),
-    )
-    await store.complete_run(run.id, status=status)
+    try:
+        await store.finish_step(
+            parent_step.id,
+            status=StepStatus.SUCCEEDED if status == RunStatus.SUCCEEDED else (
+                StepStatus.FAILED
+                if status == RunStatus.FAILED
+                else StepStatus.MANUAL_REVIEW_REQUIRED
+            ),
+        )
+        await store.complete_run(run.id, status=status)
+    except LifecycleError:
+        terminal = await cancelled_result()
+        if terminal:
+            return terminal
+        raise
     return CoordinatorResult(status.value.lower(), run.id, tuple(children), tuple(outputs))
