@@ -7,6 +7,7 @@ import uuid
 import hashlib
 from typing import Any
 
+from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.models import Chat, ChatMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import get_db
@@ -159,7 +160,9 @@ class AgentService:
         error = (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
         if message.done:
             desired_status = (
-                "CANCELLED" if status == "CANCELLED" else ("FAILED" if error else "COMPLETE")
+                status
+                if status in {"CANCEL_REQUESTED", "CANCELLED"}
+                else ("FAILED" if error else "COMPLETE")
             )
             if desired_status != status:
                 transition = getattr(self.store, "transition_terminal", None)
@@ -188,12 +191,13 @@ class AgentService:
                 status = "RUNNING"
             elif status in {"RUNNING", "PENDING"}:
                 status = "FAILED"
+                restart_error = error or "interrupted by CPTR restart"
                 await ChatMessage.update(
                     message.id,
                     done=True,
-                    meta={"error": "interrupted by CPTR restart"},
+                    meta={"error": restart_error},
                 )
-                error = "interrupted by CPTR restart"
+                error = restart_error
                 transition = getattr(self.store, "transition_terminal", None)
                 if callable(transition) and task.__class__ is ControlTask:
                     await transition(
@@ -326,8 +330,19 @@ class AgentService:
         if task is None or task.user_id != user_id:
             raise KeyError("task not found")
         now = int(time.time() * 1000)
+        request_cancel = getattr(self.store, "request_cancel", None)
         transition = getattr(self.store, "transition_terminal", None)
-        if callable(transition):
+        if callable(request_cancel):
+            won = await request_cancel(task.id, requested_at=now)
+            current = await self.store.get(task.id)
+            if not won and current and current.status not in {"CANCEL_REQUESTED"}:
+                result = await self.get_task(task.id, user_id=user_id)
+                result["cancelled"] = False
+                result["cancel_race"] = (
+                    "completion_won" if current.status == "COMPLETE" else "terminal_state_won"
+                )
+                return result
+        elif callable(transition):
             won = await transition(
                 task.id,
                 status="CANCELLED",
@@ -345,17 +360,30 @@ class AgentService:
                     else "terminal_state_won"
                 )
                 return result
+        invalidate = getattr(self.store, "invalidate_messages_for_task", None)
+        if callable(invalidate):
+            await invalidate(task.id, now=now)
         from cptr.utils.chat_task import cancel_task
 
-        found = await cancel_task(task.message_id)
-        if not found:
+        quiescent = await cancel_task(
+            task.message_id,
+            timeout=TASK_CANCELLATION_TIMEOUT_SECONDS,
+        )
+        if not quiescent:
+            result = await self.get_task(task.id, user_id=user_id)
+            result["cancelled"] = False
+            result["cancellation_status"] = "BLOCKED"
+            result["error"] = "owned execution did not quiesce within the cancellation bound"
+            return result
+        finalize = getattr(self.store, "finalize_cancel", None)
+        if callable(finalize):
+            await finalize(task.id, cancelled_at=now, updated_at=int(time.time() * 1000))
+        elif not callable(transition):
             await ChatMessage.update(
                 task.message_id,
                 done=True,
                 meta={"error": "cancelled"},
             )
-        if not callable(transition):
-            await self.store.update(task.id, status="CANCELLED", cancelled_at=now, updated_at=now)
         result = await self.get_task(task.id, user_id=user_id)
         result["cancelled"] = True
         return result

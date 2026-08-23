@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from cptr.events import EVENTS, publish_event
-from cptr.env import CHAT_MAX_ITERATIONS, CHAT_TOOL_COMMAND_MAX_CHARS, CHAT_TOOL_MAX_CHARS
+from cptr.env import (
+    CHAT_MAX_ITERATIONS,
+    CHAT_TOOL_COMMAND_MAX_CHARS,
+    CHAT_TOOL_MAX_CHARS,
+    TASK_CANCELLATION_TIMEOUT_SECONDS,
+)
 from cptr.utils.context import (
     build_context_usage,
     estimate_messages_tokens,
@@ -357,6 +362,7 @@ def _apply_skills_create_prompt(
 _tasks: dict[str, asyncio.Task] = {}  # message_id → asyncio.Task
 _task_state: dict[str, dict] = {}  # message_id → {content, output}
 _task_chat: dict[str, str] = {}  # message_id → chat_id
+_cancel_requested: set[str] = set()
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
 
 
@@ -378,6 +384,8 @@ def start_task(
     target: ModelTarget | None = None,
 ):
     """Launch the agentic loop as a background asyncio.Task."""
+    if message_id in _cancel_requested:
+        raise RuntimeError("task cancellation is in progress")
     if target is None:
         if connection is None:
             raise ValueError("start_task requires either target or connection")
@@ -420,13 +428,31 @@ def start_task(
     asyncio.create_task(emit_active())
 
 
-async def cancel_task(message_id: str) -> bool:
-    """Cancel a running task. Returns True if found."""
+async def cancel_task(
+    message_id: str, *, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS
+) -> bool:
+    """Cancel one agent turn and wait for owned execution to quiesce."""
+    _cancel_requested.add(message_id)
+    from cptr.utils.tools import cancel_owned_command_sessions
+
+    commands_quiescent = await cancel_owned_command_sessions(message_id, timeout=timeout)
     task = _tasks.get(message_id)
-    if task:
-        task.cancel()
-        return True
-    return False
+    if not task:
+        if commands_quiescent:
+            _cancel_requested.discard(message_id)
+        return commands_quiescent
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))
+    except asyncio.TimeoutError:
+        return False
+    except asyncio.CancelledError:
+        pass
+    return commands_quiescent and task.done()
+
+
+def is_cancel_requested(message_id: str) -> bool:
+    return message_id in _cancel_requested
 
 
 def is_running(message_id: str) -> bool:
@@ -508,6 +534,8 @@ def _is_pending_internal_subagent_result(message: ChatMessage) -> bool:
 
 def _is_pending_chat_input(message: ChatMessage) -> bool:
     meta = message.meta or {}
+    if meta.get("delivery_status") == "CANCELLED":
+        return False
     return bool(meta.get("queued") or is_pending_subagent_result_message(meta))
 
 
@@ -1611,6 +1639,15 @@ async def run_chat_task(
 
     async def _save_message(save_reason: str, **kwargs) -> bool:
         """Persist a message update and log enough detail to debug skipped saves."""
+        if kwargs.get("done") is True:
+            from cptr.utils.tools import wait_for_owned_command_sessions
+
+            if not await wait_for_owned_command_sessions(
+                message_id, timeout=TASK_CANCELLATION_TIMEOUT_SECONDS
+            ):
+                meta = dict(kwargs.get("meta") or {})
+                meta["error"] = "owned execution still active"
+                kwargs = {**kwargs, "done": False, "meta": meta}
         saved_output = kwargs.get("output", output_items)
         saved_content = kwargs.get("content", content)
         counts, reasoning_count, reasoning_chars = _output_debug_stats(saved_output)
@@ -2949,34 +2986,36 @@ async def run_chat_task(
             except Exception:
                 logger.debug("[task %s] active-state emit failed", message_id[:8], exc_info=True)
         try:
-            await export_chat_to_file(request, chat_id)
+            if not is_cancel_requested(message_id):
+                await export_chat_to_file(request, chat_id)
         except Exception:
             logger.exception(f"Failed to export chat {chat_id}")
         # Generate a proper title if the chat still has the auto-truncated fallback
         try:
-            chat_obj = await Chat.get_by_id(chat_id)
-            if chat_obj:
-                all_msgs = await ChatMessage.get_all_by_chat(chat_id)
-                first_user = next(
-                    (
-                        m
-                        for m in all_msgs
-                        if m.role == "user" and not (m.meta and m.meta.get("queued"))
-                    ),
-                    None,
-                )
-                if first_user:
-                    # The router sets title = content[:50] on creation.
-                    # Only generate if the title still matches that fallback.
-                    fallback = first_user.content[:50].strip() or "New Chat"
-                    if chat_obj.title == fallback:
-                        await generate_chat_title(
-                            chat_id,
-                            user_id,
-                            connection,
-                            model,
-                            first_user.content,
-                        )
+            if not is_cancel_requested(message_id):
+                chat_obj = await Chat.get_by_id(chat_id)
+                if chat_obj:
+                    all_msgs = await ChatMessage.get_all_by_chat(chat_id)
+                    first_user = next(
+                        (
+                            m
+                            for m in all_msgs
+                            if m.role == "user" and not (m.meta and m.meta.get("queued"))
+                        ),
+                        None,
+                    )
+                    if first_user:
+                        # The router sets title = content[:50] on creation.
+                        # Only generate if the title still matches that fallback.
+                        fallback = first_user.content[:50].strip() or "New Chat"
+                        if chat_obj.title == fallback:
+                            await generate_chat_title(
+                                chat_id,
+                                user_id,
+                                connection,
+                                model,
+                                first_user.content,
+                            )
         except Exception:
             logger.debug(
                 "[title] Error in title generation for chat %s", chat_id[:8], exc_info=True
@@ -2984,42 +3023,47 @@ async def run_chat_task(
         # Best-effort post-turn memory review. Runs detached and never competes
         # with queued user input processing.
         try:
-            from cptr.utils.memory import review_memory_after_turn
+            if not is_cancel_requested(message_id):
+                from cptr.utils.memory import review_memory_after_turn
 
-            await review_memory_after_turn(
-                request,
-                user_id=user_id,
-                message_id=message_id,
-                workspace=workspace,
-                conversation_messages=messages,
-                assistant_reply=content,
-                model_connection=connection,
-                model=model,
-            )
+                await review_memory_after_turn(
+                    request,
+                    user_id=user_id,
+                    message_id=message_id,
+                    workspace=workspace,
+                    conversation_messages=messages,
+                    assistant_reply=content,
+                    model_connection=connection,
+                    model=model,
+                )
         except Exception:
             logger.debug("[memory] Failed to review conversation", exc_info=True)
         try:
-            from cptr.utils.skills import review_skills_after_turn
+            if not is_cancel_requested(message_id):
+                from cptr.utils.skills import review_skills_after_turn
 
-            await review_skills_after_turn(
-                workspace=workspace,
-                conversation_messages=review_messages,
-                assistant_reply=content,
-                model_connection=review_model_connection,
-                model=review_model_name,
-                loaded_skill_names=loaded_skill_names,
-                tool_names=tool_names_used,
-                skill_create_requested=skill_create_requested,
-                plan_mode=bool(review_chat_params.get("plan_mode")),
-                subagent=bool(review_chat_params.get("subagent")),
-                skills_enabled=task_completed_success
-                and skill_authoring_allowed
-                and "manage_skill" not in disabled_builtin_tool_names(review_builtin_tools),
-            )
+                await review_skills_after_turn(
+                    workspace=workspace,
+                    conversation_messages=review_messages,
+                    assistant_reply=content,
+                    model_connection=review_model_connection,
+                    model=review_model_name,
+                    loaded_skill_names=loaded_skill_names,
+                    tool_names=tool_names_used,
+                    skill_create_requested=skill_create_requested,
+                    plan_mode=bool(review_chat_params.get("plan_mode")),
+                    subagent=bool(review_chat_params.get("subagent")),
+                    skills_enabled=task_completed_success
+                    and skill_authoring_allowed
+                    and "manage_skill" not in disabled_builtin_tool_names(review_builtin_tools),
+                )
         except Exception:
             logger.debug("[skills] Failed to review conversation", exc_info=True)
         # Process any pending user prompts or internal subagent results.
         try:
-            await process_pending_chat_inputs(request, chat_id, user_id, workspace)
+            if not is_cancel_requested(message_id):
+                await process_pending_chat_inputs(request, chat_id, user_id, workspace)
         except Exception:
             logger.exception(f"Failed to process pending inputs for chat {chat_id}")
+        finally:
+            _cancel_requested.discard(message_id)

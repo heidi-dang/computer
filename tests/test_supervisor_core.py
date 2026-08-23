@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from cptr.services.supervisor import (
@@ -107,6 +108,22 @@ class FinalGateRepairDirector(FakeDirector):
                 next_assignment="Repair the final acceptance failure.",
             )
         return Decision(goal_satisfied=True)
+
+
+class BlockingObserveAgent(FakeAgentService):
+    def __init__(self):
+        super().__init__()
+        self.observe_started = asyncio.Event()
+        self.release_observe = asyncio.Event()
+
+    async def get_task(self, task_id, **kwargs):
+        self.observe_started.set()
+        await self.release_observe.wait()
+        return {"id": task_id, "status": "COMPLETE", "output": "worker finished"}
+
+
+class CountingDirector(FakeDirector):
+    pass
 
 
 class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
@@ -237,6 +254,35 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.status, MonitorStatus.COMPLETE)
         self.assertEqual(agent.cancelled, [])
+
+    async def test_cancel_stops_stale_supervision_before_verification_or_repair(self):
+        store = InMemorySupervisorStore()
+        agent = BlockingObserveAgent()
+        director = CountingDirector()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=director)
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Cancel during observation",
+            acceptance_criteria=["The work is cancelled safely"],
+            model_id="model-1",
+        )
+
+        await supervisor.run_once(monitor.monitor_id)
+        stale_run = asyncio.create_task(supervisor.run_once(monitor.monitor_id))
+        await asyncio.wait_for(agent.observe_started.wait(), timeout=1)
+
+        cancelled = await supervisor.cancel(monitor.monitor_id)
+        self.assertEqual(cancelled.status, MonitorStatus.CANCELLED)
+        agent.release_observe.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await stale_run
+
+        state = await store.get_monitor(monitor.monitor_id)
+        self.assertEqual(state.status, MonitorStatus.CANCELLED)
+        self.assertEqual(state.scopes[0].status, ScopeStatus.CANCELLED)
+        self.assertEqual(director.evaluations, 0)
+        self.assertEqual(len(agent.started), 1)
 
     async def test_approval_is_persisted_enforced_and_resumed(self):
         store = InMemorySupervisorStore()

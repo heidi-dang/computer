@@ -103,15 +103,18 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(
                     side_effect=[
                         task,
+                        SimpleNamespace(**{**task.__dict__, "status": "CANCEL_REQUESTED"}),
                         SimpleNamespace(**{**task.__dict__, "status": "CANCELLED"}),
                     ]
                 ),
             ),
             patch.object(
                 service.store,
-                "transition_terminal",
+                "request_cancel",
                 new=AsyncMock(return_value=True),
-            ) as transition,
+            ) as request_cancel,
+            patch.object(service.store, "invalidate_messages_for_task", new=AsyncMock()),
+            patch.object(service.store, "finalize_cancel", new=AsyncMock(return_value=True)),
             patch("cptr.utils.chat_task.cancel_task", new=AsyncMock(return_value=True)),
             patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
             patch.object(service.store, "update", new=AsyncMock()),
@@ -120,7 +123,7 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "CANCELLED")
         self.assertTrue(result["cancelled"])
-        transition.assert_awaited_once()
+        request_cancel.assert_awaited_once()
 
     async def test_send_message_stays_queued_while_target_worker_is_running(self):
         service = AgentService()
@@ -193,7 +196,7 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(
                 service.store,
-                "transition_terminal",
+                "request_cancel",
                 new=AsyncMock(return_value=False),
             ),
             patch("cptr.utils.chat_task.cancel_task", new=AsyncMock()) as cancel,
@@ -233,9 +236,19 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch.object(
-                service.store, "get", new=AsyncMock(side_effect=[task, cancelled, cancelled])
+                service.store,
+                "get",
+                new=AsyncMock(
+                    side_effect=[
+                        task,
+                        SimpleNamespace(**{**task.__dict__, "status": "CANCEL_REQUESTED"}),
+                        cancelled,
+                    ]
+                ),
             ),
-            patch.object(service.store, "transition_terminal", new=AsyncMock(return_value=True)),
+            patch.object(service.store, "request_cancel", new=AsyncMock(return_value=True)),
+            patch.object(service.store, "invalidate_messages_for_task", new=AsyncMock()),
+            patch.object(service.store, "finalize_cancel", new=AsyncMock(return_value=True)),
             patch("cptr.utils.chat_task.cancel_task", new=AsyncMock(return_value=True)),
             patch("cptr.utils.chat_task.is_running", return_value=True),
             patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
@@ -244,6 +257,46 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             result = await service.cancel_task("task-1", user_id="user-1")
 
         self.assertEqual(result["status"], "CANCELLED")
+
+    async def test_cancel_reports_blocker_when_owned_execution_does_not_quiesce(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do work",
+            model_id="model-1",
+            output=None,
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        requested = SimpleNamespace(**{**task.__dict__, "status": "CANCEL_REQUESTED"})
+        message = SimpleNamespace(
+            id="message-1",
+            chat_id="chat-1",
+            done=False,
+            content="partial",
+            output=[],
+            meta={"error": "owned execution still active"},
+        )
+        with (
+            patch.object(
+                service.store, "get", new=AsyncMock(side_effect=[task, requested, requested])
+            ),
+            patch.object(service.store, "request_cancel", new=AsyncMock(return_value=True)),
+            patch.object(service.store, "invalidate_messages_for_task", new=AsyncMock()),
+            patch("cptr.utils.chat_task.cancel_task", new=AsyncMock(return_value=False)),
+            patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
+        ):
+            result = await service.cancel_task("task-1", user_id="user-1")
+
+        self.assertEqual(result["status"], "CANCEL_REQUESTED")
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["cancellation_status"], "BLOCKED")
 
     async def test_reconciles_disappeared_worker_after_restart(self):
         service = AgentService()

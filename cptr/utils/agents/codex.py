@@ -23,6 +23,7 @@ from cptr.utils.agents.events import (
 )
 from cptr.utils.agents.prompts import session_turn_prompt_text
 from cptr.utils.identity import env_for, preexec_for
+from cptr.utils.processes import terminate_process_group
 
 CODEX_STDOUT_CHUNK_SIZE = 64 * 1024
 CODEX_MAX_WIRE_MESSAGE_CHARS = 16 * 1024 * 1024
@@ -52,6 +53,7 @@ class CodexAppServer:
             stderr=asyncio.subprocess.PIPE,
             cwd=self.cwd or os.getcwd(),
             env=self.env,
+            start_new_session=True,
             preexec_fn=self.preexec_fn,
         )
         self.reader_task = asyncio.create_task(self._reader_loop())
@@ -66,13 +68,7 @@ class CodexAppServer:
         await self.notify("initialized")
 
     async def close(self) -> None:
-        if self.proc and self.proc.returncode is None:
-            self.proc.terminate()
-            with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self.proc.wait(), timeout=3)
-            if self.proc.returncode is None:
-                self.proc.kill()
-                await self.proc.wait()
+        await terminate_process_group(self.proc, timeout=3)
         for task in (self.reader_task, self.stderr_task):
             if task:
                 task.cancel()

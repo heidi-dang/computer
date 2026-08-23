@@ -83,6 +83,9 @@ if _execute_timeout is not None:
 STREAM_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_CONNECT_TIMEOUT", "30"))
 STREAM_READ_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_READ_TIMEOUT", "300"))
 STREAM_WRITE_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_WRITE_TIMEOUT", "600"))
+TASK_CANCELLATION_TIMEOUT_SECONDS = max(
+    0.1, float(os.environ.get("CPTR_TASK_CANCELLATION_TIMEOUT", "10"))
+)
 
 # ── Automation scheduler ────────────────────────────────────
 AUTOMATION_POLL_INTERVAL = int(os.environ.get("AUTOMATION_POLL_INTERVAL", "10"))
