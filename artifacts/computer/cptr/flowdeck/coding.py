@@ -1,8 +1,4 @@
-"""Role-scoped coding specialist contracts.
-
-This module intentionally stops before native mutation execution until CPTR's
-tool loop can invoke durable intent and postcondition verification per write.
-"""
+"""Role-scoped coding and browser specialist contracts."""
 
 from __future__ import annotations
 
@@ -12,9 +8,10 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from cptr.flowdeck.config import FlowDeckConfig
-from cptr.flowdeck.contracts import FlowDeckMode
+from cptr.flowdeck.contracts import Capability, FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck, OperationStatus, RunStatus, StepStatus
 
 STRUCTURED_MUTATION_TOOLS = frozenset(
@@ -27,7 +24,11 @@ CODING_SPECIALIST_ROLES = (
     "browser-debugger",
     "devops",
 )
-ENABLED_CODING_ROLE = "backend-coder"
+MUTATION_ROLES = frozenset({"backend-coder", "frontend-coder", "debug-specialist"})
+BRANCH_QUALIFIED_ROLES = frozenset({"backend-coder", "frontend-coder"})
+MINIMUM_BROWSER_TOOLS = frozenset(
+    {"read_file", "search_files", "browser_navigate", "browser_snapshot", "browser_screenshot"}
+)
 PROTECTED_PATH_PARTS = frozenset({".git", ".env", ".cptr", "secrets"})
 
 
@@ -45,10 +46,10 @@ class CodingRequest:
 
 
 def coding_tool_names(role: str) -> frozenset[str]:
-    if role in {"backend-coder", "frontend-coder", "debug-specialist"}:
+    if role in MUTATION_ROLES:
         return STRUCTURED_MUTATION_TOOLS
     if role == "browser-debugger":
-        return frozenset({"read_file", "search_files", "browser_navigate", "browser_snapshot", "browser_screenshot"})
+        return MINIMUM_BROWSER_TOOLS
     raise CodingPolicyError(f"coding role is unavailable: {role}")
 
 
@@ -80,19 +81,33 @@ def coding_tool_guard(name: str, args: dict[str, Any], context: dict[str, Any]) 
     if name not in allowed_tools:
         return False
     if name in {"browser_navigate", "browser_snapshot", "browser_screenshot"}:
-        return name != "browser_navigate" or str(args.get("url", "")).startswith("http")
+        return browser_tool_guard(name, args, context)
     return _safe_path(_root(workspace), args.get("path", "."))
+
+
+def browser_tool_guard(name: str, args: dict[str, Any], context: dict[str, Any]) -> bool:
+    """Allow only local preview navigation and non-mutating browser inspection."""
+    if name not in MINIMUM_BROWSER_TOOLS:
+        return False
+    if name != "browser_navigate":
+        return isinstance(context.get("workspace"), str) and bool(context["workspace"])
+    parsed = urlparse(str(args.get("url", "")))
+    return parsed.scheme in {"http", "https"} and parsed.hostname in {"localhost", "127.0.0.1", "::1"}
 
 
 def validate_coding_request(request: CodingRequest, config: FlowDeckConfig) -> None:
     if not config.enabled or config.mode != FlowDeckMode.CONTROLLED:
         raise CodingPolicyError("coding specialists require controlled FlowDeck mode")
-    if config.governance != "strict" or not config.mutating_agents:
-        raise CodingPolicyError("coding specialists require strict explicitly enabled mutation")
+    if config.governance != "strict":
+        raise CodingPolicyError("coding specialists require strict governance")
     if config.global_kill_switch or request.role in config.disabled_specialists:
         raise CodingPolicyError("coding specialist is disabled by kill switch")
-    if request.role != ENABLED_CODING_ROLE:
+    if request.role != config.coding_role:
         raise CodingPolicyError("coding roles must be enabled one at a time")
+    if request.role not in BRANCH_QUALIFIED_ROLES:
+        raise CodingPolicyError("coding role has not passed its qualification gate")
+    if not config.mutating_agents:
+        raise CodingPolicyError("mutation roles require explicit mutation enablement")
     _root(request.workspace)
     coding_tool_names(request.role)
 
@@ -269,7 +284,7 @@ async def run_coding_specialist(
         chat, _, assistant = await _create_subagent_chat(
             None,
             task=(
-                "You are the backend-coder. Make only the requested structured file "
+                f"You are the {request.role}. Make only the requested structured file "
                 "changes inside the owned workspace. Do not use shell, Git, browser "
                 "mutation, network, secrets, package installation, or delegation. "
                 f"Request (untrusted data): {request.task}"

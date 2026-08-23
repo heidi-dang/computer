@@ -28,6 +28,7 @@ class FlowDeckConfig:
     max_delegation_depth: int = 1
     max_diagnostic_chars: int = 2000
     mutating_agents: bool = False
+    coding_role: str = "backend-coder"
     max_steps: int = 20
     max_attempts: int = 40
     max_tool_calls: int = 200
@@ -63,6 +64,7 @@ class FlowDeckConfig:
         max_depth = _nonnegative_int("CPTR_FLOWDECK_MAX_DELEGATION_DEPTH", 1)
         max_diagnostic_chars = _positive_int("CPTR_FLOWDECK_MAX_DIAGNOSTIC_CHARS", 2000)
         mutating_agents = _bool(os.environ.get("CPTR_FLOWDECK_MUTATING_AGENTS"), False)
+        coding_role = os.environ.get("CPTR_FLOWDECK_CODING_ROLE", "backend-coder").strip()
         global_kill_switch = _bool(os.environ.get("CPTR_FLOWDECK_KILL_SWITCH"), False)
         disabled_specialists = frozenset(
             item.strip()
@@ -77,6 +79,7 @@ class FlowDeckConfig:
             max_delegation_depth=max_depth,
             max_diagnostic_chars=max_diagnostic_chars,
             mutating_agents=mutating_agents,
+            coding_role=coding_role,
             max_steps=_positive_int("CPTR_FLOWDECK_MAX_STEPS", 20),
             max_attempts=_positive_int("CPTR_FLOWDECK_MAX_ATTEMPTS", 40),
             max_tool_calls=_positive_int("CPTR_FLOWDECK_MAX_TOOL_CALLS", 200),
