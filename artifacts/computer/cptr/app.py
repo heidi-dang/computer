@@ -14,10 +14,10 @@ from cptr.routers import (
     automations_router,
     bridge_router,
     browser_router,
-    webhook_router,
     chat_router,
     events_router,
     files_router,
+    flowdeck_router,
     gateway_router,
     git_router,
     images_router,
@@ -27,6 +27,7 @@ from cptr.routers import (
     skills_router,
     state_router,
     terminal_router,
+    webhook_router,
     workspace_router,
 )
 from cptr.utils.config import check_access, load_config
@@ -287,6 +288,7 @@ app.include_router(chat_router)
 app.include_router(events_router)
 app.include_router(files_router)
 app.include_router(gateway_router)
+app.include_router(flowdeck_router)
 app.include_router(git_router)
 app.include_router(images_router)
 app.include_router(memory_router)

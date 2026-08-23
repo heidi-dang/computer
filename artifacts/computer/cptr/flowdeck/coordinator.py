@@ -179,6 +179,8 @@ async def run_heidi_coordinator(
     )
     if not created and run.status == RunStatus.SUCCEEDED.value:
         return CoordinatorResult("succeeded", run.id, (), ())
+    if run.status == RunStatus.CANCELLED.value:
+        return CoordinatorResult("cancelled", run.id, (), ())
     if run.status == RunStatus.PENDING.value:
         await store.start_run(run.id)
     parent_step = await store.get_step(run.id)
@@ -196,6 +198,9 @@ async def run_heidi_coordinator(
     children: list[dict[str, Any]] = []
     outputs: list[str] = []
     for index, item in enumerate(plan):
+        current_run = await store.get_run_by_request_key(request.request_key)
+        if current_run and current_run.status == RunStatus.CANCELLED.value:
+            return CoordinatorResult("cancelled", current_run.id, tuple(children), tuple(outputs))
         budget.consume_step()
         budget.consume_delegation()
         child_key = f"{request.request_key}:child:{index}:{item.specialist_id}"

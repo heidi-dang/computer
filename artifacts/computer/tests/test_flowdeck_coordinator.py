@@ -15,7 +15,13 @@ from cptr.flowdeck.coordinator import (
     classify_coordinator_request,
     run_heidi_coordinator,
 )
-from cptr.flowdeck.durable import DurableFlowDeck, RunStatus, StepStatus
+from cptr.flowdeck.durable import (
+    DurableFlowDeck,
+    LifecycleError,
+    OperationStatus,
+    RunStatus,
+    StepStatus,
+)
 from cptr.flowdeck.registry import AGENT_REGISTRY, get_agent
 from cptr.models.base import Base
 from cptr.models.workspaces import Workspace
@@ -194,3 +200,45 @@ class CoordinatorDurableWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(result.children), 3)
         self.assertTrue(all(item["status"] == "succeeded" for item in result.children))
         self.assertEqual(len(result.outputs), 3)
+
+    async def test_cancellation_preserves_unknown_and_blocks_finalization(self):
+        run, _ = await self.store.create_run(
+            request_key="cancel-workflow",
+            owner="owner",
+            workspace=str(self.root),
+            step_name="heidi-coordinator",
+        )
+        await self.store.start_run(run.id)
+        step = await self.store.get_step(run.id)
+        await self.store.start_step(step.id)
+        operation, _ = await self.store.record_intent(
+            run_id=run.id,
+            idempotency_key="cancel-workflow:child",
+            capability="delegate_specialist",
+            target="tester",
+            reconcile_kind="coordinator_child",
+            step_id=step.id,
+        )
+        attempt = await self.store.prepare_attempt(
+            operation_id=operation.id, owner="owner", fencing_epoch=0
+        )
+        cancelled = await self.store.cancel_run(
+            run_id=run.id, owner="owner", workspace=str(self.root)
+        )
+        self.assertEqual(cancelled.status, RunStatus.CANCELLED.value)
+        operations = await self.store.get_run_operations(run.id)
+        self.assertEqual(operations[0].status, OperationStatus.OUTCOME_UNKNOWN.value)
+        with self.assertRaises(LifecycleError):
+            await self.store.finish_attempt(
+                attempt.id,
+                owner="owner",
+                fencing_epoch=0,
+                outcome="succeeded",
+                evidence={
+                    "source": "verifier",
+                    "authoritative": True,
+                    "observation": "verifier_check",
+                    "observed_outcome": "succeeded",
+                    "attempt_id": attempt.id,
+                },
+            )

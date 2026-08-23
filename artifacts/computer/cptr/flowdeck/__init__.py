@@ -4,6 +4,12 @@ FlowDeck owns policy and durable orchestration; CPTR remains the only
 component that executes model/tool work.
 """
 
+from cptr.flowdeck.authenticated_gateway import (
+    AuthenticatedGatewayError,
+    SpecialistDispatchRequest,
+    dispatch_authenticated_specialist,
+    resolve_gateway_workspace,
+)
 from cptr.flowdeck.budgets import BudgetExceeded, RunBudget
 from cptr.flowdeck.coding import (
     CODING_SPECIALIST_ROLES,
@@ -16,14 +22,6 @@ from cptr.flowdeck.coding import (
     validate_coding_request,
 )
 from cptr.flowdeck.config import FlowDeckConfig
-from cptr.flowdeck.coordinator import (
-    CoordinatorPolicyError,
-    CoordinatorRequest,
-    CoordinatorResult,
-    PlannedDelegation,
-    classify_coordinator_request,
-    run_heidi_coordinator,
-)
 from cptr.flowdeck.contracts import (
     AgentDefinition,
     AgentRole,
@@ -35,6 +33,14 @@ from cptr.flowdeck.contracts import (
     RouteDecision,
     RouteStrategy,
     ShadowDiagnostic,
+)
+from cptr.flowdeck.coordinator import (
+    CoordinatorPolicyError,
+    CoordinatorRequest,
+    CoordinatorResult,
+    PlannedDelegation,
+    classify_coordinator_request,
+    run_heidi_coordinator,
 )
 from cptr.flowdeck.durable import (
     ApprovalStatus,
@@ -60,17 +66,11 @@ from cptr.flowdeck.execution import (
     validate_mapper_request,
 )
 from cptr.flowdeck.fdx import FDXConfig, FDXPolicyError, FDXResult, run_fdx, run_optional_fdx
+from cptr.flowdeck.gateway import observe_request
 from cptr.flowdeck.git_readonly import (
     GitInspectionPolicyError,
     GitInspectionRequest,
     inspect_git,
-)
-from cptr.flowdeck.gateway import observe_request
-from cptr.flowdeck.authenticated_gateway import (
-    AuthenticatedGatewayError,
-    SpecialistDispatchRequest,
-    dispatch_authenticated_specialist,
-    resolve_gateway_workspace,
 )
 from cptr.flowdeck.registry import AGENT_REGISTRY, get_agent, validate_registry
 from cptr.flowdeck.tester import (

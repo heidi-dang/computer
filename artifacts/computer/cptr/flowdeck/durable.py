@@ -43,6 +43,7 @@ class RunStatus(str, Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+    CANCELLED = "CANCELLED"
 
 
 class StepStatus(str, Enum):
@@ -51,6 +52,7 @@ class StepStatus(str, Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     MANUAL_REVIEW_REQUIRED = "MANUAL_REVIEW_REQUIRED"
+    CANCELLED = "CANCELLED"
 
 
 class OperationStatus(str, Enum):
@@ -277,6 +279,91 @@ class DurableFlowDeck:
             return await db.scalar(
                 select(FlowDeckRun).where(FlowDeckRun.request_key == request_key)
             )
+
+    async def get_run_for_owner(
+        self, *, run_id: str, owner: str, workspace: str
+    ) -> FlowDeckRun | None:
+        async with self.session_factory() as db:
+            return await db.scalar(
+                select(FlowDeckRun).where(
+                    FlowDeckRun.id == run_id,
+                    FlowDeckRun.owner == owner,
+                    FlowDeckRun.workspace == workspace,
+                )
+            )
+
+    async def cancel_run(
+        self, *, run_id: str, owner: str, workspace: str, now: int | None = None
+    ) -> FlowDeckRun:
+        """Cancel future work while preserving uncertainty for active attempts."""
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            if run.owner != owner or run.workspace != workspace:
+                raise LifecycleError("run ownership or workspace mismatch")
+            if run.status == RunStatus.CANCELLED.value:
+                return run
+            self._require(
+                run.status,
+                {
+                    RunStatus.PENDING.value,
+                    RunStatus.RUNNING.value,
+                    RunStatus.ORPHANED.value,
+                    RunStatus.RECOVERING.value,
+                },
+            )
+            operations = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckLogicalOperation).where(
+                            FlowDeckLogicalOperation.run_id == run_id
+                        )
+                    )
+                ).all()
+            )
+            for item in operations:
+                if item.status == OperationStatus.INTENT_RECORDED.value:
+                    item.status = OperationStatus.MANUAL_REVIEW_REQUIRED.value
+                elif item.status == OperationStatus.RUNNING.value:
+                    item.status = OperationStatus.OUTCOME_UNKNOWN.value
+                    item.outcome = None
+                    attempts = list(
+                        (
+                            await db.scalars(
+                                select(FlowDeckPhysicalAttempt).where(
+                                    FlowDeckPhysicalAttempt.operation_id == item.id,
+                                    FlowDeckPhysicalAttempt.status.in_(
+                                        {
+                                            AttemptStatus.PREPARED.value,
+                                            AttemptStatus.RUNNING.value,
+                                        }
+                                    ),
+                                )
+                            )
+                        ).all()
+                    )
+                    for attempt in attempts:
+                        attempt.status = AttemptStatus.UNKNOWN.value
+                        attempt.error = "cancelled while outcome was uncertain"
+                        attempt.ended_at = now
+            steps = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckStep).where(FlowDeckStep.run_id == run_id)
+                    )
+                ).all()
+            )
+            for step in steps:
+                if step.status in {StepStatus.PENDING.value, StepStatus.RUNNING.value}:
+                    step.status = StepStatus.CANCELLED.value
+                    step.updated_at = now
+            run.status = RunStatus.CANCELLED.value
+            run.updated_at = now
+            await self._event(db, run_id, "RUN_CANCELLED", {}, now)
+            return run
+
+        return await self._transaction(operation)
 
     async def get_run_operations(self, run_id: str) -> list[FlowDeckLogicalOperation]:
         async with self.session_factory() as db:

@@ -22,6 +22,7 @@ def _bool(value: str | None, default: bool = False) -> bool:
 @dataclass(frozen=True)
 class FlowDeckConfig:
     enabled: bool = False
+    coordinator_enabled: bool = False
     mode: FlowDeckMode = FlowDeckMode.OFF
     governance: str = "strict"
     max_specialists: int = 4
@@ -64,6 +65,9 @@ class FlowDeckConfig:
         max_depth = _nonnegative_int("CPTR_FLOWDECK_MAX_DELEGATION_DEPTH", 1)
         max_diagnostic_chars = _positive_int("CPTR_FLOWDECK_MAX_DIAGNOSTIC_CHARS", 2000)
         mutating_agents = _bool(os.environ.get("CPTR_FLOWDECK_MUTATING_AGENTS"), False)
+        coordinator_enabled = _bool(
+            os.environ.get("CPTR_FLOWDECK_COORDINATOR_ENABLED"), False
+        )
         coding_role = os.environ.get("CPTR_FLOWDECK_CODING_ROLE", "backend-coder").strip()
         global_kill_switch = _bool(os.environ.get("CPTR_FLOWDECK_KILL_SWITCH"), False)
         disabled_specialists = frozenset(
@@ -73,6 +77,7 @@ class FlowDeckConfig:
         )
         return cls(
             enabled=True,
+            coordinator_enabled=coordinator_enabled,
             mode=mode,
             governance=governance,
             max_specialists=max_specialists,
