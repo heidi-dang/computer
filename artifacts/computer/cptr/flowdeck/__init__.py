@@ -29,6 +29,7 @@ from cptr.flowdeck.durable import (
     RunStatus,
     StaleWriterError,
 )
+from cptr.flowdeck.evidence import EvidenceValidationError
 from cptr.flowdeck.execution import (
     MAPPER_CAPABILITIES,
     MAPPER_TOOL_NAMES,
@@ -58,6 +59,7 @@ __all__ = [
     "DelegationRequest",
     "DuplicateRequestError",
     "DurableFlowDeck",
+    "EvidenceValidationError",
     "FlowDeckConfig",
     "FlowDeckMode",
     "GovernanceDecision",

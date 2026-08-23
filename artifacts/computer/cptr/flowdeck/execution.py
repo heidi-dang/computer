@@ -203,8 +203,11 @@ async def run_read_only_specialist(
         evidence={
             "source": "runtime",
             "authoritative": True,
+            "observation": "native_loop_return",
+            "observed_outcome": "succeeded",
             "chat_id": chat.id,
             "attempt_id": attempt.id,
+            "specialist_claim": None,
         },
     )
     await store.finish_step(step.id, status=StepStatus.SUCCEEDED)

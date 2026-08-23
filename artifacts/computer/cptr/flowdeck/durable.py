@@ -28,6 +28,10 @@ from cptr.models.flowdeck import (
     FlowDeckStep,
     FlowDeckWorkspaceLease,
 )
+from cptr.flowdeck.evidence import (
+    validate_reconciliation_evidence,
+    validate_terminal_evidence,
+)
 
 
 class RunStatus(str, Enum):
@@ -501,11 +505,10 @@ class DurableFlowDeck:
         """Commit a positively observed attempt outcome under the current fence."""
         if outcome not in {"succeeded", "failed"}:
             raise LifecycleError("attempt outcome must be succeeded or failed")
-        if (
-            evidence.get("authoritative") is not True
-            or evidence.get("source") not in {"runtime", "verifier"}
-        ):
-            raise LifecycleError("attempt completion requires authoritative runtime/verifier evidence")
+        try:
+            validate_terminal_evidence(evidence, outcome=outcome, attempt_id=attempt_id)
+        except ValueError as exc:
+            raise LifecycleError(str(exc)) from exc
         now = self.clock() if now is None else now
 
         async def operation(db: AsyncSession):
@@ -587,6 +590,12 @@ class DurableFlowDeck:
                 for item in operations
             ):
                 raise LifecycleError("run has non-terminal operations")
+            if any(
+                not isinstance(item.authoritative_evidence, dict)
+                or item.authoritative_evidence.get("authoritative") is not True
+                for item in operations
+            ):
+                raise LifecycleError("run requires authoritative evidence for every operation")
             run.status = status.value
             run.updated_at = now
             await self._event(
@@ -615,12 +624,14 @@ class DurableFlowDeck:
                     OperationStatus.MANUAL_REVIEW_REQUIRED.value,
                 },
             )
-            source = (evidence or {}).get("source")
-            authoritative = (evidence or {}).get("authoritative") is True
-            positively_reconciled = outcome in {"succeeded", "failed"} and authoritative and source in {
-                "verifier",
-                "runtime",
-            }
+            positively_reconciled = False
+            if outcome in {"succeeded", "failed"}:
+                try:
+                    validate_reconciliation_evidence(evidence, outcome=outcome)
+                except ValueError:
+                    pass
+                else:
+                    positively_reconciled = True
             if positively_reconciled:
                 op.status = (
                     OperationStatus.SUCCEEDED.value
