@@ -1,0 +1,5 @@
+{
+  "buildCommand": "npm run build",
+  "outputDirectory": "cptr/frontend/build",
+  "framework": "sveltekit"
+}
