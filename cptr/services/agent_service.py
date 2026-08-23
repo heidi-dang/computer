@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import hashlib
 from typing import Any
 
 from cptr.models import Chat, ChatMessage, ControlTask, Workspace
@@ -157,11 +158,33 @@ class AgentService:
         status = task.status
         error = (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
         if message.done:
-            status = "CANCELLED" if status == "CANCELLED" else ("FAILED" if error else "COMPLETE")
+            desired_status = (
+                "CANCELLED" if status == "CANCELLED" else ("FAILED" if error else "COMPLETE")
+            )
+            if desired_status != status:
+                transition = getattr(self.store, "transition_terminal", None)
+                if callable(transition) and task.__class__ is ControlTask:
+                    won = await transition(
+                        task.id,
+                        status=desired_status,
+                        error=error,
+                        updated_at=int(time.time() * 1000),
+                    )
+                    if won:
+                        status = desired_status
+                    else:
+                        current = await self.store.get(task.id)
+                        status = current.status if current else status
+                else:
+                    status = desired_status
         else:
             from cptr.utils.chat_task import is_running
 
-            if is_running(message.id):
+            if status in {"CANCELLED", "COMPLETE", "FAILED"}:
+                # A durable terminal transition wins over a late worker
+                # heartbeat or a message row that has not flushed yet.
+                pass
+            elif is_running(message.id):
                 status = "RUNNING"
             elif status in {"RUNNING", "PENDING"}:
                 status = "FAILED"
@@ -171,12 +194,21 @@ class AgentService:
                     meta={"error": "interrupted by CPTR restart"},
                 )
                 error = "interrupted by CPTR restart"
-                await self.store.update(
-                    task.id,
-                    status=status,
-                    error="interrupted by CPTR restart",
-                    updated_at=int(time.time() * 1000),
-                )
+                transition = getattr(self.store, "transition_terminal", None)
+                if callable(transition) and task.__class__ is ControlTask:
+                    await transition(
+                        task.id,
+                        status=status,
+                        error="interrupted by CPTR restart",
+                        updated_at=int(time.time() * 1000),
+                    )
+                else:
+                    await self.store.update(
+                        task.id,
+                        status=status,
+                        error="interrupted by CPTR restart",
+                        updated_at=int(time.time() * 1000),
+                    )
         output = message.content or ""
         if status != task.status or task.output != output:
             await self.store.update(
@@ -209,7 +241,14 @@ class AgentService:
             "raw_output": task["raw_output"],
         }
 
-    async def send_message(self, task_id: str, *, user_id: str, content: str) -> dict[str, Any]:
+    async def send_message(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        content: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
         task = await self.store.get(task_id)
         if task is None or task.user_id != user_id:
             raise KeyError("task not found")
@@ -217,49 +256,124 @@ class AgentService:
         if not content:
             raise ValueError("message must not be blank")
         now = int(time.time() * 1000)
-        message = await ChatMessage.create(
-            chat_id=task.chat_id,
-            role="user",
-            content=content,
-            meta={"queued": True, "control_task_id": task.id},
-            created_at=now,
+        dedupe_key = (
+            idempotency_key or hashlib.sha256(f"{task.id}\0{content}".encode("utf-8")).hexdigest()
         )
+        control_message = await self.store.enqueue_message(
+            task_id=task.id,
+            user_id=user_id,
+            chat_id=task.chat_id,
+            content=content,
+            dedupe_key=dedupe_key,
+            chat_message_id=None,
+            now=now,
+        )
+        message_id = control_message.chat_message_id
+        if not message_id:
+            # Recover the bind if the process stopped after committing the
+            # control row or chat row but before the second update.
+            existing_messages = await ChatMessage.get_all_by_chat(task.chat_id)
+            existing = next(
+                (
+                    item
+                    for item in existing_messages
+                    if (item.meta or {}).get("control_message_id") == control_message.id
+                ),
+                None,
+            )
+            if existing is not None:
+                message_id = existing.id
+                await self.store.update_message(control_message.id, chat_message_id=message_id)
+        if not message_id:
+            message = await ChatMessage.create(
+                chat_id=task.chat_id,
+                role="user",
+                content=content,
+                meta={
+                    "queued": True,
+                    "delivery_status": "QUEUED",
+                    "control_task_id": task.id,
+                    "control_message_id": control_message.id,
+                },
+                created_at=now,
+            )
+            message_id = message.id
+            await self.store.update_message(control_message.id, chat_message_id=message_id)
         from cptr.utils.chat_task import process_pending_chat_inputs
-        from cptr.utils.identity import internal_request_for_user
 
-        request = await internal_request_for_user(None, user_id)
-        chat = await Chat.get_by_id(task.chat_id)
-        workspace = (chat.meta or {}).get("workspace", "") if chat else ""
-        await process_pending_chat_inputs(request, task.chat_id, user_id, workspace)
-        return {"task_id": task.id, "message_id": message.id, "status": "QUEUED"}
+        from cptr.utils.chat_task import get_active_chat_ids, is_running
+
+        if not is_running(task.message_id) and task.chat_id not in get_active_chat_ids():
+            from cptr.utils.identity import internal_request_for_user
+
+            request = await internal_request_for_user(None, user_id)
+            chat = await Chat.get_by_id(task.chat_id)
+            workspace = (chat.meta or {}).get("workspace", "") if chat else ""
+            await process_pending_chat_inputs(request, task.chat_id, user_id, workspace)
+            refreshed = await self.store.get_message(control_message.id)
+            if refreshed is not None:
+                control_message = refreshed
+        return {
+            "task_id": task.id,
+            "message_id": message_id,
+            "control_message_id": control_message.id,
+            "status": "QUEUED",
+            "delivery_status": control_message.status,
+        }
 
     async def cancel_task(self, task_id: str, *, user_id: str) -> dict[str, Any]:
         task = await self.store.get(task_id)
         if task is None or task.user_id != user_id:
             raise KeyError("task not found")
+        now = int(time.time() * 1000)
+        transition = getattr(self.store, "transition_terminal", None)
+        if callable(transition):
+            won = await transition(
+                task.id,
+                status="CANCELLED",
+                cancelled_at=now,
+                updated_at=now,
+                error="cancelled",
+            )
+            if not won:
+                current = await self.store.get(task.id)
+                result = await self.get_task(task.id, user_id=user_id)
+                result["cancelled"] = False
+                result["cancel_race"] = (
+                    "completion_won"
+                    if current and current.status == "COMPLETE"
+                    else "terminal_state_won"
+                )
+                return result
         from cptr.utils.chat_task import cancel_task
 
         found = await cancel_task(task.message_id)
-        now = int(time.time() * 1000)
         if not found:
             await ChatMessage.update(
                 task.message_id,
                 done=True,
                 meta={"error": "cancelled"},
             )
-        await self.store.update(task.id, status="CANCELLED", cancelled_at=now, updated_at=now)
-        return await self.get_task(task.id, user_id=user_id)
+        if not callable(transition):
+            await self.store.update(task.id, status="CANCELLED", cancelled_at=now, updated_at=now)
+        result = await self.get_task(task.id, user_id=user_id)
+        result["cancelled"] = True
+        return result
 
     async def get_diff(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
         async with await get_db() as db:
             workspace = await db.get(Workspace, workspace_id)
             if workspace is None or workspace.user_id != user_id:
                 raise KeyError("workspace not found")
-        from cptr.utils.git import diff
+        from cptr.utils.git import diff, is_repo
         from cptr.utils.identity import identity_for_user_id
 
         identity = await identity_for_user_id(user_id)
-        return await diff(workspace.path, None, False, True, False, identity)
+        if not await is_repo(workspace.path, identity):
+            return {"is_repo": False, "files": [], "diagnostic": "not a git repository"}
+        result = await diff(workspace.path, None, False, True, False, identity)
+        result["is_repo"] = True
+        return result
 
     async def get_verification_evidence(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
         async with await get_db() as db:

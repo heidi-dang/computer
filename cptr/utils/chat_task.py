@@ -570,6 +570,11 @@ async def process_pending_chat_inputs(request, chat_id: str, user_id: str, works
     """
     lock = get_pending_input_lock(chat_id)
     async with lock:
+        # A follow-up is a continuation, not a second concurrent worker.  The
+        # durable queue remains in place until the active worker reaches its
+        # terminal persistence path and calls this function again.
+        if chat_id in get_active_chat_ids():
+            return
         while True:
             all_msgs = await ChatMessage.get_all_by_chat(chat_id)
 
@@ -579,15 +584,25 @@ async def process_pending_chat_inputs(request, chat_id: str, user_id: str, works
 
             combined_content = "\n\n".join(m.content for m in input_batch if m.content)
             combined_meta = _merge_pending_input_meta(input_batch)
+            combined_meta = dict(combined_meta or {})
+            control_message_ids = [
+                str((m.meta or {}).get("control_message_id"))
+                for m in input_batch
+                if (m.meta or {}).get("control_message_id")
+            ]
+            control_task_ids = {
+                str((m.meta or {}).get("control_task_id"))
+                for m in input_batch
+                if (m.meta or {}).get("control_task_id")
+            }
+            if control_message_ids:
+                combined_meta["control_message_ids"] = control_message_ids
 
             chat = await Chat.get_by_id(chat_id)
             if not chat:
                 return
 
             parent_id = input_batch[0].parent_id
-
-            for m in input_batch:
-                await ChatMessage.delete(m.id)
 
             combined_msg = await ChatMessage.create(
                 chat_id=chat_id,
@@ -633,6 +648,31 @@ async def process_pending_chat_inputs(request, chat_id: str, user_id: str, works
             )
             await Chat.update_current_message(chat_id, assistant_msg.id, now_ms())
 
+            # Keep the original queued records as durable audit/evidence rows;
+            # only remove their pending marker after the continuation exists.
+            for m in input_batch:
+                meta = dict(m.meta or {})
+                meta["queued"] = False
+                meta["delivery_status"] = "DELIVERED"
+                meta["transcript_message_id"] = combined_msg.id
+                await ChatMessage.update(m.id, meta=meta)
+
+            from cptr.services.control_store import ControlTaskStore
+
+            control_store = ControlTaskStore()
+            for control_message_id in control_message_ids:
+                await control_store.update_message(
+                    control_message_id,
+                    status="DELIVERED",
+                    target_message_id=assistant_msg.id,
+                    delivered_at=now_ms(),
+                    updated_at=now_ms(),
+                )
+            for control_task_id in control_task_ids:
+                await control_store.repoint_task_message(
+                    control_task_id, assistant_msg.id, now=now_ms()
+                )
+
             # Notify frontend that pending inputs became transcript messages.
             await emit_to_user(
                 user_id,
@@ -644,19 +684,29 @@ async def process_pending_chat_inputs(request, chat_id: str, user_id: str, works
             )
 
             # Start new task and continue draining other ready branch batches.
-            start_task(
-                request,
-                message_id=assistant_msg.id,
-                chat_id=chat_id,
-                user_id=user_id,
-                workspace=workspace,
-                target=target,
-            )
+            try:
+                start_task(
+                    request,
+                    message_id=assistant_msg.id,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    workspace=workspace,
+                    target=target,
+                )
+            except Exception:
+                for control_message_id in control_message_ids:
+                    await control_store.update_message(
+                        control_message_id,
+                        status="FAILED",
+                        updated_at=now_ms(),
+                    )
+                raise
             logger.info(
                 "[chat-input] Processed %d pending input message(s) for chat %s",
                 len(input_batch),
                 chat_id[:8],
             )
+            return
 
 
 async def reconcile_chat_state():
@@ -682,8 +732,22 @@ async def reconcile_chat_state():
         stuck = list(result.scalars().all())
 
     healed_chats: set[str] = set()
+    resumable_control_messages: list[ChatMessage] = []
     for msg in stuck:
         if not is_running(msg.id):
+            parent = await ChatMessage.get_by_id(msg.parent_id) if msg.parent_id else None
+            control_message_ids = (
+                (parent.meta or {}).get("control_message_ids", []) if parent else []
+            )
+            if isinstance(control_message_ids, list) and control_message_ids:
+                # A control continuation may have been launched and consumed
+                # immediately before the process stopped. Resume that exact
+                # assistant message so the durable steering record is neither
+                # lost nor delivered to a duplicate continuation.
+                resumable_control_messages.append(msg)
+                healed_chats.add(msg.chat_id)
+                logger.warning("[reconcile] Resuming control continuation %s after restart", msg.id)
+                continue
             logger.warning("[reconcile] Marking stuck message %s as done", msg.id)
             meta = dict(msg.meta or {})
             meta["error"] = "interrupted by server restart"
@@ -699,6 +763,20 @@ async def reconcile_chat_state():
                 from cptr.utils.identity import internal_request_for_user
 
                 request = await internal_request_for_user(None, chat.user_id)
+                for message in resumable_control_messages:
+                    if message.chat_id != cid:
+                        continue
+                    from cptr.utils.model_targets import resolve_model_target
+
+                    target = await resolve_model_target(message.model or "")
+                    start_task(
+                        request,
+                        message_id=message.id,
+                        chat_id=cid,
+                        user_id=chat.user_id,
+                        workspace=workspace,
+                        target=target,
+                    )
                 await process_pending_chat_inputs(request, cid, chat.user_id, workspace)
             except Exception:
                 logger.exception("[reconcile] Failed to process pending inputs for chat %s", cid)
@@ -1470,6 +1548,19 @@ async def run_chat_task(
         parent_msg = await ChatMessage.get_by_id(msg.parent_id)
         if parent_msg and parent_msg.role == "user":
             summary_message_id = parent_msg.id
+            control_message_ids = (parent_msg.meta or {}).get("control_message_ids", [])
+            if isinstance(control_message_ids, list) and control_message_ids:
+                from cptr.services.control_store import ControlTaskStore
+
+                control_store = ControlTaskStore()
+                consumed_at = now_ms()
+                for control_message_id in control_message_ids:
+                    await control_store.update_message(
+                        str(control_message_id),
+                        status="CONSUMED",
+                        consumed_at=consumed_at,
+                        updated_at=consumed_at,
+                    )
     content = (msg.content or "") if msg else ""
     output_items: list[dict] = list(msg.output or []) if msg else []
     text_buffer = ""  # Accumulates text between tool calls

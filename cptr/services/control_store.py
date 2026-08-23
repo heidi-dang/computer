@@ -16,6 +16,7 @@ from cptr.models import (
     AutonomousScope,
     AutonomousWorkspaceLease,
     ControlIdempotency,
+    ControlMessage,
     ControlTask,
 )
 from cptr.services.supervisor import (
@@ -95,6 +96,15 @@ class SqlSupervisorStore:
             row = await db.get(AutonomousMonitor, monitor.monitor_id)
             if row is None:
                 raise KeyError(f"monitor not found: {monitor.monitor_id}")
+            terminal = {
+                MonitorStatus.COMPLETE.value,
+                MonitorStatus.CANCELLED.value,
+                MonitorStatus.BLOCKED.value,
+                MonitorStatus.FAILED.value,
+            }
+            if row.status in terminal and row.status != monitor.status.value:
+                await db.rollback()
+                return
             row.status = monitor.status.value
             row.current_scope_id = monitor.current_scope_id
             row.approval_id = monitor.approval_id
@@ -120,6 +130,26 @@ class SqlSupervisorStore:
                 target.history = [item.value for item in scope.history]
                 target.updated_at = scope.updated_at
             await db.commit()
+
+    async def cancel_monitor(self, monitor_id: str) -> bool:
+        async with await get_db() as db:
+            result = await db.execute(
+                update(AutonomousMonitor)
+                .where(
+                    AutonomousMonitor.id == monitor_id,
+                    AutonomousMonitor.status.not_in(
+                        [
+                            MonitorStatus.COMPLETE.value,
+                            MonitorStatus.CANCELLED.value,
+                            MonitorStatus.BLOCKED.value,
+                            MonitorStatus.FAILED.value,
+                        ]
+                    ),
+                )
+                .values(status=MonitorStatus.CANCELLED.value, updated_at=_now_ms())
+            )
+            await db.commit()
+            return result.rowcount == 1
 
     async def claim_monitor(self, monitor_id: str) -> bool:
         now = _now_ms()
@@ -419,3 +449,107 @@ class ControlTaskStore:
         async with await get_db() as db:
             await db.execute(update(ControlTask).where(ControlTask.id == task_id).values(**values))
             await db.commit()
+
+    async def transition_terminal(
+        self,
+        task_id: str,
+        *,
+        status: str,
+        updated_at: int,
+        error: str | None = None,
+        cancelled_at: int | None = None,
+    ) -> bool:
+        """Atomically claim the one durable terminal transition for a task."""
+        values: dict[str, Any] = {"status": status, "updated_at": updated_at}
+        if error is not None:
+            values["error"] = error
+        if cancelled_at is not None:
+            values["cancelled_at"] = cancelled_at
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.status.not_in(("COMPLETE", "FAILED", "CANCELLED")),
+                )
+                .values(**values)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def enqueue_message(
+        self,
+        *,
+        task_id: str,
+        user_id: str,
+        chat_id: str,
+        content: str,
+        dedupe_key: str,
+        chat_message_id: str | None,
+        now: int,
+    ) -> ControlMessage:
+        """Create or return one durable follow-up message by its retry key."""
+        async with await get_db() as db:
+            result = await db.execute(
+                select(ControlMessage).where(
+                    ControlMessage.user_id == user_id,
+                    ControlMessage.task_id == task_id,
+                    ControlMessage.dedupe_key == dedupe_key,
+                )
+            )
+            existing = result.scalar_one_or_none()
+            if existing is not None:
+                return existing
+            message = ControlMessage(
+                user_id=user_id,
+                task_id=task_id,
+                chat_id=chat_id,
+                chat_message_id=chat_message_id,
+                content=content,
+                dedupe_key=dedupe_key,
+                status="QUEUED",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(message)
+            try:
+                await db.commit()
+            except IntegrityError:
+                await db.rollback()
+                result = await db.execute(
+                    select(ControlMessage).where(
+                        ControlMessage.user_id == user_id,
+                        ControlMessage.task_id == task_id,
+                        ControlMessage.dedupe_key == dedupe_key,
+                    )
+                )
+                existing = result.scalar_one_or_none()
+                if existing is None:
+                    raise
+                return existing
+            await db.refresh(message)
+            return message
+
+    async def update_message(self, message_id: str, **values: Any) -> bool:
+        if not values:
+            return False
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlMessage).where(ControlMessage.id == message_id).values(**values)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def get_message(self, message_id: str) -> ControlMessage | None:
+        async with await get_db() as db:
+            return await db.get(ControlMessage, message_id)
+
+    async def repoint_task_message(self, task_id: str, message_id: str, *, now: int) -> bool:
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(ControlTask.id == task_id, ControlTask.status.not_in(("CANCELLED",)))
+                .values(message_id=message_id, status="RUNNING", updated_at=now)
+            )
+            await db.commit()
+            return result.rowcount == 1

@@ -38,6 +38,31 @@ class ControlTask(Base):
     )
 
 
+class ControlMessage(Base):
+    """Durable follow-up delivery record for task and autonomous steering."""
+
+    __tablename__ = "control_messages"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    user_id = Column(Text, ForeignKey("users.id"), nullable=False)
+    task_id = Column(Text, ForeignKey("control_tasks.id", ondelete="CASCADE"), nullable=False)
+    chat_id = Column(Text, ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
+    chat_message_id = Column(Text, ForeignKey("chat_messages.id"), nullable=True)
+    content = Column(Text, nullable=False)
+    dedupe_key = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="QUEUED")
+    target_message_id = Column(Text, nullable=True)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+    delivered_at = Column(BigInteger, nullable=True)
+    consumed_at = Column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "task_id", "dedupe_key", name="uq_control_message_dedupe"),
+        Index("ix_control_message_chat_status", "chat_id", "status"),
+    )
+
+
 class AutonomousMonitor(Base):
     __tablename__ = "autonomous_monitors"
 

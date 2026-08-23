@@ -141,6 +141,8 @@ class SupervisorStore(Protocol):
 
     async def save_monitor(self, monitor: MonitorState) -> None: ...
 
+    async def cancel_monitor(self, monitor_id: str) -> bool: ...
+
     async def claim_monitor(self, monitor_id: str) -> bool: ...
 
     async def release_monitor(self, monitor_id: str) -> None: ...
@@ -191,8 +193,31 @@ class InMemorySupervisorStore:
         return self.monitors.get(monitor_id)
 
     async def save_monitor(self, monitor: MonitorState) -> None:
+        existing = self.monitors.get(monitor.monitor_id)
+        terminal = {
+            MonitorStatus.COMPLETE,
+            MonitorStatus.CANCELLED,
+            MonitorStatus.BLOCKED,
+            MonitorStatus.FAILED,
+        }
+        if existing and existing.status in terminal and monitor.status != existing.status:
+            return
         monitor.updated_at = int(time.time() * 1000)
         self.monitors[monitor.monitor_id] = monitor
+
+    async def cancel_monitor(self, monitor_id: str) -> bool:
+        monitor = self.monitors.get(monitor_id)
+        if monitor is None:
+            return False
+        if monitor.status in {
+            MonitorStatus.COMPLETE,
+            MonitorStatus.CANCELLED,
+            MonitorStatus.BLOCKED,
+            MonitorStatus.FAILED,
+        }:
+            return False
+        monitor.status = MonitorStatus.CANCELLED
+        return True
 
     async def claim_monitor(self, monitor_id: str) -> bool:
         lock = self._locks.setdefault(monitor_id, asyncio.Lock())
@@ -382,6 +407,10 @@ class AutonomousSupervisor:
         return monitor
 
     async def cancel(self, monitor_id: str) -> MonitorState:
+        monitor = await self._required_monitor(monitor_id)
+        cancel_monitor = getattr(self.store, "cancel_monitor", None)
+        if callable(cancel_monitor) and not await cancel_monitor(monitor_id):
+            return await self._required_monitor(monitor_id)
         monitor = await self._required_monitor(monitor_id)
         monitor.status = MonitorStatus.CANCELLED
         for scope in monitor.scopes:

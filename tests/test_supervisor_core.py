@@ -218,6 +218,26 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent.cancelled, ["task_1"])
         self.assertEqual(state.scopes[0].status, ScopeStatus.CANCELLED)
 
+    async def test_cancel_does_not_overwrite_completed_monitor(self):
+        store = InMemorySupervisorStore()
+        agent = FakeAgentService()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=FakeDirector())
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Already complete",
+            acceptance_criteria=["The work is complete"],
+            model_id="model-1",
+        )
+        monitor.status = MonitorStatus.COMPLETE
+        monitor.scopes[0].status = ScopeStatus.VERIFIED
+        await store.save_monitor(monitor)
+
+        result = await supervisor.cancel(monitor.monitor_id)
+
+        self.assertEqual(result.status, MonitorStatus.COMPLETE)
+        self.assertEqual(agent.cancelled, [])
+
     async def test_approval_is_persisted_enforced_and_resumed(self):
         store = InMemorySupervisorStore()
         agent = FakeAgentService()

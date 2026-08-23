@@ -17,6 +17,7 @@ from cptr.models.control import (
     AutonomousMonitor,
     AutonomousScope,
     AutonomousWorkspaceLease,
+    ControlMessage,
     ControlIdempotency,
     ControlTask,
 )
@@ -37,6 +38,7 @@ __all__ = [
     "Chat",
     "ChatMessage",
     "Config",
+    "ControlMessage",
     "ControlIdempotency",
     "ControlTask",
     "File",
