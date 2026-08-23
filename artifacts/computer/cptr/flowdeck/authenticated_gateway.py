@@ -102,6 +102,12 @@ async def dispatch_authenticated_specialist(
         user_id=user_id,
         requested_workspace=dispatch.workspace,
     )
+    # Re-read ownership immediately before entering any native model/tool loop.
+    workspace = await resolve_gateway_workspace(
+        session_factory=session_factory,
+        user_id=user_id,
+        requested_workspace=workspace,
+    )
     if dispatch.role in {"backend-coder", "frontend-coder"}:
         return await run_coding_specialist(
             CodingRequest(

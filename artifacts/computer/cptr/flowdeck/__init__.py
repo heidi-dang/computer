@@ -12,8 +12,6 @@ from cptr.flowdeck.coding import (
     browser_tool_guard,
     coding_tool_guard,
     coding_tool_names,
-    run_browser_debugger,
-    run_coding_specialist,
     validate_browser_request,
     validate_coding_request,
 )
@@ -51,8 +49,6 @@ from cptr.flowdeck.execution import (
     MapperPolicyError,
     MapperRequest,
     mapper_tool_guard,
-    run_mapper,
-    run_read_only_specialist,
     validate_mapper_request,
 )
 from cptr.flowdeck.fdx import FDXConfig, FDXPolicyError, FDXResult, run_fdx, run_optional_fdx
@@ -129,12 +125,8 @@ __all__ = [
     "inspect_git",
     "mapper_tool_guard",
     "observe_request",
-    "run_browser_debugger",
-    "run_coding_specialist",
     "run_fdx",
-    "run_mapper",
     "run_optional_fdx",
-    "run_read_only_specialist",
     "run_tester",
     "resolve_gateway_workspace",
     "SpecialistDispatchRequest",

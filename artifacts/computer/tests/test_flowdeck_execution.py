@@ -19,6 +19,7 @@ from cptr.flowdeck.execution import (
     validate_mapper_request,
 )
 from cptr.models.base import Base
+from cptr.models.workspaces import Workspace
 from cptr.utils.tools import execute_tool, get_tool_list
 
 
@@ -32,6 +33,17 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
             await connection.run_sync(Base.metadata.create_all)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.store = DurableFlowDeck(self.sessions, clock=lambda: 1000)
+        async with self.sessions() as session:
+            session.add(
+                Workspace(
+                    user_id="user-1",
+                    path=str(self.workspace.name),
+                    name="test",
+                    data={},
+                    created_at=1000,
+                )
+            )
+            await session.commit()
         self.request = MapperRequest(
             request_key="mapper-request",
             task="Map the repository structure.",

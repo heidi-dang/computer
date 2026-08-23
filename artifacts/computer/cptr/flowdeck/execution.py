@@ -123,6 +123,22 @@ async def run_read_only_specialist(
         from cptr.utils.db import get_session_factory
 
         store = DurableFlowDeck(get_session_factory())
+    from cptr.flowdeck.coding import resolve_authorized_workspace
+
+    root = await resolve_authorized_workspace(
+        session_factory=store.session_factory,
+        user_id=request.user_id,
+        workspace=request.workspace,
+    )
+    request = MapperRequest(
+        request_key=request.request_key,
+        task=request.task,
+        workspace=str(root),
+        user_id=request.user_id,
+        model=request.model,
+        connection=request.connection,
+        parent_chat_id=request.parent_chat_id,
+    )
 
     run, created = await store.create_run(
         request_key=request.request_key,

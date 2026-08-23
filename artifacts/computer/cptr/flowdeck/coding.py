@@ -28,7 +28,7 @@ CODING_SPECIALIST_ROLES = (
     "browser-debugger",
     "devops",
 )
-MUTATION_ROLES = frozenset({"backend-coder", "frontend-coder", "debug-specialist"})
+MUTATION_ROLES = frozenset({"backend-coder", "frontend-coder"})
 BRANCH_QUALIFIED_ROLES = frozenset({"backend-coder", "frontend-coder"})
 MINIMUM_BROWSER_TOOLS = frozenset(
     {"read_file", "search_files", "browser_navigate", "browser_snapshot", "browser_screenshot"}
@@ -476,6 +476,18 @@ async def run_browser_debugger(
         from cptr.utils.db import get_session_factory
 
         store = DurableFlowDeck(get_session_factory())
+    root = await resolve_authorized_workspace(
+        session_factory=store.session_factory,
+        user_id=request.user_id,
+        workspace=request.workspace,
+    )
+    request = CodingRequest(
+        role=request.role,
+        workspace=str(root),
+        user_id=request.user_id,
+        task=request.task,
+        request_key=request.request_key,
+    )
     run, created = await store.create_run(
         request_key=request.request_key,
         owner=request.user_id,
