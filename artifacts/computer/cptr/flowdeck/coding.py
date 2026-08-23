@@ -187,7 +187,7 @@ def _browser_prompt(task: str) -> str:
     )
 
 
-async def run_coding_specialist(
+async def _native_run_coding_specialist(
     request: CodingRequest,
     *,
     model: str,
@@ -461,7 +461,7 @@ async def run_coding_specialist(
     return result
 
 
-async def run_browser_debugger(
+async def _native_run_browser_debugger(
     request: CodingRequest,
     *,
     model: str,
@@ -570,6 +570,66 @@ async def run_browser_debugger(
     await store.finish_step(step.id, status=StepStatus.SUCCEEDED)
     await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
     return result
+
+
+async def run_coding_specialist(
+    request: CodingRequest,
+    *,
+    authenticated_request: Any,
+    model: str,
+    connection: dict[str, Any],
+    parent_chat_id: str,
+    store: DurableFlowDeck | None = None,
+) -> str:
+    """Authenticated compatibility boundary; authority comes from CPTR request."""
+    from cptr.flowdeck.authenticated_gateway import (
+        SpecialistDispatchRequest,
+        dispatch_authenticated_specialist,
+    )
+
+    return await dispatch_authenticated_specialist(
+        authenticated_request,
+        SpecialistDispatchRequest(
+            role=request.role,
+            request_key=request.request_key,
+            task=request.task,
+            workspace=request.workspace,
+            model=model,
+            connection=connection,
+            parent_chat_id=parent_chat_id,
+        ),
+        store=store,
+    )
+
+
+async def run_browser_debugger(
+    request: CodingRequest,
+    *,
+    authenticated_request: Any,
+    model: str,
+    connection: dict[str, Any],
+    parent_chat_id: str,
+    store: DurableFlowDeck | None = None,
+) -> str:
+    """Authenticated compatibility boundary; authority comes from CPTR request."""
+    from cptr.flowdeck.authenticated_gateway import (
+        SpecialistDispatchRequest,
+        dispatch_authenticated_specialist,
+    )
+
+    return await dispatch_authenticated_specialist(
+        authenticated_request,
+        SpecialistDispatchRequest(
+            role="browser-debugger",
+            request_key=request.request_key,
+            task=request.task,
+            workspace=request.workspace,
+            model=model,
+            connection=connection,
+            parent_chat_id=parent_chat_id,
+        ),
+        store=store,
+    )
 
 
 async def _heartbeat_run(store: DurableFlowDeck, run_id: str) -> None:

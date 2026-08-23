@@ -16,8 +16,8 @@ from cptr.flowdeck.coding import (
     browser_tool_guard,
     coding_tool_guard,
     resolve_authorized_workspace,
-    run_browser_debugger,
-    run_coding_specialist,
+    _native_run_browser_debugger,
+    _native_run_coding_specialist,
     validate_browser_request,
     validate_coding_request,
 )
@@ -130,7 +130,7 @@ class CodingContractTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_native_mutation_stays_gated_until_per_write_hooks_exist(self):
         with self.assertRaises(CodingPolicyError):
-            await run_coding_specialist(
+            await _native_run_coding_specialist(
                 self.request,
                 model="model",
                 connection={},
@@ -218,7 +218,7 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="native result"),
             ) as run_chat,
         ):
-            result = await run_coding_specialist(
+            result = await _native_run_coding_specialist(
                 self.request,
                 model="model",
                 connection={"provider": "test"},
@@ -343,7 +343,7 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                     new=native_loop,
                 ),
             ):
-                result = await run_coding_specialist(
+                result = await _native_run_coding_specialist(
                     request,
                     model="model",
                     connection={"provider": "test"},
@@ -440,7 +440,7 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaises(CodingPolicyError),
         ):
-            await run_coding_specialist(
+            await _native_run_coding_specialist(
                 self.request,
                 model="model",
                 connection={"provider": "test"},
@@ -504,7 +504,7 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value="browser result"),
             ) as run_chat,
         ):
-            result = await run_browser_debugger(
+                result = await _native_run_browser_debugger(
                 request,
                 model="model",
                 connection={"provider": "test"},

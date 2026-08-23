@@ -14,13 +14,13 @@ from sqlalchemy import select
 
 from cptr.flowdeck.coding import (
     CodingRequest,
-    run_browser_debugger,
-    run_coding_specialist,
+    _native_run_browser_debugger,
+    _native_run_coding_specialist,
 )
 from cptr.flowdeck.execution import (
     READ_ONLY_SPECIALIST_IDS,
     MapperRequest,
-    run_read_only_specialist,
+    _native_run_read_only_specialist,
 )
 from cptr.models.workspaces import Workspace
 
@@ -109,7 +109,7 @@ async def dispatch_authenticated_specialist(
         requested_workspace=workspace,
     )
     if dispatch.role in {"backend-coder", "frontend-coder"}:
-        return await run_coding_specialist(
+        return await _native_run_coding_specialist(
             CodingRequest(
                 role=dispatch.role,
                 workspace=workspace,
@@ -123,7 +123,7 @@ async def dispatch_authenticated_specialist(
             store=store,
         )
     if dispatch.role == "browser-debugger":
-        return await run_browser_debugger(
+        return await _native_run_browser_debugger(
             CodingRequest(
                 role=dispatch.role,
                 workspace=workspace,
@@ -137,7 +137,7 @@ async def dispatch_authenticated_specialist(
             store=store,
         )
     if dispatch.role in READ_ONLY_SPECIALIST_IDS:
-        return await run_read_only_specialist(
+        return await _native_run_read_only_specialist(
             MapperRequest(
                 request_key=dispatch.request_key,
                 task=dispatch.task,

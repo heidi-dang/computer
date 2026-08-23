@@ -15,7 +15,7 @@ from cptr.flowdeck.execution import (
     MapperPolicyError,
     MapperRequest,
     mapper_tool_guard,
-    run_mapper,
+    _native_run_read_only_specialist,
     validate_mapper_request,
 )
 from cptr.models.base import Base
@@ -123,7 +123,7 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ),
         ):
-            result = await run_mapper(self.request, store=self.store)
+            result = await _native_run_read_only_specialist(self.request, "mapper", store=self.store)
 
         self.assertEqual(result, "runtime-observed mapper result")
         create_chat.assert_awaited_once()
@@ -167,9 +167,9 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
                     clear=False,
                 ),
             ):
-                from cptr.flowdeck.execution import run_read_only_specialist
+                from cptr.flowdeck.execution import _native_run_read_only_specialist
 
-                result = await run_read_only_specialist(
+                result = await _native_run_read_only_specialist(
                     request, specialist_id, store=self.store
                 )
             self.assertEqual(result, f"{specialist_id} result")
@@ -209,7 +209,7 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
         ):
             results = await asyncio.gather(
                 *(
-                    run_mapper(request, store=self.store)
+                    _native_run_read_only_specialist(request, "mapper", store=self.store)
                     for request in requests
                 )
             )
@@ -255,7 +255,7 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
             ),
             self.assertRaises(asyncio.CancelledError),
         ):
-            await run_mapper(self.request, store=self.store)
+            await _native_run_read_only_specialist(self.request, "mapper", store=self.store)
 
         run, created = await self.store.create_run(
             request_key=self.request.request_key,

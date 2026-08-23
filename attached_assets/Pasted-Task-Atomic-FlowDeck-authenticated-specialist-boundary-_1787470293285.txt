@@ -1,0 +1,295 @@
+Task
+Atomic FlowDeck authenticated specialist-boundary refactor
+
+Goal:
+Make the authenticated FlowDeck gateway the only authoritative specialist execution boundary without expanding authority, adding a production route, or touching the separate Git adversarial-test milestone.
+
+Current known-good baseline:
+- FlowDeck/backend suite: 68/68 passing
+- Authenticated gateway exists
+- Durable workspace ownership checks exist
+- Browser/read-only paths perform ownership revalidation
+- debug-specialist is read-only
+- Package-level lower-level execution exports were removed
+- Native CPTR remains the only model/tool execution owner
+- FDX and all higher-risk authority remain disabled
+
+Known remaining problem:
+These module-level functions remain directly callable and accept request dataclasses containing caller-controlled user_id/workspace:
+- run_coding_specialist
+- run_browser_debugger
+- run_read_only_specialist
+- run_mapper
+
+This task must close that boundary atomically.
+
+To dev
+1. Inspect before modifying.
+   - Find every definition, import, reference, wrapper, test caller, and indirect caller of:
+     - run_coding_specialist
+     - run_browser_debugger
+     - run_read_only_specialist
+     - run_mapper
+   - Find every construction of CodingRequest / MapperRequest or equivalent specialist execution request objects.
+   - Confirm the authenticated gateway call graph.
+   - Confirm no production route currently executes specialists.
+   - Record the pre-change 68/68 baseline.
+
+2. Refactor the native execution implementations to private/internal functions.
+   Target conceptual boundary:
+
+   authenticated CPTR request
+       → authenticated FlowDeck gateway
+       → canonical user/workspace authorization
+       → private specialist native implementation
+       → existing CPTR native execution loop
+
+   Do NOT create another model/tool loop.
+
+3. The private native implementations may receive already-authorized internal execution context, but they must not be exposed as public production authority boundaries.
+
+4. Any compatibility-facing callable must require the authenticated CPTR request/context.
+   - Derive user identity exclusively from authenticated CPTR request state.
+   - Do not trust caller-supplied user_id as authority.
+   - Do not trust caller-supplied workspace as authority.
+   - Resolve the requested workspace against durable Workspace ownership.
+   - Require exactly one canonical workspace for the authenticated user.
+   - Fail closed for:
+     - missing authentication
+     - malformed authentication
+     - wrong user
+     - forged path
+     - stale ownership
+     - ambiguous ownership
+     - missing ownership
+     - mismatched runtime identity
+     - mismatched runtime workspace
+
+5. Compatibility wrappers must delegate through the authenticated gateway rather than directly invoking private native implementations.
+
+6. Do not leave a second public path that can execute a specialist using a caller-created user_id/workspace request object.
+
+7. Update existing unit tests atomically with the contract change.
+   - Tests specifically validating private/native internals may import private implementations only when genuinely testing internal mechanics.
+   - Security/integration tests must use the authenticated gateway/public authenticated boundary.
+   - Do not weaken tests merely to preserve pass counts.
+
+8. Preserve all existing controls:
+   - CPTR owns all model/provider/tool execution.
+   - Stable logical operation IDs.
+   - Separate physical attempts.
+   - Intent-before-side-effect.
+   - Workspace lease.
+   - Fencing epoch.
+   - Heartbeats.
+   - OUTCOME_UNKNOWN.
+   - MANUAL_REVIEW_REQUIRED.
+   - Authoritative verifier/runtime evidence.
+   - Single-mutator policy.
+   - Budgets.
+   - Cancellation/orphan recovery.
+   - Existing structured tool allowlists.
+   - Protected-path and traversal/symlink controls.
+
+9. debug-specialist must remain read-only:
+   - read_file
+   - list_directory
+   - search_files
+
+10. Do NOT work on the separate Git adversarial-test milestone in this task.
+
+11. Do NOT enable:
+   - FDX
+   - devops
+   - debug-specialist mutation
+   - Git mutation
+   - unrestricted shell
+   - MCP
+   - network writes
+   - package installation
+   - deployment
+   - publishing
+   - secrets access
+   - unrestricted Heidi autonomy
+   - new orchestration UI
+   - production specialist execution routes
+
+12. Do not change workflows/configuration/dependencies unless the refactor absolutely requires it. If it appears necessary, stop and report why instead of broadening scope.
+
+Roadmap
+1. Baseline
+   - Confirm clean/known working-tree state.
+   - Run existing FlowDeck/backend suite.
+   - Capture caller/reference graph for all four lower-level functions.
+
+2. Contract design
+   - Define private native execution functions.
+   - Define authenticated compatibility/public boundary.
+   - Confirm there is one authoritative path.
+
+3. Atomic implementation
+   - Rename/internalize native functions.
+   - Update gateway dispatch.
+   - Convert compatibility callables to authenticated-request-required wrappers or remove them when unnecessary.
+   - Remove caller-controlled identity as authority.
+   - Ensure canonical workspace comes from durable authenticated resolution.
+   - Update all affected call sites in the same change.
+
+4. Existing-test migration
+   - Update direct callers.
+   - Preserve internal-unit coverage.
+   - Move security/authorization coverage through authenticated boundary.
+
+5. Security tests
+   Add explicit tests proving rejection of:
+   - no authenticated request
+   - missing auth.user_id
+   - caller-forged user_id
+   - wrong user
+   - forged workspace
+   - stale Workspace record
+   - ambiguous duplicate Workspace mapping
+   - cross-user read attempt
+   - runtime identity mismatch
+   - runtime workspace mismatch
+   - attempts to use compatibility wrappers without authenticated context
+   - direct forbidden specialist tool dispatch
+
+6. Regression verification
+   - Run focused gateway/coding/execution/durability tests.
+   - Run complete FlowDeck/backend suite.
+   - Compile changed Python modules.
+   - Run targeted Ruff only on changed implementation/tests.
+   - Run git diff --check.
+   - Run migration initialization/sanity path.
+   - Run API smoke.
+   - Run frontend production build.
+
+7. Acceptance audit
+   Search the repository again and prove:
+   - no production-facing specialist execution callable accepts caller-controlled identity as authority
+   - no public compatibility wrapper directly invokes a native implementation
+   - no active route bypasses authenticated gateway
+   - all requested specialists are covered by the same authentication/ownership boundary
+   - debug-specialist remains read-only
+   - no authority expansion occurred
+
+8. Stop after this milestone.
+   Do not continue into Git adversarial hardening or additional FlowDeck authority in the same task.
+
+Commands
+Run from the current repository/workspace without using user-specific absolute paths.
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git log -n 10 --oneline
+
+grep -RInE 'run_coding_specialist|run_browser_debugger|run_read_only_specialist|run_mapper|CodingRequest|MapperRequest|dispatch_authenticated_specialist' cptr tests --exclude-dir='__pycache__'
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+
+After implementation:
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+
+python3 -m compileall -q cptr/flowdeck
+
+CHANGED_PY="$(git diff --name-only -- '*.py' | tr '\n' ' ')"
+if [ -n "$CHANGED_PY" ]; then
+  python3 -m ruff check $CHANGED_PY
+fi
+
+git diff --check
+
+grep -RInE 'run_coding_specialist|run_browser_debugger|run_read_only_specialist|run_mapper' cptr tests --exclude-dir='__pycache__'
+
+grep -RInE 'CodingRequest\(|MapperRequest\(' cptr tests --exclude-dir='__pycache__'
+
+git status --short
+git diff --stat
+git diff
+
+Use the repository's existing migration-initialization, API smoke, and frontend production-build commands already used successfully in this Replit environment. Do not invent a second setup path.
+
+Bug checks
+- Public wrapper still accepts user_id as trusted authority → FAIL
+- Public wrapper still accepts workspace as trusted authority → FAIL
+- Native specialist implementation remains production-public/exposed → FAIL
+- Compatibility wrapper directly invokes native implementation instead of authenticated gateway → FAIL
+- Browser/read-only execution can run without authenticated CPTR request → FAIL
+- Cross-user workspace read is possible → FAIL
+- Runtime request identity is not matched to authenticated identity → FAIL
+- Runtime workspace is not matched to canonical authorized workspace → FAIL
+- Duplicate/stale durable Workspace ownership does not fail closed → FAIL
+- Existing durable intent/lease/fencing/recovery semantics weakened → FAIL
+- debug-specialist gains mutation authority → FAIL
+- Tool allowlist expands → FAIL
+- Another model/tool execution loop is introduced → FAIL
+- Production specialist route added → FAIL
+- FDX or other deferred authority enabled → FAIL
+- Existing 68-test baseline regresses without a documented legitimate test-count replacement → FAIL
+- Refactor leaves both old and new authoritative execution paths alive → FAIL
+
+Tests before commit
+Acceptance requires all of the following:
+
+1. Baseline existing tests continue to pass after necessary test migration.
+2. New authenticated-boundary tests pass.
+3. Missing authenticated identity is rejected.
+4. Forged caller identity cannot become authority.
+5. Wrong-user workspace is rejected.
+6. Forged workspace is rejected.
+7. Stale workspace mapping is rejected.
+8. Ambiguous workspace ownership is rejected.
+9. Cross-user read is rejected.
+10. Runtime identity mismatch is rejected.
+11. Runtime workspace mismatch is rejected.
+12. All nine currently supported specialist roles use the authenticated boundary:
+    - backend-coder
+    - frontend-coder
+    - browser-debugger
+    - debug-specialist
+    - mapper
+    - researcher
+    - architect
+    - reviewer
+    - security-auditor
+13. debug-specialist remains read-only.
+14. Durable recovery/idempotency/lease/fencing tests remain passing.
+15. Python compilation passes.
+16. Targeted Ruff for changed files passes.
+17. git diff --check passes.
+18. Migration initialization passes.
+19. API smoke returns HTTP 200.
+20. Frontend production build passes.
+21. Repository-wide post-refactor search confirms there is no remaining unauthenticated authoritative specialist execution path.
+
+Required closure evidence:
+- Before/after call graph.
+- Exact functions internalized/removed/wrapped.
+- Exact authentication source.
+- Exact workspace ownership/revalidation sequence.
+- Exact tests added/updated.
+- Full pass counts.
+- Search evidence for remaining direct callers.
+- Confirmation no production execution route was added.
+- Confirmation no authority was expanded.
+- Remaining risks, if any.
+- Final score.
+
+Score must be >= 9/10 to call this milestone complete.
+Anything below 9/10 = NOT DONE.
+
+Commit/push
+Do NOT push to GitHub.
+
+Do not commit merely because tests pass.
+
+First complete the implementation, verification, post-change security audit, and closure report.
+
+Leave the final verified diff available for review.
+
+Only create a local commit if I explicitly approve it after reviewing the closure report.

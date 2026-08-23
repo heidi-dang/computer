@@ -107,7 +107,7 @@ def _specialist_prompt(specialist_id: str, task: str) -> str:
     )
 
 
-async def run_read_only_specialist(
+async def _native_run_read_only_specialist(
     request: MapperRequest,
     specialist_id: str,
     *,
@@ -231,6 +231,44 @@ async def run_read_only_specialist(
     return result
 
 
-async def run_mapper(request: MapperRequest, *, store: DurableFlowDeck | None = None) -> str:
-    """Run the mapper vertical slice through CPTR's native subagent path."""
-    return await run_read_only_specialist(request, "mapper", store=store)
+async def run_read_only_specialist(
+    request: MapperRequest,
+    specialist_id: str,
+    *,
+    authenticated_request: Any,
+    store: DurableFlowDeck | None = None,
+) -> str:
+    """Authenticated compatibility boundary; authority comes from CPTR request."""
+    from cptr.flowdeck.authenticated_gateway import (
+        SpecialistDispatchRequest,
+        dispatch_authenticated_specialist,
+    )
+
+    return await dispatch_authenticated_specialist(
+        authenticated_request,
+        SpecialistDispatchRequest(
+            role=specialist_id,
+            request_key=request.request_key,
+            task=request.task,
+            workspace=request.workspace,
+            model=request.model,
+            connection=request.connection,
+            parent_chat_id=request.parent_chat_id,
+        ),
+        store=store,
+    )
+
+
+async def run_mapper(
+    request: MapperRequest,
+    *,
+    authenticated_request: Any,
+    store: DurableFlowDeck | None = None,
+) -> str:
+    """Authenticated mapper compatibility boundary."""
+    return await run_read_only_specialist(
+        request,
+        "mapper",
+        authenticated_request=authenticated_request,
+        store=store,
+    )
