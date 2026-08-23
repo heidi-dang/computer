@@ -7,6 +7,7 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from cptr.flowdeck.durable import DurableFlowDeck
 from cptr.flowdeck.fdx import (
     FDXConfig,
     FDXPolicyError,
@@ -15,7 +16,6 @@ from cptr.flowdeck.fdx import (
     run_optional_fdx,
     validate_workspace_jail,
 )
-from cptr.flowdeck.durable import DurableFlowDeck
 from cptr.models.base import Base
 
 
@@ -56,12 +56,14 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         os.unlink(self.db_path)
 
     async def _run_fdx(self, payload, **kwargs):
+        kwargs.pop("workspace", None)
         run, _ = await self.store.create_run(
             request_key=f"fdx-{id(payload)}-{len(kwargs)}",
             owner="fdx-test",
             workspace=str(self.workspace),
         )
-        await self.store.start_run(run.id)
+        if run.status == "PENDING":
+            await self.store.start_run(run.id)
         return await run_fdx(
             payload,
             workspace=str(self.workspace),
@@ -71,12 +73,14 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def _run_optional_fdx(self, payload, *, fallback, **kwargs):
+        kwargs.pop("workspace", None)
         run, _ = await self.store.create_run(
             request_key=f"optional-fdx-{id(payload)}-{len(kwargs)}",
             owner="fdx-test",
             workspace=str(self.workspace),
         )
-        await self.store.start_run(run.id)
+        if run.status == "PENDING":
+            await self.store.start_run(run.id)
         return await run_optional_fdx(
             payload,
             workspace=str(self.workspace),
@@ -100,13 +104,13 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fdx_requires_protocol_and_absolute_executable(self):
         with self.assertRaises(FDXPolicyError):
-            await run_fdx(
+            await self._run_fdx(
                 {},
                 workspace=str(self.workspace),
                 config=self.config(protocol="wrong"),
             )
         with self.assertRaises(FDXPolicyError):
-            await run_fdx(
+            await self._run_fdx(
                 {},
                 workspace=str(self.workspace),
                 config=self.config(executable="fdx"),
@@ -124,7 +128,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_fdx_returns_bounded_structured_output(self):
-        result = await run_fdx(
+        result = await self._run_fdx(
             {"task": "inspect"},
             workspace=str(self.workspace),
             configured_root=str(self.root),
@@ -142,7 +146,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         )
         self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
         with self.assertRaises(FDXPolicyError):
-            await run_fdx(
+            await self._run_fdx(
                 {},
                 workspace=str(self.workspace),
                 configured_root=str(self.root),
@@ -151,7 +155,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fdx_rejects_oversized_input_and_timeout_falls_back(self):
         with self.assertRaises(FDXPolicyError):
-            await run_fdx(
+            await self._run_fdx(
                 {"payload": "x" * 2048},
                 workspace=str(self.workspace),
                 configured_root=str(self.root),
@@ -174,7 +178,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
                 used_fdx=False,
             )
 
-        result = await run_optional_fdx(
+        result = await self._run_optional_fdx(
             {},
             workspace=str(self.workspace),
             configured_root=str(self.root),
@@ -197,7 +201,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
                 },
             )()
 
-        result = await run_optional_fdx(
+        result = await self._run_optional_fdx(
             {},
             workspace=str(self.workspace),
             config=self.config(executable=str(self.root / "missing")),
@@ -228,7 +232,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
                 used_fdx=False,
             )
 
-        result = await run_optional_fdx(
+        result = await self._run_optional_fdx(
             {},
             workspace=str(self.workspace),
             configured_root=str(self.root),
@@ -250,7 +254,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         )
         self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
         with self.assertRaises(FDXPolicyError):
-            await run_fdx(
+            await self._run_fdx(
                 {},
                 workspace=str(self.workspace),
                 configured_root=str(self.root),
@@ -269,7 +273,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         )
         self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
         with self.assertRaises(FDXPolicyError):
-            await run_fdx(
+            await self._run_fdx(
                 {},
                 workspace=str(self.workspace),
                 configured_root=str(self.root),
@@ -280,12 +284,50 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fdx_rejects_unverified_read_only_parity(self):
         with self.assertRaises(FDXPolicyError):
-            await run_fdx(
+            await self._run_fdx(
                 {},
                 workspace=str(self.workspace),
                 configured_root=str(self.root),
                 config=self.config(read_only_verified=False),
             )
+
+    async def test_fdx_requires_exclusive_durable_workspace_ownership(self):
+        first, _ = await self.store.create_run(
+            request_key="fdx-owner",
+            owner="owner",
+            workspace=str(self.workspace),
+        )
+        if first.status == "PENDING":
+            await self.store.start_run(first.id)
+        lease = await self.store.acquire_workspace_lease(
+            workspace=str(self.workspace),
+            run_id=first.id,
+            owner="owner",
+            ttl_ms=120_000,
+        )
+        self.assertIsNotNone(lease)
+        second, _ = await self.store.create_run(
+            request_key="fdx-contender",
+            owner="contender",
+            workspace=str(self.workspace),
+        )
+        if second.status == "PENDING":
+            await self.store.start_run(second.id)
+        with self.assertRaises(FDXPolicyError):
+            await run_fdx(
+                {},
+                workspace=str(self.workspace),
+                configured_root=str(self.root),
+                config=self.config(read_only_verified=True),
+                store=self.store,
+                run_id=second.id,
+                owner="contender",
+            )
+        await self.store.release_workspace_lease(
+            workspace=str(self.workspace),
+            owner="owner",
+            epoch=lease.epoch,
+        )
 
     async def test_disabled_fdx_preserves_fallback_without_process(self):
         called = False

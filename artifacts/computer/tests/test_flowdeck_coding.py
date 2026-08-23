@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from starlette.requests import Request
 
 from cptr.flowdeck.budgets import BudgetExceeded, RunBudget
 from cptr.flowdeck.coding import (
@@ -24,6 +25,7 @@ from cptr.flowdeck.contracts import FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck
 from cptr.models.base import Base
 from cptr.models.flowdeck import FlowDeckLogicalOperation, FlowDeckPhysicalAttempt
+from cptr.utils.config import AuthResult
 from cptr.utils.tools import execute_tool
 
 
@@ -230,6 +232,19 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             fake_message = type("Message", (), {"id": f"{role}-message"})()
 
             async def native_loop(*args, role=role, path=path, **kwargs):
+                auth_request = Request(
+                    {
+                        "type": "http",
+                        "method": "GET",
+                        "path": "/__internal__",
+                        "headers": [],
+                        "client": ("127.0.0.1", 0),
+                        "server": ("internal", 0),
+                        "scheme": "http",
+                        "state": {},
+                    }
+                )
+                auth_request.state.auth = AuthResult(user_id="user-1", role="user")
                 context = {
                     "workspace": self.workspace.name,
                     "specialist_role": role,
@@ -240,7 +255,7 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                     "mutation_tool_names": frozenset(
                         {"edit_file", "multi_edit_file", "write_file"}
                     ),
-                    "request": object(),
+                    "request": auth_request,
                 }
                 return await execute_tool(
                     "edit_file",
@@ -271,16 +286,6 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 patch(
                     "cptr.utils.tools._run_existing_subagent_chat",
                     new=native_loop,
-                ),
-                patch(
-                    "cptr.utils.tools.Runtime.read_file",
-                    new=AsyncMock(return_value={"content": "before\n", "binary": False}),
-                ),
-                patch(
-                    "cptr.utils.tools.Runtime.write_file",
-                    new=AsyncMock(
-                        side_effect=lambda request, full, content, path=path: path.write_text(content)
-                    ),
                 ),
             ):
                 result = await run_coding_specialist(
@@ -373,6 +378,35 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                 parent_chat_id="parent",
                 store=self.store,
             )
+
+    async def test_coding_direct_dispatch_denies_all_unqualified_capabilities(self):
+        context = {
+            "workspace": self.workspace.name,
+            "specialist_role": "backend-coder",
+            "allowed_tool_names": frozenset(
+                {"read_file", "search_files", "edit_file", "multi_edit_file", "write_file"}
+            ),
+            "tool_guard": coding_tool_guard,
+        }
+        forbidden = {
+            "run_command",
+            "send_input",
+            "kill_task",
+            "git_commit",
+            "git_push",
+            "mcp_tool",
+            "browser_click",
+            "browser_type",
+            "browser_evaluate",
+            "deploy",
+            "publish",
+            "read_secret",
+            "install_package",
+            "network_write",
+        }
+        for name in forbidden:
+            result = await execute_tool(name, {}, context)
+            self.assertIn("tool denied by execution policy", result, name)
 
     async def test_browser_debugger_reuses_native_loop_without_mutation_hooks(self):
         fake_chat = type("Chat", (), {"id": "browser-chat"})()
