@@ -1,0 +1,367 @@
+Task
+Task #14B — Close Remaining Real-HTTP Acceptance Gaps
+
+To dev
+Do not redesign FlowDeck.
+
+Do not add new authority.
+
+Do not add UI.
+
+Do not touch the qualified authenticated gateway, Heidi architecture, Git security layer, or durable state machine unless a real failing HTTP test proves a production defect.
+
+Current verified baseline:
+- Branch: main
+- HEAD: 13805b321e8b3d54221719478f67fa2c98c9af66
+- FlowDeck suite: 95/95 passing
+- Real HTTP integration tests: 4/4 passing
+- Current Task #14 audit score: 8.4/10
+- Failure reason: incomplete real-HTTP evidence
+- No production defect currently identified
+
+The objective of this task is ONLY to add the missing real-HTTP acceptance evidence necessary to reach >=9/10.
+
+Roadmap
+1. Verify baseline
+   - Confirm branch, HEAD, clean/expected working tree.
+   - Run 95/95 FlowDeck baseline.
+   - Run existing 4/4 real HTTP suite.
+
+2. Expand workspace rejection matrix over real HTTP.
+
+Add explicit assembled-app HTTP tests for:
+- forged workspace path
+- nonexistent workspace
+- stale durable ownership
+- ambiguous duplicate ownership mapping
+- wrong-user workspace
+- non-directory workspace if relevant
+
+For every denied POST assert:
+- request is rejected
+- coordinator is not invoked
+- no durable FlowDeck run is created
+- no child step/operation/attempt is created
+
+3. Add different-Idempotency-Key behavior.
+
+Existing same-key test already proves one durable run.
+
+Now prove:
+- same payload + same key → same logical orchestration
+- same payload + different key → distinct logical request according to intended contract
+- no accidental cross-key deduplication
+
+4. Add lost-response retry simulation.
+
+Use the real HTTP application stack.
+
+Simulate:
+- first request is fully processed/persisted
+- client treats response as lost
+- same request is retried using same Idempotency-Key
+
+Prove:
+- existing durable run is recovered
+- no duplicate Heidi logical execution
+- no duplicate mutating child operation
+- run count remains one
+
+Do not require a real network outage if the ASGI test transport cannot model one faithfully.
+A test-client response-loss simulation is acceptable if it exercises the real server route twice.
+
+5. Add reconnect/status proof.
+
+After a submitted orchestration:
+- discard the first HTTP client instance/session
+- construct a new HTTP client
+- authenticate again
+- fetch durable run status
+
+Prove:
+- same run is returned
+- no new orchestration is created
+- no completed child is replayed
+- connection/client lifetime is not orchestration truth
+
+6. Add full request authority-field matrix over HTTP.
+
+For each prohibited field, issue a real POST:
+
+- user_id
+- role
+- specialist
+- tools
+- capabilities
+- model
+- provider
+- budget
+- governance
+- delegation_depth
+- kill_switch
+- fdx
+- devops
+- shell
+- git_mutation
+
+The strict request contract must reject them.
+
+Do not merely inspect the Pydantic schema.
+
+7. Add hostile-objective HTTP tests.
+
+Submit objectives containing attempts to:
+
+- enable devops
+- run unrestricted shell
+- push to GitHub
+- read .env/secrets
+- enable FDX
+- mutate Git
+- switch model/provider
+- increase budget
+- increase delegation depth
+- bypass authenticated specialist gateway
+- override verifier failure
+- force UNKNOWN to success
+
+Instrument server policy/coordinator boundaries as necessary.
+
+Prove:
+- request text remains task content only
+- no configuration changes
+- no authority changes
+- no unqualified specialist becomes available
+- no forbidden tool is exposed
+
+8. Add malformed bearer-header HTTP cases.
+
+Cover at minimum:
+- malformed Authorization format
+- Bearer with missing token
+- unsupported auth scheme if applicable
+
+All must fail before FlowDeck execution.
+
+9. Add active-work cancellation HTTP qualification.
+
+Use deterministic controlled child execution.
+
+Sequence:
+- submit orchestration
+- place child/attempt into active state
+- cancel via real HTTP endpoint
+- attempt simulated late completion
+
+Prove:
+- cancellation succeeds
+- future delegation stops
+- uncertain active work becomes OUTCOME_UNKNOWN where applicable
+- stale late completion cannot publish SUCCEEDED
+- parent cannot become SUCCEEDED
+- fencing remains authoritative
+- reconciliation/manual review remains required where appropriate
+
+10. Add same-workspace concurrent HTTP submissions.
+
+Issue concurrent real HTTP requests targeting the same owned workspace with mutating plans.
+
+Prove:
+- existing workspace lease is authoritative
+- only one mutator owns the workspace
+- second writer cannot bypass fencing
+- stale writer cannot finalize
+- no new locking architecture is introduced
+
+11. Add external result-state HTTP matrix.
+
+Seed or execute durable runs representing:
+
+- SUCCEEDED
+- FAILED
+- CANCELLED
+- OUTCOME_UNKNOWN
+- MANUAL_REVIEW_REQUIRED
+- NOT_RUN if externally supported
+
+Fetch through the real HTTP status endpoint.
+
+Assert exact external semantics.
+
+Explicitly prove:
+- FAILED != success
+- CANCELLED != success
+- OUTCOME_UNKNOWN != success
+- MANUAL_REVIEW_REQUIRED != success
+- NOT_RUN != success
+
+12. Strengthen disabled-fast-path HTTP assertions.
+
+Existing HTTP test proves:
+- coordinator not invoked
+- no FlowDeckRun
+
+Extend instrumentation to assert zero:
+- specialist gateway calls
+- model resolution/execution calls where appropriate
+- FDX calls
+- mutation calls
+- FlowDeck steps
+- logical operations
+- physical attempts
+- execution events
+
+Do not weaken the existing fast path.
+
+13. Do not modify release workflow work unless a new test file is not picked up by the existing:
+   test_flowdeck*.py
+pattern.
+
+Task #15 already makes the FlowDeck suite release-blocking.
+
+14. Root-cause fixes only.
+
+If any new HTTP integration test fails due to a real defect:
+- preserve the failing test
+- identify the root cause
+- make the smallest production fix
+- rerun focused tests
+- rerun all FlowDeck tests
+
+Do not rewrite tests to accommodate insecure behavior.
+
+Commands
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git branch --show-current
+git rev-parse HEAD
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest tests.test_flowdeck_http -v
+
+After implementation:
+
+python3 -m unittest tests.test_flowdeck_http -v
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+
+python3 -m compileall -q cptr/flowdeck cptr/routers
+
+CHANGED_PY="$(git diff --name-only -- '*.py' | tr '\n' ' ')"
+if [ -n "$CHANGED_PY" ]; then
+  python3 -m ruff check $CHANGED_PY
+fi
+
+git diff --check
+git status --short
+git diff --stat
+git diff
+
+Use the existing migration initialization, API smoke, and frontend build paths already proven in this repository.
+
+Bug checks
+- Tests call route functions directly instead of real HTTP → FAIL
+- Forged/stale/ambiguous workspace only covered below HTTP → FAIL
+- Denied ownership request creates a run → FAIL
+- Same-key retry creates another run → FAIL
+- Different keys are incorrectly merged → FAIL
+- Lost-response retry duplicates execution → FAIL
+- New client/reconnect creates a run → FAIL
+- Completed child replayed after reconnect → FAIL
+- Authority field accepted by HTTP schema → FAIL
+- Hostile objective modifies policy → FAIL
+- Malformed bearer reaches FlowDeck → FAIL
+- Cross-user status/cancel succeeds → FAIL
+- Active cancelled attempt later publishes success → FAIL
+- Concurrent mutators bypass workspace lease → FAIL
+- Stale fencing epoch finalizes → FAIL
+- FAILED maps to success → FAIL
+- OUTCOME_UNKNOWN maps to success → FAIL
+- MANUAL_REVIEW_REQUIRED maps to success → FAIL
+- Disabled route invokes model/specialist/FDX/mutation → FAIL
+- Disabled route creates FlowDeck step/op/attempt/event → FAIL
+- New specialist authority is introduced → FAIL
+- FDX/devops/Git mutation/shell/MCP/deploy/secrets enabled → FAIL
+- CPTR stops being sole model/tool execution owner → FAIL
+
+Tests before commit
+Acceptance requires:
+
+1. Existing 95/95 baseline remains passing.
+2. Existing 4/4 HTTP tests remain passing.
+3. Forged workspace rejected over real HTTP.
+4. Missing workspace rejected over real HTTP.
+5. Stale ownership rejected over real HTTP.
+6. Ambiguous ownership rejected over real HTTP.
+7. Every denied ownership request creates zero runs.
+8. Same Idempotency-Key remains one logical orchestration.
+9. Different Idempotency-Key behavior is explicitly proven.
+10. Lost-response retry does not duplicate execution.
+11. Reconnect with a new HTTP client does not create a run.
+12. Completed child work is not replayed.
+13. Full prohibited-field matrix is rejected.
+14. Hostile objectives cannot expand authority.
+15. Malformed bearer headers fail closed.
+16. Active-work cancellation is qualified over HTTP.
+17. Late completion after cancellation cannot produce success.
+18. Same-workspace concurrent mutators remain lease-controlled.
+19. Stale fencing cannot finalize.
+20. SUCCEEDED status mapping proven.
+21. FAILED mapping proven.
+22. CANCELLED mapping proven.
+23. OUTCOME_UNKNOWN mapping proven.
+24. MANUAL_REVIEW_REQUIRED mapping proven.
+25. NOT_RUN mapping proven if externally representable.
+26. Disabled HTTP fast path has zero orchestration side effects across all instrumented categories.
+27. Full FlowDeck suite passes.
+28. Python compilation passes.
+29. Targeted Ruff passes.
+30. git diff --check passes.
+31. Migration initialization passes.
+32. API smoke returns HTTP 200.
+33. Frontend production build passes.
+34. No authority expansion.
+35. Final read-only audit score >= 9/10.
+
+Evidence
+Closure report must include:
+
+- PASS / FAIL
+- final score
+- branch / HEAD
+- working-tree status
+- HTTP test module(s)
+- previous HTTP count vs new HTTP count
+- total FlowDeck test count
+- workspace rejection HTTP evidence
+- zero-run evidence for denied requests
+- same-key evidence
+- different-key evidence
+- lost-response retry evidence
+- reconnect/new-client evidence
+- authority-field HTTP matrix
+- hostile-objective HTTP evidence
+- malformed-auth evidence
+- active cancellation evidence
+- concurrency/fencing evidence
+- complete result-state HTTP matrix
+- disabled fast-path zero-side-effect evidence
+- defects found and root-cause fixes
+- final production call graph
+- confirmation CPTR remains sole model/tool execution owner
+- confirmation no authority expansion
+- remaining risks
+
+Score
+>= 9/10 required.
+
+Anything below 9/10 = Task #12 / Task #14 acceptance remains NOT CLOSED.
+
+Commit/push
+Do NOT push to GitHub.
+
+Do NOT create a commit automatically.
+
+Leave the final verified diff for review.
