@@ -118,3 +118,19 @@ class FlowDeckRecoveryLease(Base):
     acquired_at = Column(BigInteger, nullable=False)
     heartbeat_at = Column(BigInteger, nullable=False)
     expires_at = Column(BigInteger, nullable=False)
+
+
+class FlowDeckApproval(Base):
+    __tablename__ = "flowdeck_approvals"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    run_id = Column(Text, nullable=False, index=True)
+    operation_id = Column(Text, nullable=False, unique=True)
+    capability = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="PENDING")
+    requested_at = Column(BigInteger, nullable=False)
+    resolved_at = Column(BigInteger, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    evidence = Column(JSON, nullable=True)
+
+    __table_args__ = (Index("ix_flowdeck_approvals_status", "status"),)

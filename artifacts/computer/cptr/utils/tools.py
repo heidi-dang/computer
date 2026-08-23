@@ -2761,6 +2761,8 @@ async def _run_existing_subagent_chat(
     model: str,
     user_id: str,
     config: dict,
+    allowed_tool_names: frozenset[str] | None = None,
+    tool_guard=None,
 ) -> str:
     """Run the agent loop for an already-created sub-agent chat."""
     from cptr.models import ChatMessage
@@ -2779,6 +2781,8 @@ async def _run_existing_subagent_chat(
             full_model_id=model,
         ),
         workspace=workspace,
+        allowed_tool_names=allowed_tool_names,
+        tool_guard=tool_guard,
     )
 
     result_msg = await ChatMessage.get_by_id(assistant_msg_id)
@@ -3277,13 +3281,14 @@ async def get_tool_list(
     if not background_subagents_enabled:
         schemas = [_without_background_param(s) for s in schemas]
 
-    # Add external tool server schemas
-    try:
-        cache = await _load_tool_servers()
-        for tool_info in cache["tools"].values():
-            schemas.append(tool_info["spec"])
-    except Exception:
-        pass
+    # Restricted execution contexts never receive external tool-server schemas.
+    if allowed_tool_names is None:
+        try:
+            cache = await _load_tool_servers()
+            for tool_info in cache["tools"].values():
+                schemas.append(tool_info["spec"])
+        except Exception:
+            pass
 
     return schemas
 

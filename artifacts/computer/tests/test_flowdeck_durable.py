@@ -6,6 +6,7 @@ from tempfile import NamedTemporaryFile
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.flowdeck.durable import (
+    ApprovalStatus,
     DurableFlowDeck,
     LifecycleError,
     OperationStatus,
@@ -71,6 +72,36 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(operation_created)
         self.assertEqual(run.id, duplicate_run.id)
         self.assertEqual(operation.id, duplicate_operation.id)
+
+    async def test_approval_is_durable_but_never_execution_authority(self):
+        _, operation = await self._run_and_intent()
+        approval, created = await self.store.request_approval(
+            operation_id=operation.id,
+            capability="write_files",
+            now=self.now,
+        )
+        self.assertTrue(created)
+        await self.store.resolve_approval(
+            approval.id,
+            status=ApprovalStatus.APPROVED,
+            resolved_by="human-reviewer",
+            evidence={"source": "human", "authoritative": True},
+            now=self.now + 1,
+        )
+        duplicate, duplicate_created = await self.store.request_approval(
+            operation_id=operation.id,
+            capability="write_files",
+            now=self.now + 2,
+        )
+        self.assertFalse(duplicate_created)
+        self.assertEqual(duplicate.id, approval.id)
+        self.assertEqual(duplicate.status, ApprovalStatus.APPROVED.value)
+        refreshed_run, _ = await self.store.create_run(
+            request_key="request-1",
+            owner="worker-a",
+            workspace="/workspace",
+        )
+        self.assertEqual(refreshed_run.status, RunStatus.RUNNING.value)
 
     async def test_intent_precedes_attempt_and_crash_becomes_unknown(self):
         run, operation = await self._run_and_intent()
@@ -149,6 +180,7 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
             owner="worker-a",
             fencing_epoch=lease.epoch,
             outcome="failed",
+            evidence={"source": "runtime", "authoritative": True},
             now=self.now + 1,
         )
         second = await self.store.prepare_attempt(

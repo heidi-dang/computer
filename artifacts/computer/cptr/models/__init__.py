@@ -16,6 +16,7 @@ from cptr.models.chats import (
 from cptr.models.automations import Automation, AutomationRun
 from cptr.models.flowdeck import (
     FlowDeckEvent,
+    FlowDeckApproval,
     FlowDeckLogicalOperation,
     FlowDeckPhysicalAttempt,
     FlowDeckRecoveryLease,

@@ -1976,6 +1976,8 @@ async def run_chat_task(
             logger.info(
                 "[task %s] plan mode active, %d tools available", message_id[:8], len(tools)
             )
+        if allowed_tool_names is not None:
+            tools = [tool for tool in tools if tool["name"] in allowed_tool_names]
         review_messages = messages
         review_model_connection = connection
         review_model_name = model
@@ -2032,7 +2034,9 @@ async def run_chat_task(
                         and current_params.get("auto_approve_tools")
                         else "auto"
                     )
-                should_auto = approval_mode == "full" or (
+                should_auto = (
+                    allowed_tool_names is not None and name not in allowed_tool_names
+                ) or approval_mode == "full" or (
                     approval_mode == "auto" and tool and tool_approval == "allow"
                 )
                 if (
@@ -2081,7 +2085,7 @@ async def run_chat_task(
                 await _save_message("tool call in progress", content=content, output=output_items)
 
                 arguments = item.get("arguments") or {}
-                if name == "create_artifact":
+                if name == "create_artifact" and allowed_tool_names is None:
                     args = dict(arguments)
                     args.pop("workspace", None)
                     result = await create_artifact(**args, workspace=workspace)
@@ -2559,7 +2563,9 @@ async def run_chat_task(
                             and current_params.get("auto_approve_tools")
                             else "auto"
                         )
-                    should_auto = approval_mode == "full" or (
+                    should_auto = (
+                        allowed_tool_names is not None and tc["name"] not in allowed_tool_names
+                    ) or approval_mode == "full" or (
                         approval_mode == "auto" and tool and tool_approval == "allow"
                     )
                     if not should_auto:
@@ -2637,7 +2643,7 @@ async def run_chat_task(
                 sequential_result_items: list[dict] = []
                 for idx in other_indices:
                     tc, item = call_items[idx]
-                    if tc["name"] == "create_artifact":
+                    if tc["name"] == "create_artifact" and allowed_tool_names is None:
                         args = dict(tc["arguments"])
                         args.pop("workspace", None)
                         result = await create_artifact(**args, workspace=workspace)

@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cptr.models.flowdeck import (
+    FlowDeckApproval,
     FlowDeckEvent,
     FlowDeckLogicalOperation,
     FlowDeckPhysicalAttempt,
@@ -62,6 +63,13 @@ class AttemptStatus(str, Enum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     UNKNOWN = "UNKNOWN"
+
+
+class ApprovalStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
 
 
 class LifecycleError(RuntimeError):
@@ -214,6 +222,50 @@ class DurableFlowDeck:
 
         await self._transaction(operation)
 
+    async def get_step(self, run_id: str, *, sequence: int = 0) -> FlowDeckStep:
+        async with self.session_factory() as db:
+            step = await db.scalar(
+                select(FlowDeckStep).where(
+                    FlowDeckStep.run_id == run_id,
+                    FlowDeckStep.sequence == sequence,
+                )
+            )
+            if not step:
+                raise LifecycleError("unknown step")
+            return step
+
+    async def finish_step(
+        self,
+        step_id: str,
+        *,
+        status: StepStatus,
+        now: int | None = None,
+    ) -> None:
+        if status not in {
+            StepStatus.SUCCEEDED,
+            StepStatus.FAILED,
+            StepStatus.MANUAL_REVIEW_REQUIRED,
+        }:
+            raise LifecycleError("step must finish with a terminal status")
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            step = await db.get(FlowDeckStep, step_id)
+            if not step:
+                raise LifecycleError("unknown step")
+            self._require(step.status, {StepStatus.RUNNING.value})
+            step.status = status.value
+            step.updated_at = now
+            await self._event(
+                db,
+                step.run_id,
+                "STEP_COMPLETED",
+                {"step_id": step_id, "status": status.value},
+                now,
+            )
+
+        await self._transaction(operation)
+
     async def record_intent(
         self,
         *,
@@ -287,7 +339,7 @@ class DurableFlowDeck:
         *,
         operation_id: str,
         owner: str,
-        fencing_epoch: int,
+        fencing_epoch: int = 0,
         now: int | None = None,
     ) -> FlowDeckPhysicalAttempt:
         """Create a distinct attempt only after intent exists and fencing is valid."""
@@ -300,7 +352,7 @@ class DurableFlowDeck:
                 {OperationStatus.INTENT_RECORDED.value, OperationStatus.FAILED.value},
             )
             run = await self._run(db, op.run_id)
-            if run.workspace:
+            if run.workspace and fencing_epoch:
                 await self._assert_workspace_lease(
                     db, run.workspace, run.id, owner, fencing_epoch, now
                 )
@@ -331,6 +383,80 @@ class DurableFlowDeck:
             return attempt
 
         return await self._transaction(operation)
+
+    async def request_approval(
+        self,
+        *,
+        operation_id: str,
+        capability: str,
+        now: int | None = None,
+    ) -> tuple[FlowDeckApproval, bool]:
+        """Record approval intent only; approval never executes an operation."""
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            logical = await self._operation(db, operation_id)
+            existing = await db.scalar(
+                select(FlowDeckApproval).where(FlowDeckApproval.operation_id == operation_id)
+            )
+            if existing:
+                if existing.capability != capability:
+                    raise DuplicateRequestError("approval capability does not match operation")
+                return existing, False
+            approval = FlowDeckApproval(
+                id=_id(),
+                run_id=logical.run_id,
+                operation_id=operation_id,
+                capability=capability,
+                status=ApprovalStatus.PENDING.value,
+                requested_at=now,
+            )
+            db.add(approval)
+            await self._event(
+                db,
+                logical.run_id,
+                "APPROVAL_REQUESTED",
+                {"operation_id": operation_id, "capability": capability},
+                now,
+            )
+            return approval, True
+
+        return await self._transaction(operation)
+
+    async def resolve_approval(
+        self,
+        approval_id: str,
+        *,
+        status: ApprovalStatus,
+        resolved_by: str,
+        evidence: dict[str, Any],
+        now: int | None = None,
+    ) -> None:
+        """Persist a human/verifier decision without granting execution authority."""
+        if status not in {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED}:
+            raise LifecycleError("approval must resolve to approved or rejected")
+        if not resolved_by.strip():
+            raise LifecycleError("approval resolver is required")
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            approval = await db.get(FlowDeckApproval, approval_id)
+            if not approval:
+                raise LifecycleError("unknown approval")
+            self._require(approval.status, {ApprovalStatus.PENDING.value})
+            approval.status = status.value
+            approval.resolved_at = now
+            approval.resolved_by = resolved_by
+            approval.evidence = evidence
+            await self._event(
+                db,
+                approval.run_id,
+                "APPROVAL_RESOLVED",
+                {"approval_id": approval_id, "status": status.value},
+                now,
+            )
+
+        await self._transaction(operation)
 
     async def mark_attempt_unknown(
         self,
@@ -367,13 +493,19 @@ class DurableFlowDeck:
         attempt_id: str,
         *,
         owner: str,
-        fencing_epoch: int,
+        fencing_epoch: int = 0,
         outcome: str,
+        evidence: dict[str, Any],
         now: int | None = None,
     ) -> None:
         """Commit a positively observed attempt outcome under the current fence."""
         if outcome not in {"succeeded", "failed"}:
             raise LifecycleError("attempt outcome must be succeeded or failed")
+        if (
+            evidence.get("authoritative") is not True
+            or evidence.get("source") not in {"runtime", "verifier"}
+        ):
+            raise LifecycleError("attempt completion requires authoritative runtime/verifier evidence")
         now = self.clock() if now is None else now
 
         async def operation(db: AsyncSession):
@@ -383,7 +515,7 @@ class DurableFlowDeck:
             op = await self._operation(db, attempt.operation_id)
             self._require(op.status, {OperationStatus.RUNNING.value})
             run = await self._run(db, op.run_id)
-            if run.workspace:
+            if run.workspace and fencing_epoch:
                 await self._assert_workspace_lease(
                     db, run.workspace, run.id, owner, fencing_epoch, now
                 )
@@ -395,12 +527,14 @@ class DurableFlowDeck:
             attempt.outcome = outcome
             attempt.ended_at = now
             attempt.heartbeat_at = now
+            attempt.error = None
             op.status = (
                 OperationStatus.SUCCEEDED.value
                 if outcome == "succeeded"
                 else OperationStatus.FAILED.value
             )
             op.outcome = outcome
+            op.authoritative_evidence = evidence
             op.updated_at = now
             await self._event(
                 db,
@@ -547,6 +681,18 @@ class DurableFlowDeck:
             return [run.id for run in runs]
 
         return await self._transaction(operation)
+
+    async def orphan_run(self, run_id: str, *, now: int | None = None) -> None:
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(run.status, {RunStatus.RUNNING.value, RunStatus.RECOVERING.value})
+            run.status = RunStatus.ORPHANED.value
+            run.updated_at = now
+            await self._event(db, run_id, "RUN_ORPHANED", {}, now)
+
+        await self._transaction(operation)
 
     async def acquire_workspace_lease(
         self,

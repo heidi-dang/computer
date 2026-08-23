@@ -1,7 +1,7 @@
 """FlowDeck-C-PTR coordination contracts and shadow routing.
 
-This package is intentionally execution-free in the first rollout. CPTR
-remains the only component that executes model/tool work.
+FlowDeck owns policy and durable orchestration; CPTR remains the only
+component that executes model/tool work.
 """
 
 from cptr.flowdeck.config import FlowDeckConfig
@@ -18,6 +18,7 @@ from cptr.flowdeck.contracts import (
     ShadowDiagnostic,
 )
 from cptr.flowdeck.durable import (
+    ApprovalStatus,
     AttemptStatus,
     DuplicateRequestError,
     DurableFlowDeck,
@@ -28,13 +29,30 @@ from cptr.flowdeck.durable import (
     RunStatus,
     StaleWriterError,
 )
+from cptr.flowdeck.execution import (
+    MAPPER_CAPABILITIES,
+    MAPPER_TOOL_NAMES,
+    READ_ONLY_SPECIALIST_IDS,
+    READ_ONLY_TOOL_NAMES,
+    MapperPolicyError,
+    MapperRequest,
+    mapper_tool_guard,
+    run_mapper,
+    run_read_only_specialist,
+    validate_mapper_request,
+)
 from cptr.flowdeck.gateway import observe_request
 from cptr.flowdeck.registry import AGENT_REGISTRY, get_agent, validate_registry
 
 __all__ = [
     "AGENT_REGISTRY",
+    "MAPPER_CAPABILITIES",
+    "MAPPER_TOOL_NAMES",
+    "READ_ONLY_SPECIALIST_IDS",
+    "READ_ONLY_TOOL_NAMES",
     "AgentDefinition",
     "AgentRole",
+    "ApprovalStatus",
     "AttemptStatus",
     "Capability",
     "DelegationRequest",
@@ -46,6 +64,8 @@ __all__ = [
     "GovernanceVerdict",
     "LeaseUnavailableError",
     "LifecycleError",
+    "MapperPolicyError",
+    "MapperRequest",
     "OperationStatus",
     "RecoveryGrant",
     "RouteDecision",
@@ -54,6 +74,10 @@ __all__ = [
     "ShadowDiagnostic",
     "StaleWriterError",
     "get_agent",
+    "mapper_tool_guard",
     "observe_request",
+    "run_mapper",
+    "run_read_only_specialist",
+    "validate_mapper_request",
     "validate_registry",
 ]
