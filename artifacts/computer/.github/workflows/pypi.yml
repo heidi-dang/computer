@@ -13,6 +13,23 @@ permissions:
   contents: read
 
 jobs:
+  flowdeck-security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CPTR dependencies
+        run: python -m pip install .
+
+      - name: Run FlowDeck security and regression tests
+        run: python -m unittest discover -s tests -p 'test_flowdeck*.py' -v
+
   preflight:
     runs-on: ubuntu-latest
     outputs:
@@ -84,7 +101,7 @@ jobs:
           echo "release_assets_needed=$missing" >> "$GITHUB_OUTPUT"
 
   build:
-    needs: preflight
+    needs: [preflight, flowdeck-security]
     if: github.ref == 'refs/heads/release' && (needs.preflight.outputs.publish_needed == 'true' || needs.preflight.outputs.release_assets_needed == 'true')
     runs-on: ubuntu-latest
     steps:
