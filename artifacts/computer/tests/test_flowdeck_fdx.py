@@ -1,8 +1,11 @@
 import asyncio
+import os
 import stat
 import tempfile
 import unittest
 from pathlib import Path
+
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.flowdeck.fdx import (
     FDXConfig,
@@ -12,6 +15,8 @@ from cptr.flowdeck.fdx import (
     run_optional_fdx,
     validate_workspace_jail,
 )
+from cptr.flowdeck.durable import DurableFlowDeck
+from cptr.models.base import Base
 
 
 class FDXTests(unittest.IsolatedAsyncioTestCase):
@@ -34,6 +39,52 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    async def asyncSetUp(self):
+        db_fd, self.db_path = tempfile.mkstemp()
+        os.close(db_fd)
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{self.db_path}")
+        async with self.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        self.store = DurableFlowDeck(
+            async_sessionmaker(self.engine, expire_on_commit=False),
+            clock=lambda: 1000,
+        )
+
+    async def asyncTearDown(self):
+        await self.engine.dispose()
+        os.unlink(self.db_path)
+
+    async def _run_fdx(self, payload, **kwargs):
+        run, _ = await self.store.create_run(
+            request_key=f"fdx-{id(payload)}-{len(kwargs)}",
+            owner="fdx-test",
+            workspace=str(self.workspace),
+        )
+        await self.store.start_run(run.id)
+        return await run_fdx(
+            payload,
+            workspace=str(self.workspace),
+            store=self.store,
+            run_id=run.id,
+            **kwargs,
+        )
+
+    async def _run_optional_fdx(self, payload, *, fallback, **kwargs):
+        run, _ = await self.store.create_run(
+            request_key=f"optional-fdx-{id(payload)}-{len(kwargs)}",
+            owner="fdx-test",
+            workspace=str(self.workspace),
+        )
+        await self.store.start_run(run.id)
+        return await run_optional_fdx(
+            payload,
+            workspace=str(self.workspace),
+            store=self.store,
+            run_id=run.id,
+            fallback=fallback,
+            **kwargs,
+        )
 
     def config(self, **overrides):
         values = {

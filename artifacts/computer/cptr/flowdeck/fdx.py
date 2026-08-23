@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cptr.flowdeck.durable import DurableFlowDeck
+
 FDX_PROTOCOL = "flowdeck-fdx/1"
 FDX_VERSION = "1"
 DEFAULT_TIMEOUT_SECONDS = 15
@@ -121,12 +123,26 @@ async def run_fdx(
     workspace: str,
     config: FDXConfig,
     configured_root: str | None = None,
+    store: DurableFlowDeck | None = None,
+    run_id: str | None = None,
+    owner: str = "flowdeck-fdx",
+    lease_ttl_ms: int = 120_000,
 ) -> FDXResult:
     """Run only a structured FDX process and return bounded, untrusted output."""
     _validate_config(config)
     root = validate_workspace_jail(workspace, configured_root)
     if not configured_root:
         raise FDXPolicyError("FDX requires an explicit configured jail")
+    if store is None or not run_id:
+        raise FDXPolicyError("FDX requires a durable workspace lease")
+    lease = await store.acquire_workspace_lease(
+        workspace=str(root),
+        run_id=run_id,
+        owner=owner,
+        ttl_ms=lease_ttl_ms,
+    )
+    if lease is None:
+        raise FDXPolicyError("FDX workspace is already owned")
     jail_root = Path(configured_root).expanduser().resolve()
     executable = str(Path(config.executable).expanduser())
     if not Path(executable).is_absolute():
@@ -146,38 +162,45 @@ async def run_fdx(
         raise FDXPolicyError("FDX input exceeded configured bound")
     before = _snapshot_files(jail_root)
 
-    process = await asyncio.create_subprocess_exec(
-        executable,
-        "--protocol",
-        config.protocol,
-        "--workspace",
-        str(root),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=str(root),
-        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
-        limit=config.max_output_bytes + 1,
-        start_new_session=True,
-    )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(encoded_request),
-            timeout=config.timeout_seconds,
+        process = await asyncio.create_subprocess_exec(
+            executable,
+            "--protocol",
+            config.protocol,
+            "--workspace",
+            str(root),
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(root),
+            env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+            limit=config.max_output_bytes + 1,
+            start_new_session=True,
         )
-    except (asyncio.TimeoutError, asyncio.CancelledError):
         try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await process.wait()
-        raise
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(encoded_request),
+                timeout=config.timeout_seconds,
+            )
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            raise
+        finally:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        await process.wait()
+        await store.release_workspace_lease(
+            workspace=str(root),
+            owner=owner,
+            epoch=lease.epoch,
+        )
     if len(stdout) > config.max_output_bytes or len(stderr) > config.max_output_bytes:
         raise FDXPolicyError("FDX output exceeded configured bound")
     after = _snapshot_files(jail_root)
@@ -218,6 +241,9 @@ async def run_optional_fdx(
     config: FDXConfig,
     fallback: Callable[[], Awaitable[FDXResult]],
     configured_root: str | None = None,
+    store: DurableFlowDeck | None = None,
+    run_id: str | None = None,
+    owner: str = "flowdeck-fdx",
 ) -> FDXResult:
     """Use FDX only when qualified; otherwise preserve the secure CPTR path."""
     if not config.enabled:
@@ -228,6 +254,9 @@ async def run_optional_fdx(
             workspace=workspace,
             config=config,
             configured_root=configured_root,
+            store=store,
+            run_id=run_id,
+            owner=owner,
         )
     except (FDXPolicyError, OSError, asyncio.TimeoutError):
         fallback_result = await fallback()
