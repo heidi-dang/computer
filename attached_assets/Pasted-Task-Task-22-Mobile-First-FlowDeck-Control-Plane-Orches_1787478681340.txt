@@ -1,0 +1,1045 @@
+Task
+Task #22 — Mobile-First FlowDeck / Control-Plane Orchestration UI
+
+Goal:
+Build the first production orchestration UI for the now-qualified CPTR + FlowDeck + control-plane backend.
+
+This UI must be:
+
+- MOBILE-FIRST
+- Fully responsive
+- Highly polished
+- Visually distinctive and eye-catching
+- Smooth and alive during execution
+- Real-time
+- Truthful about backend state
+- Production-ready
+- Accessible
+- Fast
+- Reconnect-safe
+
+This is primarily a frontend/client milestone.
+
+DO NOT expand backend execution authority.
+
+Current accepted backend baseline:
+- Task #21 integrated authority/recovery qualification: PASS
+- FlowDeck tests: 104/104 PASS
+- Full backend tests: 147/147 PASS
+- CPTR remains sole model/tool execution owner
+- Authenticated FlowDeck gateway remains sole specialist execution boundary
+- FlowDeck remains authoritative for:
+  - workspace ownership
+  - leases/fencing
+  - logical idempotency
+  - attempts/retries
+  - cancellation/recovery
+  - evidence/completion
+- Control plane remains projection/orchestration metadata
+- FDX disabled
+- Devops disabled
+- Debug mutation disabled
+- Git mutation disabled
+- No unrestricted shell/MCP/install/deploy/publish/secrets authority
+- Do not weaken any of these boundaries for UI convenience
+
+
+To dev
+
+1. Audit before modifying.
+
+Inspect the existing CPTR frontend completely before designing new FlowDeck UI.
+
+Map:
+
+- frontend framework and routing
+- global layout/shell
+- navigation
+- current workspace selector
+- chat interface
+- model selector
+- responsive breakpoints
+- existing design tokens
+- theme support
+- dark/light mode behavior
+- reusable cards/buttons/dialogs/dropdowns/tooltips
+- existing animation system
+- toast/notification system
+- API client layer
+- auth/session handling
+- Socket.IO / WebSocket / SSE / polling infrastructure
+- reconnect behavior
+- backend FlowDeck/control-plane endpoints
+- run status schema
+- evidence schema
+- token-usage information currently available
+- specialist/step information currently available
+- cancellation API
+- control API
+- current API error conventions
+
+Do not start by creating an isolated visual mockup that ignores the existing application.
+
+Integrate naturally into CPTR.
+
+2. MOBILE FIRST IS A HARD REQUIREMENT.
+
+Design from small phone screens first.
+
+The UI must work correctly at least at:
+
+- 320px
+- 360px
+- 375px
+- 390px
+- 414px
+- 430px
+- tablet widths
+- laptop widths
+- large desktop
+
+Do NOT:
+
+- create desktop UI first and shrink it afterward
+- require horizontal scrolling for core controls
+- create tiny touch targets
+- hide essential orchestration state on phones
+- rely on hover for essential information
+- use fixed-width panels that break mobile layouts
+
+Minimum touch targets should remain comfortable for phones.
+
+Bottom sheets, drawers, expandable sections, tabs, or stacked layouts may be preferable on mobile.
+
+3. Make the UI visually premium.
+
+The FlowDeck orchestration experience must NOT look like a generic admin dashboard.
+
+It should feel like a modern autonomous-computing interface.
+
+Use:
+
+- strong hierarchy
+- carefully tuned typography
+- sophisticated spacing
+- refined surfaces
+- subtle depth
+- polished borders
+- tasteful glow/highlight effects
+- motion
+- micro-interactions
+- animated active states
+- smooth transitions
+- skeleton/loading states
+- meaningful empty states
+- attractive completion states
+- high-quality failure/manual-review states
+
+The user specifically requires eye-catching effects that make the live work worth watching.
+
+Effects should emphasize:
+
+- active agent
+- active step
+- new events
+- tool execution
+- verification
+- transitions between phases
+- completion
+
+Do not add random visual noise.
+
+4. Performance requirement for effects.
+
+Eye-catching does NOT mean heavy.
+
+Animations must:
+
+- remain smooth on mobile
+- avoid unnecessary layout thrashing
+- avoid large continuously animated DOM trees
+- avoid excessive blur
+- avoid unbounded event rendering
+- avoid memory growth during long sessions
+- respect prefers-reduced-motion
+- pause/reduce invisible/off-screen animations where practical
+
+The UI should remain responsive during long orchestration runs.
+
+5. Build a primary orchestration experience.
+
+The user should be able to:
+
+- choose/use the current workspace
+- enter an objective
+- start orchestration
+- watch execution live
+- inspect steps
+- inspect specialists
+- inspect tools/actions
+- inspect verification
+- inspect progress
+- inspect token consumption
+- cancel
+- reload/reconnect
+- return to an existing run
+
+Do not require the user to understand internal FlowDeck database concepts.
+
+6. Preserve existing global model selection.
+
+Do NOT create another model-selection authority inside FlowDeck.
+
+The UI should show the currently selected CPTR model as informational context.
+
+If the existing global CPTR model selector already exists, reuse it.
+
+Do not add:
+
+- per-agent model selection
+- Heidi model override
+- specialist model override
+- automatic model switching controls
+
+7. Real-time token information is a HARD REQUIREMENT.
+
+Display real token usage while work is executing.
+
+Audit what token telemetry is actually available.
+
+Where supported, show:
+
+- total tokens
+- input tokens
+- output tokens
+- current-turn tokens
+- cumulative run tokens
+- per-step tokens
+- per-specialist tokens
+- possibly cached/reasoning token categories if the backend/provider reliably reports them
+
+Animate token counters smoothly as real values update.
+
+Never fabricate token values.
+
+If exact values are not available:
+
+show a truthful state such as:
+
+- Not reported
+- Calculating
+- Provider did not report token usage
+
+Do NOT estimate and display it as exact.
+
+If backend telemetry is insufficient, add the smallest read-only telemetry plumbing required to expose already-known token usage.
+
+Do NOT change model execution behavior merely to obtain token counts.
+
+8. Real-time progress is a HARD REQUIREMENT.
+
+Show both:
+
+- overall orchestration progress
+- current-step progress/status
+
+But progress values must represent real backend state.
+
+Never invent arbitrary percentages such as “73%” merely because the agent appears busy.
+
+Preferred representations:
+
+If deterministic planned steps exist:
+
+completed required steps / total required steps
+
+If percentage can be derived truthfully:
+
+show percentage
+
+If the workflow is open-ended:
+
+show phase/status progression instead:
+
+Planning
+Mapping
+Researching
+Implementing
+Testing
+Reviewing
+Verifying
+Complete
+
+If remaining scope cannot be reliably calculated:
+
+show indeterminate animated progress rather than fake precision.
+
+9. Live execution header.
+
+Create a visually strong live status header containing useful current information such as:
+
+- run state
+- current agent
+- current phase
+- selected CPTR model
+- elapsed time
+- token count
+- progress
+- verification state
+- cancel control
+
+On mobile this should collapse gracefully without hiding essential state.
+
+10. Agent/specialist visualization.
+
+Represent active specialists clearly.
+
+Current qualified roles may include:
+
+- Heidi coordinator
+- mapper
+- researcher
+- architect
+- reviewer
+- security-auditor
+- debug-specialist read-only
+- browser-debugger
+- tester
+- backend-coder
+- frontend-coder
+
+Do not show disabled roles as available execution options.
+
+Devops/FDX/debug mutation/Git mutation remain disabled.
+
+Recommended visual treatment:
+
+- active agent highlighted
+- completed agent visibly settled
+- waiting agent subdued
+- failed agent distinct
+- manual-review agent distinct
+- token count per agent where available
+- elapsed time per agent where available
+- expandable activity/evidence
+
+Avoid making the UI imply agents have authority they do not possess.
+
+11. Heidi coordinator visualization.
+
+Heidi should visually appear as coordinator rather than as another unrestricted tool agent.
+
+Allow the user to understand:
+
+- current plan
+- why a specialist is active
+- which steps are pending
+- which are complete
+- which are blocked
+- which are verification-gated
+
+Do not expose hidden prompts or sensitive internal policy.
+
+12. Live timeline / activity feed.
+
+Build an attractive real-time activity timeline.
+
+Potential events:
+
+- run created
+- planning started
+- specialist selected
+- specialist started
+- tool started
+- tool completed
+- mutation observed
+- test started
+- test completed
+- browser observation
+- verification started
+- evidence accepted
+- evidence rejected
+- child succeeded
+- child failed
+- cancellation requested
+- recovery started
+- manual review required
+- run completed
+
+Events should stream into the UI smoothly.
+
+Long runs require:
+
+- virtualized/bounded rendering where necessary
+- grouping
+- collapsing repetitive events
+- auto-scroll only when the user has not manually scrolled away
+- obvious “jump to latest” control
+
+Do not freeze the browser with thousands of event nodes.
+
+13. Tool activity.
+
+Tool activity should be visible but not overwhelming.
+
+Display:
+
+- tool name
+- specialist
+- status
+- start/end
+- duration
+- safe summarized input
+- safe summarized result
+- verification relationship
+
+Never expose:
+
+- secrets
+- API keys
+- credentials
+- hidden authorization material
+- raw sensitive environment values
+
+14. Verification/evidence UI.
+
+This is especially important because FlowDeck’s verifier contract is now authoritative.
+
+Clearly distinguish:
+
+A. Specialist claim
+B. Runtime observation
+C. Authoritative verified evidence
+
+For example:
+
+Specialist:
+"Implementation complete"
+
+Verification:
+✓ Tests 147/147
+✓ Postcondition matched
+✓ Git diff check passed
+
+The UI must NOT visually mark specialist prose as verified evidence.
+
+Create a dedicated verification/evidence presentation.
+
+Possible states:
+
+- Awaiting verification
+- Verifying
+- Verified
+- Failed verification
+- Outcome unknown
+- Manual review required
+
+15. Outcome states must remain semantically distinct.
+
+Do NOT collapse everything into red/green.
+
+Support distinctly:
+
+- PENDING
+- RUNNING
+- SUCCEEDED
+- FAILED
+- CANCELLED
+- OUTCOME_UNKNOWN
+- MANUAL_REVIEW_REQUIRED
+- ORPHANED/RECOVERING if surfaced by API
+
+UNKNOWN must never look like success.
+
+MANUAL_REVIEW_REQUIRED needs a high-visibility presentation and explanation.
+
+16. Recovery/reconnect UX.
+
+Reloading the browser must NOT visually create a new run.
+
+The UI must:
+
+- restore durable run identity
+- reconnect to real-time updates
+- fetch current authoritative state
+- continue elapsed/activity presentation
+- retain current token totals where available
+- show recovery/reconnecting state
+- avoid duplicate events
+
+If transport reconnects:
+
+connection state != orchestration state
+
+Display temporary:
+
+Reconnecting…
+
+but keep durable run status separate.
+
+17. Cancellation UX.
+
+Cancellation must:
+
+- require deliberate user action
+- clearly show cancellation request
+- display if active work is still resolving
+- correctly transition to CANCELLED / OUTCOME_UNKNOWN / MANUAL_REVIEW_REQUIRED according to backend truth
+
+Do NOT optimistically display “Cancelled successfully” before backend authority confirms it.
+
+18. Run history.
+
+Add a useful way to return to recent FlowDeck/control-plane runs if the backend already supports this safely.
+
+If run-list API does not yet exist, do NOT invent an unsafe broad enumeration endpoint during this UI milestone.
+
+Use only safely available owned-run data.
+
+If a small authenticated owner-scoped read endpoint is genuinely required, keep it read-only and narrowly scoped.
+
+19. Workspace integration.
+
+FlowDeck UI must respect the existing CPTR workspace model.
+
+Do not introduce a second workspace selector/source of truth if one already exists.
+
+Show current workspace clearly.
+
+Cross-user or unavailable workspaces must never be exposed by frontend assumptions.
+
+Backend remains authoritative.
+
+20. Mobile layout proposal.
+
+Design mobile first around something like:
+
+Top:
+- compact orchestration status
+- progress
+- token counter
+
+Main:
+- current agent
+- current action
+- live activity
+
+Bottom navigation / tabs:
+- Live
+- Plan
+- Agents
+- Evidence
+
+Persistent accessible action:
+- Cancel when running
+
+On desktop this may expand into richer multi-column presentation.
+
+Do not force this exact layout if the existing CPTR design suggests a better structure.
+
+21. Desktop enhancement.
+
+On larger screens consider:
+
+LEFT
+- plan / agent tree
+
+CENTER
+- primary live activity / conversation / execution
+
+RIGHT
+- tokens
+- evidence
+- current model
+- verification
+- resource/progress metrics
+
+But mobile experience remains the primary design constraint.
+
+22. Add attractive empty state.
+
+Before execution, create an intentional FlowDeck start experience.
+
+It should make clear:
+
+- current workspace
+- selected CPTR model
+- objective input
+- FlowDeck/Heidi role
+- start action
+
+Do not overload users with internal implementation details.
+
+23. Objective composer.
+
+Make objective entry polished and useful.
+
+Consider:
+
+- auto-resizing input
+- keyboard shortcuts on desktop
+- clear mobile submit control
+- suggested examples
+- current workspace context
+- selected model context
+
+Do not allow the client to send:
+
+- role permissions
+- capabilities
+- model override
+- provider override
+- budgets
+- governance
+- delegation depth
+- kill switches
+- FDX/devops flags
+
+Use the strict existing API schema.
+
+24. Realtime transport.
+
+Audit the backend first.
+
+Reuse existing CPTR transport when appropriate:
+
+- Socket.IO
+- WebSocket
+- SSE
+- authenticated polling
+
+Do NOT create duplicate realtime systems without necessity.
+
+If the current orchestration API does not expose push updates, use efficient authenticated polling first unless a new realtime endpoint has a strong architectural justification.
+
+Durable HTTP state remains authoritative.
+
+25. Token telemetry backend audit.
+
+Before changing backend:
+
+determine exactly what CPTR currently records from providers.
+
+Find:
+
+- usage fields
+- prompt tokens
+- completion tokens
+- model usage metadata
+- per-turn metrics
+- subagent usage
+- streaming usage reporting
+
+If token telemetry currently disappears before the UI can consume it, add minimal server-owned telemetry persistence/event propagation.
+
+Requirements:
+
+- no fabricated values
+- no second token accounting implementation if one exists
+- no model-provider-specific UI logic unless normalized server-side
+- long-run counters survive reconnect where durable data supports it
+
+26. Progress telemetry backend audit.
+
+Determine which state is currently available:
+
+- planned steps
+- current step
+- completed steps
+- child status
+- run status
+- current specialist
+- verification status
+- attempts
+- retries
+
+Normalize minimally for frontend consumption.
+
+Do NOT allow frontend heuristics to become execution truth.
+
+27. Accessibility.
+
+Eye-catching visual effects must remain accessible.
+
+Requirements:
+
+- keyboard navigation
+- visible focus state
+- proper semantic controls
+- appropriate ARIA
+- readable contrast
+- screen-reader labels for status indicators
+- motion reduction
+- not relying solely on color for status
+- touch accessibility
+
+28. Theme support.
+
+Preserve existing CPTR theme architecture.
+
+UI must look polished in both:
+
+- light
+- dark
+
+if both are currently supported.
+
+Avoid effects that only look correct on dark backgrounds.
+
+29. Errors.
+
+Build polished handling for:
+
+- authentication expired
+- workspace unavailable
+- FlowDeck disabled
+- run not found
+- authorization failure
+- network disconnect
+- reconnect
+- API failure
+- cancellation failure
+- verification failure
+- manual review
+- provider unavailable
+- model discovery unavailable
+
+The existing provider-model discovery timeout must not destroy the FlowDeck UI if the app otherwise remains healthy.
+
+30. No fake demo data in production.
+
+Mock data may be used for isolated tests/story development.
+
+Production UI must bind to actual API state.
+
+No hardcoded:
+
+- fake agent names outside registry data
+- fake progress
+- fake token counts
+- fake run timelines
+- fake completion status
+
+31. Preserve security.
+
+Frontend must never receive or expose unnecessary:
+
+- secret keys
+- environment values
+- approval internals
+- hidden prompts
+- credentials
+- raw server policy objects
+
+32. No direct specialist execution from UI.
+
+The UI must use:
+
+UI
+→ authenticated orchestration API
+→ Heidi / control-plane
+→ authenticated specialist gateway
+→ CPTR execution
+
+Never:
+
+UI
+→ specialist
+
+Never:
+
+UI
+→ CPTR tool
+
+Never:
+
+UI
+→ private executor
+
+33. Do not enable disabled capabilities.
+
+This UI milestone must NOT enable:
+
+- FDX
+- devops
+- debug mutation
+- Git mutation
+- unrestricted shell
+- MCP
+- package installation
+- deployment/publishing
+- secrets
+- broader autonomy
+
+34. Visual QA.
+
+After implementation, visually inspect every major screen at multiple widths.
+
+Required widths at minimum:
+
+320
+375
+390
+430
+768
+1024
+1440
+
+Check:
+
+- no overflow
+- no clipping
+- correct overlays
+- readable typography
+- no unusable tiny controls
+- animation smoothness
+- dialogs/sheets fit
+- timeline usable
+- token counter fits
+- activity feed usable
+- evidence UI readable
+- cancel reachable
+- landscape mobile acceptable
+
+35. Performance QA.
+
+Check:
+
+- initial render
+- long activity stream
+- repeated token updates
+- rapid progress updates
+- reconnect
+- 100+ timeline events
+- 500+ timeline events if architecture permits
+- mobile CPU responsiveness
+
+Use event coalescing/throttling where needed.
+
+36. Preserve current backend baseline.
+
+UI work must not regress:
+
+- 104/104 FlowDeck
+- 147/147 backend
+
+If backend telemetry additions are required, add their own tests.
+
+37. Stop after the production UI milestone.
+
+Do NOT continue into new backend authority.
+
+
+Roadmap
+
+1. Baseline audit
+2. Frontend architecture audit
+3. Existing API/realtime/telemetry audit
+4. Mobile-first UX information architecture
+5. Design system extension
+6. Empty/start state
+7. Live orchestration shell
+8. Current-agent visualization
+9. Plan/progress UI
+10. Token/resource telemetry
+11. Live activity timeline
+12. Tool activity
+13. Evidence/verification UI
+14. Cancel/recovery/reconnect UI
+15. Run/history integration if safely supported
+16. Tablet adaptation
+17. Desktop enhancement
+18. Motion/micro-interaction polish
+19. Accessibility pass
+20. Performance pass
+21. Cross-browser/mobile responsive QA
+22. Backend regression
+23. Final visual acceptance audit
+24. Stop
+
+
+Commands
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git branch --show-current
+git rev-parse HEAD
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+cd cptr/frontend
+
+cat package.json
+
+# Use the frontend project's existing install/build/test/lint commands.
+# Do not invent a second package-manager setup.
+
+# After implementation, run the existing production build.
+
+cd "$APP_ROOT"
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+python3 -m compileall -q cptr
+
+git diff --check
+git status --short
+git diff --stat
+git diff
+
+
+Bug checks
+
+- UI designed desktop-first → FAIL
+- Core layout breaks at 320px → FAIL
+- Horizontal scrolling required for main UI → FAIL
+- Touch targets too small → FAIL
+- Essential info available only by hover → FAIL
+- Token values fabricated → FAIL
+- Progress percentage fabricated → FAIL
+- UI marks agent prose as verified evidence → FAIL
+- UNKNOWN appears successful → FAIL
+- MANUAL_REVIEW_REQUIRED appears as generic success/failure → FAIL
+- UI becomes orchestration authority → FAIL
+- UI selects specialist authority directly → FAIL
+- UI overrides model/provider → FAIL
+- Per-agent model controls introduced → FAIL
+- UI controls capabilities/budgets/governance → FAIL
+- Reload creates duplicate run → FAIL
+- Reconnect duplicates activity/events → FAIL
+- Cancel displays completion before backend confirmation → FAIL
+- Long timeline causes severe browser slowdown → FAIL
+- Token updates cause excessive rerenders → FAIL
+- Animations make mobile UI sluggish → FAIL
+- prefers-reduced-motion ignored → FAIL
+- Dark theme broken → FAIL
+- Light theme broken → FAIL
+- Accessibility relies only on colors → FAIL
+- Secrets/raw policy exposed → FAIL
+- UI calls specialist/private executor directly → FAIL
+- Second realtime orchestration truth created → FAIL
+- FDX/devops/Git mutation/debug mutation enabled → FAIL
+- Existing backend tests regress → FAIL
+- UI looks like unfinished admin/debug tooling → FAIL
+
+
+Tests before commit
+
+Acceptance requires:
+
+1. Existing FlowDeck baseline remains 104/104 PASS.
+2. Existing full backend baseline remains 147/147 PASS or higher.
+3. Production frontend build passes.
+4. Mobile 320px passes visual QA.
+5. Mobile 375px passes.
+6. Mobile 390px passes.
+7. Mobile 430px passes.
+8. Tablet 768px passes.
+9. Desktop 1024px passes.
+10. Desktop 1440px passes.
+11. No main-screen horizontal overflow.
+12. Touch interaction works.
+13. Keyboard interaction works.
+14. Reduced-motion mode works.
+15. Light/dark themes work where supported.
+16. Start orchestration works through authenticated API.
+17. Live run state updates correctly.
+18. Current agent displays correctly.
+19. Current step/phase displays correctly.
+20. Overall progress is truthful.
+21. Indeterminate state used when percentage cannot be calculated.
+22. Real token usage displays where available.
+23. Unknown token usage is labelled honestly.
+24. Per-agent/step usage is accurate where supported.
+25. Live activity feed updates without refresh.
+26. Tool activity renders safely.
+27. Verification evidence is distinct from specialist claims.
+28. SUCCEEDED UI is correct.
+29. FAILED UI is correct.
+30. CANCELLED UI is correct.
+31. OUTCOME_UNKNOWN UI is correct.
+32. MANUAL_REVIEW_REQUIRED UI is correct.
+33. Reconnect restores same run.
+34. Reload does not create a new run.
+35. Duplicate realtime events are not shown.
+36. Cancellation reflects authoritative backend response.
+37. Long event stream remains performant.
+38. Rapid token updates remain performant.
+39. No client authority expansion.
+40. No model override introduced.
+41. No direct specialist execution path introduced.
+42. No disabled backend capability becomes enabled.
+43. Authentication errors render correctly.
+44. Workspace authorization errors render correctly.
+45. Network/reconnect states render correctly.
+46. Existing provider-discovery timeout does not break the UI.
+47. Accessibility checks pass for new components.
+48. Frontend lint/type checks pass according to existing project baseline.
+49. git diff --check passes.
+50. API smoke returns HTTP 200.
+51. Final visual polish score >= 9/10.
+
+
+Evidence
+
+Closure report must include:
+
+- PASS / FAIL
+- final score
+- branch / HEAD
+- working-tree state
+- frontend architecture before/after
+- screenshots/visual QA evidence for:
+  - 320
+  - 375/390
+  - 430
+  - 768
+  - 1024
+  - 1440
+- mobile-first design explanation
+- responsive behavior
+- orchestration start flow
+- live-status implementation
+- agent visualization
+- progress implementation
+- token telemetry source
+- token accuracy/fallback behavior
+- activity stream architecture
+- verification/evidence UI
+- cancellation UX
+- reconnect/reload UX
+- performance evidence
+- accessibility evidence
+- light/dark theme evidence
+- exact frontend test/build results
+- exact FlowDeck test count
+- exact backend test count
+- API smoke
+- confirmation CPTR remains sole model/tool execution owner
+- confirmation UI has no execution authority
+- confirmation no specialist/model/capability overrides were introduced
+- confirmation disabled authority remains disabled
+- remaining risks
+- final score
+
+
+Commit/push
+
+Do NOT push to GitHub.
+
+Do NOT create a commit automatically.
+
+Leave the fully verified UI diff available for review.
+
+Only commit after explicit approval.
+
+Score
+
+>= 9/10 required.
+
+Below 9/10 = UI milestone NOT DONE.

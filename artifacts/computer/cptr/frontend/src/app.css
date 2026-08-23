@@ -25,8 +25,8 @@
 
 :root {
 	--app-text-scale: 1;
-	--app-bg: #ffffff;
-	--app-fg: #525252;
+	--app-bg: #f7f7f3;
+	--app-fg: #33413b;
 	--app-fg-muted: color-mix(in oklab, var(--app-fg) 62%, var(--app-bg));
 	--app-fg-subtle: color-mix(in oklab, var(--app-fg) 48%, var(--app-bg));
 	--app-border: color-mix(in oklab, var(--app-fg) 1.5%, transparent);
@@ -34,6 +34,17 @@
 	--app-hover: color-mix(in oklab, var(--app-fg) 6%, transparent);
 	--app-active: color-mix(in oklab, var(--app-fg) 7%, transparent);
 	--app-ui-font: var(--font-sans);
+}
+
+.dark {
+	--app-bg: #101716;
+	--app-fg: #dfe8df;
+	--app-fg-muted: color-mix(in oklab, var(--app-fg) 62%, var(--app-bg));
+	--app-fg-subtle: color-mix(in oklab, var(--app-fg) 48%, var(--app-bg));
+	--app-border: color-mix(in oklab, var(--app-fg) 11%, transparent);
+	--app-divider: color-mix(in oklab, var(--app-fg) 7%, transparent);
+	--app-hover: color-mix(in oklab, var(--app-fg) 8%, transparent);
+	--app-active: color-mix(in oklab, var(--app-fg) 12%, transparent);
 }
 
 @layer base {

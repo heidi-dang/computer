@@ -14,6 +14,12 @@
 		goto('/scheduled');
 		if (typeof window !== 'undefined' && window.innerWidth < 768) sidebarOpen.set(false);
 	}
+
+	function openFlowDeck(e: MouseEvent) {
+		e.preventDefault();
+		goto('/flowdeck');
+		if (typeof window !== 'undefined' && window.innerWidth < 768) sidebarOpen.set(false);
+	}
 </script>
 
 <div class="px-1.5 mt-1 shrink-0">
@@ -46,3 +52,14 @@
 		</a>
 	</div>
 {/if}
+
+<div class="px-1.5 shrink-0">
+	<a
+		href="/flowdeck"
+		class="flex items-center gap-1.5 w-full h-7 px-2 rounded-lg text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100 no-underline"
+		onclick={openFlowDeck}
+	>
+		<Icon name="gateway" size={14} />
+		<span class="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">FlowDeck</span>
+	</a>
+</div>
