@@ -168,6 +168,58 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(LifecycleError):
             await self.store.mark_attempt_unknown(attempt.id, now=self.now + 2)
 
+    async def test_stale_physical_attempt_cannot_publish_success(self):
+        run, operation = await self._run_and_intent()
+        lease = await self.store.acquire_workspace_lease(
+            workspace="/workspace",
+            run_id=run.id,
+            owner="worker-a",
+            ttl_ms=100,
+            now=self.now,
+        )
+        stale_attempt = await self.store.prepare_attempt(
+            operation_id=operation.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            now=self.now,
+        )
+        await self.store.finish_attempt(
+            stale_attempt.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            outcome="failed",
+            evidence={
+                "source": "runtime",
+                "authoritative": True,
+                "observation": "native_loop_return",
+                "observed_outcome": "failed",
+                "attempt_id": stale_attempt.id,
+            },
+            now=self.now + 1,
+        )
+        current_attempt = await self.store.prepare_attempt(
+            operation_id=operation.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            now=self.now + 2,
+        )
+        with self.assertRaises(LifecycleError):
+            await self.store.finish_attempt(
+                stale_attempt.id,
+                owner="worker-a",
+                fencing_epoch=lease.epoch,
+                outcome="succeeded",
+                evidence={
+                    "source": "runtime",
+                    "authoritative": True,
+                    "observation": "native_loop_return",
+                    "observed_outcome": "succeeded",
+                    "attempt_id": stale_attempt.id,
+                },
+                now=self.now + 3,
+            )
+        self.assertEqual(current_attempt.attempt_no, 2)
+
     async def test_manual_review_is_terminal_and_closes_run_safely(self):
         run, operation = await self._run_and_intent()
         lease = await self.store.acquire_workspace_lease(
@@ -309,6 +361,46 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
                 },
                 now=self.now + 1,
             )
+
+    async def test_terminal_evidence_cannot_cross_durable_identity(self):
+        run, operation = await self._run_and_intent()
+        lease = await self.store.acquire_workspace_lease(
+            workspace="/workspace",
+            run_id=run.id,
+            owner="worker-a",
+            ttl_ms=100,
+            now=self.now,
+        )
+        attempt = await self.store.prepare_attempt(
+            operation_id=operation.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            now=self.now,
+        )
+        for field, value in (
+            ("run_id", "other-run"),
+            ("operation_id", "other-operation"),
+            ("workspace", "/other-workspace"),
+            ("owner", "other-user"),
+            ("operation_fingerprint", "other-operation-fingerprint"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(LifecycleError):
+                    await self.store.finish_attempt(
+                        attempt.id,
+                        owner="worker-a",
+                        fencing_epoch=lease.epoch,
+                        outcome="succeeded",
+                        evidence={
+                            "source": "verifier",
+                            "authoritative": True,
+                            "observation": "verifier_check",
+                            "observed_outcome": "succeeded",
+                            "attempt_id": attempt.id,
+                            field: value,
+                        },
+                        now=self.now + 1,
+                    )
 
     async def test_run_cannot_complete_while_operation_is_ambiguous(self):
         run, operation = await self._run_and_intent()

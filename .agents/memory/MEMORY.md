@@ -2,3 +2,4 @@
 - [FlowDeck read-only execution](flowdeck-readonly-execution.md) — read-only specialists share scopes without mutation leases and must reuse CPTR's native loop with runtime tool filtering.
 - [FlowDeck coding gates](flowdeck-coding-gates.md) — mutation roles qualify one at a time; every structured write needs durable intent, fencing, and independent verification.
 - [FDX isolation gate](fdx-isolation-gate.md) — optional FDX needs durable workspace ownership plus independent OS isolation; otherwise native CPTR remains the path.
+- [Evidence verifier policy](evidence-verifier-policy.md) — terminal evidence is runtime/verifier-only, identity-bound durably, and stale attempts cannot finalize.

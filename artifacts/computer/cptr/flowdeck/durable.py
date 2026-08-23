@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from cptr.flowdeck.evidence import (
+    bind_durable_identity,
     validate_reconciliation_evidence,
     validate_terminal_evidence,
 )
@@ -520,19 +521,40 @@ class DurableFlowDeck:
         """Commit a positively observed attempt outcome under the current fence."""
         if outcome not in {"succeeded", "failed"}:
             raise LifecycleError("attempt outcome must be succeeded or failed")
-        try:
-            validate_terminal_evidence(evidence, outcome=outcome, attempt_id=attempt_id)
-        except ValueError as exc:
-            raise LifecycleError(str(exc)) from exc
         now = self.clock() if now is None else now
 
         async def operation(db: AsyncSession):
             attempt = await db.get(FlowDeckPhysicalAttempt, attempt_id)
             if not attempt:
                 raise LifecycleError("unknown attempt")
+            self._require(
+                attempt.status,
+                {AttemptStatus.PREPARED.value, AttemptStatus.RUNNING.value},
+            )
+            if attempt.fencing_epoch != fencing_epoch:
+                raise StaleWriterError("attempt fencing epoch is stale")
             op = await self._operation(db, attempt.operation_id)
             self._require(op.status, {OperationStatus.RUNNING.value})
             run = await self._run(db, op.run_id)
+            try:
+                bound_evidence = bind_durable_identity(
+                    evidence,
+                    run_id=run.id,
+                    operation_id=op.id,
+                    step_id=op.step_id,
+                    workspace=run.workspace,
+                    owner=run.owner,
+                    operation_fingerprint=(
+                        f"{op.capability}:{op.target}:{op.reconcile_kind}"
+                    ),
+                )
+                validate_terminal_evidence(
+                    bound_evidence,
+                    outcome=outcome,
+                    attempt_id=attempt_id,
+                )
+            except ValueError as exc:
+                raise LifecycleError(str(exc)) from exc
             if run.workspace and fencing_epoch:
                 await self._assert_workspace_lease(
                     db, run.workspace, run.id, owner, fencing_epoch, now
@@ -552,7 +574,7 @@ class DurableFlowDeck:
                 else OperationStatus.FAILED.value
             )
             op.outcome = outcome
-            op.authoritative_evidence = evidence
+            op.authoritative_evidence = bound_evidence
             op.updated_at = now
             await self._event(
                 db,
@@ -648,7 +670,19 @@ class DurableFlowDeck:
             positively_reconciled = False
             if outcome in {"succeeded", "failed"}:
                 try:
-                    validate_reconciliation_evidence(evidence, outcome=outcome)
+                    run = await self._run(db, op.run_id)
+                    bound_evidence = bind_durable_identity(
+                        evidence or {},
+                        run_id=run.id,
+                        operation_id=op.id,
+                        step_id=op.step_id,
+                        workspace=run.workspace,
+                        owner=run.owner,
+                        operation_fingerprint=(
+                            f"{op.capability}:{op.target}:{op.reconcile_kind}"
+                        ),
+                    )
+                    validate_reconciliation_evidence(bound_evidence, outcome=outcome)
                 except ValueError:
                     pass
                 else:
@@ -660,7 +694,7 @@ class DurableFlowDeck:
                     else OperationStatus.FAILED.value
                 )
                 op.outcome = outcome
-                op.authoritative_evidence = evidence
+                op.authoritative_evidence = bound_evidence
                 event_kind = "OUTCOME_RECONCILED"
             else:
                 op.status = OperationStatus.MANUAL_REVIEW_REQUIRED.value
