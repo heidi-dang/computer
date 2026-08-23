@@ -62,6 +62,12 @@ from cptr.flowdeck.git_readonly import (
     inspect_git,
 )
 from cptr.flowdeck.gateway import observe_request
+from cptr.flowdeck.authenticated_gateway import (
+    AuthenticatedGatewayError,
+    SpecialistDispatchRequest,
+    dispatch_authenticated_specialist,
+    resolve_gateway_workspace,
+)
 from cptr.flowdeck.registry import AGENT_REGISTRY, get_agent, validate_registry
 from cptr.flowdeck.tester import (
     TEST_CHECKS,
@@ -84,6 +90,7 @@ __all__ = [
     "ApprovalStatus",
     "AttemptStatus",
     "BudgetExceeded",
+    "AuthenticatedGatewayError",
     "Capability",
     "CodingPolicyError",
     "CodingRequest",
@@ -118,6 +125,7 @@ __all__ = [
     "coding_tool_guard",
     "coding_tool_names",
     "get_agent",
+    "dispatch_authenticated_specialist",
     "inspect_git",
     "mapper_tool_guard",
     "observe_request",
@@ -128,6 +136,8 @@ __all__ = [
     "run_optional_fdx",
     "run_read_only_specialist",
     "run_tester",
+    "resolve_gateway_workspace",
+    "SpecialistDispatchRequest",
     "validate_browser_request",
     "validate_coding_request",
     "validate_mapper_request",
