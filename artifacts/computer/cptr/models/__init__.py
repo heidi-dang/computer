@@ -1,10 +1,7 @@
 """Database models for cptr."""
 
+from cptr.models.automations import Automation, AutomationRun
 from cptr.models.base import Base
-from cptr.models.users import User, Auth, UserStates
-from cptr.models.workspaces import Workspace
-from cptr.models.config import Config
-from cptr.models.files import File
 from cptr.models.chats import (
     Chat,
     ChatMessage,
@@ -13,10 +10,20 @@ from cptr.models.chats import (
     is_pending_subagent_result_message,
     is_subagent_result_message,
 )
-from cptr.models.automations import Automation, AutomationRun
+from cptr.models.config import Config
+from cptr.models.control import (
+    AutonomousApproval,
+    AutonomousEvidence,
+    AutonomousMonitor,
+    AutonomousScope,
+    AutonomousWorkspaceLease,
+    ControlIdempotency,
+    ControlTask,
+)
+from cptr.models.files import File
 from cptr.models.flowdeck import (
-    FlowDeckEvent,
     FlowDeckApproval,
+    FlowDeckEvent,
     FlowDeckLogicalOperation,
     FlowDeckPhysicalAttempt,
     FlowDeckRecoveryLease,
@@ -24,6 +31,8 @@ from cptr.models.flowdeck import (
     FlowDeckStep,
     FlowDeckWorkspaceLease,
 )
+from cptr.models.users import Auth, User, UserStates
+from cptr.models.workspaces import Workspace
 
 __all__ = [
     "Base",
@@ -41,6 +50,14 @@ __all__ = [
     "is_subagent_result_message",
     "Automation",
     "AutomationRun",
+    "FlowDeckApproval",
+    "AutonomousApproval",
+    "AutonomousEvidence",
+    "AutonomousMonitor",
+    "AutonomousScope",
+    "AutonomousWorkspaceLease",
+    "ControlIdempotency",
+    "ControlTask",
     "FlowDeckEvent",
     "FlowDeckLogicalOperation",
     "FlowDeckPhysicalAttempt",

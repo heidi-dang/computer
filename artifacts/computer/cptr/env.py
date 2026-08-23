@@ -108,6 +108,15 @@ STREAM_WRITE_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_WRITE_TIMEOUT",
 AUTOMATION_POLL_INTERVAL = int(os.environ.get("AUTOMATION_POLL_INTERVAL", "10"))
 TIMER_POLL_INTERVAL = int(os.environ.get("TIMER_POLL_INTERVAL", "1"))
 
+# ── ChatGPT control plane ───────────────────────────────────
+# The upstream control API is deliberately unavailable unless explicitly
+# enabled; FlowDeck remains the default production orchestration boundary.
+CONTROL_PLANE_ENABLED = _env_bool("CPTR_CONTROL_PLANE_ENABLED", "false")
+SUPERVISOR_POLL_INTERVAL = float(os.environ.get("CPTR_SUPERVISOR_POLL_INTERVAL", "2"))
+SUPERVISOR_MAX_ATTEMPTS = _env_int("CPTR_SUPERVISOR_MAX_ATTEMPTS", 5)
+SUPERVISOR_OPENAI_MODEL = os.environ.get("CPTR_SUPERVISOR_OPENAI_MODEL", "")
+SUPERVISOR_OPENAI_API_KEY = os.environ.get("CPTR_SUPERVISOR_OPENAI_API_KEY", "")
+
 # ── CORS ────────────────────────────────────────────────────
 # Socket.IO CORS allowed origins.
 # Default → "*" (allow all origins)

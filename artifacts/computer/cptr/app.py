@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
@@ -15,6 +16,7 @@ from cptr.routers import (
     bridge_router,
     browser_router,
     chat_router,
+    control_router,
     events_router,
     files_router,
     flowdeck_router,
@@ -66,6 +68,15 @@ async def lifespan(app: FastAPI):
     from cptr.routers.chat import warm_model_cache
 
     await warm_model_cache(app.state)
+    if os.environ.get("CPTR_CONTROL_PLANE_ENABLED", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    ):
+        from cptr.routers.control import recover_monitors
+
+        await recover_monitors(app)
 
     # Start automation scheduler
     from cptr.utils.automations import scheduler_worker_loop
@@ -285,6 +296,7 @@ app.include_router(bridge_router)
 app.include_router(browser_router)
 app.include_router(webhook_router)
 app.include_router(chat_router)
+app.include_router(control_router)
 app.include_router(events_router)
 app.include_router(files_router)
 app.include_router(gateway_router)
