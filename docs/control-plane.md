@@ -94,6 +94,12 @@ python -m unittest discover -s tests -v
 
 The repository's frontend checks remain unchanged. The control-plane migration is applied by the existing Alembic startup path.
 
+Independent workspace validation can be configured with `CPTR_VERIFICATION_COMMANDS_JSON`, a JSON
+array of argv-based commands. Each item has a `name`, an `argv` array, and an optional
+`timeout_seconds` value (capped at ten minutes). CPTR executes these commands in the owned
+workspace without a shell and persists bounded stdout/stderr, timestamps, duration, exit code,
+timeout state, and pass/fail evidence. Worker output is never treated as validation evidence.
+
 ## ChatGPT Developer Mode
 
 Start CPTR and the companion MCP adapter, expose the adapter through an HTTPS tunnel or deployment, and add the adapter's `/mcp` URL in ChatGPT Developer Mode under Settings → Connectors. Use the plugin README for adapter-specific commands. Refresh the connector after changing tool schemas or annotations.

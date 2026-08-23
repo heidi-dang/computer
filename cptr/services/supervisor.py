@@ -484,6 +484,9 @@ class AutonomousSupervisor:
             monitor=monitor,
             scope=scope,
         )
+        for check in verification.checks:
+            if check.get("verification_command"):
+                await self._append_evidence(monitor, scope, "verification_command", check)
         await self._append_evidence(
             monitor,
             scope,
@@ -513,7 +516,8 @@ class AutonomousSupervisor:
                 original_goal=monitor.original_goal,
                 original_acceptance_criteria=monitor.original_acceptance_criteria,
             )
-        except Exception:  # noqa: BLE001 - preserve a retryable state across provider outages
+        except Exception:
+            logger.exception("supervisor director evaluate failed for scope %s", scope.scope_id)
             await self._repair_or_block(
                 monitor,
                 scope,
@@ -589,7 +593,10 @@ class AutonomousSupervisor:
                 monitor=monitor, scope=scope, decision=decision
             )
             self._sync_director_state(monitor)
-        except Exception:  # noqa: BLE001 - retry once the director is available again
+        except Exception:
+            logger.exception(
+                "supervisor director repair planning failed for scope %s", scope.scope_id
+            )
             scope.last_decision = {
                 "next_action_required": True,
                 "next_assignment": "Retry after the supervisor director recovers.",

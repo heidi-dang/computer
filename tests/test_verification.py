@@ -1,6 +1,11 @@
+import json
+import os
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 
-from cptr.services.verification import DefaultIndependentVerifier
+from cptr.services.verification import DefaultIndependentVerifier, VerificationCommand
 
 
 class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
@@ -27,6 +32,88 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
                 "git_diff_check",
             },
         )
+
+    async def test_configured_commands_run_independently_and_capture_bounded_evidence(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            command = VerificationCommand(
+                name="smoke",
+                argv=(
+                    sys.executable,
+                    "-c",
+                    "print('independent smoke passed')",
+                ),
+                timeout_seconds=5,
+            )
+
+            result = await DefaultIndependentVerifier(commands=[command]).verify(
+                task={"status": "COMPLETE", "output": "worker prose"},
+                evidence={
+                    "independent": {
+                        "workspace_path": workspace,
+                        "git_diff_check": {"passed": True},
+                    }
+                },
+            )
+
+        self.assertTrue(result.passed)
+        command_check = next(item for item in result.checks if item.get("name") == "smoke")
+        self.assertTrue(command_check["passed"])
+        self.assertEqual(command_check["exit_code"], 0)
+        self.assertIn("independent smoke passed", command_check["stdout"])
+        self.assertIsInstance(command_check["started_at"], int)
+        self.assertIsInstance(command_check["finished_at"], int)
+        self.assertIn("duration_ms", command_check)
+        self.assertFalse(command_check["timed_out"])
+
+    async def test_configured_command_failure_is_not_hidden_by_worker_prose(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            command = VerificationCommand(
+                name="pytest",
+                argv=(sys.executable, "-c", "import sys; print('fixture failed'); sys.exit(3)"),
+                timeout_seconds=5,
+            )
+
+            result = await DefaultIndependentVerifier(commands=[command]).verify(
+                task={"status": "COMPLETE", "output": "tests passed"},
+                evidence={
+                    "independent": {
+                        "workspace_path": workspace,
+                        "git_diff_check": {"passed": True},
+                    }
+                },
+            )
+
+        self.assertFalse(result.passed)
+        command_check = next(item for item in result.checks if item.get("name") == "pytest")
+        self.assertFalse(command_check["passed"])
+        self.assertEqual(command_check["exit_code"], 3)
+        self.assertIn("fixture failed", command_check["stdout"])
+        self.assertTrue(any("pytest" in failure for failure in result.failures))
+
+    async def test_commands_can_be_loaded_from_configuration_without_shell_interpolation(self):
+        with tempfile.TemporaryDirectory() as workspace:
+            old = os.environ.get("CPTR_VERIFICATION_COMMANDS_JSON")
+            os.environ["CPTR_VERIFICATION_COMMANDS_JSON"] = json.dumps(
+                [{"name": "configured", "argv": [sys.executable, "-c", "print('ok')"]}]
+            )
+            try:
+                result = await DefaultIndependentVerifier().verify(
+                    task={"status": "COMPLETE"},
+                    evidence={
+                        "independent": {
+                            "workspace_path": Path(workspace),
+                            "git_diff_check": {"passed": True},
+                        }
+                    },
+                )
+            finally:
+                if old is None:
+                    os.environ.pop("CPTR_VERIFICATION_COMMANDS_JSON", None)
+                else:
+                    os.environ["CPTR_VERIFICATION_COMMANDS_JSON"] = old
+
+        self.assertTrue(result.passed)
+        self.assertTrue(any(item.get("name") == "configured" for item in result.checks))
 
 
 if __name__ == "__main__":

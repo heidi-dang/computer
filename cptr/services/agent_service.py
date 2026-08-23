@@ -271,6 +271,7 @@ class AgentService:
 
         identity = await identity_for_user_id(user_id)
         return {
+            "workspace_path": workspace.path,
             "git_status": await status(workspace.path, identity),
             "git_diff_check": await diff_check(workspace.path, identity),
         }
