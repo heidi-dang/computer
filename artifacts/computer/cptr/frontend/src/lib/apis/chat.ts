@@ -60,8 +60,10 @@ export interface SendMessageResult {
 }
 
 export type ToolApprovalMode = 'ask' | 'auto' | 'full';
+export type ChatAgent = 'computer' | 'heidi';
 
 export interface ChatSendParams {
+	agent?: ChatAgent;
 	tool_approval_mode?: ToolApprovalMode;
 	plan_mode?: boolean;
 	request_params?: Record<string, unknown>;

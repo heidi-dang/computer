@@ -55,8 +55,8 @@
 					]
 				: []),
 			...filtered.map((m) => ({
-				label: m.name,
-				tooltip: m.name,
+				label: `${m.provider} / ${m.name}`,
+				tooltip: `${m.provider} / ${m.name}`,
 				active: m.id === selectedModel,
 				check: true,
 				onclick: () => {
@@ -134,15 +134,22 @@
 <span class="relative inline-flex {open ? 'z-[1001]' : ''}">
 	<button
 		bind:this={btnEl}
-		class="flex items-center gap-1 px-2 py-1 rounded-lg text-[0.6875rem] text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors duration-100"
+		class="model-picker-trigger app-interactive flex min-h-9 min-w-0 max-w-[13rem] items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs text-gray-500 transition-colors duration-100 sm:max-w-[24rem]"
+		title={selectedModel === null || selectedModel === ''
+			? nullLabel
+			: $chatModels.find((m) => m.id === selectedModel)
+				? `${$chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
+				: $t('modelSelector.selectModel')}
 		onclick={toggle}
 	>
-		<span class="truncate max-w-[10rem]"
+		<span class="min-w-0 flex-1 text-left leading-tight break-words"
 			>{selectedModel === null || selectedModel === ''
 				? nullLabel
 				: $chatModels.length === 0
 					? $t('modelSelector.noModels')
-					: $chatModels.find((m) => m.id === selectedModel)?.name ||
+					: $chatModels.find((m) => m.id === selectedModel)
+							? `${$chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
+							:
 						$t('modelSelector.selectModel')}</span
 		>
 		{#if $chatModels.length > 0 || nullable}
@@ -168,7 +175,7 @@
 			{preferAbove}
 			forceAbove={preferAbove}
 			maxHeight={selectorMaxHeight}
-			className="w-52"
+			className="w-[min(30rem,calc(100vw-1rem))] sm:w-[30rem]"
 			scrollActiveIntoView
 			scrollActiveBlock="center"
 			{align}
@@ -221,3 +228,17 @@
 		</DropdownMenu>
 	{/if}
 </span>
+
+<style>
+	.model-picker-trigger {
+		background: color-mix(in oklab, var(--app-surface) 92%, var(--app-fg));
+		border-color: color-mix(in oklab, var(--app-fg) 12%, transparent);
+	}
+
+	@media (max-width: 380px) {
+		.model-picker-trigger {
+			max-width: 11rem;
+			padding-inline: 0.45rem;
+		}
+	}
+</style>

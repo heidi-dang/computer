@@ -23,6 +23,8 @@
 		type ContextUsage,
 		type ChatTask
 	} from '$lib/apis/chat';
+	import { createFlowDeckOrchestration, getFlowDeckOrchestration } from '$lib/apis/flowdeck';
+	import type { ChatAgent } from '../common/AgentSelector.svelte';
 	import {
 		chatModels,
 		defaultModel,
@@ -95,6 +97,7 @@
 	let inputText = $state('');
 	let chatId = $state<string | null>(initialChatId ?? null);
 	let selectedModel = $state('');
+	let selectedAgent = $state<ChatAgent>('computer');
 	let toolApprovalMode = $state<ToolApprovalMode>('auto');
 	let planMode = $state(false);
 	let requestParams = $state<Record<string, unknown>>({});
@@ -135,6 +138,9 @@
 	let chatInputEl: ChatInput;
 	let statusButtonEl: HTMLButtonElement | undefined = $state();
 	let sending = $state(false);
+	let flowdeckStatus = $state('');
+	let flowdeckRunId = $state('');
+	let flowdeckPoller: ReturnType<typeof setInterval> | null = null;
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChatId);
@@ -723,6 +729,9 @@
 		planMode = false;
 		requestParams = {};
 		voiceModeEnabled = false;
+		selectedAgent = 'computer';
+		flowdeckStatus = '';
+		flowdeckRunId = '';
 	}
 
 	function loadChatSettings(meta: Record<string, any> | null) {
@@ -741,6 +750,7 @@
 			requestParams = params.request_params;
 		}
 		voiceModeEnabled = params.voice_mode === true;
+		if (params.agent === 'heidi' || params.agent === 'computer') selectedAgent = params.agent;
 		const models = get(chatModels);
 		if (
 			typeof meta?.last_model === 'string' &&
@@ -779,6 +789,7 @@
 		stopTtsPlayback();
 		unbindSocketListeners?.();
 		unbindSocketListeners = null;
+		stopFlowDeckPolling();
 		if (commandSessionsTimer) clearInterval(commandSessionsTimer);
 		commandSessionsTimer = null;
 		window.removeEventListener('computer:inspectCommandSession', handleInspectCommandSession);
@@ -902,6 +913,7 @@
 
 	function getChatSendParams(): ChatSendParams {
 		const params: ChatSendParams = {
+			agent: selectedAgent,
 			tool_approval_mode: toolApprovalMode,
 			plan_mode: planMode,
 			request_params: requestParams
@@ -912,7 +924,7 @@
 
 	async function send() {
 		let text = inputText.trim();
-		if (!text || !selectedModel) return;
+		if (!text || (selectedAgent !== 'heidi' && !selectedModel)) return;
 		if (sending) return;
 		if (hasChatContent && text === '/compact') {
 			await handleManualCompact();
@@ -935,6 +947,10 @@
 		if (hasChatContent && text === '/skills:list') {
 			await handleSkillsListCommand();
 			inputText = '';
+			return;
+		}
+		if (selectedAgent === 'heidi') {
+			await sendToFlowDeck(text);
 			return;
 		}
 		stopTtsPlayback();
@@ -1069,6 +1085,73 @@
 			currentMessageId = parentId;
 			throw e;
 		} finally {
+			sending = false;
+			chatInputEl?.focus();
+		}
+	}
+
+	function stopFlowDeckPolling() {
+		if (flowdeckPoller) clearInterval(flowdeckPoller);
+		flowdeckPoller = null;
+	}
+
+	function startFlowDeckPolling(runId: string) {
+		stopFlowDeckPolling();
+		flowdeckPoller = setInterval(async () => {
+			try {
+				const state = await getFlowDeckOrchestration(runId, workspace);
+				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
+				if (
+					['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(
+						flowdeckStatus
+					)
+				) {
+					stopFlowDeckPolling();
+				}
+			} catch {
+				// Keep the last truthful state; the next poll or completion response can update it.
+			}
+		}, 2500);
+	}
+
+	async function sendToFlowDeck(text: string) {
+		if (!workspace) {
+			toast.error('Choose a workspace before using Heidi.');
+			return;
+		}
+		stopTtsPlayback();
+		sending = true;
+		flowdeckStatus = 'active';
+		flowdeckRunId = '';
+		try {
+			const result = await createFlowDeckOrchestration(
+				{
+					workspace,
+					objective: text,
+					metadata: { source: 'chat-composer', chat_id: chatId }
+				},
+				`chat-flowdeck-${crypto.randomUUID()}`
+			);
+			flowdeckRunId = result.run_id || '';
+			flowdeckStatus = String(result.status || 'active').toLowerCase();
+			if (
+				flowdeckRunId &&
+				!['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(flowdeckStatus)
+			) {
+				startFlowDeckPolling(flowdeckRunId);
+			}
+			if (flowdeckStatus === 'succeeded') {
+				toast.success('Heidi completed the FlowDeck orchestration.');
+			}
+		} catch (error) {
+			flowdeckStatus = 'failed';
+			toast.error(
+				error instanceof Error
+					? error.message
+					: 'Heidi could not start FlowDeck orchestration.'
+			);
+		} finally {
+			inputText = '';
 			sending = false;
 			chatInputEl?.focus();
 		}
@@ -1804,11 +1887,14 @@
 					bind:this={chatInputEl}
 					bind:inputText
 					bind:selectedModel
+					bind:selectedAgent
 					bind:toolApprovalMode
 					bind:planMode
 					bind:requestParams
 					bind:voiceModeEnabled
 					{sending}
+					flowdeckStatus={flowdeckStatus}
+					flowdeckRunId={flowdeckRunId}
 					{workspace}
 					placeholder={$t('chat.placeholder', { name: workspaceDisplayName })}
 					tasks={chatTasks}
@@ -1931,11 +2017,14 @@
 					bind:this={chatInputEl}
 					bind:inputText
 					bind:selectedModel
+					bind:selectedAgent
 					bind:toolApprovalMode
 					bind:planMode
 					bind:requestParams
 					bind:voiceModeEnabled
 					{sending}
+					flowdeckStatus={flowdeckStatus}
+					flowdeckRunId={flowdeckRunId}
 					{streaming}
 					{workspace}
 					{contextUsage}
