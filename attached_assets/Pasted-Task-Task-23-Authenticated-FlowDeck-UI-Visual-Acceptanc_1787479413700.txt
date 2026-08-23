@@ -1,0 +1,800 @@
+Task
+Task #23 — Authenticated FlowDeck UI Visual Acceptance and Final Polish
+
+Goal:
+Close the remaining Task #22 acceptance gap by testing the authenticated `/flowdeck` cockpit itself across mobile, tablet, and desktop, then fix only genuine UI/responsive/runtime defects.
+
+This is a visual QA and polish milestone.
+
+Do NOT add new backend authority.
+Do NOT add new specialist capabilities.
+Do NOT redesign the backend architecture.
+Do NOT add another realtime system.
+Do NOT enable FDX, devops, debug mutation, Git mutation, unrestricted shell, MCP, install/deploy/publish, secrets, or broader autonomy.
+
+Current accepted baseline:
+- Task #21 backend authority/recovery: PASS
+- Task #22 UI implementation exists at `/flowdeck`
+- FlowDeck tests: 104/104 PASS
+- Full backend suite: 147/147 PASS
+- Frontend production build: PASS
+- No FlowDeck-specific svelte-check errors
+- `git diff --check`: PASS
+- Mobile-first implementation exists
+- Real create/read/cancel FlowDeck API integration exists
+- Idempotent run creation exists
+- URL/session run recovery exists
+- Polling live refresh exists
+- Offline/reconnect/unavailable/error states exist
+- Truthful token/progress semantics exist
+- No client-side authority expansion
+- No commit/push/deploy performed
+
+Known remaining blocker:
+The authenticated FlowDeck cockpit has not yet been fully visually exercised while signed in.
+
+The sign-in boundary was tested, but that is insufficient to prove the actual live cockpit is polished and responsive.
+
+To dev
+
+1. Verify baseline first.
+
+Before changing anything:
+- confirm branch / HEAD / working tree
+- run FlowDeck 104/104
+- run full backend 147/147
+- run frontend production build
+- confirm `/flowdeck` route exists
+- confirm current implementation is still mobile-first
+- confirm no unexpected changes since Task #22
+
+Do not modify code before baseline verification.
+
+2. Use a legitimate authenticated local/test session.
+
+Do NOT:
+- hardcode credentials
+- commit credentials
+- embed tokens in source
+- expose secrets in logs
+- weaken authentication
+- bypass authentication middleware
+
+Use:
+- existing local/test account fixtures
+- already available authenticated browser session
+- or manual sign-in if required
+
+If authentication cannot be completed automatically without violating security, stop and clearly report the exact manual action required from me.
+
+3. Test the REAL authenticated `/flowdeck` cockpit.
+
+Do not test only:
+- sign-in page
+- unauthenticated redirect
+- isolated components
+
+Open the actual authenticated FlowDeck route and inspect the rendered production UI.
+
+4. Required viewport matrix.
+
+Visually inspect at minimum:
+
+- 320 × suitable height
+- 360
+- 375
+- 390
+- 414
+- 430
+- 768
+- 1024
+- 1440
+
+Also test:
+- mobile portrait
+- mobile landscape where practical
+
+For each width verify:
+- no horizontal overflow
+- no clipped cards
+- no hidden essential controls
+- no overlapping text
+- no unreadable labels
+- no broken drawers/sheets
+- no inaccessible cancel control
+- no unusable timeline
+- token counter fits
+- current-agent display fits
+- progress display fits
+- evidence display remains readable
+
+5. Mobile-first polish is mandatory.
+
+The 320–430px experience is the primary acceptance target.
+
+Mobile must feel intentional, not compressed desktop.
+
+Check:
+- touch spacing
+- visual hierarchy
+- stacking order
+- bottom sheets / tabs / drawers
+- sticky controls
+- objective composer
+- active run header
+- cancel accessibility
+- plan readability
+- timeline readability
+- evidence readability
+- current model display
+- current specialist display
+- token display
+- progress display
+
+6. Verify the empty/start state.
+
+Authenticated user with no active run:
+
+Check:
+- current workspace shown clearly
+- selected CPTR model shown clearly
+- objective composer is visually polished
+- CTA is obvious
+- layout is not empty/dead
+- responsive behavior works on phone
+- no authority-bearing controls exposed
+- no per-agent model controls
+
+7. Run one real or deterministic FlowDeck orchestration.
+
+Use the safest available deterministic/local test path.
+
+Exercise the actual UI through:
+
+Start
+→ Planning
+→ Specialist activity
+→ Tool / activity updates
+→ Verification
+→ Completion
+
+Do not require a live provider if deterministic test data can exercise the real production UI state safely.
+
+Do not fake production state in code.
+
+8. Verify live state presentation.
+
+Check visually:
+
+- current run state
+- current phase
+- current specialist
+- current plan/step
+- elapsed time
+- token usage
+- progress
+- evidence state
+- tool activity
+- cancel control
+
+The screen should feel alive while execution is active.
+
+9. Eye-catching polish.
+
+This is a hard requirement.
+
+The user experience should be visually compelling enough that watching a run feels interesting.
+
+Polish:
+- active-agent emphasis
+- animated state transitions
+- progress transitions
+- token count transitions
+- tool execution animations
+- verification animations
+- completion effects
+- subtle highlights/glows
+- hover/focus/touch feedback
+- loading/skeleton states
+
+But:
+- no excessive animation
+- no distracting constant motion
+- no expensive blur storms
+- no frame drops on mobile
+- respect reduced-motion
+
+10. Verify token UI with REAL telemetry.
+
+Check all states:
+
+A. provider reports usage
+- total tokens
+- input/output where available
+- cumulative totals
+- per-step/per-agent where supported
+
+B. provider does not report usage
+UI must show:
+- Not reported
+or equivalent truthful state
+
+C. usage appears later
+Counter should update correctly.
+
+Do not fabricate or estimate exact token counts.
+
+11. Verify progress truthfulness.
+
+Check:
+
+A. deterministic step count available
+- completed / total
+- truthful percentage if derivable
+
+B. open-ended work
+- phase / indeterminate progress
+- no fake percentages
+
+C. complete
+- only show 100% if backend truth supports it
+
+D. failed/unknown/manual review
+- do not imply completion percentage means success
+
+12. Verify agent visualization.
+
+Exercise and inspect:
+- Heidi
+- at least one read-only specialist
+- at least one coder if safe
+- tester
+- reviewer if present in the plan
+
+Confirm:
+- active role stands out
+- completed role is clear
+- waiting role is clear
+- failed role is clear
+- tokens/time show where reported
+- disabled roles are not shown as available execution choices
+
+13. Verify activity timeline.
+
+Test:
+- new events appear without reload
+- event order is correct
+- duplicate events are removed
+- auto-scroll behaves sensibly
+- manual scroll disables forced snapping
+- "jump to latest" works if present
+- long text does not destroy layout
+- mobile timeline remains readable
+
+Stress test:
+- 100+ events
+- 500+ events if safe/available
+
+Check performance.
+
+14. Verify tool activity.
+
+Check actual rendered tool rows/cards:
+
+- tool name
+- agent
+- state
+- duration
+- summarized input/result
+- verification relationship
+
+Verify:
+- secrets are not shown
+- raw environment variables are not shown
+- long output is bounded/collapsible
+- mobile rendering works
+
+15. Verify evidence UI.
+
+This is critical.
+
+The UI must visually distinguish:
+
+Specialist claim
+vs
+Runtime observation
+vs
+Authoritative verified evidence
+
+Check states:
+- awaiting verification
+- verifying
+- verified
+- verification failed
+- outcome unknown
+- manual review required
+
+Do not visually decorate specialist prose as if verified.
+
+16. Verify terminal states.
+
+Create/seed/test legitimate UI states for:
+
+- SUCCEEDED
+- FAILED
+- CANCELLED
+- OUTCOME_UNKNOWN
+- MANUAL_REVIEW_REQUIRED
+
+If available:
+- ORPHANED
+- RECOVERING
+
+Check on mobile and desktop.
+
+Each state must have:
+- distinct wording
+- distinct iconography
+- distinct semantics
+- accessible non-color-only differentiation
+
+UNKNOWN must never look successful.
+
+MANUAL_REVIEW_REQUIRED must be visually prominent.
+
+17. Cancellation UX.
+
+Start active run.
+
+Cancel through UI.
+
+Verify:
+- deliberate confirmation
+- no premature optimistic completion
+- cancellation-request state
+- backend-confirmed result
+- if backend returns OUTCOME_UNKNOWN/manual review, UI reflects that exact truth
+- mobile cancel remains reachable
+
+18. Reload/reconnect UX.
+
+During active run:
+- reload page
+- close/reopen route
+- simulate temporary network loss
+- restore connection
+
+Verify:
+- same run ID
+- same durable state
+- no second run
+- no duplicate activity
+- token totals remain correct where persisted
+- reconnect indicator is temporary
+- orchestration state remains separate from transport state
+
+19. Session recovery.
+
+Test:
+- URL run identity
+- session-storage recovery
+- reload with existing run
+- invalid run ID
+- stale run ID
+- unauthorized run
+
+Ensure failures are polished and understandable.
+
+20. Navigation integration.
+
+Check FlowDeck entry in existing CPTR navigation:
+
+- visible in correct place
+- responsive sidebar/mobile nav
+- active state correct
+- not visually inconsistent
+- works with collapsed nav
+- works on mobile
+- does not break other routes
+
+21. Light/dark themes.
+
+Test all major FlowDeck states in both themes.
+
+Check:
+- contrast
+- borders
+- glows
+- status chips
+- overlays
+- evidence colors
+- timeline
+- composer
+- disabled states
+- manual-review state
+- unknown state
+
+No effect should rely on dark mode only.
+
+22. Reduced motion.
+
+With `prefers-reduced-motion`:
+
+- stop/reduce nonessential animation
+- progress still understandable
+- active state still visible
+- no usability loss
+
+23. Keyboard accessibility.
+
+Verify:
+- tab order
+- composer
+- start button
+- tabs
+- drawers
+- evidence expand/collapse
+- timeline controls
+- cancel dialog
+- close controls
+- focus restoration after dialog/sheet
+
+24. Screen-reader semantics.
+
+Verify:
+- run status announced meaningfully
+- progress semantics appropriate
+- buttons labelled
+- icons do not carry meaning alone
+- live updates not excessively noisy
+- evidence status understandable
+
+25. Touch accessibility.
+
+Test on mobile dimensions:
+- buttons large enough
+- tabs tappable
+- timeline controls tappable
+- dialog actions tappable
+- no tiny icon-only critical actions
+
+26. Performance.
+
+Measure/inspect:
+- initial FlowDeck route render
+- active polling
+- rapid token updates
+- progress updates
+- 100+ events
+- long evidence list
+- reconnect
+- route navigation
+
+Look for:
+- excessive rerenders
+- CPU spikes
+- memory growth
+- layout thrashing
+- expensive animation loops
+
+Fix root causes only.
+
+27. Browser console.
+
+During:
+- start
+- active run
+- cancel
+- reconnect
+- terminal state
+- route navigation
+
+Check console for:
+- runtime errors
+- unhandled promises
+- hydration errors
+- repeated network errors
+- duplicate pollers
+- stale timer leaks
+
+No new FlowDeck runtime error is acceptable.
+
+28. Network inspection.
+
+Check:
+- one expected polling loop
+- polling stops/changes appropriately at terminal state
+- no duplicate polling after reload
+- no unauthorized control endpoints
+- no direct specialist calls
+- no leaking secrets
+- no redundant high-frequency requests
+
+29. Fix only proven UI defects.
+
+If visual QA finds:
+- overflow
+- broken spacing
+- unreadable states
+- weak hierarchy
+- poor animation
+- excessive animation
+- incorrect token presentation
+- incorrect progress presentation
+- duplicate events
+- bad reconnect behavior
+
+Fix the root cause.
+
+Do not redesign working backend APIs unnecessarily.
+
+30. Preserve backend authority.
+
+The UI MUST remain:
+
+UI
+→ authenticated FlowDeck API
+→ Heidi/control plane
+→ authenticated specialist gateway
+→ CPTR
+
+Never:
+UI → specialist
+UI → tool
+UI → native private executor
+
+31. Preserve global model authority.
+
+No:
+- route-specific model
+- per-agent model
+- per-step model
+- provider override
+- automatic UI model switching
+
+Show the global CPTR model only.
+
+32. Keep disabled authority disabled.
+
+Do NOT enable:
+- FDX
+- devops
+- debug mutation
+- Git mutation
+- unrestricted shell
+- MCP
+- install
+- deploy
+- publish
+- secrets
+- broader autonomy
+
+33. Regression verification.
+
+After all visual fixes:
+
+Run:
+- FlowDeck suite
+- full backend suite
+- frontend production build
+- FlowDeck-specific svelte checks
+- existing frontend lint/type checks according to repository baseline
+- git diff --check
+- API smoke
+
+Do not try to fix all 1,458 pre-existing repository-wide Svelte errors in this milestone.
+
+Only ensure no new FlowDeck-specific regression.
+
+Roadmap
+1. Verify baseline
+2. Obtain legitimate authenticated session
+3. Open actual authenticated `/flowdeck`
+4. Test empty state
+5. Run active orchestration
+6. Mobile QA
+7. Tablet QA
+8. Desktop QA
+9. Live telemetry QA
+10. Agent visualization QA
+11. Activity timeline QA
+12. Tool activity QA
+13. Evidence QA
+14. Terminal-state QA
+15. Cancellation QA
+16. Reconnect/reload QA
+17. Theme QA
+18. Reduced-motion QA
+19. Accessibility QA
+20. Performance QA
+21. Browser/network QA
+22. Fix proven issues
+23. Full regression
+24. Final visual acceptance audit
+25. Stop
+
+Commands
+Use repository-derived paths only.
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git branch --show-current
+git rev-parse HEAD
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+cd cptr/frontend
+
+# Use the existing frontend package manager and scripts.
+cat package.json
+
+# Run existing production build / FlowDeck checks.
+
+cd "$APP_ROOT"
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+python3 -m compileall -q cptr
+
+git diff --check
+git status --short
+git diff --stat
+git diff
+
+Use existing API smoke procedures.
+
+Bug checks
+- Authenticated cockpit never actually tested → FAIL
+- Only login screen visually tested → FAIL
+- 320px layout breaks → FAIL
+- 375/390 layout breaks → FAIL
+- 430 layout breaks → FAIL
+- Tablet layout breaks → FAIL
+- Desktop layout breaks → FAIL
+- Horizontal overflow → FAIL
+- Essential mobile control hidden → FAIL
+- Cancel inaccessible on mobile → FAIL
+- Token value fabricated → FAIL
+- Fake percentage displayed → FAIL
+- Specialist prose shown as verified → FAIL
+- UNKNOWN looks successful → FAIL
+- MANUAL_REVIEW_REQUIRED understated → FAIL
+- Reconnect creates new run → FAIL
+- Reload duplicates activity → FAIL
+- Duplicate poller created → FAIL
+- Cancellation shown complete before backend confirms → FAIL
+- Timeline becomes unusable on long runs → FAIL
+- Rapid token updates cause severe rerenders → FAIL
+- Animation causes mobile lag → FAIL
+- Reduced motion ignored → FAIL
+- Theme contrast broken → FAIL
+- Focus handling broken → FAIL
+- Essential state relies only on color → FAIL
+- Console contains new FlowDeck errors → FAIL
+- UI leaks secrets/policy internals → FAIL
+- Direct specialist/tool call introduced → FAIL
+- Global model authority changed → FAIL
+- Disabled capability enabled → FAIL
+- Backend regression → FAIL
+
+Tests before commit
+Acceptance requires:
+
+1. FlowDeck backend remains 104/104 PASS.
+2. Full backend remains 147/147 PASS or higher.
+3. Frontend production build passes.
+4. No new FlowDeck-specific svelte-check errors.
+5. Authenticated `/flowdeck` cockpit successfully rendered.
+6. 320px authenticated visual QA PASS.
+7. 360px PASS.
+8. 375px PASS.
+9. 390px PASS.
+10. 414px PASS.
+11. 430px PASS.
+12. 768px PASS.
+13. 1024px PASS.
+14. 1440px PASS.
+15. Mobile portrait PASS.
+16. Mobile landscape PASS where practical.
+17. Empty/start state polished.
+18. Real/deterministic orchestration start UI works.
+19. Current agent updates correctly.
+20. Progress is truthful.
+21. Token usage is truthful.
+22. Unknown token state is honest.
+23. Activity stream updates correctly.
+24. Tool activity is readable and safe.
+25. Evidence is visually separated from specialist claims.
+26. SUCCEEDED state PASS.
+27. FAILED state PASS.
+28. CANCELLED state PASS.
+29. OUTCOME_UNKNOWN state PASS.
+30. MANUAL_REVIEW_REQUIRED state PASS.
+31. Cancel flow PASS.
+32. Reload preserves same run.
+33. Reconnect preserves same run.
+34. No duplicate events.
+35. No duplicate polling loops.
+36. Light theme PASS.
+37. Dark theme PASS.
+38. Reduced-motion PASS.
+39. Keyboard navigation PASS.
+40. Touch interaction PASS.
+41. Accessibility semantics PASS.
+42. Long activity stream remains performant.
+43. Rapid token updates remain performant.
+44. Browser console clean of new FlowDeck errors.
+45. Network behavior sane and bounded.
+46. UI does not gain execution authority.
+47. No model/provider/specialist override introduced.
+48. No disabled backend authority enabled.
+49. git diff --check passes.
+50. API smoke returns HTTP 200.
+51. Final authenticated UI visual score >=9/10.
+
+Evidence
+Closure report must include:
+
+- PASS / FAIL
+- final score
+- branch / HEAD
+- working-tree status
+- exact authentication method used for QA
+- authenticated cockpit confirmed
+- visual QA evidence for:
+  - 320
+  - 360
+  - 375
+  - 390
+  - 414
+  - 430
+  - 768
+  - 1024
+  - 1440
+- mobile portrait evidence
+- mobile landscape evidence
+- empty-state evidence
+- active-run evidence
+- agent-state evidence
+- progress evidence
+- token telemetry evidence
+- activity-feed evidence
+- tool-activity evidence
+- verification/evidence evidence
+- cancellation evidence
+- reconnect/reload evidence
+- terminal-state evidence
+- light/dark theme evidence
+- reduced-motion evidence
+- accessibility evidence
+- performance evidence
+- browser console/network evidence
+- exact frontend build/check results
+- FlowDeck test count
+- full backend test count
+- API smoke result
+- defects found and fixes
+- confirmation CPTR remains sole model/tool executor
+- confirmation UI remains non-authoritative
+- confirmation no model/specialist/capability override exists
+- confirmation disabled authority remains disabled
+- remaining risks
+
+Score
+>=9/10 required.
+
+Below 9/10 = Task #22 remains NOT CLOSED.
+
+Commit/push
+Do NOT push to GitHub.
+
+Do NOT create a commit automatically.
+
+Leave the final verified UI diff available for review.
+
+Only commit after explicit approval.
