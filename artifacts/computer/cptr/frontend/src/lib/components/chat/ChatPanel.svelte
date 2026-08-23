@@ -1151,7 +1151,7 @@
 				{
 					workspace,
 					objective: text,
-					metadata: { source: 'chat-composer', chat_id: chatId }
+					metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
 				},
 				`chat-flowdeck-${crypto.randomUUID()}`
 			);

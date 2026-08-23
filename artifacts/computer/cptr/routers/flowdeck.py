@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from typing import Any
 
@@ -25,6 +26,7 @@ from cptr.utils.config import check_access
 from cptr.utils.db import get_session_factory
 
 router = APIRouter(prefix="/v1/flowdeck", tags=["flowdeck"])
+logger = logging.getLogger(__name__)
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
 
 
@@ -122,7 +124,19 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             user_id=user_id,
             requested_workspace=body.workspace,
         )
-        target, _ = await _resolve_model(request, workspace, request.app.state)
+        # Prefer the model already chosen in the authenticated chat. This
+        # avoids an unnecessary provider-model discovery round trip for
+        # FlowDeck requests while still resolving it through server policy.
+        requested_model = str((body.metadata or {}).get("model") or "").strip()
+        if requested_model:
+            from cptr.utils.model_targets import resolve_model_target
+
+            try:
+                target = await resolve_model_target(requested_model, request.app.state)
+            except Exception:
+                target, _ = await _resolve_model(request, workspace, request.app.state)
+        else:
+            target, _ = await _resolve_model(request, workspace, request.app.state)
         if target.kind != "api":
             raise HTTPException(503, "the CPTR API model is unavailable")
         result = await run_heidi_coordinator(
@@ -139,6 +153,9 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
         )
     except (AuthenticatedGatewayError, CoordinatorPolicyError) as exc:
         raise HTTPException(403, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("FlowDeck model or orchestration execution failed")
+        raise HTTPException(503, "FlowDeck could not reach the configured API model") from exc
     return {
         "run_id": result.run_id,
         "status": result.status,
