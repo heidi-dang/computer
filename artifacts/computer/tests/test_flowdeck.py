@@ -139,6 +139,23 @@ class FlowDeckContractsTests(unittest.TestCase):
         ):
             self.assertIsNone(observe_request(content="write this file"))
 
+    def test_cptr_route_fast_path_does_not_invoke_gateway_when_disabled(self):
+        from cptr.routers import chat as chat_router
+
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(chat_router, "flowdeck_shadow_enabled", return_value=False),
+            patch("cptr.flowdeck.gateway.observe_request") as observe,
+        ):
+            chat_router._observe_flowdeck_request(
+                content="write this file",
+                model_id="native-model",
+                user_id="user-1",
+                workspace="/workspace",
+            )
+
+        observe.assert_not_called()
+
     def test_shadow_errors_are_isolated(self):
         os.environ["CPTR_FLOWDECK_ENABLED"] = "true"
         os.environ["CPTR_FLOWDECK_MODE"] = "shadow"

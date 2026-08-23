@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from cptr.models import Chat, ChatMessage, Config, is_internal_chat
+from cptr.env import flowdeck_shadow_enabled
 from cptr.utils.config import check_access, now_ms, _get_jwt_secret
 from cptr.utils.crypto import decrypt_key
 from cptr.utils.db import get_db
@@ -26,6 +27,29 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 COOKIE_NAME = "cptr_session"
+
+
+def _observe_flowdeck_request(
+    *,
+    content: str,
+    model_id: str,
+    user_id: str,
+    workspace: str | None,
+) -> None:
+    """Run optional FlowDeck shadow observation without initializing it when off."""
+    if not flowdeck_shadow_enabled():
+        return
+
+    # Keep this import behind the CPTR-owned fast path. Disabled CPTR requests
+    # do not import or invoke the FlowDeck gateway/service at all.
+    from cptr.flowdeck.gateway import observe_request
+
+    observe_request(
+        content=content,
+        model_id=model_id,
+        user_id=user_id,
+        workspace=workspace,
+    )
 
 
 def _get_user(request: Request) -> str:
@@ -1139,9 +1163,7 @@ async def send_message(request: Request, body: SendMessageRequest):
         )
 
     if queued_msg:
-        from cptr.flowdeck.gateway import observe_request
-
-        observe_request(
+        _observe_flowdeck_request(
             content=body.content,
             model_id=body.model_id,
             user_id=user_id,
@@ -1160,9 +1182,7 @@ async def send_message(request: Request, body: SendMessageRequest):
 
     # FlowDeck is advisory in this rollout. This call must remain before the
     # native task starts and must never alter CPTR's authoritative execution.
-    from cptr.flowdeck.gateway import observe_request
-
-    observe_request(
+    _observe_flowdeck_request(
         content=body.content,
         model_id=body.model_id,
         user_id=user_id,

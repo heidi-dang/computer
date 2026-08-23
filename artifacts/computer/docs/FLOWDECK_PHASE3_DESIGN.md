@@ -44,6 +44,21 @@ operation, physical attempt, owner, expiry, and heartbeat. An expired lease
 does not imply safe retry: orphaned work is reconciled first and may require
 manual review.
 
+### Lease epoch and RecoveryLease
+
+Each workspace mutation lease carries a monotonically increasing `epoch`
+(fencing token) for its logical operation. Every acquisition or recovery
+increments the epoch. A mutating adapter and its verifier must carry the
+epoch, and a stale writer whose epoch is no longer current must be rejected.
+Lease expiry alone never authorizes a stale writer to continue.
+
+`RecoveryLease` is a separate exclusive contract for recovering one stale run.
+It contains the run ID, recovery owner, lease epoch, acquired-at time, expiry,
+heartbeat, and purpose. Only one worker may hold a `RecoveryLease` for a run;
+normal execution cannot use one as a mutation lease. Recovery first reconciles
+the prior physical attempt, then either records a positively verified outcome
+or transitions the operation to `MANUAL_REVIEW_REQUIRED`.
+
 ## Ports and trust boundaries
 
 - `SubagentExecutionPort`: delegates to the existing CPTR execution primitive;
@@ -54,6 +69,10 @@ manual review.
   reimplementing approval decisions.
 - Evidence/verifier boundary: evidence is untrusted input until a verifier
   checks source, scope, freshness, and expected operation identity.
+- Gate-deciding authoritative evidence must be verifier-generated or directly
+  observed by the trusted runtime. A specialist self-report, adapter claim, or
+  copied log is untrusted input and cannot by itself authorize a transition,
+  success, retry, or recovery decision.
 - External adapters: return structured outcomes and evidence; they do not
   decide retries or bypass `MANUAL_REVIEW_REQUIRED`.
 

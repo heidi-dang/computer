@@ -21,6 +21,24 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def flowdeck_shadow_enabled() -> bool:
+    """Return whether the optional, non-authoritative shadow observer is active.
+
+    This check intentionally lives in CPTR's lightweight environment boundary
+    so the chat route can bypass the FlowDeck package entirely when disabled.
+    """
+    enabled = _env_bool(
+        "CPTR_FLOWDECK_ENABLED",
+        os.environ.get("FLOWDECK_ENABLED", "false"),
+    )
+    if not enabled:
+        return False
+    return os.environ.get(
+        "CPTR_FLOWDECK_MODE",
+        os.environ.get("FLOWDECK_MODE", "shadow"),
+    ).strip().lower() == "shadow"
+
+
 # ── Data directory ──────────────────────────────────────────
 # Where cptr stores its database, config, and user data.
 # Default: ~/.cptr
