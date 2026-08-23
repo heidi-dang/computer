@@ -28,9 +28,16 @@ class ReadOnlyGitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_fixed_operations_are_read_only_and_bounded(self):
         before = subprocess.check_output(["git", "-C", str(self.root), "status", "--porcelain"])
-        status = await inspect_git(GitInspectionRequest("status", str(self.root)))
-        log = await inspect_git(GitInspectionRequest("log", str(self.root), limit=1000))
-        diff = await inspect_git(GitInspectionRequest("diff_stat", str(self.root)))
+        status = await inspect_git(
+            GitInspectionRequest("status", str(self.root)), authorized_workspace=str(self.root)
+        )
+        log = await inspect_git(
+            GitInspectionRequest("log", str(self.root), limit=1000),
+            authorized_workspace=str(self.root),
+        )
+        diff = await inspect_git(
+            GitInspectionRequest("diff_stat", str(self.root)), authorized_workspace=str(self.root)
+        )
         self.assertIn("##", status)
         self.assertIn("initial", log)
         self.assertEqual(diff, "")
@@ -39,11 +46,20 @@ class ReadOnlyGitTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unsupported_or_out_of_scope_requests_are_denied(self):
         with self.assertRaises(GitInspectionPolicyError):
-            await inspect_git(GitInspectionRequest("commit", str(self.root)))
+            await inspect_git(
+                GitInspectionRequest("commit", str(self.root)),
+                authorized_workspace=str(self.root),
+            )
         with self.assertRaises(GitInspectionPolicyError):
-            await inspect_git(GitInspectionRequest("status", str(self.root), limit=0))
+            await inspect_git(
+                GitInspectionRequest("status", str(self.root), limit=0),
+                authorized_workspace=str(self.root),
+            )
         with self.assertRaises(GitInspectionPolicyError):
-            await inspect_git(GitInspectionRequest("status", str(self.root / "missing")))
+            await inspect_git(
+                GitInspectionRequest("status", str(self.root / "missing")),
+                authorized_workspace=str(self.root),
+            )
 
 
 if __name__ == "__main__":
