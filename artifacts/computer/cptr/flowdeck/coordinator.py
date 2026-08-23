@@ -196,6 +196,7 @@ async def run_heidi_coordinator(
     children: list[dict[str, Any]] = []
     outputs: list[str] = []
     for index, item in enumerate(plan):
+        budget.consume_step()
         budget.consume_delegation()
         child_key = f"{request.request_key}:child:{index}:{item.specialist_id}"
         child_step = await store.create_child_step(
@@ -210,9 +211,18 @@ async def run_heidi_coordinator(
             step_id=child_step.id,
         )
         if child_operation.status == OperationStatus.SUCCEEDED.value:
-            children.append({"specialist": item.specialist_id, "status": "succeeded", "reused": True})
+            await store.start_step(child_step.id)
+            await store.finish_step(child_step.id, status=StepStatus.SUCCEEDED)
+            children.append(
+                {
+                    "specialist": item.specialist_id,
+                    "status": "succeeded",
+                    "reused": True,
+                }
+            )
             continue
         await store.start_step(child_step.id)
+        budget.consume_attempt()
         attempt = await store.prepare_attempt(
             operation_id=child_operation.id,
             owner=user_id,
@@ -281,9 +291,16 @@ async def run_heidi_coordinator(
                 children.append({"specialist": item.specialist_id, "status": "failed"})
                 break
             else:
-                await store.mark_attempt_unknown(attempt.id, error="child outcome was not authoritative")
+                await store.mark_attempt_unknown(
+                    attempt.id, error="child outcome was not authoritative"
+                )
                 await store.finish_step(child_step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
-                children.append({"specialist": item.specialist_id, "status": "manual_review_required"})
+                children.append(
+                    {
+                        "specialist": item.specialist_id,
+                        "status": "manual_review_required",
+                    }
+                )
                 break
         except BaseException:
             await store.mark_attempt_unknown(attempt.id, error="coordinator child interrupted")

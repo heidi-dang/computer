@@ -24,11 +24,26 @@ AGENT_REGISTRY: tuple[AgentDefinition, ...] = (
         can_delegate=True,
         max_delegation_depth=1,
     ),
-    AgentDefinition("planner", AgentRole.SPECIALIST, "Produces read-only implementation plans.", _READ_ONLY),
-    AgentDefinition("architect", AgentRole.SPECIALIST, "Reviews architecture and boundaries.", _READ_ONLY),
-    AgentDefinition("researcher", AgentRole.SPECIALIST, "Gathers and summarizes read-only evidence.", _READ_ONLY),
-    AgentDefinition("mapper", AgentRole.SPECIALIST, "Maps repositories and system boundaries.", _READ_ONLY),
-    AgentDefinition("reviewer", AgentRole.SPECIALIST, "Reviews evidence and implementation quality.", _READ_ONLY),
+    AgentDefinition(
+        "planner", AgentRole.SPECIALIST,
+        "Produces read-only implementation plans.", _READ_ONLY,
+    ),
+    AgentDefinition(
+        "architect", AgentRole.SPECIALIST,
+        "Reviews architecture and boundaries.", _READ_ONLY,
+    ),
+    AgentDefinition(
+        "researcher", AgentRole.SPECIALIST,
+        "Gathers and summarizes read-only evidence.", _READ_ONLY,
+    ),
+    AgentDefinition(
+        "mapper", AgentRole.SPECIALIST,
+        "Maps repositories and system boundaries.", _READ_ONLY,
+    ),
+    AgentDefinition(
+        "reviewer", AgentRole.SPECIALIST,
+        "Reviews evidence and implementation quality.", _READ_ONLY,
+    ),
     AgentDefinition(
         "security-auditor",
         AgentRole.SPECIALIST,
@@ -77,7 +92,10 @@ def validate_registry(registry: tuple[AgentDefinition, ...] = AGENT_REGISTRY) ->
             raise RegistryError(f"agent {agent.id} has negative delegation depth")
 
 
-def get_agent(agent_id: str, registry: tuple[AgentDefinition, ...] = AGENT_REGISTRY) -> AgentDefinition:
+def get_agent(
+    agent_id: str,
+    registry: tuple[AgentDefinition, ...] = AGENT_REGISTRY,
+) -> AgentDefinition:
     for agent in registry:
         if agent.id == agent_id:
             return agent

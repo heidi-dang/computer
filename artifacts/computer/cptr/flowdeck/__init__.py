@@ -16,6 +16,14 @@ from cptr.flowdeck.coding import (
     validate_coding_request,
 )
 from cptr.flowdeck.config import FlowDeckConfig
+from cptr.flowdeck.coordinator import (
+    CoordinatorPolicyError,
+    CoordinatorRequest,
+    CoordinatorResult,
+    PlannedDelegation,
+    classify_coordinator_request,
+    run_heidi_coordinator,
+)
 from cptr.flowdeck.contracts import (
     AgentDefinition,
     AgentRole,
@@ -90,6 +98,9 @@ __all__ = [
     "Capability",
     "CodingPolicyError",
     "CodingRequest",
+    "CoordinatorPolicyError",
+    "CoordinatorRequest",
+    "CoordinatorResult",
     "DelegationRequest",
     "DuplicateRequestError",
     "DurableFlowDeck",
@@ -108,6 +119,7 @@ __all__ = [
     "MapperPolicyError",
     "MapperRequest",
     "OperationStatus",
+    "PlannedDelegation",
     "RecoveryGrant",
     "RouteDecision",
     "RouteStrategy",
@@ -120,12 +132,14 @@ __all__ = [
     "browser_tool_guard",
     "coding_tool_guard",
     "coding_tool_names",
+    "classify_coordinator_request",
     "get_agent",
     "dispatch_authenticated_specialist",
     "inspect_git",
     "mapper_tool_guard",
     "observe_request",
     "run_fdx",
+    "run_heidi_coordinator",
     "run_optional_fdx",
     "run_tester",
     "resolve_gateway_workspace",
