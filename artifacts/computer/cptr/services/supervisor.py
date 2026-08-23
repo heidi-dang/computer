@@ -485,6 +485,7 @@ class AutonomousSupervisor:
             await get_verification_evidence(
                 monitor.workspace_id,
                 user_id=monitor.user_id,
+                attempt_id=task_id,
             )
             if callable(get_verification_evidence)
             else {}

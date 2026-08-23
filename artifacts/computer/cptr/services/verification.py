@@ -169,25 +169,18 @@ def _control_plane_outcome(status: str, evidence: dict[str, Any]) -> str:
 
 def _authoritative_control_plane_evidence(
     evidence: dict[str, Any], *, outcome: str, attempt_id: str
-) -> dict[str, Any]:
-    """Normalize legacy control-plane evidence without trusting worker prose."""
+) -> dict[str, Any] | None:
+    """Normalize trusted evidence; missing evidence must fail closed."""
     independent = evidence.get("independent")
-    if isinstance(independent, dict) and independent.get("authoritative") is True:
-        normalized = dict(independent)
-        normalized.setdefault("source", "verifier")
-        normalized.setdefault("observation", "verifier_check")
-        normalized.setdefault("observed_outcome", outcome)
-        normalized.setdefault("attempt_id", attempt_id)
-        normalized.setdefault("specialist_claim", None)
-        return normalized
-    return {
-        "source": "verifier",
-        "authoritative": True,
-        "observation": "verifier_check",
-        "observed_outcome": outcome,
-        "attempt_id": attempt_id,
-        "specialist_claim": None,
-    }
+    if not isinstance(independent, dict) or independent.get("authoritative") is not True:
+        return None
+    normalized = dict(independent)
+    normalized.setdefault("source", "verifier")
+    normalized.setdefault("observation", "verifier_check")
+    normalized.setdefault("observed_outcome", outcome)
+    normalized.setdefault("attempt_id", attempt_id)
+    normalized.setdefault("specialist_claim", None)
+    return normalized
 
 
 def _commands_from_environment() -> list[VerificationCommand]:

@@ -17,7 +17,17 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_worker_prose_is_not_enough_when_git_check_fails(self):
         result = await DefaultIndependentVerifier().verify(
             task={"status": "COMPLETE", "output": "Everything passed"},
-            evidence={"independent": {"git_diff_check": {"passed": False}}},
+            evidence={
+                "independent": {
+                    "authoritative": True,
+                    "source": "verifier",
+                    "observation": "verifier_check",
+                    "observed_outcome": "succeeded",
+                    "attempt_id": "",
+                    "specialist_claim": None,
+                    "git_diff_check": {"passed": False},
+                }
+            },
         )
 
         self.assertFalse(result.passed)
@@ -26,7 +36,17 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
     async def test_durable_success_and_independent_checks_can_pass(self):
         result = await DefaultIndependentVerifier().verify(
             task={"status": "COMPLETE", "output": "worker prose"},
-            evidence={"independent": {"git_diff_check": {"passed": True}}},
+            evidence={
+                "independent": {
+                    "authoritative": True,
+                    "source": "verifier",
+                    "observation": "verifier_check",
+                    "observed_outcome": "succeeded",
+                    "attempt_id": "",
+                    "specialist_claim": None,
+                    "git_diff_check": {"passed": True},
+                }
+            },
         )
 
         self.assertTrue(result.passed)
@@ -55,6 +75,12 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
                 task={"status": "COMPLETE", "output": "worker prose"},
                 evidence={
                     "independent": {
+                        "authoritative": True,
+                        "source": "verifier",
+                        "observation": "verifier_check",
+                        "observed_outcome": "succeeded",
+                        "attempt_id": "",
+                        "specialist_claim": None,
                         "workspace_path": workspace,
                         "git_diff_check": {"passed": True},
                     }
@@ -84,6 +110,12 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
                 task={"status": "COMPLETE", "output": "tests passed"},
                 evidence={
                     "independent": {
+                        "authoritative": True,
+                        "source": "verifier",
+                        "observation": "verifier_check",
+                        "observed_outcome": "succeeded",
+                        "attempt_id": "",
+                        "specialist_claim": None,
                         "workspace_path": workspace,
                         "git_diff_check": {"passed": True},
                     }
@@ -108,6 +140,12 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
                     task={"status": "COMPLETE"},
                     evidence={
                         "independent": {
+                            "authoritative": True,
+                            "source": "verifier",
+                            "observation": "verifier_check",
+                            "observed_outcome": "succeeded",
+                            "attempt_id": "",
+                            "specialist_claim": None,
                             "workspace_path": Path(workspace),
                             "git_diff_check": {"passed": True},
                         }

@@ -35,6 +35,17 @@ class FakeAgentService:
             "patch": "diff --git a/src/example.py b/src/example.py",
         }
 
+    async def get_verification_evidence(self, workspace_id, *, attempt_id=None, **kwargs):
+        return {
+            "authoritative": True,
+            "source": "verifier",
+            "observation": "verifier_check",
+            "observed_outcome": "succeeded",
+            "attempt_id": attempt_id or "",
+            "specialist_claim": None,
+            "git_diff_check": {"passed": True},
+        }
+
     async def cancel_task(self, task_id, **kwargs):
         self.cancelled.append(task_id)
         self.tasks[task_id]["status"] = "CANCELLED"

@@ -261,17 +261,31 @@ class AgentService:
         identity = await identity_for_user_id(user_id)
         return await diff(workspace.path, None, False, True, False, identity)
 
-    async def get_verification_evidence(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
+    async def get_verification_evidence(
+        self,
+        workspace_id: str,
+        *,
+        user_id: str,
+        attempt_id: str | None = None,
+    ) -> dict[str, Any]:
         async with await get_db() as db:
             workspace = await db.get(Workspace, workspace_id)
             if workspace is None or workspace.user_id != user_id:
                 raise KeyError("workspace not found")
-        from cptr.utils.git import diff_check, status
+        from cptr.utils.git import diff_check as git_diff_check
+        from cptr.utils.git import status
         from cptr.utils.identity import identity_for_user_id
 
         identity = await identity_for_user_id(user_id)
+        diff_evidence = await git_diff_check(workspace.path, identity)
         return {
+            "source": "verifier",
+            "authoritative": True,
+            "observation": "verifier_check",
+            "observed_outcome": "succeeded" if diff_evidence.get("passed") else "failed",
+            "attempt_id": attempt_id,
+            "specialist_claim": None,
             "workspace_path": workspace.path,
             "git_status": await status(workspace.path, identity),
-            "git_diff_check": await diff_check(workspace.path, identity),
+            "git_diff_check": diff_evidence,
         }
