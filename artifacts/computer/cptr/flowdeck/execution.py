@@ -202,6 +202,7 @@ async def _native_run_read_only_specialist(
             config={"max_output": 30_000},
             allowed_tool_names=READ_ONLY_TOOL_NAMES,
             tool_guard=mapper_tool_guard,
+            flowdeck_run_id=run.id,
         )
     except BaseException:
         await store.mark_attempt_unknown(attempt.id)

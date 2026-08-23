@@ -1145,6 +1145,28 @@ class DurableFlowDeck:
             created_at=now,
         )
         db.add(event)
+        # FlowDeck lifecycle events are observational only. Broadcast the
+        # durable record through CPTR's existing authenticated Socket.IO
+        # channel; model/tool execution remains exclusively in CPTR.
+        try:
+            run = await db.get(FlowDeckRun, run_id)
+            if run:
+                from cptr.socket.main import emit_to_user
+
+                await emit_to_user(
+                    run.owner,
+                    {
+                        "type": "flowdeck:event",
+                        "flowdeck_run_id": run_id,
+                        "kind": kind,
+                        "payload": payload,
+                        "sequence": event.sequence,
+                        "created_at": now,
+                    },
+                )
+        except Exception:
+            # Event delivery must never change durable lifecycle semantics.
+            pass
         return event
 
     async def _run(self, db: AsyncSession, run_id: str) -> FlowDeckRun:

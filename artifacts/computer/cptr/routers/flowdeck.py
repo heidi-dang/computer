@@ -149,7 +149,20 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
 @router.get("/orchestrations/{run_id}")
 async def get_orchestration(request: Request, run_id: str, workspace: str):
     _, _, run = await _owned_run(request, run_id, workspace)
-    return _safe_run(run)
+    events = await DurableFlowDeck(get_session_factory()).list_events(run.id)
+    response = _safe_run(run)
+    response["events"] = [
+        {
+            "id": event.id,
+            "run_id": event.run_id,
+            "sequence": event.sequence,
+            "kind": event.kind,
+            "payload": event.payload,
+            "created_at": event.created_at,
+        }
+        for event in events
+    ]
+    return response
 
 
 @router.post("/orchestrations/{run_id}/cancel")

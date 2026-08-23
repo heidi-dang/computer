@@ -406,6 +406,7 @@ async def _native_run_coding_specialist(
             before_mutation=before_mutation,
             after_mutation=after_mutation,
             specialist_role=request.role,
+			flowdeck_run_id=run.id,
         )
     except BaseException:
         await store.mark_attempt_unknown(root_attempt.id, error="coding session interrupted")
@@ -542,6 +543,7 @@ async def _native_run_browser_debugger(
             allowed_tool_names=MINIMUM_BROWSER_TOOLS,
             tool_guard=browser_tool_guard,
             specialist_role=request.role,
+			flowdeck_run_id=run.id,
         )
     except BaseException:
         await store.mark_attempt_unknown(attempt.id)

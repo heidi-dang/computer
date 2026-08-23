@@ -58,6 +58,7 @@
 	} from '$lib/stores/audio';
 
 	import ChatInput from './ChatInput.svelte';
+	import FlowDeckExecutionTimeline from './FlowDeckExecutionTimeline.svelte';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ChatHistory from './ChatHistory.svelte';
@@ -141,6 +142,7 @@
 	let flowdeckStatus = $state('');
 	let flowdeckRunId = $state('');
 	let flowdeckPoller: ReturnType<typeof setInterval> | null = null;
+	let flowdeckEvents = $state<any[]>([]);
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChatId);
@@ -564,7 +566,25 @@
 		active?: boolean;
 		updated_at?: number;
 		last_read_at?: number;
+		flowdeck_run_id?: string;
+		kind?: string;
+		payload?: Record<string, unknown>;
 	}) {
+		if (data.flowdeck_run_id) {
+			flowdeckEvents = [
+				...flowdeckEvents.filter(
+					(event) =>
+						!(
+							event.flowdeck_run_id === data.flowdeck_run_id &&
+							event.message_id === data.message_id &&
+							event.output?.call_id === data.output?.call_id &&
+							event.output?.type === data.output?.type
+						)
+				),
+				data
+			];
+		}
+
 		// On the landing page, update the chat list in place from socket events
 		if (isLanding) {
 			const knownChat = previousChats.some((c) => c.id === data.chat_id);
@@ -732,6 +752,7 @@
 		selectedAgent = 'computer';
 		flowdeckStatus = '';
 		flowdeckRunId = '';
+		flowdeckEvents = [];
 	}
 
 	function loadChatSettings(meta: Record<string, any> | null) {
@@ -1101,6 +1122,7 @@
 			try {
 				const state = await getFlowDeckOrchestration(runId, workspace);
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
+				if (Array.isArray(state.events)) flowdeckEvents = state.events;
 				if (
 					['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(
 						flowdeckStatus
@@ -1123,6 +1145,7 @@
 		sending = true;
 		flowdeckStatus = 'active';
 		flowdeckRunId = '';
+		flowdeckEvents = [];
 		try {
 			const result = await createFlowDeckOrchestration(
 				{
@@ -1133,6 +1156,7 @@
 				`chat-flowdeck-${crypto.randomUUID()}`
 			);
 			flowdeckRunId = result.run_id || '';
+			if (Array.isArray(result.events)) flowdeckEvents = result.events;
 			flowdeckStatus = String(result.status || 'active').toLowerCase();
 			if (
 				flowdeckRunId &&
@@ -1883,6 +1907,9 @@
 					</h1>
 				</div>
 
+				{#if flowdeckEvents.length > 0}
+					<FlowDeckExecutionTimeline events={flowdeckEvents} status={flowdeckStatus} />
+				{/if}
 				<ChatInput
 					bind:this={chatInputEl}
 					bind:inputText
@@ -2012,6 +2039,9 @@
 							</svg>
 						</button>
 					</div>
+				{/if}
+				{#if flowdeckEvents.length > 0}
+					<FlowDeckExecutionTimeline events={flowdeckEvents} status={flowdeckStatus} />
 				{/if}
 				<ChatInput
 					bind:this={chatInputEl}

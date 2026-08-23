@@ -1410,6 +1410,7 @@ async def run_chat_task(
     before_mutation=None,
     after_mutation=None,
     specialist_role: str | None = None,
+    flowdeck_run_id: str | None = None,
 ):
     """Plain async function. Makes raw API calls in a loop."""
     if request is None:
@@ -1426,7 +1427,15 @@ async def run_chat_task(
     async def emit(**data):
         """Stream an output delta to the user."""
         try:
-            await emit_to_user(user_id, {"chat_id": chat_id, "message_id": message_id, **data})
+            await emit_to_user(
+                user_id,
+                {
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    **({"flowdeck_run_id": flowdeck_run_id} if flowdeck_run_id else {}),
+                    **data,
+                },
+            )
         except Exception:
             # Socket failure must not prevent the queue push below,
             # otherwise the gateway SSE stream hangs forever.
