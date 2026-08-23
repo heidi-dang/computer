@@ -86,8 +86,12 @@ def classify_coordinator_request(
     """Produce a deterministic plan; no model or workspace inspection occurs."""
     lowered = (task or "").casefold()
     selected: list[PlannedDelegation] = []
+    # A natural-language request often contains incidental words such as
+    # "review", "error", or "browser" while naming one clear objective.
+    # Choose one primary specialist in the declared priority order instead of
+    # turning those incidental matches into an oversized delegation plan.
     for hint, role in _HINTS:
-        if hint in lowered and role not in {item.specialist_id for item in selected}:
+        if hint in lowered:
             selected.append(
                 PlannedDelegation(
                     role,
@@ -95,6 +99,7 @@ def classify_coordinator_request(
                     get_agent(role).capabilities,
                 )
             )
+            break
     check = next((item for item in _CHECK_HINTS if item in lowered), None)
     if check and "tester" not in {item.specialist_id for item in selected}:
         selected.append(
