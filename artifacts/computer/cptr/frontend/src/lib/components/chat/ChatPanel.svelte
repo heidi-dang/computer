@@ -23,7 +23,11 @@
 		type ContextUsage,
 		type ChatTask
 	} from '$lib/apis/chat';
-	import { createFlowDeckOrchestration, getFlowDeckOrchestration } from '$lib/apis/flowdeck';
+	import {
+		cancelFlowDeckOrchestration,
+		createFlowDeckOrchestration,
+		getFlowDeckOrchestration
+	} from '$lib/apis/flowdeck';
 	import type { ChatAgent } from '../common/AgentSelector.svelte';
 	import {
 		chatModels,
@@ -792,7 +796,20 @@
 		if (!flowdeckMessageId) return;
 		const message = allMessages.find((item) => item.id === flowdeckMessageId);
 		if (!message) return;
-		if (event.delta) message.content += event.delta;
+		if (event.delta) {
+			const output = [...(message.output || [])];
+			const lastMessage = [...output].reverse().find((item: any) => item.type === 'message');
+			if (lastMessage) {
+				const content = [...(lastMessage.content || [])];
+				const lastText = [...content].reverse().find((item: any) => item.type === 'output_text');
+				if (lastText) lastText.text = `${lastText.text || ''}${event.delta}`;
+				else content.push({ type: 'output_text', text: event.delta });
+				lastMessage.content = content;
+				message.output = output;
+			} else {
+				message.content += event.delta;
+			}
+		}
 		if (event.output) {
 			const output = [...(message.output || [])];
 			const item = event.output;
@@ -807,8 +824,22 @@
 			message.output = output;
 		}
 		const activity = flowDeckActivityText(event);
-		if (activity && !message.content.includes(activity)) {
-			message.content = message.content ? `${message.content}\n\n${activity}` : activity;
+		if (
+			activity &&
+			!(message.output || []).some((item: any) =>
+				(item.content || []).some((part: any) => part.text === activity)
+			)
+		) {
+			message.output = [
+				...(message.output || []),
+				{
+					type: 'message',
+					id: `flowdeck-activity-${flowDeckEventKey(event)}`,
+					status: 'completed',
+					role: 'assistant',
+					content: [{ type: 'output_text', text: activity }]
+				}
+			];
 		}
 		allMessages = [...allMessages];
 	}
@@ -1456,6 +1487,19 @@
 
 	async function handleCancel() {
 		const active = allMessages.find((m) => m.role === 'assistant' && !m.done);
+		if (active && flowdeckMessageId === active.id && flowdeckRunId) {
+			stopTtsPlayback();
+			active.done = true;
+			allMessages = [...allMessages];
+			flowdeckStatus = 'cancelled';
+			stopFlowDeckPolling();
+			try {
+				await cancelFlowDeckOrchestration(flowdeckRunId, workspace);
+			} catch (err) {
+				console.error('[chat] FlowDeck cancel error', err);
+			}
+			return;
+		}
 		if (!active || !chatId) return;
 		stopTtsPlayback();
 

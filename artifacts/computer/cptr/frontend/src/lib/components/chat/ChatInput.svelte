@@ -1626,11 +1626,15 @@
 					<strong class="block text-xs font-semibold">Heidi · FlowDeck</strong>
 					<span class="app-muted block truncate text-[0.6875rem]">
 						{sending && !flowdeckStatus
-							? 'Starting controlled orchestration…'
+							? 'Starting…'
 							: flowdeckStatus === 'active'
-								? 'Orchestration active'
+								? 'Working'
+								: flowdeckStatus === 'planning'
+									? 'Planning'
+									: flowdeckStatus === 'verifying'
+										? 'Verifying'
 								: flowdeckStatus === 'succeeded'
-									? 'Orchestration complete'
+									? 'Complete'
 									: `Orchestration ${flowdeckStatus.replaceAll('_', ' ')}`}
 					</span>
 				</span>
