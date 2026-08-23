@@ -295,11 +295,11 @@
 		isStarting = true;
 		startError = '';
 		orchestrationDisabled = false;
-		const idempotencyKey =
-			typeof crypto !== 'undefined' && 'randomUUID' in crypto
-				? crypto.randomUUID()
-				: `flowdeck-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 		try {
+			const idempotencyKey =
+				typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+					? crypto.randomUUID()
+					: `flowdeck-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 			const created = await createFlowDeckOrchestration(
 				{ workspace, objective: objective.trim() },
 				idempotencyKey
@@ -446,7 +446,7 @@
 					</div>
 				</div>
 
-				<form class="composer-card" onsubmit={startOrchestration}>
+				<form class="composer-card" action="javascript:void(0)" onsubmit={startOrchestration}>
 					<div class="composer-topline">
 						<div>
 							<div class="section-label">New controlled run</div>
