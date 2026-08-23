@@ -1,0 +1,2006 @@
+Master Plan — FlowDeck-C-PTR
+0. Objective
+
+Build a CPTR-native implementation of FlowDeck v2.4.1's orchestration, governance, delegation, verification, evidence, recovery, and code-intelligence architecture without replacing CPTR's proven execution runtime.
+
+The finished architecture should be:
+
+CPTR UI / Chat
+      │
+      ▼
+FlowDeck-C-PTR
+      │
+      ├─ Heidi coordinator
+      ├─ canonical agent registry
+      ├─ classifier / router
+      ├─ governance
+      ├─ delegation
+      ├─ durable orchestration
+      ├─ evidence
+      ├─ verification
+      ├─ recovery / circuit breaking
+      ├─ observability
+      └─ FDX adapter
+             │
+             ▼
+       CPTR native runtime
+             │
+    ┌────────┼──────────┐
+    ▼        ▼          ▼
+ API LLMs  CPTR tools  Coding agents
+                       Codex
+                       Claude Code
+                       OpenCode
+                       Gemini
+                       etc.
+
+The implementation must port FlowDeck semantics, not its OpenCode-specific runtime wiring.
+
+FlowDeck currently assumes OpenCode owns sessions, model execution, sandboxing and native subagent execution.
+
+For FlowDeck-C-PTR, CPTR becomes that authoritative runtime.
+
+1. Baselines
+
+Freeze development against these exact revisions before starting.
+
+CPTR
+repository: heidi-dang/computer
+branch: main
+baseline:
+f9d1d8cdaf7e034b8fa19619063a6be931b9ee97
+FlowDeck
+repository: heidi-dang/FlowDeck
+release: v2.4.1
+baseline:
+b3c8ffa799ef6cbd41861565dae0c3c01c493db0
+
+Do not silently port behavior from future FlowDeck main during this project.
+
+Later releases can be merged through explicit parity upgrades.
+
+2. Core architectural rule
+CPTR owns execution
+
+Keep CPTR responsible for:
+
+chat lifecycle;
+message persistence;
+model selection;
+provider connections;
+external coding-agent adapters;
+filesystem operations;
+terminal execution;
+browser;
+Git;
+skills;
+MCP;
+authentication;
+Socket.IO;
+user/tool approvals;
+process identity.
+
+CPTR already separates API models and agent models through ModelTarget.
+
+It also already supports Codex, Claude Code, Cursor, Grok, OpenCode, Cline, Gemini and Pi agent profiles.
+
+FlowDeck-C-PTR owns coordination
+
+FlowDeck-C-PTR should own:
+
+Heidi;
+task classification;
+execution strategy;
+specialist selection;
+capability policies;
+delegation;
+run/step lifecycle;
+retries;
+circuit breakers;
+evidence requirements;
+verification;
+completion policy;
+scorecards;
+orchestration persistence;
+workflow recovery;
+FDX code intelligence.
+3. Non-goals
+
+The initial project must not:
+
+rewrite CPTR chat;
+replace chat_task.py;
+replace Socket.IO;
+replace CPTR authentication;
+replace CPTR's database;
+replace CPTR model providers;
+replace existing external coding-agent adapters;
+make OpenCode mandatory;
+require Node/Bun for normal orchestration;
+port FlowDeck's bun:sqlite;
+give every specialist every CPTR tool;
+automatically push, publish or deploy;
+remove the existing CPTR agent loop;
+change normal CPTR filesystem behavior globally.
+
+This is an additive subsystem, not a CPTR rewrite.
+
+4. Proposed package structure
+
+Create a clear subsystem instead of growing cptr/utils/chat_task.py.
+
+cptr/
+└── orchestration/
+    ├── __init__.py
+    │
+    ├── domain/
+    │   ├── agents.py
+    │   ├── runs.py
+    │   ├── steps.py
+    │   ├── evidence.py
+    │   ├── results.py
+    │   ├── approvals.py
+    │   ├── capabilities.py
+    │   └── errors.py
+    │
+    ├── registry/
+    │   ├── canonical_agents.py
+    │   ├── capabilities.py
+    │   └── validation.py
+    │
+    ├── routing/
+    │   ├── classifier.py
+    │   ├── router.py
+    │   ├── strategy.py
+    │   └── rules.py
+    │
+    ├── governance/
+    │   ├── policy.py
+    │   ├── tool_guard.py
+    │   ├── shell_policy.py
+    │   ├── filesystem_policy.py
+    │   ├── git_policy.py
+    │   └── delegation_policy.py
+    │
+    ├── execution/
+    │   ├── coordinator.py
+    │   ├── runner.py
+    │   ├── dispatcher.py
+    │   ├── specialist_runner.py
+    │   ├── idempotency.py
+    │   └── checkpoints.py
+    │
+    ├── verification/
+    │   ├── verifier.py
+    │   ├── gates.py
+    │   ├── scorecard.py
+    │   └── completion.py
+    │
+    ├── recovery/
+    │   ├── retry.py
+    │   ├── circuit_breaker.py
+    │   ├── resume.py
+    │   └── reconciliation.py
+    │
+    ├── persistence/
+    │   ├── repositories.py
+    │   ├── transactions.py
+    │   └── migrations.py
+    │
+    ├── evidence/
+    │   ├── collector.py
+    │   ├── provenance.py
+    │   └── snapshots.py
+    │
+    ├── ports/
+    │   ├── models.py
+    │   ├── tools.py
+    │   ├── filesystem.py
+    │   ├── terminal.py
+    │   ├── browser.py
+    │   ├── git.py
+    │   ├── agents.py
+    │   └── fdx.py
+    │
+    ├── adapters/
+    │   ├── cptr_models.py
+    │   ├── cptr_tools.py
+    │   ├── cptr_agents.py
+    │   ├── cptr_events.py
+    │   └── fdx_process.py
+    │
+    ├── prompts/
+    │   ├── heidi.py
+    │   └── specialists/
+    │
+    ├── diagnostics/
+    │   ├── doctor.py
+    │   └── health.py
+    │
+    ├── metrics/
+    │   ├── counters.py
+    │   └── tracing.py
+    │
+    └── tests/
+
+The exact split can change during implementation, but the architectural boundaries should remain.
+
+5. Agent registry
+
+Port FlowDeck's canonical registry concept almost directly.
+
+FlowDeck currently derives:
+
+names;
+modes;
+routing;
+permissions;
+delegation rules;
+
+from one canonical source of truth.
+
+That is a good invariant and should remain.
+
+Initial agents
+Primary
+heidi
+orchestrator    compatibility alias
+Specialists
+planner
+architect
+researcher
+mapper
+backend-coder
+frontend-coder
+devops
+tester
+reviewer
+security-auditor
+debug-specialist
+browser-debugger
+
+Each canonical definition should carry:
+
+AgentDefinition(
+    id=...,
+    mode=...,
+    description=...,
+    allowed_task_types=...,
+    allowed_capabilities=...,
+    forbidden_actions=...,
+    owned_paths=...,
+    model_policy=...,
+    delegation_policy=...,
+    max_delegation_depth=...,
+    required_inputs=...,
+    expected_outputs=...,
+    progress_states=...,
+    escalation_conditions=...,
+    stop_conditions=...,
+    success_criteria=...,
+)
+
+FlowDeck already stores essentially this information.
+
+6. Model policy
+
+Initial rule:
+
+one model selected in CPTR UI
+            │
+            ▼
+           Heidi
+            │
+            ▼
+      all specialists
+
+Specialists inherit the selected model unless the user explicitly configures otherwise.
+
+Do not introduce automatic specialist model switching in the first version.
+
+This avoids debugging two variables simultaneously:
+
+orchestration behavior;
+model-selection behavior.
+
+Per-agent overrides can come after parity is stable.
+
+7. Capability model
+
+Do not map specialists directly to arbitrary function names.
+
+Create stable capabilities.
+
+For example:
+
+FILES_READ
+FILES_WRITE
+FILES_DELETE
+
+CODE_SEARCH
+CODE_ANALYSIS
+
+SHELL_READ
+SHELL_MUTATE
+
+GIT_READ
+GIT_LOCAL_WRITE
+GIT_REMOTE_WRITE
+
+BROWSER_READ
+BROWSER_INTERACT
+
+TEST_RUN
+BUILD_RUN
+
+SUBAGENT_DISPATCH
+
+NETWORK_READ
+NETWORK_WRITE
+
+PACKAGE_INSTALL
+
+DEPLOY
+
+SECRETS_READ
+
+Then map CPTR tools to capabilities.
+
+Example:
+
+read_file       → FILES_READ
+search_files    → CODE_SEARCH
+write_file      → FILES_WRITE
+edit_file       → FILES_WRITE
+run_command     → classify dynamically
+browser tools   → BROWSER_*
+git commands    → classify dynamically
+
+This makes governance stable even if tool names change.
+
+8. Delegation rules
+
+This should remain strict.
+
+Heidi
+max depth = 1
+may delegate to specialist
+may run multiple independent specialists
+Specialist
+max depth = 0
+cannot spawn another specialist
+cannot delegate to itself
+cannot delegate to Heidi
+
+FlowDeck already follows this pattern.
+
+Required checks:
+
+SELF_DELEGATION_BLOCKED
+SPECIALIST_CANNOT_DELEGATE
+DEPTH_LIMIT_EXCEEDED
+TARGET_NOT_FOUND
+TARGET_DISABLED
+CAPACITY_EXCEEDED
+
+These should be typed failure codes rather than prose matching.
+
+9. FlowDeck-C-PTR execution strategy
+
+Heidi should classify each task into one of a small number of strategies.
+
+DIRECT
+
+For small, contained work.
+
+Examples:
+
+one-file bug;
+simple config correction;
+small documentation change.
+Heidi
+  ↓
+CPTR tools
+SPECIALIST
+
+For a single clear domain.
+
+Example:
+
+backend API bug
+      ↓
+backend-coder
+PARALLEL_SPECIALISTS
+
+For independent workstreams.
+
+Example:
+
+            Heidi
+           /  |   \
+     mapper tester security
+
+Only genuinely independent activities run concurrently.
+
+SEQUENTIAL_PIPELINE
+
+Example:
+
+mapper
+  ↓
+planner
+  ↓
+backend-coder
+  ↓
+tester
+  ↓
+reviewer
+  ↓
+Heidi closure
+EXTERNAL_AGENT
+
+Used intentionally when CPTR's configured agent adapter is the best executor:
+
+Heidi
+ ↓
+CPTR AgentPort
+ ↓
+Codex / Claude Code / OpenCode / Gemini
+
+FlowDeck itself must remain independent of that choice.
+
+10. Run lifecycle
+
+Every meaningful orchestration should have a durable run.
+
+CREATED
+   ↓
+CLASSIFYING
+   ↓
+PLANNING
+   ↓
+RUNNING
+   ↓
+VERIFYING
+   ↓
+COMPLETED
+
+Alternative states:
+
+WAITING_FOR_APPROVAL
+BLOCKED
+RETRYING
+RECOVERING
+CANCELLED
+FAILED
+STALLED
+SUPERSEDED
+
+Terminal states:
+
+COMPLETED
+FAILED
+CANCELLED
+SUPERSEDED
+
+Terminal runs must never be resumed automatically.
+
+11. Step lifecycle
+
+Each run contains explicit steps.
+
+PENDING
+READY
+RUNNING
+VERIFYING
+COMPLETED
+FAILED
+BLOCKED
+CANCELLED
+SKIPPED
+
+A step should contain:
+
+step_id
+run_id
+agent
+task_type
+description
+dependencies
+capabilities
+attempt
+idempotency_key
+status
+started_at
+completed_at
+input_snapshot
+output
+evidence
+verification
+error
+
+This becomes the unit of recovery and retry.
+
+12. Persistence
+
+Do not port FlowDeck's Bun SQLite provider.
+
+FlowDeck does have useful persistence concepts including repositories, transactions, retry policies and migrations.
+
+But its concrete provider is based on bun:sqlite.
+
+Use CPTR's existing SQLAlchemy database infrastructure.
+
+Proposed additive tables
+orchestration_runs
+orchestration_steps
+orchestration_delegations
+orchestration_events
+orchestration_evidence
+orchestration_checkpoints
+orchestration_approvals
+orchestration_operations
+Important rule
+
+Do not overload Chat.meta with durable orchestration state.
+
+Chat metadata may contain lightweight presentation references such as:
+
+{
+  "active_orchestration_run": "run_..."
+}
+
+but the authoritative state belongs in dedicated tables.
+
+13. Why durable state matters
+
+CPTR's current async subagents are deliberately process-local and non-durable.
+
+CPTR also tracks live agent tasks in in-memory asyncio.Task maps.
+
+That is fine for ordinary chat generation.
+
+FlowDeck autonomous workflows require stronger guarantees.
+
+After process death:
+
+running process disappears
+        ↓
+startup reconciliation
+        ↓
+inspect durable operation record
+        ↓
+determine:
+- completed?
+- partially committed?
+- safe to retry?
+- needs verification?
+        ↓
+resume or fail safely
+14. Idempotency
+
+Every externally observable mutation requires a deterministic idempotency key.
+
+Example:
+
+hash(
+  run_id,
+  step_id,
+  operation_type,
+  canonical_target,
+  normalized_arguments
+)
+
+Before running a mutation:
+
+operation record exists?
+        │
+      yes
+        ▼
+ completed?
+   ├─ yes → replay result
+   ├─ unknown → reconcile
+   └─ failed → retry policy
+
+Examples that require protection:
+
+file creation;
+file deletion;
+Git commit;
+branch creation;
+PR creation;
+package publishing;
+deployment;
+remote API mutations.
+
+Never rely solely on model instruction such as:
+
+"Don't perform this twice."
+
+It needs runtime enforcement.
+
+15. Checkpoints
+
+Create a checkpoint after meaningful boundaries.
+
+Example:
+
+step started
+   ↓
+read-only investigation
+   ↓
+CHECKPOINT
+   ↓
+mutation
+   ↓
+CHECKPOINT
+   ↓
+tests
+   ↓
+CHECKPOINT
+   ↓
+review
+
+A checkpoint should contain enough information to decide whether a step can resume safely.
+
+Not necessarily enough to recreate an entire LLM context verbatim.
+
+16. Governance architecture
+
+FlowDeck currently has:
+
+off
+advisory
+strict
+
+governance modes.
+
+Keep them.
+
+Enforcement chain
+specialist capability
+        ↓
+FlowDeck governance
+        ↓
+CPTR security / approval
+        ↓
+execution adapter
+        ↓
+actual tool
+Rule
+
+FlowDeck may restrict CPTR further.
+
+FlowDeck may never weaken a CPTR restriction.
+
+17. Approval model
+
+CPTR's existing approval system remains authoritative.
+
+There should be no first-version equivalent of FlowDeck's unrestricted global approval shortcut.
+
+Risk categories:
+
+Local safe
+
+Usually autonomous:
+
+read source
+edit workspace source
+run unit tests
+run typecheck
+inspect git status
+local safe build
+
+depending on CPTR configuration.
+
+Approval required
+
+Examples:
+
+git push
+force push
+PR merge
+npm publish
+package release
+production deployment
+sudo
+system changes
+external destructive API call
+credential access
+Invalid / denied
+
+Examples:
+
+rm -rf /
+escape workspace jail
+specialist recursive delegation
+read protected credentials without permission
+malformed operation
+18. Filesystem policy
+
+This needs two distinct security domains.
+
+Normal CPTR
+
+Do not break existing functionality.
+
+CPTR currently intentionally permits some absolute and home-directory reads while explicitly blocking sensitive credential paths.
+
+FlowDeck specialist
+
+Default jail:
+
+canonical workspace root
+
+Reject:
+
+../
+absolute external path
+symlink escape
+prefix-collision escape
+workspace-root symlink escape
+FDX escape
+
+FlowDeck 2.4.1 explicitly hardened all of those classes.
+
+Special exemptions should require explicit capability grants.
+
+19. Shell policy
+
+Do not classify run_command as simply "allowed" or "denied".
+
+Implement command classification.
+
+Categories:
+
+READ_ONLY
+LOCAL_MUTATION
+EXTERNAL_MUTATION
+PRIVILEGED
+DESTRUCTIVE
+UNKNOWN
+
+Parse:
+
+pipelines;
+&&;
+||;
+semicolon chains;
+$();
+backticks;
+redirection;
+environment assignments;
+shell wrappers.
+
+The maximum risk of any nested segment becomes the command's risk.
+
+Example:
+
+echo "$(cat ~/.ssh/id_ed25519)"
+
+must inherit credential-read risk even though top-level command is echo.
+
+20. Git security
+
+Port FlowDeck's hardened read-only Git policy.
+
+FlowDeck 2.4.1 explicitly blocks dangerous options including:
+
+-c
+--config
+--config-env
+--exec-path
+--output
+--ext-diff
+--textconv
+--paginate
+--no-pager
+
+in contexts where they can undermine read-only guarantees.
+
+Build a proper Git command classifier rather than maintaining scattered string checks.
+
+21. FDX
+
+Keep FDX as the high-performance code-intelligence engine.
+
+Do not rewrite it in Python unless a later benchmark proves there is a reason.
+
+CPTR interface
+class FdxPort(Protocol):
+    async def search(...)
+    async def read(...)
+    async def outline(...)
+    async def impact(...)
+    async def batch(...)
+
+Implementation:
+
+CPTR
+ ↓
+FDX adapter
+ ↓
+fdx serve --root <canonical-root>
+
+Mandatory protections:
+
+canonical repository root;
+absolute deadline;
+output-size limit;
+process-health tracking;
+structured-response validation;
+graceful shutdown;
+crash restart;
+no unrestricted fallback;
+identical jail semantics in native and fallback paths.
+
+FlowDeck v2.4.1 made repository jail parity a core release requirement.
+
+22. Evidence model
+
+Do not allow specialists to simply report:
+
+"Tests pass."
+
+Each important claim should be backed by evidence.
+
+Example:
+
+{
+  "kind": "command",
+  "command": "pytest ...",
+  "exit_code": 0,
+  "started_at": "...",
+  "completed_at": "...",
+  "stdout_digest": "...",
+  "stderr_digest": "..."
+}
+
+Other evidence types:
+
+file_snapshot
+diff
+test_result
+build_result
+typecheck_result
+lint_result
+browser_assertion
+HTTP_response
+Git_state
+security_check
+review_result
+
+Evidence should be tied to:
+
+run
+step
+attempt
+operation
+23. Verification policy
+
+Verification must be runtime-enforced.
+
+Example implementation step:
+
+backend-coder changes API
+       ↓
+targeted tests
+       ↓
+typecheck/lint if relevant
+       ↓
+reviewer
+       ↓
+remaining findings?
+   yes ─┐
+        ▼
+     repair
+        │
+        └────→ verify again
+
+A specialist cannot mark its own step complete if mandatory verification is absent.
+
+24. Scorecards
+
+Port FlowDeck's evidence-aware scorecard principle.
+
+Importantly, FlowDeck already distinguishes:
+
+PASS
+FAIL
+UNKNOWN
+
+rather than treating missing evidence as success.
+
+Suggested run scorecard:
+
+tests passed
+tests failed
+build
+typecheck
+lint
+files changed
+commands run
+tool calls
+delegations
+retries
+blocks
+warnings
+duration
+tokens
+remaining findings
+verification status
+Critical rule
+not_run != pass
+unknown != pass
+25. Retry policy
+
+No blind repetition.
+
+Attempt 1
+
+Normal hypothesis.
+
+Attempt 2
+
+Must include new diagnosis or materially changed strategy.
+
+Attempt 3
+
+Same semantic failure:
+
+CIRCUIT_OPEN
+
+Then:
+
+escalate to Heidi;
+choose alternate agent;
+ask user if necessary;
+fail safely.
+
+FlowDeck already contains repeated-action/circuit concepts and specialist escalation rules.
+
+26. Failure fingerprints
+
+Fingerprint failures by semantics, not literal text.
+
+Example:
+
+operation
+target
+error category
+exit code
+relevant normalized arguments
+
+This prevents:
+
+pytest ./foo
+pytest foo
+cd . && pytest foo
+
+from being incorrectly treated as three unrelated failures when they are the same failing strategy.
+
+27. Recovery
+
+Startup recovery must distinguish:
+
+RUNNING in DB + no live task
+
+from actual active execution.
+
+For each stale run:
+
+acquire recovery lease;
+inspect last checkpoint;
+inspect operation state;
+inspect repository/filesystem state;
+determine whether prior mutation committed;
+avoid duplicates;
+mark prior attempt interrupted;
+resume from next safe boundary.
+
+Never automatically rerun a potentially committed external operation.
+
+28. Concurrency
+
+Use bounded concurrency.
+
+Suggested first defaults:
+
+Heidi:             1
+specialists/run:   4
+mutating agents:   1 per overlapping workspace ownership
+read-only agents:  up to configured limit
+
+Independent:
+
+mapper + security-auditor
+
+Potentially unsafe concurrently:
+
+backend-coder + backend-coder editing same files
+
+Use path/workspace leases for mutation.
+
+29. File ownership and conflict handling
+
+Before specialist mutation:
+
+resolve intended path scope
+       ↓
+acquire lease
+       ↓
+execute
+       ↓
+verify
+       ↓
+release
+
+If ownership can't be determined:
+
+serialize mutation
+
+Do not merge concurrent file edits optimistically in v1.
+
+30. Heidi responsibilities
+
+Heidi should be the only component allowed to:
+
+decide strategy;
+construct specialist graph;
+retry with a different specialist;
+terminate orchestration early;
+synthesize evidence;
+produce final closure;
+determine whether user approval is needed.
+
+Heidi should generally execute simple work directly rather than delegating everything.
+
+This matches FlowDeck's current primary-agent intent.
+
+31. Specialist responsibilities
+
+Specialists should receive narrow assignments.
+
+Example:
+
+agent: backend-coder
+
+Task:
+Fix API serialization failure in X.
+
+Allowed scope:
+src/api/**
+tests/api/**
+
+Required output:
+- root cause
+- files changed
+- tests
+- remaining risks
+
+They should not receive the entire orchestration master prompt unnecessarily.
+
+32. Specialist output contract
+
+Use structured internal completion data.
+
+Example:
+
+{
+  "status": "completed",
+  "summary": "...",
+  "files_changed": [],
+  "tests": [],
+  "findings": [],
+  "remaining_risks": [],
+  "evidence_ids": [],
+  "needs_followup": false
+}
+
+User-facing prose remains separate.
+
+This improves deterministic orchestration.
+
+33. CPTR integration ports
+
+Build adapters rather than importing CPTR implementation details throughout the orchestration layer.
+
+Example:
+
+class ToolPort:
+    execute(...)
+
+class ModelPort:
+    complete(...)
+    stream(...)
+
+class ExternalAgentPort:
+    execute(...)
+
+class FilePort:
+    read(...)
+    write(...)
+    stat(...)
+
+class GitPort:
+    status(...)
+    diff(...)
+    execute(...)
+
+class EventPort:
+    emit(...)
+
+Only adapters know things like:
+
+cptr.utils.tools
+cptr.utils.model_targets
+cptr.socket.main
+
+This keeps the FlowDeck layer independently testable.
+
+34. Chat integration
+
+Do not create a second chat implementation.
+
+The user's FlowDeck orchestration still belongs to a regular CPTR chat.
+
+Recommended metadata/reference flow:
+
+Chat
+ ↓
+orchestration_run_id
+ ↓
+run
+ ↓
+steps / evidence / events
+
+Specialist internal chats may remain hidden/internal just as current CPTR async subagents already use internal chat concepts.
+
+35. Streaming and UX
+
+Reuse CPTR's existing Socket.IO event path.
+
+Add orchestration-specific events such as:
+
+orchestration:started
+orchestration:strategy
+orchestration:step_started
+orchestration:step_progress
+orchestration:step_completed
+orchestration:step_failed
+orchestration:delegated
+orchestration:approval_required
+orchestration:recovering
+orchestration:verification
+orchestration:completed
+
+Never build a second live transport layer.
+
+36. User-visible task list
+
+CPTR already has persisted chat task metadata and chat:tasks events.
+
+Use that UI initially.
+
+Map orchestration steps onto existing visible tasks rather than inventing a new frontend subsystem immediately.
+
+Later we can build richer FlowDeck visualizations.
+
+37. Diagnostics / Doctor
+
+Build a CPTR-native FlowDeck Doctor.
+
+Checks:
+
+database migration
+canonical agent registry
+configured model
+CPTR execution adapters
+workspace security
+FDX availability
+FDX version
+FDX jail
+terminal capability
+Git capability
+browser capability
+external-agent availability
+orchestration recovery state
+stale leases
+configuration
+pending migrations
+
+Doctor must report:
+
+OK
+WARN
+INFO
+SKIP
+ERROR
+
+truthfully.
+
+FlowDeck v2.4.1 specifically corrected false diagnostic status handling.
+
+38. Configuration
+
+Suggested configuration tree:
+
+{
+  "flowdeck": {
+    "enabled": false,
+    "mode": "shadow",
+    "governance": "strict",
+    "max_specialists": 4,
+    "max_delegation_depth": 1,
+    "max_attempts": 3,
+    "fdx": {
+      "enabled": false
+    },
+    "mutating_agents": false
+  }
+}
+
+Possible modes:
+
+off
+shadow
+read_only
+controlled
+full
+39. Rollout stages
+Phase 0 — Baseline freeze and characterization
+
+Before implementing FlowDeck behavior:
+
+record existing CPTR tests;
+record chat behavior;
+record agent behavior;
+record tool approval behavior;
+record restart behavior;
+record Socket.IO events;
+capture current performance.
+Exit gate
+
+No port code yet.
+
+We know exactly what behavior must not regress.
+
+40. Phase 1 — Contracts and registry
+
+Implement only:
+
+domain objects;
+canonical registry;
+capability model;
+lifecycle enums;
+error types;
+configuration schemas.
+
+No live execution.
+
+Tests
+registry completeness;
+duplicate IDs;
+delegation rules;
+capabilities;
+configuration parsing;
+serialization.
+Exit gate
+
+All deterministic FlowDeck concepts represented natively in Python.
+
+41. Phase 2 — Shadow router
+
+Enable:
+
+flowdeck.mode = shadow
+
+For every eligible CPTR request:
+
+classify;
+choose strategy;
+choose specialist graph;
+evaluate governance;
+log result.
+
+Then:
+
+discard FlowDeck decision
+
+and allow existing CPTR behavior to execute normally.
+
+Exit gate
+
+Large fixture suite demonstrates routing consistency without changing user behavior.
+
+42. Phase 3 — Durable run engine
+
+Build:
+
+orchestration tables;
+repository layer;
+run lifecycle;
+steps;
+event journal;
+leases;
+idempotency;
+recovery.
+
+Still no real specialist mutation.
+
+Failure tests
+
+Kill backend during:
+
+classification
+step startup
+checkpoint
+step completion
+
+Then restart.
+
+Exit gate
+
+Run integrity remains correct.
+
+43. Phase 4 — Read-only specialists
+
+Enable:
+
+mapper
+researcher
+planner
+architect
+reviewer
+security-auditor
+
+Allowed:
+
+read;
+search;
+inspect;
+FDX if available.
+
+Denied:
+
+file writes;
+shell mutation;
+Git mutation;
+external mutation.
+Exit gate
+
+Read-only delegation works under concurrency and restart.
+
+44. Phase 5 — FDX qualification
+
+Bring FDX online separately.
+
+Test:
+
+search;
+read;
+outline;
+impact;
+concurrency;
+cancellation;
+timeout;
+process restart;
+jail;
+symlink attack;
+traversal attack;
+native/fallback parity.
+Exit gate
+
+No filesystem escape possible in the qualification suite.
+
+45. Phase 6 — Tester
+
+Enable tester with:
+
+test-file writes
+test runner
+read-only source access
+
+Tester should not become a general application-code writer.
+
+Exit gate
+
+TDD/regression workflows work safely.
+
+46. Phase 7 — Coding specialists
+
+Progressively enable:
+
+backend-coder;
+frontend-coder;
+debug-specialist;
+browser-debugger;
+devops.
+
+Not all at once.
+
+Each specialist gets independent capability tests.
+
+47. Phase 8 — Verification pipeline
+
+Require:
+
+implementation
+    ↓
+focused validation
+    ↓
+review
+    ↓
+repair if needed
+    ↓
+broader validation
+    ↓
+closure
+
+No task can reach COMPLETED while required checks are:
+
+FAIL
+UNKNOWN
+NOT_RUN
+
+unless the run explicitly records a permitted exception.
+
+48. Phase 9 — Full Heidi orchestration
+
+Enable:
+
+flowdeck.mode = full
+
+only after prior stages have passed.
+
+Now Heidi may autonomously:
+
+execute directly;
+delegate;
+parallelize;
+repair;
+verify;
+close.
+
+But external sensitive actions still require CPTR approval.
+
+49. Phase 10 — UI improvements
+
+Only after runtime stability.
+
+Potential additions:
+
+orchestration graph;
+specialist cards;
+evidence viewer;
+retry timeline;
+approval queue;
+run scorecard;
+recovery status;
+FDX status.
+
+The frontend should be downstream of stable runtime APIs, not used to define runtime behavior.
+
+50. Feature flags
+
+These are mandatory during development:
+
+FLOWDECK_ENABLED
+FLOWDECK_SHADOW_MODE
+FLOWDECK_MUTATING_AGENTS
+FLOWDECK_FDX
+FLOWDECK_DURABLE_RECOVERY
+FLOWDECK_STRICT_GOVERNANCE
+
+Prefer real CPTR configuration over environment variables where appropriate, but emergency environment kill switches are useful.
+
+Critical requirement:
+
+FLOWDECK_ENABLED=false
+
+must restore the original CPTR execution path without database rollback.
+
+51. Backward compatibility
+
+Existing CPTR features must continue working:
+
+normal chat;
+API models;
+OpenAI-compatible endpoints;
+Anthropic;
+Codex;
+Claude Code;
+OpenCode;
+Gemini;
+Cline;
+Cursor;
+Pi;
+Grok;
+files;
+terminal;
+browser;
+skills;
+MCP;
+chat branching;
+context compaction;
+queued messages;
+approvals;
+automation;
+reconnect;
+restart reconciliation.
+
+FlowDeck-C-PTR should only intercept when explicitly enabled.
+
+52. Security qualification
+
+Mandatory adversarial cases:
+
+Filesystem
+../secret
+../../
+absolute external path
+workspace-prefix collision
+symlink inside workspace → outside
+workspace itself symlinked
+nested symlink chain
+race during symlink resolution
+Credentials
+
+Attempt:
+
+.env
+.env.local
+~/.ssh/
+~/.aws/
+~/.config/gh/
+~/.docker/
+~/.kube/
+.netrc
+.npmrc
+
+Ensure existing CPTR protection remains.
+
+53. Git adversarial tests
+
+Test attempts involving:
+
+git -c ...
+git --config ...
+git --exec-path
+git diff --ext-diff
+git log with unsafe pager
+git alias execution
+shell wrappers
+subshell Git
+
+Read-only specialists must never turn Git inspection into arbitrary execution.
+
+54. Shell adversarial tests
+
+Examples:
+
+echo "$(rm -rf something)"
+true && dangerous-command
+false || dangerous-command
+VAR=$(cat ~/.ssh/key) command
+sh -c "..."
+bash -c "..."
+eval ...
+xargs ...
+
+The classifier should either properly inherit risk or classify as unknown and require stronger handling.
+
+55. Delegation adversarial tests
+
+Verify:
+
+Heidi → specialist                   PASS
+Heidi → Heidi                        BLOCK
+specialist → specialist              BLOCK
+specialist → Heidi                    BLOCK
+depth > 1                            BLOCK
+disabled specialist                  BLOCK
+unknown specialist                   BLOCK
+parallel capacity exceeded           BLOCK/QUEUE
+56. Idempotency tests
+
+Inject duplicate:
+
+API request;
+Socket event;
+worker callback;
+recovery event;
+step completion;
+retry;
+approval;
+process restart.
+
+Expected:
+
+one committed side effect
+57. Concurrency tests
+
+Run:
+
+50 read-only specialists
+multiple runs
+same workspace
+different workspaces
+different users
+
+Then mutation tests:
+
+same file
+same Git branch
+same run
+different runs
+
+No corruption, mixed ownership or cross-user leakage.
+
+58. Cancellation tests
+
+Cancel:
+
+Heidi;
+one specialist;
+one of several parallel specialists;
+command;
+FDX request;
+run awaiting approval.
+
+Check:
+
+process cleanup;
+task cleanup;
+leases released;
+no orphan workers;
+run state correct;
+no surprise continuation.
+59. Restart tests
+
+Kill CPTR:
+
+before mutation;
+during file write;
+after file write before DB commit;
+after DB commit;
+during test;
+during specialist completion;
+during verification;
+awaiting approval.
+
+Every case must reconcile deterministically.
+
+60. Streaming tests
+
+Verify no duplicate or missing transitions:
+
+step_started
+progress
+tool activity
+step_completed
+run_completed
+
+Frontend reconnect should reconstruct current state from durable state rather than depend entirely on missed Socket.IO messages.
+
+61. Performance gates
+
+Measure before and after.
+
+Metrics:
+
+time to first token
+chat startup
+simple DIRECT task overhead
+classifier latency
+specialist startup
+4-way delegation overhead
+FDX latency
+DB writes per step
+Socket event volume
+memory growth
+long-run memory stability
+
+A trivial chat should not pay the full orchestration cost if FlowDeck is not needed.
+
+62. Fast path
+
+Add a real fast lane.
+
+Example:
+
+simple local task
+      ↓
+cheap deterministic classification
+      ↓
+DIRECT
+      ↓
+existing CPTR agent loop
+
+Do not initialize:
+
+full workflow DB graph;
+specialists;
+FDX daemon;
+expensive planning;
+
+unless needed.
+
+63. Observability
+
+Every orchestration event should carry correlation fields:
+
+run_id
+step_id
+attempt
+operation_id
+chat_id
+message_id
+user_id
+workspace
+agent
+
+Logs should never contain secrets.
+
+Include structured failure codes.
+
+64. Audit trail
+
+Record decisions such as:
+
+routing decision
+governance allow
+governance block
+approval required
+approval granted
+delegation
+retry
+circuit open
+verification
+recovery
+completion
+
+But avoid storing raw sensitive arguments when a digest/redacted representation is sufficient.
+
+65. Migration policy
+
+Database migrations must be:
+
+additive;
+forward-safe;
+deterministic;
+transaction-aware;
+tested against an existing CPTR database.
+
+Do not rewrite existing Chat or ChatMessage rows.
+
+Rollback should primarily mean:
+
+disable FlowDeck
+
+not:
+
+downgrade database and rewrite chats
+66. Testing architecture
+
+Create dedicated orchestration tests rather than only extending generic CPTR tests.
+
+Recommended groups:
+
+tests/orchestration/unit/
+tests/orchestration/contracts/
+tests/orchestration/governance/
+tests/orchestration/routing/
+tests/orchestration/security/
+tests/orchestration/idempotency/
+tests/orchestration/recovery/
+tests/orchestration/concurrency/
+tests/orchestration/fdx/
+tests/orchestration/integration/
+tests/orchestration/e2e/
+
+A major port should not depend on prompt-based manual testing.
+
+67. Parity fixtures
+
+For important FlowDeck rules, create fixtures that execute:
+
+FlowDeck v2.4.1 expectation
+             vs
+FlowDeck-C-PTR result
+
+Examples:
+
+agent registry;
+routing decisions;
+delegation;
+capability decisions;
+governance;
+retry state;
+scorecards;
+path security;
+Git policy.
+
+The implementations do not need byte-for-byte parity.
+
+Behavioral invariants need parity.
+
+68. Release gate
+
+FlowDeck-C-PTR does not become default until all of these are true:
+
+existing CPTR regression suite       PASS
+new orchestration unit suite         PASS
+security suite                       PASS
+recovery suite                       PASS
+idempotency suite                    PASS
+concurrency suite                    PASS
+FDX suite                            PASS
+integration suite                    PASS
+browser/UI E2E                       PASS
+clean install                        PASS
+upgrade existing install             PASS
+disable/rollback test                PASS
+long-running burn-in                 PASS
+69. No false-green rule
+
+Forbidden acceptance patterns:
+
+try:
+    ...
+except:
+    pass
+
+or equivalent tests whose only assertion is that execution returned.
+
+FlowDeck 2.4.1 itself specifically removed false-green test patterns.
+
+Tests must assert:
+
+expected state;
+expected error class;
+expected operation count;
+expected absence of side effects;
+expected recovery behavior.
+70. Release progression
+
+Suggested internal versions:
+
+0.1 shadow
+0.2 durable runtime
+0.3 read-only specialists
+0.4 FDX
+0.5 tester
+0.6 coding specialists
+0.7 verification/recovery
+0.8 full orchestration
+0.9 release candidate
+1.0 CPTR-native FlowDeck
+
+These do not need to become public package versions; they can be milestone labels.
+
+71. Final acceptance definition
+
+I would consider the port complete only when all of the following are true.
+
+Architecture
+FlowDeck has no runtime requirement on OpenCode.
+CPTR remains execution owner.
+OpenCode is only another optional CPTR agent.
+Functionality
+Heidi direct execution works.
+specialist delegation works.
+parallel delegation works.
+model inheritance works.
+verification works.
+durable runs work.
+crash recovery works.
+FDX works.
+Safety
+workspace jail works;
+credential protections remain;
+delegation depth works;
+unsafe Git usage is blocked;
+dangerous shell operations respect approval;
+duplicate side effects are prevented;
+circuit breakers stop loops.
+Compatibility
+
+All existing CPTR modes continue working.
+
+Reliability
+
+A server restart cannot silently duplicate mutations or convert interrupted work into a false success.
+
+Truthfulness
+
+The system never reports:
+
+PASS
+
+when evidence is:
+
+UNKNOWN
+NOT_RUN
+FAILED
+72. Recommended implementation priority
+
+If we want the lowest-risk sequence:
+
+1. Contracts
+2. Registry
+3. Capability model
+4. Shadow router
+5. Durable run DB
+6. Idempotency
+7. Governance
+8. Read-only specialists
+9. Recovery
+10. FDX
+11. Tester
+12. Coding specialists
+13. Verification
+14. Full Heidi
+15. UI enhancements
+
+Do not start with Heidi prompts or UI.
+
+The runtime invariants need to exist first.
+
+73. What Gemini and Claude should specifically review
+
+I recommend giving them this entire plan and asking them to challenge these points rather than merely saying whether they like it.
+
+You can give them these review criteria:
+
+Review this proposed FlowDeck v2.4.1 → CPTR-native migration architecture as an adversarial principal engineer. Do not rewrite the plan yet.
+
+Check specifically:
+
+Whether the boundary between FlowDeck orchestration and CPTR execution is correct.
+Whether any OpenCode dependency is accidentally still required.
+Whether the persistence and recovery model can cause duplicate side effects.
+Whether the idempotency design is sufficient.
+Whether filesystem and symlink containment has gaps.
+Whether shell/Git governance can be bypassed.
+Whether delegation rules can create recursion or concurrency races.
+Whether specialist capability isolation is sufficient.
+Whether FDX should remain a subprocess/native port or be redesigned.
+Whether CPTR's current async subagent/chat task architecture creates integration hazards.
+Whether the proposed database model is too complex or too weak.
+Whether the rollout phases are ordered correctly.
+Whether any phase is missing a rollback strategy.
+Whether existing CPTR behavior can regress despite the feature flags.
+Whether verification and evidence rules are strong enough to prevent false success.
+Whether the plan has unnecessary complexity that can safely be removed.
+Identify P0/P1/P2 risks.
+Propose concrete changes only where they materially reduce risk or complexity.
+
+Return:
+
+verdict;
+architecture score /10;
+P0 issues;
+P1 issues;
+P2 issues;
+changes you strongly recommend;
+parts you would preserve unchanged;
+whether you would authorize implementation after those changes.
+
+That should produce substantially more useful feedback than asking either model simply to "review the plan."
+
+Current recommendation
+
+Architecture: native semantic port
+Initial implementation mode: shadow-only
+Fallback: existing CPTR runtime
+OpenCode dependency: none
+FDX: retain through jailed adapter
+Persistence: CPTR-native SQLAlchemy
+Specialist recursion: prohibited
+Default model: inherit CPTR UI model
+External mutations: retain CPTR approval boundary
+First mutation: only after read-only orchestration, durability, recovery and security gates are proven.
+
+Bring back Gemini's and Claude Opus's reviews separately. I can then compare their criticisms against this design, classify each proposed change as accept / modify / reject, and produce the final master plan.
