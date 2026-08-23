@@ -1,0 +1,745 @@
+Task
+Task #21 — Final Integrated Authority, Recovery, and End-to-End Closure Audit
+
+Goal:
+Perform the final backend qualification of the combined CPTR + FlowDeck + integrated control-plane system.
+
+This task must prove that the integrated system has exactly ONE authoritative path for execution, specialist dispatch, workspace ownership, leases/fencing, idempotency/retries, cancellation/recovery, approvals, and evidence/completion.
+
+Do NOT add new functionality unless a failing acceptance test exposes a real root-cause defect.
+
+Current verified baseline:
+- Branch: control-plane-integration
+- HEAD: 848fd05eccc32cf52347b36d6dadb697fed68b90
+- Working tree: clean
+- Task #20: PASS / merged
+- Backend suite: 142/142 PASS
+- FlowDeck suite: 104/104 PASS
+- Task #19 migration validation: merged
+- CPTR remains sole model/tool execution owner
+- FlowDeck remains authoritative for:
+  - authenticated specialist dispatch
+  - workspace ownership
+  - workspace leases/fencing
+  - logical identity/idempotency
+  - physical attempts/retries
+  - cancellation/recovery
+  - evidence/completion
+- Control-plane state is projection/status metadata only
+- Control plane remains disabled by default
+- No GitHub push performed
+
+Required authority model:
+
+Authenticated request
+    ↓
+server-owned policy
+    ↓
+FlowDeck durable identity
+    ↓
+Controlled Heidi / orchestration
+    ↓
+authenticated FlowDeck specialist gateway
+    ↓
+CPTR native execution
+    ↓
+trusted runtime observations
+    ↓
+FlowDeck verifier/evidence contract
+    ↓
+authoritative durable outcome
+    ↓
+control-plane status projection
+
+Authority ownership:
+
+Model/tool execution:
+CPTR ONLY
+
+Specialist dispatch:
+Authenticated FlowDeck gateway ONLY
+
+Workspace authorization:
+Canonical authenticated Workspace ownership ONLY
+
+Workspace mutation ownership:
+FlowDeck lease + fencing epoch ONLY
+
+Logical idempotency:
+FlowDeck logical operation ONLY
+
+Retries:
+FlowDeck physical attempts ONLY
+
+Cancellation/recovery:
+FlowDeck durable lifecycle ONLY
+
+Completion/evidence:
+FlowDeck verifier contract ONLY
+
+Control plane:
+Projection, coordination metadata and API surface — NOT competing execution truth
+
+
+To dev
+1. Inspect before modifying.
+
+Verify:
+- branch
+- HEAD
+- clean/expected working tree
+- migration head
+- 142/142 backend baseline
+- 104/104 FlowDeck baseline
+
+Do not change source until baseline is proven.
+
+2. Produce a complete authority map.
+
+Audit every code path capable of:
+
+- resolving model/provider
+- calling a model
+- executing a tool
+- invoking a specialist
+- authorizing a workspace
+- acquiring/releasing workspace ownership
+- issuing fencing epochs
+- creating logical operations
+- creating physical attempts
+- retrying execution
+- cancelling execution
+- recovering execution
+- granting approvals
+- recording evidence
+- verifying evidence
+- finalizing success/failure
+- projecting status into control-plane records
+
+Inspect at minimum:
+
+- FlowDeck coordinator
+- authenticated specialist gateway
+- coding specialists
+- read-only specialists
+- browser-debugger
+- tester
+- FlowDeck durable layer
+- FlowDeck verifier/evidence layer
+- FlowDeck approvals
+- FlowDeck production HTTP router
+- CPTR native chat/task execution
+- control API
+- control auth
+- agent service
+- control store
+- supervisor
+- supervisor director
+- control verification service
+- restart recovery
+- integrated workspace lease adapter
+
+Return:
+
+Concern
+Intended authority
+Actual authority
+Secondary callers
+Competing authority?
+PASS / FAIL
+
+Any genuine second authority = FAIL until resolved.
+
+3. Prove CPTR is the only model/tool executor.
+
+Search every integrated control-plane path.
+
+Supervisor/director/control API must not independently:
+
+- create another model loop
+- directly execute arbitrary CPTR tools
+- own another tool registry
+- bypass the CPTR native execution primitive
+- silently switch providers/models
+
+One selected CPTR model must continue through Heidi and specialists.
+
+4. Prove authenticated FlowDeck gateway is the only specialist authority.
+
+Control-plane components must not directly invoke:
+
+- private coding implementation
+- private read-only implementation
+- private browser implementation
+- tester process runner as an agent bypass
+- CPTR tools
+
+All specialist work must go through the authenticated FlowDeck dispatch boundary.
+
+5. Prove workspace ownership is canonical.
+
+For every production entrypoint:
+
+- authenticated identity is server-derived
+- caller user_id is never authority
+- requested workspace is canonicalized
+- durable ownership is verified
+- wrong-user workspace fails
+- forged workspace fails
+- missing workspace fails
+- stale mapping fails
+- ambiguous mapping fails
+
+There must not be a weaker control-plane workspace authorization path.
+
+6. Prove FlowDeck has the only execution lease/fencing authority.
+
+Audit:
+
+- flowdeck_workspace_leases
+- flowdeck_recovery_leases
+- autonomous_workspace_leases
+- supervisor locks
+- monitor locks
+- in-memory locks
+
+Any control-plane lock may coordinate metadata only.
+
+It MUST NOT independently authorize mutation.
+
+Actual workspace mutation permission must require the current FlowDeck lease/fencing epoch.
+
+Test:
+
+- two control requests target the same workspace
+- two mutating specialist plans collide
+- lease transfers between workers
+- stale supervisor continues running
+- restart occurs while lease is owned
+
+Stale owner must never commit authoritative completion evidence.
+
+7. Prove one idempotency/retry authority.
+
+Trace mapping between:
+
+HTTP/control Idempotency-Key
+→ control task identity
+→ FlowDeck request key
+→ FlowDeck logical operation
+→ FlowDeck physical attempts
+
+Requirements:
+
+- same logical request cannot create duplicate mutation
+- retries reuse logical identity
+- retries create a new physical attempt only when permitted
+- OUTCOME_UNKNOWN cannot be bypassed by generating a fresh control retry identity
+- a duplicate control request cannot create duplicate FlowDeck work
+
+8. Prove cancellation converges.
+
+Exercise cancellation through all exposed paths.
+
+Test:
+
+A. cancel before child execution
+B. cancel during read-only execution
+C. cancel during mutation
+D. cancel after mutation but before verification
+E. cancel during tester
+F. cancelled worker later returns success
+G. cancellation followed by process restart
+
+Expected:
+
+- future delegation stops
+- uncertain side effects become OUTCOME_UNKNOWN when appropriate
+- stale attempt completion is rejected
+- stale fencing completion is rejected
+- parent cannot become success
+- control projection cannot become success
+- reconciliation/manual review remains required where applicable
+
+9. Prove restart/recovery converges on durable FlowDeck truth.
+
+Simulate restart at:
+
+A. request persisted, no child
+B. child running before side effect
+C. side effect may have occurred, response lost
+D. mutation done, verification not persisted
+E. evidence persisted, parent not finalized
+F. FlowDeck success persisted, control projection stale
+G. control projection says success while FlowDeck says UNKNOWN/FAILED
+
+After restart:
+
+- load durable FlowDeck state
+- do not trust stale process memory
+- preserve logical operation IDs
+- preserve physical attempt identities
+- preserve fencing
+- completed work is not replayed
+- UNKNOWN mutation is not blindly retried
+- control projection is repaired from FlowDeck
+- operation-specific reconciliation is used
+
+10. Prove FlowDeck completion overrides every control-plane claim.
+
+Explicit conflict tests:
+
+Control = success
+FlowDeck = FAILED
+→ FAILED
+
+Control = success
+FlowDeck = CANCELLED
+→ CANCELLED
+
+Control = success
+FlowDeck = OUTCOME_UNKNOWN
+→ OUTCOME_UNKNOWN
+
+Control = success
+FlowDeck = MANUAL_REVIEW_REQUIRED
+→ MANUAL_REVIEW_REQUIRED
+
+Supervisor says verified
+but no valid FlowDeck evidence
+→ NOT SUCCESS
+
+Agent says done
+but verifier fails
+→ NOT SUCCESS
+
+Approval granted
+execution fails
+→ FAILED
+
+Stale evidence
+→ rejected
+
+Wrong:
+- run
+- operation
+- attempt
+- user
+- workspace
+- fingerprint
+- fencing epoch
+
+→ rejected
+
+11. Run a fully integrated happy-path E2E.
+
+Use deterministic fixtures where possible.
+
+Exercise:
+
+authenticated control request
+→ FlowDeck durable request
+→ Heidi
+→ mapper/architect if planned
+→ backend-coder
+→ tester
+→ reviewer
+→ authoritative FlowDeck completion
+→ control-plane projection
+
+Prove:
+
+- one authenticated owner
+- one canonical workspace
+- one CPTR-selected model
+- child dispatch through authenticated gateway
+- one mutator at a time
+- coding verification is independent
+- tester evidence is structured
+- reviewer prose cannot override evidence
+- FlowDeck parent state is authoritative
+- control success mirrors FlowDeck success
+
+Do not require external provider access if deterministic execution seams can exercise the production boundaries.
+
+12. Run integrated failure E2E.
+
+Example:
+
+backend-coder
+→ tester FAILS
+→ reviewer says "looks good"
+
+Required result:
+
+FlowDeck = failure/non-success
+Control projection = failure/non-success
+
+Reviewer prose must not override tester evidence.
+
+13. Run integrated OUTCOME_UNKNOWN E2E.
+
+Simulate:
+
+mutation starts
+→ outcome confirmation lost
+→ operation becomes OUTCOME_UNKNOWN
+→ supervisor attempts retry
+
+Required:
+
+- no blind retry
+- reconcile existing logical operation
+- use authoritative postcondition where possible
+- unresolved result → MANUAL_REVIEW_REQUIRED
+- control plane mirrors FlowDeck outcome
+
+14. Run integrated cancellation E2E.
+
+Start active coding work.
+
+Cancel through control API.
+
+Then simulate late successful worker return.
+
+Required:
+
+- late success rejected
+- attempt state blocks finalization
+- fencing blocks stale owner
+- FlowDeck parent cannot succeed
+- control projection cannot succeed
+
+15. Run integrated restart E2E.
+
+Sequence:
+
+request
+→ child 1 succeeds
+→ child 2 begins
+→ runtime restart
+→ recovery
+
+Required:
+
+- same durable task/run
+- same logical operation IDs
+- completed child 1 not replayed
+- next safe action resumes
+- no duplicate mutation
+- no duplicate evidence
+- stale control projection repaired
+
+16. Audit approvals.
+
+Compare control-plane approvals with FlowDeck approvals.
+
+Ensure execution-affecting approval is:
+
+- authenticated
+- user bound
+- workspace bound
+- operation/fingerprint bound
+- one-shot
+- permission-to-attempt only
+
+Approval MUST NOT:
+
+- establish success
+- bypass verifier
+- bypass lease/fencing
+- permit unrelated operation
+
+17. Prove disabled control plane is inert.
+
+Because it is disabled by default:
+
+With control plane disabled verify zero:
+
+- supervisor background execution
+- director execution
+- control agent execution
+- control verification loop
+- duplicate evidence creation
+- independent retry loop
+- workspace execution authority
+
+Native CPTR and FlowDeck behavior must remain unchanged.
+
+18. Model policy.
+
+Verify:
+
+- CPTR global selected model is authoritative
+- control requests cannot override model/provider
+- Heidi inherits selected model
+- specialists inherit selected model
+- supervisor cannot auto-switch
+- verifier does not call a separate verification model
+
+19. Migration closure.
+
+Verify exactly one linear migration graph:
+
+0001
+→ 0002
+→ 0003
+→ 0004
+→ 0005 FlowDeck orchestration
+→ 0006 FlowDeck approvals
+→ 0007 control plane
+→ 0008 control hardening
+
+Run:
+
+- fresh DB initialization
+- upgrade from 0006
+- upgrade from 0008/current schema
+- no duplicate revision IDs
+- no multiple migration heads
+- all expected tables present
+
+Do not modify existing revisions unless a real defect is proven.
+
+20. Root-cause fixes only.
+
+If a test exposes a real defect:
+
+- preserve/add failing regression test
+- identify exact competing-authority cause
+- make smallest architectural fix
+- rerun focused tests
+- rerun full backend and FlowDeck suites
+
+Do NOT add compatibility hacks that preserve competing authorities.
+
+21. Stop after Task #21.
+
+Do not start:
+
+- orchestration UI
+- new specialist types
+- FDX
+- devops
+- debug mutation
+- Git mutation
+- unrestricted shell
+- MCP
+- install
+- deploy
+- publishing
+- secrets support
+- broader autonomy
+
+
+Roadmap
+1. Verify baseline
+2. Build authority map
+3. Audit model/tool ownership
+4. Audit specialist dispatch
+5. Audit workspace ownership
+6. Audit leases/fencing
+7. Audit idempotency/retries
+8. Audit completion/evidence
+9. Audit cancellation
+10. Audit recovery
+11. Audit approvals
+12. Happy-path E2E
+13. Failure E2E
+14. OUTCOME_UNKNOWN E2E
+15. Cancellation E2E
+16. Restart E2E
+17. Disabled-mode qualification
+18. Migration qualification
+19. Full regression
+20. Final read-only acceptance audit
+21. Stop
+
+
+Commands
+Use runtime-derived paths only.
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git log -n 20 --oneline
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+grep -RInE \
+'run_chat_task|start_task|execute_tool|dispatch_authenticated_specialist|run_heidi_coordinator|supervisor|director|workspace.*lease|fencing|idempot|retry|evidence|verification|approval|cancel|recover|OUTCOME_UNKNOWN|MANUAL_REVIEW_REQUIRED' \
+cptr tests \
+--exclude-dir='__pycache__'
+
+After any required fixes:
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+python3 -m compileall -q cptr
+
+CHANGED_PY="$(git diff --name-only -- '*.py' | tr '\n' ' ')"
+if [ -n "$CHANGED_PY" ]; then
+  python3 -m ruff check $CHANGED_PY
+fi
+
+git diff --check
+
+git status --short
+git diff --stat
+git diff
+
+Use the existing repository procedures for:
+- fresh migration initialization
+- migration upgrade from 0006
+- current-schema migration verification
+- API HTTP smoke
+- frontend production build
+
+Do not invent another setup path.
+
+
+Bug checks
+- Control plane directly owns model execution → FAIL
+- Control plane directly owns tool execution → FAIL
+- Second model/tool loop exists → FAIL
+- Supervisor directly invokes specialist implementation → FAIL
+- Authenticated FlowDeck gateway bypass exists → FAIL
+- Control workspace auth weaker than FlowDeck auth → FAIL
+- Two lease systems can independently permit mutation → FAIL
+- Control lock bypasses FlowDeck fencing → FAIL
+- Stale worker can publish evidence → FAIL
+- Two logical idempotency ledgers can duplicate work → FAIL
+- Same request creates duplicate mutation → FAIL
+- OUTCOME_UNKNOWN can be bypassed using a new retry identity → FAIL
+- Cancellation implementations disagree → FAIL
+- Late cancelled result becomes success → FAIL
+- Restart trusts supervisor memory instead of durable state → FAIL
+- Completed child replayed after restart → FAIL
+- UNKNOWN mutation blindly retried → FAIL
+- Control success overrides FlowDeck FAILED → FAIL
+- Control success overrides CANCELLED → FAIL
+- Control success overrides OUTCOME_UNKNOWN → FAIL
+- Control success overrides MANUAL_REVIEW_REQUIRED → FAIL
+- Prose becomes authoritative → FAIL
+- Approval becomes execution proof → FAIL
+- Wrong/stale evidence accepted → FAIL
+- Stale fencing evidence accepted → FAIL
+- Model auto-switching exists → FAIL
+- Separate verifier model exists → FAIL
+- Disabled control plane starts execution → FAIL
+- Migration graph branches/collides → FAIL
+- Existing FlowDeck security regression → FAIL
+- Any new authority introduced → FAIL
+
+
+Tests before commit
+Acceptance requires:
+
+1. Pre-change backend baseline = 142/142 PASS.
+2. Pre-change FlowDeck baseline = 104/104 PASS.
+3. Complete authority map produced.
+4. CPTR proven sole model/tool execution authority.
+5. Authenticated FlowDeck gateway proven sole specialist authority.
+6. Canonical workspace ownership used by every execution path.
+7. FlowDeck lease/fencing proven sole mutation authority.
+8. Control-plane locks cannot independently permit mutation.
+9. FlowDeck logical operation is canonical execution identity.
+10. Control retry maps to existing logical operation / physical attempts.
+11. Same logical request cannot duplicate mutation.
+12. OUTCOME_UNKNOWN cannot be bypassed via retry.
+13. Cancellation paths converge.
+14. Late completion after cancellation rejected.
+15. Recovery paths converge on FlowDeck durable state.
+16. Completed child not replayed after restart.
+17. UNKNOWN mutation not blindly retried.
+18. FlowDeck remains final completion/evidence authority.
+19. Control cannot override FAILED.
+20. Control cannot override CANCELLED.
+21. Control cannot override OUTCOME_UNKNOWN.
+22. Control cannot override MANUAL_REVIEW_REQUIRED.
+23. Agent prose cannot establish success.
+24. Supervisor/director prose cannot establish success.
+25. Approval cannot establish success.
+26. Wrong-run evidence rejected.
+27. Wrong-operation evidence rejected.
+28. Wrong-user evidence rejected.
+29. Wrong-workspace evidence rejected.
+30. Wrong-attempt evidence rejected.
+31. Wrong-fingerprint evidence rejected.
+32. Stale fencing evidence rejected.
+33. Integrated happy-path E2E passes.
+34. Integrated tester-failure path fails correctly.
+35. Integrated OUTCOME_UNKNOWN path remains reconciliation-gated.
+36. Integrated cancellation path rejects late success.
+37. Integrated restart path does not duplicate mutation.
+38. Control plane remains disabled by default.
+39. Disabled mode starts no supervisor/director execution.
+40. One global CPTR model remains inherited.
+41. No second verifier/model/tool loop exists.
+42. Migration graph is single and linear.
+43. Fresh database initialization passes.
+44. Upgrade from 0006 passes.
+45. Current schema migration verification passes.
+46. Full FlowDeck suite passes.
+47. Full backend suite passes.
+48. Python compilation passes.
+49. Targeted Ruff passes.
+50. git diff --check passes.
+51. API smoke returns HTTP 200.
+52. Frontend production build passes.
+53. No authority expansion occurs.
+
+
+Commit/push
+Do NOT push to GitHub.
+
+Do NOT create a commit automatically.
+
+If Task #21 requires production fixes, leave the final verified diff available for review.
+
+If no production change is required, leave the working tree unchanged.
+
+Final closure report must include:
+- PASS / FAIL
+- score
+- branch / HEAD
+- working-tree state
+- authority map
+- model/tool ownership verdict
+- specialist-dispatch verdict
+- workspace-ownership verdict
+- lease/fencing verdict
+- idempotency/retry verdict
+- cancellation verdict
+- recovery verdict
+- approval verdict
+- evidence/completion verdict
+- happy-path E2E result
+- failure E2E result
+- OUTCOME_UNKNOWN E2E result
+- cancellation E2E result
+- restart E2E result
+- disabled-mode result
+- migration result
+- exact FlowDeck test count
+- exact full backend test count
+- API smoke
+- frontend build
+- defects found and root-cause fixes
+- confirmation CPTR remains sole model/tool executor
+- confirmation FlowDeck remains authoritative for lease/fencing/idempotency/recovery/evidence/completion
+- confirmation authenticated FlowDeck gateway remains sole specialist execution authority
+- confirmation no second verifier/model/tool loop
+- confirmation control plane remains disabled by default
+- confirmation no authority expansion
+- remaining risks
+
+Required score:
+>= 9/10 = Task #21 COMPLETE
+< 9/10 = NOT DONE
