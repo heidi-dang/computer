@@ -186,148 +186,26 @@ class DurableFlowDeck:
             )
             db.add_all([run, step])
             await self._event(db, run.id, "RUN_CREATED", {"request_key": request_key}, now)
-            return run, True
+            return result.rowcount == 1
 
-        try:
-            return await self._transaction(operation)
-        except IntegrityError:
-            async with self.session_factory() as db:
-                existing = await db.scalar(
-                    select(FlowDeckRun).where(FlowDeckRun.request_key == request_key)
-                )
-                if existing and existing.owner == owner and existing.workspace == workspace:
-                    return existing, False
-            raise
+        return await self._transaction(operation)
 
-    async def start_run(self, run_id: str, *, now: int | None = None) -> None:
-        now = self.clock() if now is None else now
-
-        async def operation(db: AsyncSession):
-            run = await self._run(db, run_id)
-            self._require(run.status, {RunStatus.PENDING.value, RunStatus.ORPHANED.value})
-            run.status = RunStatus.RUNNING.value
-            run.heartbeat_at = now
-            run.updated_at = now
-            await self._event(db, run_id, "RUN_STARTED", {}, now)
-
-        await self._transaction(operation)
-
-    async def start_step(self, step_id: str, *, now: int | None = None) -> None:
-        now = self.clock() if now is None else now
-
-        async def operation(db: AsyncSession):
-            step = await db.get(FlowDeckStep, step_id)
-            if not step:
-                raise LifecycleError("unknown step")
-            self._require(step.status, {StepStatus.PENDING.value})
-            step.status = StepStatus.RUNNING.value
-            step.updated_at = now
-            await self._event(db, step.run_id, "STEP_STARTED", {"step_id": step_id}, now)
-
-        await self._transaction(operation)
-
-    async def get_step(self, run_id: str, *, sequence: int = 0) -> FlowDeckStep:
-        async with self.session_factory() as db:
-            step = await db.scalar(
-                select(FlowDeckStep).where(
-                    FlowDeckStep.run_id == run_id,
-                    FlowDeckStep.sequence == sequence,
-                )
-            )
-            if not step:
-                raise LifecycleError("unknown step")
-            return step
-
-    async def finish_step(
+    async def finish_attempt(
         self,
-        step_id: str,
+        attempt_id: str,
         *,
-        status: StepStatus,
+        owner: str,
+        fencing_epoch: int = 0,
+        outcome: str,
+        evidence: dict[str, Any],
         now: int | None = None,
     ) -> None:
-        if status not in {
-            StepStatus.SUCCEEDED,
-            StepStatus.FAILED,
-            StepStatus.MANUAL_REVIEW_REQUIRED,
-        }:
-            raise LifecycleError("step must finish with a terminal status")
-        now = self.clock() if now is None else now
+        """Commit a positively observed attempt outcome under the current fence."""
+        if outcome not in {"succeeded", "failed"}:
 
-        async def operation(db: AsyncSession):
-            step = await db.get(FlowDeckStep, step_id)
-            if not step:
-                raise LifecycleError("unknown step")
-            self._require(step.status, {StepStatus.RUNNING.value})
-            step.status = status.value
-            step.updated_at = now
-            await self._event(
-                db,
-                step.run_id,
-                "STEP_COMPLETED",
-                {"step_id": step_id, "status": status.value},
-                now,
-            )
-
-        await self._transaction(operation)
-
-    async def record_intent(
-        self,
-        *,
-        run_id: str,
-        idempotency_key: str,
-        capability: str,
-        target: str,
-        reconcile_kind: str,
-        step_id: str | None = None,
-        now: int | None = None,
-    ) -> tuple[FlowDeckLogicalOperation, bool]:
-        """Persist intent before any caller-owned side effect."""
-        now = self.clock() if now is None else now
-
-        async def operation(db: AsyncSession):
-            existing = await db.scalar(
-                select(FlowDeckLogicalOperation).where(
-                    FlowDeckLogicalOperation.idempotency_key == idempotency_key
-                )
-            )
-            if existing:
-                same = (
-                    existing.run_id == run_id
-                    and existing.capability == capability
-                    and existing.target == target
-                    and existing.reconcile_kind == reconcile_kind
-                )
-                if not same:
-                    raise DuplicateRequestError("idempotency key has incompatible intent")
-                return existing, False
-
-            run = await self._run(db, run_id)
-            self._require(run.status, {RunStatus.PENDING.value, RunStatus.RUNNING.value})
-            operation_row = FlowDeckLogicalOperation(
-                id=_id(),
-                run_id=run_id,
-                step_id=step_id,
-                idempotency_key=idempotency_key,
-                capability=capability,
-                target=target,
-                reconcile_kind=reconcile_kind,
-                status=OperationStatus.INTENT_RECORDED.value,
-                intent_at=now,
-                updated_at=now,
-            )
-            db.add(operation_row)
-            await self._event(
-                db,
-                run_id,
-                "OPERATION_INTENT_RECORDED",
-                {"operation_id": operation_row.id, "idempotency_key": idempotency_key},
-                now,
-            )
-            return operation_row, True
-
-        try:
             return await self._transaction(operation)
         except IntegrityError:
+
             async with self.session_factory() as db:
                 existing = await db.scalar(
                     select(FlowDeckLogicalOperation).where(
@@ -335,7 +213,16 @@ class DurableFlowDeck:
                     )
                 )
                 if existing:
+                    same = (
+                        existing.run_id == run_id
+                        and existing.capability == capability
+                        and existing.target == target
+                        and existing.reconcile_kind == reconcile_kind
+                    )
+                    if not same:
+                        raise DuplicateRequestError("idempotency key has incompatible intent")
                     return existing, False
+
             raise
 
     async def prepare_attempt(
@@ -350,21 +237,60 @@ class DurableFlowDeck:
         now = self.clock() if now is None else now
 
         async def operation(db: AsyncSession):
-            op = await self._operation(db, operation_id)
+
+            run = await self._run(db, run_id)
+
             self._require(
-                op.status,
-                {OperationStatus.INTENT_RECORDED.value, OperationStatus.FAILED.value},
-            )
-            run = await self._run(db, op.run_id)
+                run.status,
+                {RunStatus.RUNNING.value, RunStatus.RECOVERING.value},
+
+            run.updated_at = now
+
+            await self._event(
+                db,
+                op.run_id,
+                "ATTEMPT_FINISHED",
+                {"operation_id": op.id, "attempt_id": attempt_id, "outcome": outcome},
+                now,
+
+            attempt = await db.get(FlowDeckPhysicalAttempt, attempt_id)
+
             if run.workspace and fencing_epoch:
                 await self._assert_workspace_lease(
                     db, run.workspace, run.id, owner, fencing_epoch, now
                 )
-            last = await db.scalar(
-                select(func.max(FlowDeckPhysicalAttempt.attempt_no)).where(
-                    FlowDeckPhysicalAttempt.operation_id == operation_id
-                )
+
+            step.updated_at = now
+
+            existing = await db.scalar(
+                select(FlowDeckApproval).where(FlowDeckApproval.operation_id == operation_id)
+
             )
+
+            StepStatus.MANUAL_REVIEW_REQUIRED,
+        }:
+
+            raise LifecycleError("run must complete with a terminal status")
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+
+            operation_row = FlowDeckLogicalOperation(
+                id=_id(),
+                run_id=run_id,
+                step_id=step_id,
+                idempotency_key=idempotency_key,
+                capability=capability,
+                target=target,
+                reconcile_kind=reconcile_kind,
+                status=OperationStatus.INTENT_RECORDED.value,
+                intent_at=now,
+                updated_at=now,
+
+            db.add(approval)
+
+            op = await self._operation(db, attempt.operation_id)
+
             attempt = FlowDeckPhysicalAttempt(
                 id=_id(),
                 operation_id=operation_id,
@@ -373,40 +299,9 @@ class DurableFlowDeck:
                 fencing_epoch=fencing_epoch,
                 started_at=now,
                 heartbeat_at=now,
-            )
-            db.add(attempt)
-            op.status = OperationStatus.RUNNING.value
+
             op.updated_at = now
-            await self._event(
-                db,
-                op.run_id,
-                "ATTEMPT_PREPARED",
-                {"operation_id": operation_id, "attempt_id": attempt.id},
-                now,
-            )
-            return attempt
 
-        return await self._transaction(operation)
-
-    async def request_approval(
-        self,
-        *,
-        operation_id: str,
-        capability: str,
-        now: int | None = None,
-    ) -> tuple[FlowDeckApproval, bool]:
-        """Record approval intent only; approval never executes an operation."""
-        now = self.clock() if now is None else now
-
-        async def operation(db: AsyncSession):
-            logical = await self._operation(db, operation_id)
-            existing = await db.scalar(
-                select(FlowDeckApproval).where(FlowDeckApproval.operation_id == operation_id)
-            )
-            if existing:
-                if existing.capability != capability:
-                    raise DuplicateRequestError("approval capability does not match operation")
-                return existing, False
             approval = FlowDeckApproval(
                 id=_id(),
                 run_id=logical.run_id,
@@ -414,185 +309,47 @@ class DurableFlowDeck:
                 capability=capability,
                 status=ApprovalStatus.PENDING.value,
                 requested_at=now,
-            )
-            db.add(approval)
-            await self._event(
-                db,
-                logical.run_id,
-                "APPROVAL_REQUESTED",
-                {"operation_id": operation_id, "capability": capability},
-                now,
-            )
-            return approval, True
 
-        return await self._transaction(operation)
-
-    async def resolve_approval(
-        self,
-        approval_id: str,
-        *,
-        status: ApprovalStatus,
-        resolved_by: str,
-        evidence: dict[str, Any],
-        now: int | None = None,
-    ) -> None:
-        """Persist a human/verifier decision without granting execution authority."""
-        if status not in {ApprovalStatus.APPROVED, ApprovalStatus.REJECTED}:
-            raise LifecycleError("approval must resolve to approved or rejected")
-        if not resolved_by.strip():
-            raise LifecycleError("approval resolver is required")
-        now = self.clock() if now is None else now
-
-        async def operation(db: AsyncSession):
-            approval = await db.get(FlowDeckApproval, approval_id)
-            if not approval:
-                raise LifecycleError("unknown approval")
-            self._require(approval.status, {ApprovalStatus.PENDING.value})
-            approval.status = status.value
-            approval.resolved_at = now
-            approval.resolved_by = resolved_by
             approval.evidence = evidence
-            await self._event(
-                db,
-                approval.run_id,
-                "APPROVAL_RESOLVED",
-                {"approval_id": approval_id, "status": status.value},
-                now,
-            )
 
-        await self._transaction(operation)
+            attempt.error = None
 
-    async def mark_attempt_unknown(
-        self,
-        attempt_id: str,
-        *,
-        error: str = "interrupted",
-        now: int | None = None,
-    ) -> None:
-        now = self.clock() if now is None else now
-
-        async def operation(db: AsyncSession):
-            attempt = await db.get(FlowDeckPhysicalAttempt, attempt_id)
-            if not attempt:
-                raise LifecycleError("unknown attempt")
-            if attempt.status == AttemptStatus.UNKNOWN.value:
-                return
-            self._require(
-                attempt.status,
-                {AttemptStatus.PREPARED.value, AttemptStatus.RUNNING.value},
-            )
-            op = await self._operation(db, attempt.operation_id)
-            self._require(op.status, {OperationStatus.RUNNING.value})
-            attempt.status = AttemptStatus.UNKNOWN.value
-            attempt.error = error[:1000]
-            attempt.ended_at = now
-            op.status = OperationStatus.OUTCOME_UNKNOWN.value
-            op.outcome = None
-            op.updated_at = now
-            await self._event(
-                db,
-                op.run_id,
-                "OUTCOME_UNKNOWN",
-                {"operation_id": op.id, "attempt_id": attempt_id},
-                now,
-            )
-
-        await self._transaction(operation)
-
-    async def finish_attempt(
-        self,
-        attempt_id: str,
-        *,
-        owner: str,
-        fencing_epoch: int = 0,
-        outcome: str,
-        evidence: dict[str, Any],
-        now: int | None = None,
-    ) -> None:
-        """Commit a positively observed attempt outcome under the current fence."""
-        if outcome not in {"succeeded", "failed"}:
-            raise LifecycleError("attempt outcome must be succeeded or failed")
-        try:
             validate_terminal_evidence(evidence, outcome=outcome, attempt_id=attempt_id)
         except ValueError as exc:
-            raise LifecycleError(str(exc)) from exc
-        now = self.clock() if now is None else now
 
-        async def operation(db: AsyncSession):
-            attempt = await db.get(FlowDeckPhysicalAttempt, attempt_id)
-            if not attempt:
-                raise LifecycleError("unknown attempt")
-            op = await self._operation(db, attempt.operation_id)
-            self._require(op.status, {OperationStatus.RUNNING.value})
-            run = await self._run(db, op.run_id)
-            if run.workspace and fencing_epoch:
-                await self._assert_workspace_lease(
-                    db, run.workspace, run.id, owner, fencing_epoch, now
-                )
-            attempt.status = (
-                AttemptStatus.SUCCEEDED.value
-                if outcome == "succeeded"
-                else AttemptStatus.FAILED.value
-            )
-            attempt.outcome = outcome
-            attempt.ended_at = now
-            attempt.heartbeat_at = now
-            attempt.error = None
-            op.status = (
-                OperationStatus.SUCCEEDED.value
-                if outcome == "succeeded"
-                else OperationStatus.FAILED.value
-            )
-            op.outcome = outcome
-            op.authoritative_evidence = evidence
-            op.updated_at = now
-            await self._event(
-                db,
-                op.run_id,
-                "ATTEMPT_FINISHED",
-                {"operation_id": op.id, "attempt_id": attempt_id, "outcome": outcome},
-                now,
-            )
-
-        await self._transaction(operation)
-
-    async def complete_run(
-        self,
-        run_id: str,
-        *,
-        status: RunStatus,
-        now: int | None = None,
-    ) -> None:
-        """Close a run only after its durable operations have terminal outcomes."""
-        if status not in {
-            RunStatus.SUCCEEDED,
-            RunStatus.FAILED,
             RunStatus.MANUAL_REVIEW_REQUIRED,
         }:
-            raise LifecycleError("run must complete with a terminal status")
-        now = self.clock() if now is None else now
 
-        async def operation(db: AsyncSession):
-            run = await self._run(db, run_id)
-            self._require(
-                run.status,
-                {RunStatus.RUNNING.value, RunStatus.RECOVERING.value},
-            )
-            operations = list(
+            steps = list(
                 (
                     await db.scalars(
-                        select(FlowDeckLogicalOperation).where(
-                            FlowDeckLogicalOperation.run_id == run_id
-                        )
+                        select(FlowDeckStep).where(FlowDeckStep.run_id == run_id)
                     )
                 ).all()
-            )
+
             if any(
-                item.status
+                step.status
                 not in {
-                    OperationStatus.SUCCEEDED.value,
-                    OperationStatus.FAILED.value,
-                    OperationStatus.MANUAL_REVIEW_REQUIRED.value,
+                    StepStatus.SUCCEEDED.value,
+                    StepStatus.FAILED.value,
+                    StepStatus.MANUAL_REVIEW_REQUIRED.value,
+
+            }:
+                raise LifecycleError("terminal attempt cannot become unknown")
+
+            result = await db.execute(
+                update(FlowDeckPhysicalAttempt)
+                .where(
+                    FlowDeckPhysicalAttempt.id == attempt_id,
+                    FlowDeckPhysicalAttempt.status.in_(
+                        [AttemptStatus.PREPARED.value, AttemptStatus.RUNNING.value]
+                    ),
+                    FlowDeckPhysicalAttempt.heartbeat_at.is_not(None),
+                )
+                .values(heartbeat_at=now)
+
+            ):
+                raise LifecycleError("run has non-terminal operations")
                 }
                 for item in operations
             ):

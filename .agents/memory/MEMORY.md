@@ -3,3 +3,4 @@
 - [FlowDeck coding gates](flowdeck-coding-gates.md) — mutation roles qualify one at a time; every structured write needs durable intent, fencing, and independent verification.
 - [FDX isolation gate](fdx-isolation-gate.md) — optional FDX needs durable workspace ownership plus independent OS isolation; otherwise native CPTR remains the path.
 - [FlowDeck recovery transitions](flowdeck-recovery-transitions.md) — interruption may become unknown/manual review, but terminal outcomes and manual review cannot be silently rewritten.
+- [FlowDeck SQLite concurrency](flowdeck-sqlite-concurrency.md) — the durable state layer assumes one orchestration worker; event sequencing is process-serialized until multi-worker locking is designed.
