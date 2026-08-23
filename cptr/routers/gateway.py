@@ -824,6 +824,13 @@ async def create_api_key(request: Request, body: CreateApiKeyRequest):
         "key_hash": _hash_key(raw),
         "user_id": auth.user_id,
         "name": body.name,
+        "scopes": [
+            "workspace:read",
+            "task:read",
+            "task:write",
+            "autonomous:run",
+            "git:read",
+        ],
         "created_at": int(time.time()),
     }
     keys = await _get_api_keys()
@@ -849,6 +856,7 @@ async def list_api_keys(request: Request):
         {
             "id": k.get("id"),
             "name": k.get("name", ""),
+            "scopes": k.get("scopes", []),
             "created_at": k.get("created_at"),
         }
         for k in keys

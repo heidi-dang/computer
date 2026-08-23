@@ -16,6 +16,7 @@ from cptr.routers import (
     browser_router,
     webhook_router,
     chat_router,
+    control_router,
     events_router,
     files_router,
     gateway_router,
@@ -50,6 +51,9 @@ async def lifespan(app: FastAPI):
     _logging.getLogger(__name__).info("truststore: using system certificate store")
 
     await init_db()
+    from cptr.routers.control import recover_monitors
+
+    await recover_monitors(app)
     app.state.MODELS = {}
     from cptr.env import STARTUP_TOKEN
 
@@ -85,6 +89,11 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        for monitor_task in getattr(app.state, "control_monitor_tasks", {}).values():
+            monitor_task.cancel()
+        for monitor_task in getattr(app.state, "control_monitor_tasks", {}).values():
+            with suppress(asyncio.CancelledError):
+                await monitor_task
         timer_task = getattr(app.state, "timer_task", None)
         if timer_task:
             timer_task.cancel()
@@ -144,7 +153,12 @@ async def auth_middleware(request: Request, call_next):
         or path == "/manifest.json"
     ):
         return await call_next(request)
-    if path.startswith("/_app/") or path.startswith("/v1/") or not path.startswith("/api/"):
+    if (
+        path.startswith("/_app/")
+        or path.startswith("/v1/")
+        or path.startswith("/api/control/v1")
+        or not path.startswith("/api/")
+    ):
         return await call_next(request)
     # GET /api/files/{id} is public (UUID is unguessable, <img src> can't send cookies)
     if request.method == "GET" and path.startswith("/api/files/"):
@@ -284,6 +298,7 @@ app.include_router(bridge_router)
 app.include_router(browser_router)
 app.include_router(webhook_router)
 app.include_router(chat_router)
+app.include_router(control_router)
 app.include_router(events_router)
 app.include_router(files_router)
 app.include_router(gateway_router)

@@ -14,6 +14,14 @@ from cptr.models.chats import (
     is_subagent_result_message,
 )
 from cptr.models.automations import Automation, AutomationRun
+from cptr.models.control import (
+    AutonomousApproval,
+    AutonomousEvidence,
+    AutonomousMonitor,
+    AutonomousScope,
+    ControlIdempotency,
+    ControlTask,
+)
 
 __all__ = [
     "Base",
@@ -31,4 +39,10 @@ __all__ = [
     "is_subagent_result_message",
     "Automation",
     "AutomationRun",
+    "ControlTask",
+    "AutonomousMonitor",
+    "AutonomousScope",
+    "AutonomousEvidence",
+    "AutonomousApproval",
+    "ControlIdempotency",
 ]
