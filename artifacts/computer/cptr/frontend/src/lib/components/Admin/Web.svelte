@@ -69,7 +69,7 @@
 
 			// Web search
 			webEnabled = config['web.enabled'] !== false;
-			searchProvider = config['web.search_provider'] || 'auto';
+			searchProvider = (config['web.search_provider'] as string) || 'auto';
 			exaKey = (config['web.exa_api_key'] as string) || '';
 			tavilyKey = (config['web.tavily_api_key'] as string) || '';
 			braveKey = (config['web.brave_api_key'] as string) || '';

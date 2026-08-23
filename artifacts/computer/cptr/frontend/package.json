@@ -20,6 +20,7 @@
 		"@sveltejs/adapter-static": "^3.0.10",
 		"@sveltejs/kit": "^2.57.0",
 		"@sveltejs/vite-plugin-svelte": "^7.0.0",
+		"@types/node": "^20.19.43",
 		"@types/sortablejs": "^1.15.9",
 		"prettier": "^3.7.4",
 		"prettier-plugin-svelte": "^3.4.0",

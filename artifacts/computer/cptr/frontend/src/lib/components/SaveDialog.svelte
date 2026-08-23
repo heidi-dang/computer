@@ -49,7 +49,7 @@
 			fetchDirectories(initialDir);
 		} else {
 			getWelcome()
-				.then((d) => {
+				.then((d: { suggestions?: { path?: string }[] }) => {
 					const home = d.suggestions?.[0]?.path || '/';
 					fetchDirectories(home);
 				})
@@ -74,7 +74,7 @@
 		loading = true;
 		error = null;
 		try {
-			const data = await listDir(path);
+			const data = (await listDir(path)) as { entries: DirEntry[]; path: string };
 			directories = data.entries.filter((e: DirEntry) => e.type === 'directory');
 			currentPath = data.path;
 		} catch (e: any) {

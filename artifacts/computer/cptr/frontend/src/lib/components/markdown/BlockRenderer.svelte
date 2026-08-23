@@ -33,7 +33,10 @@
 		</blockquote>
 	{:else if token.type === 'list'}
 		{@const list = token as Tokens.List}
-		<svelte:element this={list.ordered ? 'ol' : 'ul'} start={list.ordered ? list.start : undefined}>
+		<svelte:element
+			this={list.ordered ? 'ol' : 'ul'}
+			start={list.ordered ? (list.start || undefined) : undefined}
+		>
 			{#each list.items as item}
 				<li>
 					{#if item.task}

@@ -219,7 +219,7 @@
 		</div>
 	{:else}
 		<!-- Bubble: right-aligned -->
-		{#if meta?.files?.length > 0}
+		{#if meta?.files && meta.files.length > 0}
 			<div class="mb-1 w-full flex flex-col justify-end overflow-x-auto gap-1 flex-wrap">
 				{#each meta.files as upload}
 					<div class="self-end">

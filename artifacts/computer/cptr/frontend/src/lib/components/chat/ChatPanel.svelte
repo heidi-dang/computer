@@ -1241,7 +1241,7 @@
 				const state = await getFlowDeckOrchestration(runId, workspace);
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
 				if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events);
-				for (const event of state.events || []) applyFlowDeckEventToMessage(event);
+			for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
 				if (
 					['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(
 						flowdeckStatus

@@ -70,7 +70,8 @@
 	let authMode = $state<'password' | 'pam'>('password');
 	let signupEnabled = $state(false);
 
-	onMount(async () => {
+	onMount(() => {
+		void (async () => {
 		// Check auth first
 		await checkAuth();
 
@@ -133,6 +134,8 @@
 			window.removeEventListener('online', showOnlineToast);
 			window.removeEventListener('cptr:open-settings', openSettings as EventListener);
 		};
+		})();
+		return () => {};
 	});
 
 	let startupToken = $state('');
@@ -205,7 +208,7 @@
 				checkForUpdates();
 			} else {
 				const cfg = await getConfig();
-				authMode = cfg.auth_mode || 'password';
+				authMode = cfg.auth_mode === 'pam' ? 'pam' : 'password';
 				signupEnabled = cfg.signup_enabled || false;
 				authState = cfg.needs_setup ? 'needs_setup' : 'needs_login';
 			}

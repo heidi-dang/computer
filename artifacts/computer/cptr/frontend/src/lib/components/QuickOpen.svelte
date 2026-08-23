@@ -36,7 +36,9 @@
 		if (!ws) return;
 		loading = true;
 		try {
-			const data = await searchFiles(q, ws.path);
+			const data = (await searchFiles(q, ws.path)) as {
+				results: { path: string; name: string; type: string }[];
+			};
 			results = data.results;
 			selectedIndex = 0;
 		} catch {

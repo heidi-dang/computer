@@ -64,8 +64,8 @@
 	$effect(() => {
 		selectedIndex = -1;
 		history = [];
-		getWelcome()
-			.then((d) => {
+			getWelcome()
+				.then((d: { suggestions?: { path?: string }[] }) => {
 				const home = d.suggestions?.[0]?.path || '/';
 				fetchDirectories(home);
 			})
@@ -89,7 +89,7 @@
 		loading = true;
 		error = null;
 		try {
-			const data = await listDir(path);
+			const data = (await listDir(path)) as { entries: DirEntry[]; path: string };
 			directories = data.entries.filter((e: DirEntry) => e.type === 'directory');
 			currentPath = data.path;
 		} catch (e: any) {
@@ -187,7 +187,7 @@
 		const parent = val.substring(0, lastSlash) || '/';
 		const partial = val.substring(lastSlash + 1).toLowerCase();
 		try {
-			const data = await listDir(parent);
+			const data = (await listDir(parent)) as { entries: DirEntry[]; path: string };
 			const dirs = data.entries
 				.filter((e: DirEntry) => e.type === 'directory')
 				.map((e: DirEntry) => e.name);

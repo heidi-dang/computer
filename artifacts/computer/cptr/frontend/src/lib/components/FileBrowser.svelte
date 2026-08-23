@@ -460,7 +460,7 @@
 		if (isInitial) loading = true;
 		error = null;
 		try {
-			const data = await listDir(path);
+			const data = (await listDir(path)) as { entries: FileEntry[]; path: string };
 			// Only apply if still viewing the same directory
 			if (path === cwd) {
 				entries = showHidden
@@ -510,7 +510,7 @@
 
 	async function fetchSubdir(path: string) {
 		try {
-			const data = await listDir(path);
+			const data = (await listDir(path)) as { entries: FileEntry[]; path: string };
 			const filtered = showHidden
 				? data.entries
 				: data.entries.filter((e: FileEntry) => !e.name.startsWith('.'));

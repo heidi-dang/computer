@@ -40,7 +40,7 @@
 
 	// Gracefully handle unregistered language tags (e.g. ```nginx, ```mermaid, etc.)
 	const _origHighlight = lowlight.highlight.bind(lowlight);
-	lowlight.highlight = (lang: string, value: string, options?: Record<string, unknown>) => {
+	lowlight.highlight = (lang: string, value: string, options?: any) => {
 		if (!lowlight.registered(lang)) {
 			return lowlight.highlightAuto(value);
 		}
