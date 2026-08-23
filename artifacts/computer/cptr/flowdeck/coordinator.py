@@ -65,7 +65,6 @@ _HINTS: tuple[tuple[str, str], ...] = (
     ("research", "researcher"),
     ("investigate", "researcher"),
     ("map", "mapper"),
-    ("repository", "mapper"),
     ("directory", "mapper"),
     (" dir", "mapper"),
     ("review", "reviewer"),
