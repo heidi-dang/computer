@@ -95,10 +95,23 @@ python -m unittest discover -s tests -v
 The repository's frontend checks remain unchanged. The control-plane migration is applied by the existing Alembic startup path.
 
 Independent workspace validation can be configured with `CPTR_VERIFICATION_COMMANDS_JSON`, a JSON
-array of argv-based commands. Each item has a `name`, an `argv` array, and an optional
-`timeout_seconds` value (capped at ten minutes). CPTR executes these commands in the owned
-workspace without a shell and persists bounded stdout/stderr, timestamps, duration, exit code,
-timeout state, and pass/fail evidence. Worker output is never treated as validation evidence.
+array of argv-based commands. Each item has a `name`, a `category`, an `argv` array, and an optional
+`timeout_seconds` value (capped at ten minutes). Categories are `focused_tests`, `broader_tests`,
+`lint`, `typecheck`, `build`, and `runtime_smoke`. CPTR executes these commands in the owned
+workspace without a shell and persists the category, bounded stdout/stderr, timestamps, duration,
+exit code, timeout state, and pass/fail evidence. Worker output is never treated as validation
+evidence. Existing command entries without a category remain compatible and are recorded as
+`runtime_smoke`.
+
+For example:
+
+```json
+[
+  {"name":"focused-tests","category":"focused_tests","argv":["python","-m","unittest","discover","-s","tests"]},
+  {"name":"lint","category":"lint","argv":["ruff","check","."]},
+  {"name":"runtime-smoke","category":"runtime_smoke","argv":["python","scripts/smoke.py"]}
+]
+```
 
 ## ChatGPT Developer Mode
 

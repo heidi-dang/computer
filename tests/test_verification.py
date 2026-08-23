@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cptr.services.verification import DefaultIndependentVerifier, VerificationCommand
+from cptr.services.verification import (
+    VERIFICATION_CATEGORIES,
+    DefaultIndependentVerifier,
+    VerificationCommand,
+    _commands_from_payload,
+)
 
 
 class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
@@ -37,6 +42,7 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as workspace:
             command = VerificationCommand(
                 name="smoke",
+                category="runtime_smoke",
                 argv=(
                     sys.executable,
                     "-c",
@@ -69,6 +75,7 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as workspace:
             command = VerificationCommand(
                 name="pytest",
+                category="focused_tests",
                 argv=(sys.executable, "-c", "import sys; print('fixture failed'); sys.exit(3)"),
                 timeout_seconds=5,
             )
@@ -114,6 +121,22 @@ class IndependentVerificationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(result.passed)
         self.assertTrue(any(item.get("name") == "configured" for item in result.checks))
+
+    def test_configuration_supports_each_workspace_verification_category(self):
+        payload = [
+            {"name": category, "category": category, "argv": [sys.executable, "-c", "pass"]}
+            for category in sorted(VERIFICATION_CATEGORIES)
+        ]
+
+        commands = _commands_from_payload(payload)
+
+        self.assertEqual({command.category for command in commands}, VERIFICATION_CATEGORIES)
+
+    def test_unknown_workspace_verification_category_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "unknown verification category"):
+            _commands_from_payload(
+                [{"name": "bad", "category": "arbitrary", "argv": [sys.executable, "-c", "pass"]}]
+            )
 
 
 if __name__ == "__main__":

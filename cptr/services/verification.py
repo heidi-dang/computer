@@ -12,6 +12,16 @@ from typing import Any, Protocol
 
 MAX_COMMAND_OUTPUT_CHARS = 8_000
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 120.0
+VERIFICATION_CATEGORIES = frozenset(
+    {
+        "focused_tests",
+        "broader_tests",
+        "lint",
+        "typecheck",
+        "build",
+        "runtime_smoke",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +37,7 @@ class VerificationCommand:
 
     name: str
     argv: tuple[str, ...]
+    category: str = "runtime_smoke"
     timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
 
@@ -130,7 +141,20 @@ def _commands_from_payload(payload: list[Any]) -> list[VerificationCommand]:
             raise ValueError(
                 f"verification command {name} timeout must be between 0 and 600 seconds"
             )
-        commands.append(VerificationCommand(name=name, argv=tuple(argv), timeout_seconds=timeout))
+        category = str(item.get("category") or "runtime_smoke").strip()
+        if category not in VERIFICATION_CATEGORIES:
+            allowed = ", ".join(sorted(VERIFICATION_CATEGORIES))
+            raise ValueError(
+                f"unknown verification category {category!r}; expected one of {allowed}"
+            )
+        commands.append(
+            VerificationCommand(
+                name=name,
+                argv=tuple(argv),
+                category=category,
+                timeout_seconds=timeout,
+            )
+        )
     return commands
 
 
@@ -163,6 +187,7 @@ async def _run_command(command: VerificationCommand, workspace_root: Path) -> di
     passed = not timed_out and exit_code == 0
     return {
         "name": command.name,
+        "category": command.category,
         "verification_command": True,
         "argv": list(command.argv),
         "cwd": str(workspace_root),
