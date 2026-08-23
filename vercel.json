@@ -1,6 +1,14 @@
 {
   "buildCommand": "npm --prefix cptr/frontend run build",
+  "installCommand": "npm --prefix cptr/frontend install",
   "outputDirectory": "cptr/frontend/build",
   "framework": null,
-  "installCommand": "npm --prefix cptr/frontend install"
+  "functions": {
+    "api/index.py": {
+      "includeFiles": "cptr/frontend/build/**"
+    }
+  },
+  "routes": [
+    { "src": "/(.*)", "dest": "/api/index.py" }
+  ]
 }
