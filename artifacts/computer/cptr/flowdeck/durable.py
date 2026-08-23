@@ -475,7 +475,14 @@ class DurableFlowDeck:
             attempt = await db.get(FlowDeckPhysicalAttempt, attempt_id)
             if not attempt:
                 raise LifecycleError("unknown attempt")
+            if attempt.status == AttemptStatus.UNKNOWN.value:
+                return
+            self._require(
+                attempt.status,
+                {AttemptStatus.PREPARED.value, AttemptStatus.RUNNING.value},
+            )
             op = await self._operation(db, attempt.operation_id)
+            self._require(op.status, {OperationStatus.RUNNING.value})
             attempt.status = AttemptStatus.UNKNOWN.value
             attempt.error = error[:1000]
             attempt.ended_at = now
@@ -591,8 +598,11 @@ class DurableFlowDeck:
             ):
                 raise LifecycleError("run has non-terminal operations")
             if any(
-                not isinstance(item.authoritative_evidence, dict)
-                or item.authoritative_evidence.get("authoritative") is not True
+                item.status != OperationStatus.MANUAL_REVIEW_REQUIRED.value
+                and (
+                    not isinstance(item.authoritative_evidence, dict)
+                    or item.authoritative_evidence.get("authoritative") is not True
+                )
                 for item in operations
             ):
                 raise LifecycleError("run requires authoritative evidence for every operation")
@@ -625,7 +635,6 @@ class DurableFlowDeck:
                 op.status,
                 {
                     OperationStatus.OUTCOME_UNKNOWN.value,
-                    OperationStatus.MANUAL_REVIEW_REQUIRED.value,
                 },
             )
             positively_reconciled = False
