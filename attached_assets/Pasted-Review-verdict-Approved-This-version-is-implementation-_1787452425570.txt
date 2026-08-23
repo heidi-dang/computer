@@ -1,0 +1,94 @@
+Review verdict
+
+Approved. This version is implementation-ready for Issue #1.
+
+Score: 9.9/10
+
+The scope is now sufficiently tight that I would freeze it and stop changing the issue unless implementation uncovers a concrete contradiction in the CPTR codebase.
+
+What is now correctly locked
+Exact CPTR and FlowDeck baselines.
+CPTR remains execution owner.
+No second model/tool loop.
+FlowDeck disabled exits before orchestration initialization.
+Shadow mode is genuinely non-authoritative and side-effect free.
+No extra provider/model call in shadow by default.
+No FDX startup.
+Strict UNKNOWN → DENY.
+Canonical registry is the single source of truth.
+High-risk capabilities are contracts only in this milestone.
+No Phase 3 runtime accidentally slips into Issue #1.
+Future SubagentExecutionPort must wrap an existing CPTR execution primitive.
+OUTCOME_UNKNOWN and MANUAL_REVIEW_REQUIRED semantics are already established before mutation code exists.
+The Replit artifacts/computer/ prefix is explicitly identified as a workspace location rather than an application path.
+One implementation interpretation to enforce
+
+The developer should treat "prove no second agent loop" as requiring concrete evidence in the closure report.
+
+They should identify something like:
+
+Existing CPTR execution primitive:
+<actual function/class/module discovered by audit>
+
+Future FlowDeck path:
+FlowDeck scheduler
+  → SubagentExecutionPort
+  → existing CPTR primitive
+
+The report should cite actual files/functions rather than simply saying "CPTR loop reused."
+
+Likewise, the disabled-path claim should be backed by a test proving the classifier/service was not invoked, not merely that it returned no result.
+
+Issue #1 stop line
+
+The developer must stop when the repository contains:
+
+baseline audit
++
+minimal orchestration contracts
++
+canonical registry
++
+capabilities/governance
++
+delegation policy
++
+disabled fast path
++
+shadow router
++
+parity/regression tests
++
+Phase 3 design specification
+
+It must not contain functioning:
+
+durable runs
+steps
+operations
+attempt execution
+leases
+approval execution
+recovery workers
+FDX runtime
+coding specialists
+generic specialist shell
+mutation adapters
+new orchestration UI
+
+Design types or documentation describing those future systems are acceptable; live behavior is not.
+
+Acceptance decision
+
+I would now tell the developer:
+
+Proceed with Issue #1 exactly as written. Do not expand scope. Close it only with test evidence and a Phase 3 design freeze.
+
+After the closure report comes back, the correct next action is not automatically Issue #2. First audit the implementation against these safety gates, especially:
+
+disabled fast-path purity;
+shadow side-effect isolation;
+canonical registry consistency;
+absence of OpenCode runtime coupling;
+absence of a second agent loop;
+quality of the Phase 3 durability contracts.
