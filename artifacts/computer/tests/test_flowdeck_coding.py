@@ -74,6 +74,15 @@ class CodingContractTests(unittest.IsolatedAsyncioTestCase):
                 self.request,
                 self.config.__class__(**{**self.config.__dict__, "mutating_agents": False}),
             )
+        debug_request = self.request.__class__(
+            **{**self.request.__dict__, "role": "debug-specialist"}
+        )
+        with self.assertRaises(CodingPolicyError):
+            validate_coding_request(debug_request, self.config)
+        validate_coding_request(
+            debug_request,
+            self.config.__class__(**{**self.config.__dict__, "debug_mutations": True}),
+        )
 
     def test_runtime_guard_enforces_role_tools_and_owned_paths(self):
         context = {
