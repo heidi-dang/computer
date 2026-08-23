@@ -1,0 +1,135 @@
+Task
+Task #12 Final Acceptance Audit — Production Heidi Entry Gate
+
+Do not implement new functionality in this task.
+Do not add UI.
+Do not expand authority.
+
+Audit the current Task #12 implementation against its original acceptance criteria.
+
+Required evidence:
+
+1. Verify current FlowDeck suite is 91/91 or better.
+
+2. Prove disabled fast path:
+   With FlowDeck/coordinator execution disabled, a production orchestration request must result in zero:
+   - coordinator calls
+   - classifier/planner calls
+   - FlowDeck model calls
+   - specialist calls
+   - FDX calls
+   - durable FlowDeck run creation
+   - FlowDeck step/operation creation
+   - mutation
+   - execution events
+
+3. Prove duplicate/idempotent submission behavior:
+   - same logical request submitted twice
+   - simulated HTTP retry
+   - reconnect/retry after uncertain client response
+   Must not create duplicate logical mutation work.
+
+4. Prove authenticated ownership:
+   - missing auth rejected
+   - User A cannot execute in User B workspace
+   - User A cannot inspect User B run
+   - User A cannot cancel User B run
+   - forged workspace rejected
+   - stale ownership rejected
+   - ambiguous ownership rejected
+   - forged run ID fails closed
+
+5. Prove request authority isolation:
+   Client cannot override:
+   - user identity
+   - specialist
+   - capabilities
+   - model
+   - provider
+   - budgets
+   - governance
+   - delegation depth
+   - kill switches
+   - FDX
+   - devops
+   - shell
+   - Git mutation
+
+6. Prove call graph:
+   HTTP route
+   → authenticated production FlowDeck gate
+   → Controlled Heidi coordinator
+   → authenticated specialist gateway
+   → CPTR native execution
+
+   Confirm route cannot dispatch specialists or CPTR tools directly.
+
+7. Prove model ownership:
+   - selected model comes from existing CPTR model resolver
+   - Heidi inherits it
+   - children inherit it
+   - no automatic model swapping
+   - no route-level model override
+
+8. Prove cancellation:
+   - owner-only
+   - idempotent
+   - stops future delegation
+   - active uncertain mutation becomes OUTCOME_UNKNOWN where appropriate
+   - late stale attempt cannot publish success
+   - fencing remains enforced
+
+9. Prove concurrency:
+   - same-workspace mutators cannot execute concurrently outside existing lease policy
+   - stale fencing epoch is rejected
+
+10. Prove recovery/reconnect:
+   - connection state is not orchestration truth
+   - durable run state survives client disconnect/reconnect
+   - reconnect does not start another run
+   - successful children are not replayed unnecessarily
+   - OUTCOME_UNKNOWN is not blindly retried
+
+11. Prove authoritative result mapping:
+   FAILED != success
+   OUTCOME_UNKNOWN != success
+   MANUAL_REVIEW_REQUIRED != success
+   NOT_RUN != success
+
+12. Run:
+   - full FlowDeck tests
+   - API route tests
+   - authenticated gateway tests
+   - Heidi coordinator tests
+   - completion/verifier tests
+   - durable recovery/fencing tests
+   - tester tests
+   - hermetic Git tests
+   - Python compilation
+   - targeted Ruff
+   - git diff --check
+   - migration initialization
+   - API HTTP 200 smoke
+   - frontend production build
+
+13. Clarify repository state:
+   Explain precisely what “merged” means.
+   Report branch, HEAD, working-tree changes and whether any commit exists.
+   Do not commit or push.
+
+Final report must give:
+- PASS / FAIL
+- score
+- exact test counts
+- disabled-fast-path evidence
+- idempotency evidence
+- cross-user evidence
+- call graph
+- model inheritance evidence
+- cancellation/recovery evidence
+- concurrency/fencing evidence
+- remaining risks
+- confirmation no authority expansion
+
+Required score: >=9/10.
+Below 9/10 = Task #12 NOT CLOSED.
