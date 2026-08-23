@@ -459,12 +459,10 @@
 
 		const url = getWsUrl(sessionId);
 		const label = sessionId || wsPath;
-		console.log(`[terminal] connecting to ${url}`);
 		ws = new WebSocket(url);
 		ws.binaryType = 'arraybuffer';
 
 		ws.onopen = () => {
-			console.log(`[terminal] WebSocket open for ${label}`);
 			if (term) {
 				// Send ONE resize message with current dimensions.
 				// Do NOT call doFit() here; that would trigger term.onResize
@@ -472,7 +470,6 @@
 				// to receive double SIGWINCH and render content twice.
 				lastSentCols = term.cols;
 				lastSentRows = term.rows;
-				console.log(`[terminal] sending resize: ${term.cols}x${term.rows}`);
 				sendResize(term.cols, term.rows);
 			}
 		};
@@ -485,15 +482,14 @@
 		};
 
 		ws.onclose = (e) => {
-			console.log(`[terminal] WebSocket closed for ${label}, code=${e.code}, reason=${e.reason}`);
 			if (destroyed) return;
 			reconnectTimer = setTimeout(() => {
 				if (!destroyed) connectWebSocket();
 			}, 2000);
 		};
 
-		ws.onerror = (e) => {
-			console.error(`[terminal] WebSocket error for ${label}`, e);
+		ws.onerror = () => {
+			// The close handler owns reconnect behavior; avoid noisy console output.
 		};
 
 		// NOTE: term.onData and term.onResize are registered in onMount,
