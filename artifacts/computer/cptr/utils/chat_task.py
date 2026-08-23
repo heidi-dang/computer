@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Any
 
 from cptr.events import EVENTS, publish_event
-from cptr.env import CHAT_MAX_ITERATIONS, CHAT_TOOL_COMMAND_MAX_CHARS, CHAT_TOOL_MAX_CHARS
+from cptr.env import (
+    CHAT_MAX_ITERATIONS,
+    CHAT_MAX_REPEATED_TOOL_CALLS,
+    CHAT_TOOL_COMMAND_MAX_CHARS,
+    CHAT_TOOL_MAX_CHARS,
+)
 from cptr.utils.context import (
     build_context_usage,
     estimate_messages_tokens,
@@ -178,6 +183,15 @@ def ask_user_answers(
     if answers is not None and set(answers) != set(result):
         raise ValueError("answers must match the requested question ids")
     return {"answers": result}
+
+
+def tool_call_fingerprint(name: str, arguments: dict[str, Any] | None) -> str:
+    """Return a stable identity for a tool invocation, excluding its call id."""
+    try:
+        encoded = json.dumps(arguments or {}, sort_keys=True, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        encoded = repr(arguments or {})
+    return f"{name}:{encoded}"
 
 
 PLAN_MODE_PROMPT = (
@@ -1497,6 +1511,7 @@ async def run_chat_task(
     tool_names_used: set[str] = set()
     skill_create_requested = False
     skill_authoring_allowed = False
+    repeated_tool_calls: dict[str, int] = {}
 
     logger.info(
         "[task %s] start: existing content=%d chars, output=%d items",
@@ -1552,6 +1567,64 @@ async def run_chat_task(
         log = logger.info if saved else logger.warning
         log("[task %s] db save (%s) result: updated=%s", message_id[:8], save_reason, saved)
         return saved
+
+    async def _stop_repeated_tool_call(tc: dict[str, Any]) -> None:
+        """Finalize a run when the model is stuck repeating one invocation."""
+        nonlocal content
+        name = str(tc.get("name") or "tool")
+        detail = (
+            f"I stopped this response after {name} was requested repeatedly with "
+            "the same arguments. Please clarify the request or try again."
+        )
+        flushed_item = _flush_text()
+        if flushed_item:
+            await emit(output=flushed_item)
+        call_item = {
+            "type": "function_call",
+            "id": str(uuid.uuid4()),
+            "call_id": str(tc.get("call_id") or uuid.uuid4()),
+            "fc_id": tc.get("id", ""),
+            "name": name,
+            "arguments": tc.get("arguments") or {},
+            "status": "failed",
+        }
+        result_item = {
+            "type": "function_call_output",
+            "call_id": call_item["call_id"],
+            "output": f"Error: {detail}",
+        }
+        output_items.extend((call_item, result_item))
+        content = f"{content}\n\n{detail}".strip()
+        await emit(output=call_item)
+        await emit(output=result_item)
+        await _save_message(
+            "repeated tool call",
+            content=content,
+            output=output_items,
+            done=True,
+            meta={"error": "repeated tool call", "tool_name": name},
+        )
+        _task_state.pop(message_id, None)
+        await _emit_done()
+        await publish_event(
+            EVENTS.CHAT_FAILED,
+            actor={"id": user_id},
+            subject_id=chat_id,
+            subject_type="chat",
+            source="chat_task",
+            data={"workspace": event_workspace, "preview": detail[:300]},
+            message=detail,
+        )
+
+    async def _record_tool_call_or_stop(tc: dict[str, Any]) -> bool:
+        """Record a pending invocation; return True when it must be stopped."""
+        fingerprint = tool_call_fingerprint(tc.get("name", ""), tc.get("arguments"))
+        count = repeated_tool_calls.get(fingerprint, 0) + 1
+        repeated_tool_calls[fingerprint] = count
+        if count > CHAT_MAX_REPEATED_TOOL_CALLS:
+            await _stop_repeated_tool_call(tc)
+            return True
+        return False
 
     async def save_session(agent_target: AgentModelTarget, resume_state: dict | None):
         if not resume_state:
@@ -2031,6 +2104,10 @@ async def run_chat_task(
                     continue
 
                 name = item.get("name", "")
+                if await _record_tool_call_or_stop(
+                    {"name": name, "arguments": item.get("arguments"), "call_id": call_id}
+                ):
+                    return "repeat_stopped"
                 tool = ALL_TOOLS.get(name)
                 tool_approval = await resolve_builtin_tool_approval(name) if tool else "review"
                 current_chat = await Chat.get_by_id(chat_id)
@@ -2047,9 +2124,9 @@ async def run_chat_task(
                         else "auto"
                     )
                 should_auto = (
-                    allowed_tool_names is not None and name not in allowed_tool_names
-                ) or approval_mode == "full" or (
-                    approval_mode == "auto" and tool and tool_approval == "allow"
+                    (allowed_tool_names is not None and name not in allowed_tool_names)
+                    or approval_mode == "full"
+                    or (approval_mode == "auto" and tool and tool_approval == "allow")
                 )
                 if (
                     not should_auto
@@ -2164,7 +2241,7 @@ async def run_chat_task(
         }
 
         resumed_calls = await run_queued_tool_calls(tool_ctx)
-        if resumed_calls == "approval_required":
+        if resumed_calls in {"approval_required", "repeat_stopped"}:
             return
         if resumed_calls == "completed":
             messages, loaded_summary = await _load_message_history(chat_id, message_id)
@@ -2562,6 +2639,8 @@ async def run_chat_task(
                 # Check if any call needs approval
                 needs_approval = None
                 for tc in pending_calls:
+                    if await _record_tool_call_or_stop(tc):
+                        return
                     name = tc["name"]
                     tool_names_used.add(name)
                     if name == "view_skill":
@@ -2584,9 +2663,9 @@ async def run_chat_task(
                             else "auto"
                         )
                     should_auto = (
-                        allowed_tool_names is not None and tc["name"] not in allowed_tool_names
-                    ) or approval_mode == "full" or (
-                        approval_mode == "auto" and tool and tool_approval == "allow"
+                        (allowed_tool_names is not None and tc["name"] not in allowed_tool_names)
+                        or approval_mode == "full"
+                        or (approval_mode == "auto" and tool and tool_approval == "allow")
                     )
                     if not should_auto:
                         needs_approval = tc

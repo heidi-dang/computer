@@ -577,6 +577,8 @@
 		payload?: Record<string, unknown>;
 		sequence?: number;
 		created_at?: number;
+		status?: string;
+		content?: string;
 	}) {
 		if (data.flowdeck_run_id) {
 			mergeFlowDeckEvent(data);
@@ -712,6 +714,7 @@
 		}
 		if (data.done) {
 			flushTtsBuffer();
+			sending = false;
 			// Clear streaming indicator for this tab
 			if (tabId) {
 				streamingChatTabs.update((s) => {
@@ -731,6 +734,11 @@
 			// the DB reload returns. This avoids a transient blank message if the
 			// final `done` socket event beats the commit/read path.
 			msg.done = true;
+			// A bounded-loop failure includes a useful terminal preview in the
+			// done event. Show it immediately while the durable reload completes.
+			if (data.error && data.content && !msg.content) {
+				msg.content = data.content;
+			}
 			if (chatTasks.some((task) => task.status === 'pending' || task.status === 'in_progress')) {
 				setChatTasks([]);
 			}
