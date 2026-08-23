@@ -21,6 +21,7 @@ from cptr.flowdeck.coordinator import (
 )
 from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
 from cptr.routers.gateway import _authenticate, _resolve_model
+from cptr.utils.config import check_access
 from cptr.utils.db import get_session_factory
 
 router = APIRouter(prefix="/v1/flowdeck", tags=["flowdeck"])
@@ -42,6 +43,32 @@ def _request_key(request: Request) -> str:
     return value
 
 
+async def _authenticate_flowdeck(request: Request) -> str:
+    """Authenticate browser UI sessions without changing gateway auth.
+
+    FlowDeck is exposed to the authenticated Computer web app, which uses the
+    cptr_session cookie. Existing programmatic callers may still use the
+    gateway's scoped Bearer token. The specialist gateway remains Bearer-only.
+    """
+    if request.headers.get("Authorization", "").startswith("Bearer "):
+        return await _authenticate(request)
+
+    session_token = request.cookies.get("cptr_session")
+    if not session_token:
+        # Preserve the original gateway-auth path for programmatic callers
+        # and dependency-isolated tests that provide their own authenticator.
+        return await _authenticate(request)
+
+    auth = check_access(
+        client_host=request.client.host if request.client else "127.0.0.1",
+        jwt_token=session_token,
+    )
+    if auth is None or not auth.user_id:
+        raise HTTPException(401, "Authentication required")
+    request.state.auth = auth
+    return auth.user_id
+
+
 def _safe_run(run, *, reused: bool = False) -> dict[str, Any]:
     return {
         "run_id": run.id,
@@ -53,7 +80,7 @@ def _safe_run(run, *, reused: bool = False) -> dict[str, Any]:
 
 
 async def _owned_run(request: Request, run_id: str, workspace: str):
-    user_id = await _authenticate(request)
+    user_id = await _authenticate_flowdeck(request)
     try:
         canonical = await resolve_gateway_workspace(
             session_factory=get_session_factory(),
@@ -73,7 +100,7 @@ async def _owned_run(request: Request, run_id: str, workspace: str):
 @router.post("/orchestrations", status_code=status.HTTP_200_OK)
 async def create_orchestration(request: Request, body: OrchestrationRequest):
     """Run one controlled Heidi orchestration using server-owned policy."""
-    user_id = await _authenticate(request)
+    user_id = await _authenticate_flowdeck(request)
     try:
         config = FlowDeckConfig.from_env()
     except (TypeError, ValueError) as exc:
