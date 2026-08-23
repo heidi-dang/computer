@@ -1,0 +1,831 @@
+Task
+
+Begin the FlowDeck-C-PTR native port in heidi-dang/computer using the reviewed Final Master Plan.
+
+Implement ONLY Phases 0–2 in this pass:
+
+Phase 0 — baseline characterization
+Phase 1 — contracts / canonical registry / capability framework
+Phase 2 — single orchestration entry point + shadow router
+
+Do NOT begin Phase 3 durable orchestration, mutation support, approvals, recovery execution, coding specialists, FDX integration, or UI redesign yet.
+
+Frozen reference baselines:
+
+CPTR:
+- Repository: https://github.com/heidi-dang/computer
+- Branch baseline: main
+- Baseline SHA: f9d1d8cdaf7e034b8fa19619063a6be931b9ee97
+
+FlowDeck:
+- Repository: https://github.com/heidi-dang/FlowDeck
+- Release: v2.4.1
+- Baseline SHA: b3c8ffa799ef6cbd41861565dae0c3c01c493db0
+
+Architectural invariant:
+
+FlowDeck-C-PTR owns coordination.
+CPTR owns execution.
+
+Hard rules:
+- Do not create a second model/tool agent loop.
+- Do not replace CPTR chat, Socket.IO, model handling, tool execution, authentication, filesystem, terminal, browser, Git, MCP, skills, or existing external-agent adapters.
+- OpenCode must remain optional.
+- Normal FlowDeck-C-PTR orchestration must not require OpenCode.
+- Do not port FlowDeck's bun:sqlite implementation.
+- Do not redesign the frontend.
+- Do not implement coding specialists yet.
+- Do not implement generic specialist shell access yet.
+- Do not implement mutating specialist execution yet.
+- Do not push changes to main directly.
+- Do not modify the frozen FlowDeck repository.
+- Do not reboot, logout, power off, change BIOS, or require host-level manual intervention.
+- No hardcoded hostnames, ports, models, usernames, tokens, credentials, user-specific absolute paths, or deployment URLs.
+- Preserve the existing CPTR execution path exactly when FlowDeck is disabled.
+
+
+To dev
+
+1. Audit before modifying.
+
+Map the exact current CPTR boundaries involved in:
+- chat request entry
+- chat_task / native agent loop
+- current async subagent execution
+- model target resolution
+- tool registration/execution
+- CPTR approvals
+- Chat / ChatMessage persistence
+- Socket.IO events
+- current task list events
+- cancellation
+- context compaction
+- restart reconciliation
+- external coding-agent adapters
+- runtime/filesystem identity handling
+
+Produce an audit note before architecture changes.
+
+Explicitly identify the existing CPTR mechanism that FlowDeck specialists will reuse later through SubagentExecutionPort.
+
+There must be no new independent LLM/tool loop.
+
+2. Create an isolated feature branch.
+
+Use:
+flowdeck-cptr
+
+Verify the starting commit against the frozen CPTR baseline before implementation.
+
+If origin/main no longer equals the frozen SHA, do not silently rebase the design onto newer code. Record the difference and continue from an isolated branch based on the requested baseline unless an unavoidable repository condition prevents it.
+
+3. Add the smallest viable orchestration subsystem.
+
+Do NOT create dozens of empty modules.
+
+Start with the smallest vertical architecture necessary for Phases 0–2, approximately:
+
+cptr/orchestration/
+  __init__.py
+  config.py
+  domain.py
+  registry.py
+  capabilities.py
+  routing.py
+  governance.py
+  service.py
+  events.py
+
+tests/orchestration/
+  test_registry.py
+  test_capabilities.py
+  test_routing.py
+  test_shadow_mode.py
+  test_disabled_fast_path.py
+  fixtures/
+
+Split further only when an actual responsibility requires it.
+
+4. Implement the canonical agent registry.
+
+Port FlowDeck v2.4.1 semantics, not OpenCode SDK wiring.
+
+Canonical primary agents:
+- heidi
+- orchestrator
+
+Canonical specialists:
+- planner
+- architect
+- researcher
+- mapper
+- backend-coder
+- frontend-coder
+- devops
+- tester
+- reviewer
+- security-auditor
+- debug-specialist
+- browser-debugger
+
+Each registry definition must support, as applicable:
+- id
+- mode
+- description
+- allowed task types
+- allowed capabilities
+- forbidden actions
+- owned paths
+- model policy
+- delegation policy
+- max delegation depth
+- required inputs
+- expected outputs
+- progress states
+- escalation conditions
+- stop conditions
+- success criteria
+- enabled/disabled state
+
+The canonical registry must be the single source of truth.
+
+Do not maintain duplicate hardcoded specialist lists across routing, docs, tests, or governance.
+
+5. Implement typed delegation invariants now.
+
+Heidi:
+- max delegation depth = 1
+
+Specialists:
+- max delegation depth = 0
+
+Typed failures must include at minimum:
+- SELF_DELEGATION_BLOCKED
+- SPECIALIST_CANNOT_DELEGATE
+- DEPTH_LIMIT_EXCEEDED
+- TARGET_NOT_FOUND
+- TARGET_DISABLED
+- CAPACITY_EXCEEDED
+
+No prose-string parsing may be required to understand the failure reason.
+
+6. Implement the capability framework.
+
+Use stable capabilities rather than direct tool-name permission lists.
+
+Initial capability definitions should cover at least:
+
+FILES_READ
+FILES_WRITE
+FILES_DELETE
+CODE_SEARCH
+CODE_ANALYSIS
+GIT_READ
+GIT_LOCAL_WRITE
+GIT_REMOTE_WRITE
+TEST_RUN
+TYPECHECK_RUN
+LINT_RUN
+BUILD_RUN
+BROWSER_READ
+BROWSER_INTERACT
+NETWORK_READ
+NETWORK_WRITE
+MCP_USE
+SHELL_CONTROLLED
+SUBAGENT_DISPATCH
+PACKAGE_INSTALL
+DEPLOY
+SECRETS_READ
+
+Important:
+- defining a capability does NOT mean it is granted.
+- high-risk capabilities such as DEPLOY, PACKAGE_INSTALL, NETWORK_WRITE, SECRETS_READ, GIT_REMOTE_WRITE and generic shell mutation must remain ungranted in Phases 0–2.
+- UNKNOWN capability resolution must be represented explicitly and fail closed in strict mode.
+
+7. Implement FlowDeck configuration and kill switches.
+
+Required concepts:
+
+flowdeck.enabled
+flowdeck.mode
+flowdeck.governance
+flowdeck.max_specialists
+flowdeck.max_delegation_depth
+
+Supported modes should include:
+
+off
+shadow
+read_only
+controlled
+full
+
+For this implementation pass:
+- default enabled = false
+- only off and shadow may execute meaningful code paths
+- read_only / controlled / full must not accidentally activate unfinished execution functionality
+
+Support per-specialist enabled/disabled configuration from the beginning so later rollback can disable one specialist independently.
+
+8. Implement one authoritative orchestration entry point.
+
+Create a single service boundary such as:
+
+OrchestrationService.start(...)
+
+This is the only component permitted to create or initiate a FlowDeck orchestration decision.
+
+For Phases 0–2 it should:
+- check the global feature flag immediately
+- return directly to existing CPTR behavior if disabled
+- determine shadow eligibility
+- perform deterministic classification/routing
+- evaluate proposed specialist selection
+- evaluate governance in non-executing shadow form
+- produce structured shadow diagnostics
+- discard the orchestration decision
+- allow original CPTR execution to continue unchanged
+
+Do not start specialist execution.
+
+Do not create durable orchestration runs yet.
+
+Do not mutate workspace state.
+
+9. Disabled fast path is mandatory.
+
+When FlowDeck is disabled:
+
+- no orchestration DB writes
+- no FlowDeck Socket.IO events
+- no FlowDeck classifier work
+- no additional model call
+- no FDX process
+- no specialist execution
+- no orchestration locks
+- no mutation
+- no changed CPTR response semantics
+
+The branch should occur as close as safely possible to the top of the integration point.
+
+Measure baseline versus disabled-FlowDeck behavior and prove no statistically meaningful regression.
+
+10. Shadow mode must be genuinely shadow-only.
+
+Shadow mode must:
+- never mutate
+- never invoke coding specialists
+- never invoke FDX by default
+- never make an additional external provider/model request by default
+- never interfere with the original CPTR request if shadow classification fails
+- use bounded/redacted diagnostics
+- have an explicit latency budget measured against baseline
+
+Shadow output should be structured, for example:
+
+classification
+strategy
+proposed_agents
+capabilities
+governance_result
+reasons
+
+but must not become authoritative execution state.
+
+11. Port FlowDeck v2.4.1 behavioral fixtures.
+
+Create versioned parity fixtures under tests/orchestration/fixtures/flowdeck-v2.4.1/.
+
+Cover at minimum:
+- canonical registry
+- agent modes
+- delegation rules
+- specialist availability
+- representative task classification
+- representative routing
+- capability decisions
+- governance UNKNOWN behavior
+
+Do not port OpenCode-specific plugin behavior as a CPTR requirement.
+
+Explicitly audit FlowDeck prompts/configs for OpenCode-specific:
+- tool names
+- session concepts
+- permission hooks
+- Code Mode assumptions
+- OpenCode SDK types
+- OpenCode background-agent assumptions
+
+Record each as:
+- portable semantic
+- CPTR adaptation
+- not applicable / intentionally not ported
+
+12. Create Phase 3 design contracts, but do NOT implement Phase 3 runtime yet.
+
+Before this pass is closed, write the concrete design specification for:
+
+OperationGuard
+Reconciler
+RecoveryLease
+workspace mutation lease / epoch
+runtime heartbeat
+SubagentExecutionPort
+ToolFacade
+ApprovalPort
+Evidence / Verifier boundary
+
+These must be reviewed and frozen before Phase 3 implementation begins.
+
+Important Phase 3 design invariants:
+
+- operation intent commits before side effect
+- stable logical operation ID across retries
+- separate physical attempt IDs
+- OUTCOME_UNKNOWN never blindly retries
+- unsupported reconciliation -> MANUAL_REVIEW_REQUIRED
+- CPTR task maps are liveness signals, not durable truth
+- one orchestration backend worker in v1
+- one mutator per workspace in v1
+- lease has owner, TTL/heartbeat and epoch
+- specialist execution must reuse existing CPTR agent loop
+- ports enforce capability/security, not prompts
+- approvals are durable, user-bound, operation-fingerprint-bound and one-shot
+- verifier/runtime evidence is authoritative; specialist self-report is not
+
+Do not implement these mutation paths yet.
+
+13. Document the v1 threat model.
+
+Explicitly state:
+
+- V1 executable test/build workflows assume user-trusted repositories.
+- Untrusted repositories are read/static-analysis only unless the user explicitly elevates trust.
+- Path jail does not make arbitrary repo build scripts safe.
+- shell classification is defense-in-depth, not a sandbox.
+- read-only specialists will receive no arbitrary shell.
+- MCP capabilities will be default-deny until mapped.
+- repository prompt injection cannot alter runtime permissions.
+- Git metadata/hooks/config will later be treated as protected execution-sensitive state.
+- FlowDeck restrictions can only narrow CPTR authority, never expand it.
+
+14. Preserve current CPTR behavior.
+
+Run regression testing around:
+- normal API-model chat
+- OpenCode/external agent selection
+- chat persistence
+- Socket.IO streaming
+- task-list events
+- tool execution
+- approvals
+- cancellation
+- context compaction
+- queued follow-up behavior
+- reload/reconnect
+- restart reconciliation
+- filesystem
+- terminal
+- Git
+- browser where testable
+
+No FlowDeck-enabled behavior is allowed to break existing CPTR pathways.
+
+
+Roadmap
+
+Phase 0 — Baseline characterization
+
+A. Verify repository identity and frozen SHA.
+B. Capture current CPTR tests/build/typecheck/lint status.
+C. Map native agent loop and async subagent path.
+D. Capture baseline performance for representative chat requests.
+E. Capture current Socket.IO lifecycle.
+F. Record known upstream failures separately from new regressions.
+
+Exit gate:
+- baseline report committed
+- no implementation claims based on unknown baseline failures
+
+
+Phase 1 — Contracts
+
+A. Add minimal orchestration package.
+B. Add config.
+C. Port canonical registry.
+D. Add capability framework.
+E. Add delegation contracts/errors.
+F. Add representative v2.4.1 golden fixtures.
+G. Add unit tests.
+
+Exit gate:
+- registry has one source of truth
+- no OpenCode SDK dependency introduced
+- no new model loop
+- deterministic tests green
+
+
+Phase 2 — Shadow integration
+
+A. Add single OrchestrationService entry point.
+B. Add disabled fast path.
+C. Add shadow classification.
+D. Add proposed routing.
+E. Add governance simulation.
+F. Keep decision non-authoritative.
+G. Original CPTR execution continues normally.
+H. Measure latency and verify no mutation/provider side effects.
+
+Exit gate:
+- FlowDeck disabled == original CPTR behavior
+- shadow failure cannot fail normal CPTR request
+- zero mutations
+- zero specialist executions
+- zero additional model calls by default
+- no FDX startup
+- baseline regression suite remains green
+
+
+Phase 3 design freeze — documentation only in this pass
+
+Produce exact contracts/state diagrams for:
+- durable runs
+- steps
+- operations
+- attempts
+- events
+- leases
+- operation intent ordering
+- reconciliation
+- liveness/orphan detection
+- recovery ownership
+- ApprovalPort
+- ToolFacade
+- SubagentExecutionPort
+- verifier/evidence trust boundary
+
+STOP after design freeze.
+
+Do not start Phase 3 runtime implementation until this checkpoint has been reviewed.
+
+
+Commands
+
+set -euo pipefail
+
+export REPO_URL='https://github.com/heidi-dang/computer.git'
+export FLOWDECK_URL='https://github.com/heidi-dang/FlowDeck.git'
+export CPTR_BASE_SHA='f9d1d8cdaf7e034b8fa19619063a6be931b9ee97'
+export FLOWDECK_BASE_SHA='b3c8ffa799ef6cbd41861565dae0c3c01c493db0'
+export FEATURE_BRANCH='flowdeck-cptr'
+
+git remote -v
+git status --short
+git fetch origin --prune --tags
+git cat-file -e "${CPTR_BASE_SHA}^{commit}"
+git show --no-patch --format='%H %s' "${CPTR_BASE_SHA}"
+
+git switch --detach "${CPTR_BASE_SHA}"
+git switch -c "${FEATURE_BRANCH}"
+
+git status --short
+git rev-parse HEAD
+
+python --version
+node --version
+npm --version
+uv --version || true
+
+npm ci
+uv sync
+
+npm run format:check
+
+python -m compileall -q cptr
+
+if [ -f cptr/frontend/package.json ]; then
+  npm --prefix cptr/frontend ci
+  npm --prefix cptr/frontend run check || true
+  npm --prefix cptr/frontend run build
+fi
+
+if [ -d tests ]; then
+  uv run pytest -q
+fi
+
+git diff --check
+git status --short
+
+For the FlowDeck v2.4.1 semantic audit, use a temporary clone outside the CPTR Git worktree and do not modify it:
+
+export FLOWDECK_AUDIT_DIR="$(mktemp -d)"
+git clone --filter=blob:none "${FLOWDECK_URL}" "${FLOWDECK_AUDIT_DIR}"
+git -C "${FLOWDECK_AUDIT_DIR}" checkout --detach "${FLOWDECK_BASE_SHA}"
+git -C "${FLOWDECK_AUDIT_DIR}" rev-parse HEAD
+git -C "${FLOWDECK_AUDIT_DIR}" status --short
+
+After tests/audit:
+rm -rf "${FLOWDECK_AUDIT_DIR}"
+
+Before commit:
+git diff --check
+git status --short
+git diff --stat
+git diff
+
+Do not use commands that assume undocumented absolute project paths.
+Do not use destructive cleanup against the user's workspace.
+Do not reboot or restart the host OS.
+
+
+Bug checks
+
+Treat every item below as an acceptance blocker if introduced by this work.
+
+1. Second agent-loop regression
+- No new independent model/tool execution loop.
+- No duplicated context-compaction implementation.
+- No duplicated provider streaming implementation.
+- No duplicated tool-call parser.
+
+2. Disabled-path regression
+- FlowDeck disabled must not touch orchestration persistence.
+- Must not emit orchestration events.
+- Must not classify.
+- Must not call another model.
+- Must not alter normal tool availability.
+- Must not alter external-agent behavior.
+- Must not materially increase normal request latency.
+
+3. Shadow-mode side effects
+- No filesystem mutation.
+- No shell mutation.
+- No Git mutation.
+- No browser mutation.
+- No external API mutation.
+- No background specialist.
+- No FDX daemon.
+- No additional provider call unless explicitly configured in a future phase.
+
+4. OpenCode coupling
+- No @opencode-ai/plugin dependency.
+- No @opencode-ai/sdk requirement for native FlowDeck-C-PTR.
+- No OpenCode-specific session lifecycle copied into CPTR orchestration.
+- No assumption that OpenCode is installed or reachable.
+
+5. Registry drift
+- No duplicate specialist lists.
+- Factory/routing/governance/tests derive from canonical definitions.
+- Unknown specialist IDs fail closed.
+
+6. Capability bypass
+- Capability framework must distinguish UNKNOWN.
+- Strict-mode UNKNOWN must deny.
+- High-risk capabilities remain ungranted.
+
+7. Delegation
+- Heidi cannot delegate recursively beyond depth 1.
+- Specialists cannot delegate.
+- Self-delegation blocked.
+- Disabled/unknown specialists blocked.
+
+8. Configuration
+- Invalid modes fail safely.
+- Unfinished controlled/full modes must not accidentally activate mutation.
+- Per-specialist disable must work.
+
+9. Privacy
+- Shadow diagnostics must redact secrets.
+- Do not persist raw credentials/tokens.
+- Do not log full sensitive paths/arguments unnecessarily.
+
+10. Performance
+- Shadow overhead measured.
+- Disabled-path overhead compared to baseline.
+- No initialization of expensive orchestration components on normal disabled path.
+
+11. Import/lifecycle
+- Importing cptr.orchestration must not start threads/processes.
+- No FDX startup on import.
+- No DB migrations triggered merely by importing.
+- No circular dependency into chat_task/model code.
+
+12. Existing CPTR regression
+- Auth unaffected.
+- API models unaffected.
+- external coding agents unaffected.
+- Socket.IO unaffected.
+- tool approvals unaffected.
+- terminal/filesystem/Git/browser unaffected.
+
+13. Phase boundary violation
+- No durable mutation execution.
+- No coding specialist execution.
+- No generic specialist shell.
+- No ApprovalPort execution.
+- No FDX integration.
+- No new orchestration UI.
+- No automatic git push/publish/deploy behavior.
+
+
+Tests before commit
+
+Minimum acceptance suite:
+
+1. Registry
+
+- all expected v2.4.1 canonical agent IDs present
+- no duplicate IDs
+- primary/subagent modes correct
+- disabled specialists excluded from routing
+- registry consistency validation passes
+
+2. Delegation
+
+Heidi -> specialist:
+PASS
+
+Heidi -> Heidi:
+BLOCK / SELF_DELEGATION_BLOCKED
+
+specialist -> specialist:
+BLOCK / SPECIALIST_CANNOT_DELEGATE
+
+depth > 1:
+BLOCK / DEPTH_LIMIT_EXCEEDED
+
+unknown target:
+BLOCK / TARGET_NOT_FOUND
+
+disabled target:
+BLOCK / TARGET_DISABLED
+
+3. Capability policy
+
+Known granted capability:
+ALLOW
+
+Known ungranted capability:
+DENY
+
+Unknown capability:
+DENY in strict mode
+
+High-risk capabilities:
+not granted during Phases 0–2
+
+4. Disabled fast path
+
+With FlowDeck disabled:
+- original native CPTR path selected
+- shadow classifier not called
+- no orchestration event
+- no additional model call
+- no FDX call
+- no workspace mutation
+- no orchestration DB write
+
+5. Shadow router
+
+Representative requests produce structured:
+- classification
+- proposed strategy
+- proposed specialist(s)
+- governance result
+
+But:
+- existing CPTR execution remains authoritative
+- shadow exception does not break user request
+- no specialist is actually launched
+
+6. Golden parity
+
+Compare relevant behavior against versioned FlowDeck v2.4.1 fixtures for:
+- canonical agent set
+- modes
+- delegation
+- representative routing
+- governance defaults
+
+Do not require parity for OpenCode plugin-specific implementation details.
+
+7. Performance
+
+Record:
+- baseline native CPTR request overhead
+- FlowDeck disabled
+- FlowDeck shadow
+
+Disabled must show no statistically meaningful regression.
+
+Shadow must stay within the documented Phase 2 latency budget.
+
+8. Existing CPTR regression
+
+Run all available existing:
+- Python tests
+- frontend checks
+- frontend production build
+- source compile
+- formatting checks
+
+If baseline upstream diagnostics already fail:
+- prove they pre-existed on the frozen baseline
+- do not call them a FlowDeck regression
+- do not hide them
+
+9. Static quality
+
+git diff --check:
+PASS
+
+Python compilation:
+PASS
+
+No unexpected generated files:
+PASS
+
+No secrets:
+PASS
+
+No accidental Node/OpenCode dependency:
+PASS
+
+10. Design checkpoint
+
+Before commit, provide design docs for Phase 3 contracts covering:
+- OperationGuard
+- Reconciler
+- RecoveryLease
+- heartbeat/orphan semantics
+- workspace mutation lease/epoch
+- SubagentExecutionPort
+- ToolFacade
+- ApprovalPort
+- Evidence/Verifier
+- exact V1 SQLite/single-worker assumption
+
+Do not implement Phase 3 mutation behavior in this commit.
+
+
+Commit/push
+
+Only commit after every Phase 0–2 exit gate passes and no P0 issue remains in the implemented scope.
+
+Use clean, focused commits rather than one opaque bulk commit where practical.
+
+Suggested commit sequence:
+
+1.
+feat(flowdeck-cptr): add orchestration contracts and canonical registry
+
+2.
+feat(flowdeck-cptr): add capability and delegation policy
+
+3.
+feat(flowdeck-cptr): add disabled fast path and shadow router
+
+4.
+test(flowdeck-cptr): add v2.4.1 parity and regression coverage
+
+5.
+docs(flowdeck-cptr): define phase 3 durability and security contracts
+
+Before pushing:
+
+git status --short
+git diff --check
+git log --oneline --decorate -10
+
+Push only the feature branch:
+
+git push -u origin flowdeck-cptr
+
+Do not merge to main.
+Do not create or merge a PR unless explicitly requested.
+
+Final closure report must include:
+
+- starting SHA
+- final branch SHA
+- files changed
+- exact new orchestration boundaries
+- proof there is no second agent loop
+- proof FlowDeck disabled follows original CPTR path
+- shadow-mode behavior
+- FlowDeck v2.4.1 parity results
+- existing CPTR regression results
+- frontend build result
+- Python compile/test result
+- performance baseline vs disabled vs shadow
+- known baseline upstream failures
+- remaining risks
+- exact Phase 3 design contracts
+- confirmation that no Phase 3 mutation runtime was implemented
+- confirmation that no changes were made to FlowDeck v2.4.1
+- confirmation that main was not modified
+- pushed branch SHA
+
+Acceptance threshold:
+Do not call the work complete unless the implementation, regression evidence, safety boundaries, and Phase 3 design checkpoint are all at least 9/10 quality. Below that threshold, report the remaining blockers and leave the phase open.
