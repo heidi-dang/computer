@@ -27,7 +27,6 @@ CODING_SPECIALIST_ROLES = (
 )
 MUTATION_ROLES = frozenset({"backend-coder", "frontend-coder", "debug-specialist"})
 BRANCH_QUALIFIED_ROLES = frozenset({"backend-coder", "frontend-coder"})
-DEBUG_QUALIFIED_ROLES = frozenset({"debug-specialist"})
 MINIMUM_BROWSER_TOOLS = frozenset(
     {"read_file", "search_files", "browser_navigate", "browser_snapshot", "browser_screenshot"}
 )
@@ -106,12 +105,8 @@ def validate_coding_request(request: CodingRequest, config: FlowDeckConfig) -> N
         raise CodingPolicyError("coding specialist is disabled by kill switch")
     if request.role != config.coding_role:
         raise CodingPolicyError("coding roles must be enabled one at a time")
-    if request.role not in BRANCH_QUALIFIED_ROLES | (
-        DEBUG_QUALIFIED_ROLES if config.debug_mutations else frozenset()
-    ):
+    if request.role not in BRANCH_QUALIFIED_ROLES:
         raise CodingPolicyError("coding role has not passed its qualification gate")
-    if request.role in DEBUG_QUALIFIED_ROLES and not config.debug_mutations:
-        raise CodingPolicyError("debug-specialist mutation requires its separate qualification gate")
     if not config.mutating_agents:
         raise CodingPolicyError("mutation roles require explicit mutation enablement")
     _root(request.workspace)
