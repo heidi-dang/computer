@@ -136,6 +136,80 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(status, OperationStatus.MANUAL_REVIEW_REQUIRED)
 
+    async def test_terminal_attempt_cannot_be_reclassified_as_unknown(self):
+        run, operation = await self._run_and_intent()
+        lease = await self.store.acquire_workspace_lease(
+            workspace="/workspace",
+            run_id=run.id,
+            owner="worker-a",
+            ttl_ms=100,
+            now=self.now,
+        )
+        attempt = await self.store.prepare_attempt(
+            operation_id=operation.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            now=self.now,
+        )
+        await self.store.finish_attempt(
+            attempt.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            outcome="succeeded",
+            evidence={
+                "source": "runtime",
+                "authoritative": True,
+                "observation": "native_loop_return",
+                "observed_outcome": "succeeded",
+                "attempt_id": attempt.id,
+            },
+            now=self.now + 1,
+        )
+        with self.assertRaises(LifecycleError):
+            await self.store.mark_attempt_unknown(attempt.id, now=self.now + 2)
+
+    async def test_manual_review_is_terminal_and_closes_run_safely(self):
+        run, operation = await self._run_and_intent()
+        lease = await self.store.acquire_workspace_lease(
+            workspace="/workspace",
+            run_id=run.id,
+            owner="worker-a",
+            ttl_ms=100,
+            now=self.now,
+        )
+        attempt = await self.store.prepare_attempt(
+            operation_id=operation.id,
+            owner="worker-a",
+            fencing_epoch=lease.epoch,
+            now=self.now,
+        )
+        await self.store.mark_attempt_unknown(attempt.id, now=self.now + 1)
+        status = await self.store.reconcile_operation(
+            operation.id,
+            outcome=None,
+            evidence=None,
+            now=self.now + 2,
+        )
+        self.assertEqual(status, OperationStatus.MANUAL_REVIEW_REQUIRED)
+        with self.assertRaises(LifecycleError):
+            await self.store.reconcile_operation(
+                operation.id,
+                outcome="succeeded",
+                evidence={
+                    "source": "verifier",
+                    "authoritative": True,
+                    "observation": "verifier_check",
+                    "observed_outcome": "succeeded",
+                    "hash": "abc",
+                },
+                now=self.now + 3,
+            )
+        await self.store.complete_run(
+            run.id,
+            status=RunStatus.MANUAL_REVIEW_REQUIRED,
+            now=self.now + 4,
+        )
+
     async def test_authoritative_runtime_reconciliation_is_safe(self):
         run, operation = await self._run_and_intent()
         lease = await self.store.acquire_workspace_lease(
