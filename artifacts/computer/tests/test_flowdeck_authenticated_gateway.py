@@ -12,8 +12,10 @@ from cptr.flowdeck.authenticated_gateway import (
     SpecialistDispatchRequest,
     dispatch_authenticated_specialist,
 )
+from cptr.flowdeck.coding import CodingRequest, run_browser_debugger, run_coding_specialist
 from cptr.flowdeck.config import FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck
+from cptr.flowdeck.execution import MapperRequest, run_read_only_specialist
 from cptr.models.base import Base
 from cptr.models.workspaces import Workspace
 from cptr.utils.config import AuthResult
@@ -129,6 +131,72 @@ class AuthenticatedGatewayTests(unittest.IsolatedAsyncioTestCase):
                 auth_request("owner"), self.dispatch(), store=self.store
             )
         self.assertEqual(result, "read-only result")
+
+    async def test_all_supported_roles_use_the_authenticated_gateway(self):
+        roles = (
+            "backend-coder",
+            "frontend-coder",
+            "browser-debugger",
+            "debug-specialist",
+            "mapper",
+            "researcher",
+            "architect",
+            "reviewer",
+            "security-auditor",
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "CPTR_FLOWDECK_ENABLED": "true",
+                "CPTR_FLOWDECK_MODE": "controlled",
+                "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                "CPTR_FLOWDECK_MUTATING_AGENTS": "true",
+                "CPTR_FLOWDECK_CODING_ROLE": "backend-coder",
+            },
+            clear=False,
+        ), patch(
+            "cptr.flowdeck.authenticated_gateway._native_run_coding_specialist",
+            new=AsyncMock(return_value="coder"),
+        ), patch(
+            "cptr.flowdeck.authenticated_gateway._native_run_browser_debugger",
+            new=AsyncMock(return_value="browser"),
+        ), patch(
+            "cptr.flowdeck.authenticated_gateway._native_run_read_only_specialist",
+            new=AsyncMock(return_value="readonly"),
+        ):
+            for role in roles:
+                result = await dispatch_authenticated_specialist(
+                    auth_request("owner"), self.dispatch(role=role), store=self.store
+                )
+                self.assertIn(result, {"coder", "browser", "readonly"})
+
+    async def test_compatibility_boundaries_reject_missing_authenticated_context(self):
+        coding = CodingRequest(
+            role="backend-coder",
+            workspace=str(self.root),
+            user_id="forged",
+            task="x",
+            request_key="direct-coding",
+        )
+        mapper = MapperRequest(
+            request_key="direct-read",
+            task="x",
+            workspace=str(self.root),
+            user_id="forged",
+            model="free",
+            connection={},
+            parent_chat_id="p",
+        )
+        with self.assertRaises(TypeError):
+            await run_coding_specialist(
+                coding, model="free", connection={}, parent_chat_id="p", store=self.store
+            )
+        with self.assertRaises(TypeError):
+            await run_browser_debugger(
+                coding, model="free", connection={}, parent_chat_id="p", store=self.store
+            )
+        with self.assertRaises(TypeError):
+            await run_read_only_specialist(mapper, "mapper", store=self.store)
 
 
 if __name__ == "__main__":
