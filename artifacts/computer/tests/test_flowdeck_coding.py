@@ -15,6 +15,7 @@ from cptr.flowdeck.coding import (
     CodingRequest,
     browser_tool_guard,
     coding_tool_guard,
+    resolve_authorized_workspace,
     run_browser_debugger,
     run_coding_specialist,
     validate_browser_request,
@@ -25,6 +26,7 @@ from cptr.flowdeck.contracts import FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck
 from cptr.models.base import Base
 from cptr.models.flowdeck import FlowDeckLogicalOperation, FlowDeckPhysicalAttempt
+from cptr.models.workspaces import Workspace
 from cptr.utils.config import AuthResult
 from cptr.utils.tools import execute_tool
 
@@ -169,6 +171,17 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
             async_sessionmaker(self.engine, expire_on_commit=False),
             clock=lambda: 1000,
         )
+        async with self.store.session_factory() as session:
+            session.add(
+                Workspace(
+                    user_id="user-1",
+                    path=str(self.root.resolve()),
+                    name="qualification",
+                    data={},
+                    created_at=1000,
+                )
+            )
+            await session.commit()
         self.request = CodingRequest(
             role="backend-coder",
             workspace=self.workspace.name,
@@ -216,6 +229,48 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(run_chat.await_args.kwargs["before_mutation"])
         self.assertIsNotNone(run_chat.await_args.kwargs["after_mutation"])
         self.assertEqual(run_chat.await_args.kwargs["specialist_role"], "backend-coder")
+
+    async def test_workspace_ownership_resolver_fails_closed_for_wrong_stale_and_ambiguous_scope(self):
+        resolver = lambda user, path: resolve_authorized_workspace(
+            session_factory=self.store.session_factory,
+            user_id=user,
+            workspace=path,
+        )
+        with self.assertRaises(CodingPolicyError):
+            await resolver("other-user", str(self.root))
+        with self.assertRaises(CodingPolicyError):
+            await resolver("user-1", str(self.root / "forged"))
+        async with self.store.session_factory() as session:
+            await session.execute(
+                __import__("sqlalchemy").delete(Workspace).where(Workspace.user_id == "user-1")
+            )
+            await session.commit()
+        with self.assertRaises(CodingPolicyError):
+            await resolver("user-1", str(self.root))
+
+    async def test_runtime_identity_mismatch_is_denied_before_mutation(self):
+        from cptr.flowdeck.coding import _runtime_workspace_matches
+
+        request = Request(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/__internal__",
+                "headers": [],
+                "client": ("127.0.0.1", 0),
+                "server": ("internal", 0),
+                "scheme": "http",
+                "state": {},
+            }
+        )
+        request.state.auth = AuthResult(user_id="other-user", role="user")
+        self.assertFalse(
+            _runtime_workspace_matches(
+                context={"request": request, "workspace": str(self.root)},
+                user_id="user-1",
+                root=self.root,
+            )
+        )
 
     async def test_each_coding_role_executes_real_structured_mutation_with_durable_evidence(self):
         for role in ("backend-coder", "frontend-coder"):
@@ -338,10 +393,24 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
         path.write_text("before\n")
 
         async def interrupted_loop(*args, **kwargs):
+            auth_request = Request(
+                {
+                    "type": "http",
+                    "method": "GET",
+                    "path": "/__internal__",
+                    "headers": [],
+                    "client": ("127.0.0.1", 0),
+                    "server": ("internal", 0),
+                    "scheme": "http",
+                    "state": {},
+                }
+            )
+            auth_request.state.auth = AuthResult(user_id="user-1", role="user")
             context = {
                 "workspace": self.workspace.name,
                 "specialist_role": "backend-coder",
                 "call_id": "pending-call",
+                "request": auth_request,
             }
             self.assertTrue(
                 await kwargs["before_mutation"](

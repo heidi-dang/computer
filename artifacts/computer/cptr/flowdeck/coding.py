@@ -10,10 +10,13 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from sqlalchemy import select
+
 from cptr.flowdeck.budgets import RunBudget
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import Capability, FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck, OperationStatus, RunStatus, StepStatus
+from cptr.models.workspaces import Workspace
 
 STRUCTURED_MUTATION_TOOLS = frozenset(
     {"read_file", "search_files", "edit_file", "multi_edit_file", "write_file"}
@@ -35,6 +38,53 @@ PROTECTED_PATH_PARTS = frozenset({".git", ".env", ".cptr", "secrets"})
 
 class CodingPolicyError(RuntimeError):
     """Raised when a coding specialist request fails a safety gate."""
+
+
+async def resolve_authorized_workspace(
+    *,
+    session_factory: Any,
+    user_id: str,
+    workspace: str,
+) -> Path:
+    """Resolve one canonical workspace owned by exactly this application user."""
+    root = _root(workspace)
+    if not user_id:
+        raise CodingPolicyError("coding request is missing authenticated user")
+    async with session_factory() as session:
+        rows = list(
+            (
+                await session.scalars(
+                    select(Workspace).where(Workspace.user_id == user_id)
+                )
+            ).all()
+        )
+    matches = []
+    for row in rows:
+        try:
+            if _root(row.path) == root:
+                matches.append(row)
+        except CodingPolicyError:
+            continue
+    if len(matches) != 1:
+        raise CodingPolicyError("coding workspace ownership is missing, stale, or ambiguous")
+    return root
+
+
+def _runtime_workspace_matches(
+    *,
+    context: dict[str, Any],
+    user_id: str,
+    root: Path,
+) -> bool:
+    """Require the CPTR filesystem request identity and workspace to match."""
+    request = context.get("request")
+    auth = getattr(getattr(request, "state", None), "auth", None)
+    if auth is None or auth.user_id != user_id:
+        return False
+    try:
+        return _root(str(context.get("workspace", ""))) == root
+    except CodingPolicyError:
+        return False
 
 
 @dataclass(frozen=True)
@@ -151,7 +201,11 @@ async def run_coding_specialist(
         from cptr.utils.db import get_session_factory
 
         store = DurableFlowDeck(get_session_factory())
-    root = _root(request.workspace)
+    root = await resolve_authorized_workspace(
+        session_factory=store.session_factory,
+        user_id=request.user_id,
+        workspace=request.workspace,
+    )
     run, created = await store.create_run(
         request_key=request.request_key,
         owner=request.user_id,
@@ -209,6 +263,8 @@ async def run_coding_specialist(
             budget.consume_tool_call()
         except Exception as exc:
             raise CodingPolicyError("run tool-call budget exceeded") from exc
+        if not _runtime_workspace_matches(context=context, user_id=request.user_id, root=root):
+            return False
         if not coding_tool_guard(name, args, context):
             return False
         await store.assert_workspace_fence(
