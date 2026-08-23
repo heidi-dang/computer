@@ -4,3 +4,4 @@
 - [FDX isolation gate](fdx-isolation-gate.md) — optional FDX needs durable workspace ownership plus independent OS isolation; otherwise native CPTR remains the path.
 - [Evidence verifier policy](evidence-verifier-policy.md) — terminal evidence is runtime/verifier-only, identity-bound durably, and stale attempts cannot finalize.
 - [FlowDeck browser authentication](flowdeck-browser-auth.md) — browser FlowDeck requests use the CPTR session cookie; the gateway's Bearer-only auth remains for programmatic callers.
+- [Native transcript bridge](native-transcript-bridge.md) — FlowDeck must reuse normal CPTR event semantics; durable events are status/recovery, not a parallel transcript renderer.

@@ -669,24 +669,24 @@
 		if (!data.message_id) return;
 		const msg = allMessages.find((m) => m.id === data.message_id);
 		if (!msg) return;
+		applyNativeTranscriptEvent(data, msg);
+	}
 
+	function applyNativeTranscriptEvent(data: any, msg: any) {
 		if (data.delta) {
 			msg.content += data.delta;
 			allMessages = [...allMessages];
-			handleTtsDelta(data.message_id, data.delta);
+			if (data.message_id) handleTtsDelta(data.message_id, data.delta);
 		}
 		if (data.output) {
 			if (data.output.type === 'function_call') {
 				if (data.output.status === 'pending') stopTtsPlayback();
 				else resetTtsBuffer();
 			}
-			// Merge by call_id to avoid duplicates and update status of existing items
 			const existing = msg.output || [];
 			const callId = data.output.call_id;
 			const itemType = data.output.type;
-
 			if (itemType === 'reasoning') {
-				// Responses-style reasoning items stream as output item updates.
 				const itemId = data.output.id;
 				const existingIdx = itemId
 					? existing.findIndex((o: any) => o.type === 'reasoning' && o.id === itemId)
@@ -702,7 +702,6 @@
 					(o: any) => o.type === itemType && o.call_id === callId
 				);
 				if (existingIdx >= 0) {
-					// Update existing item in-place (e.g., pending → completed)
 					existing[existingIdx] = { ...existing[existingIdx], ...data.output };
 					msg.output = [...existing];
 				} else {
@@ -713,42 +712,36 @@
 			}
 			allMessages = [...allMessages];
 		}
-		if (data.error) {
-			toast.error(data.error, { duration: 8000 });
-		}
-		if (data.done) {
-			flushTtsBuffer();
-			sending = false;
-			// Clear streaming indicator for this tab
-			if (tabId) {
-				streamingChatTabs.update((s) => {
-					const n = new Set(s);
-					n.delete(tabId);
-					return n;
-				});
-			}
-			// Skip reload for cancelled messages — optimistic state is already correct
-			// and reloading causes a visual flash + scroll jump
-			if (cancelledMessageId === data.message_id) {
-				cancelledMessageId = null;
-				return;
-			}
+		if (data.error) toast.error(data.error, { duration: 8000 });
+		if (!data.done) return;
 
-			// Mark done optimistically, but keep the streamed content visible until
-			// the DB reload returns. This avoids a transient blank message if the
-			// final `done` socket event beats the commit/read path.
-			msg.done = true;
-			// A bounded-loop failure includes a useful terminal preview in the
-			// done event. Show it immediately while the durable reload completes.
-			if (data.error && data.content && !msg.content) {
-				msg.content = data.content;
-			}
-			if (chatTasks.some((task) => task.status === 'pending' || task.status === 'in_progress')) {
-				setChatTasks([]);
-			}
-			allMessages = [...allMessages];
+		flushTtsBuffer();
+		sending = false;
+		if (tabId) {
+			streamingChatTabs.update((s) => {
+				const n = new Set(s);
+				n.delete(tabId);
+				return n;
+			});
+		}
+		if (cancelledMessageId === data.message_id) {
+			cancelledMessageId = null;
+			return;
+		}
+		msg.done = true;
+		if (data.error && data.content && !msg.content) msg.content = data.content;
+		if (chatTasks.some((task) => task.status === 'pending' || task.status === 'in_progress')) {
+			setChatTasks([]);
+		}
+		if (data.flowdeck_run_id) {
+			// Native completion ends transcript streaming; durable FlowDeck
+			// completion still owns the orchestration status and is reconciled
+			// by the existing poller.
+			flowdeckStatus = data.error ? 'failed' : 'verifying';
+		} else if (data.chat_id) {
 			loadChat(data.chat_id);
 		}
+		allMessages = [...allMessages];
 	}
 
 	function flowDeckEventKey(event: any): string {
@@ -812,33 +805,7 @@
 		if (!flowdeckMessageId) return;
 		const message = allMessages.find((item) => item.id === flowdeckMessageId);
 		if (!message) return;
-		if (event.delta) {
-			const output = [...(message.output || [])];
-			const lastMessage = [...output].reverse().find((item: any) => item.type === 'message');
-			if (lastMessage) {
-				const content = [...(lastMessage.content || [])];
-				const lastText = [...content].reverse().find((item: any) => item.type === 'output_text');
-				if (lastText) lastText.text = `${lastText.text || ''}${event.delta}`;
-				else content.push({ type: 'output_text', text: event.delta });
-				lastMessage.content = content;
-				message.output = output;
-			} else {
-				message.content += event.delta;
-			}
-		}
-		if (event.output) {
-			const output = [...(message.output || [])];
-			const item = event.output;
-			const key = item.type === 'reasoning' ? item.id : `${item.type}:${item.call_id || item.id || ''}`;
-			const index = output.findIndex(
-				(existing: any) =>
-					(existing.type === 'reasoning' && item.type === 'reasoning' && existing.id === item.id) ||
-					(existing.type === item.type && item.call_id && existing.call_id === item.call_id)
-			);
-			if (index >= 0) output[index] = { ...output[index], ...item };
-			else if (key) output.push(item);
-			message.output = output;
-		}
+		applyNativeTranscriptEvent(event, message);
 		const activity = flowDeckActivityText(event);
 		if (
 			activity &&

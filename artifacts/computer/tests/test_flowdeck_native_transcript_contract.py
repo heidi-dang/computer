@@ -1,0 +1,61 @@
+"""Regression guards for Heidi's native CPTR transcript bridge.
+
+The frontend package does not currently ship a browser/unit-test runner. These
+source-level guards protect the event lifecycle contract until one is added.
+"""
+
+from pathlib import Path
+import unittest
+
+
+CHAT_PANEL = (
+    Path(__file__).resolve().parents[1]
+    / "cptr"
+    / "frontend"
+    / "src"
+    / "lib"
+    / "components"
+    / "chat"
+    / "ChatPanel.svelte"
+)
+
+
+class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = CHAT_PANEL.read_text()
+
+    def test_normal_and_flowdeck_paths_share_native_handler(self):
+        self.assertGreaterEqual(
+            self.source.count("applyNativeTranscriptEvent(data, msg)"), 1
+        )
+        self.assertGreaterEqual(
+            self.source.count("applyNativeTranscriptEvent(event, message)"), 1
+        )
+        self.assertIn("if (data.error) toast.error(data.error", self.source)
+        self.assertIn("if (!data.done) return;", self.source)
+
+    def test_native_completion_clears_streaming_without_claiming_durable_success(self):
+        self.assertIn("msg.done = true;", self.source)
+        self.assertIn("flowdeckStatus = data.error ? 'failed' : 'verifying';", self.source)
+        self.assertIn("durable FlowDeck", self.source)
+
+    def test_native_output_items_deduplicate_tool_updates(self):
+        self.assertIn("o.type === itemType && o.call_id === callId", self.source)
+        self.assertIn("existing[existingIdx] = { ...existing[existingIdx], ...data.output }", self.source)
+
+    def test_polling_normalizes_durable_run_identity_and_is_reconciliation_only(self):
+        self.assertIn("event?.run_id", self.source)
+        self.assertIn("{ ...event, flowdeck_run_id: event.run_id }", self.source)
+        self.assertIn("getFlowDeckOrchestration(runId, workspace)", self.source)
+        self.assertIn("startFlowDeckPolling(flowdeckRunId)", self.source)
+
+    def test_flowdeck_lifecycle_keeps_terminal_reconciliation(self):
+        for kind in ("RUN_COMPLETED", "RUN_CANCELLED", "RUN_ORPHANED", "RUN_FAILED"):
+            self.assertIn(f"kind === '{kind}'", self.source)
+        self.assertIn("message.done = true;", self.source)
+        self.assertIn("stopFlowDeckPolling();", self.source)
+
+
+if __name__ == "__main__":
+    unittest.main()
