@@ -1,0 +1,371 @@
+Task
+Hermetic Read-Only Git Adversarial Qualification
+
+Goal:
+Prove that the existing FlowDeck read-only Git inspection layer is safe against hostile repository configuration, process abuse, path escape, and output/timeout edge cases.
+
+This is a qualification/hardening milestone only.
+
+Do NOT add Git mutation.
+Do NOT expand specialist authority.
+Do NOT add a production specialist route.
+Do NOT modify the authenticated specialist gateway unless a proven Git integration bug requires it.
+
+Current accepted baseline:
+- Authenticated specialist gateway milestone: PASS
+- Score: 9.2/10
+- Full FlowDeck suite: 70/70 passing
+- Gateway is sole production-facing specialist execution boundary
+- Identity derives from authenticated CPTR request state
+- Canonical durable workspace ownership and revalidation are enforced
+- debug-specialist remains read-only
+- CPTR remains sole model/tool execution owner
+- FDX/devops/Git mutation/unrestricted shell/MCP/network writes/install/deploy/publish/secrets/full Heidi autonomy/new orchestration UI remain disabled
+
+To dev
+1. Inspect before modifying.
+   Review the canonical read-only Git implementation and wrapper.
+   Identify:
+   - fixed operation allowlist
+   - subprocess invocation method
+   - environment sanitization
+   - global/system/local config behavior
+   - hooks behavior
+   - fsmonitor behavior
+   - pager/editor behavior
+   - external diff behavior
+   - optional lock behavior
+   - workspace authorization behavior
+   - symlink/canonical path handling
+   - stdout/stderr bounds
+   - timeout behavior
+   - process termination/cleanup
+   - repository-state mutation risks
+
+2. Preserve the existing authority model.
+   Git must remain strictly read-only.
+
+   Permitted operations should remain only the existing fixed inspection operations such as:
+   - status
+   - log
+   - diff
+
+   Do not introduce:
+   - add
+   - commit
+   - checkout
+   - switch
+   - reset
+   - clean
+   - stash
+   - merge
+   - rebase
+   - cherry-pick
+   - tag mutation
+   - branch mutation
+   - remote mutation
+   - fetch
+   - pull
+   - push
+   - config writes
+   - submodule mutation
+   - arbitrary Git arguments
+
+3. Add direct tests against the canonical Git security implementation, not only the compatibility wrapper.
+
+4. Add adversarial tests for malicious repository-local Git configuration.
+
+   Prove hostile local configuration cannot cause executable side effects through:
+   - hooks
+   - fsmonitor
+   - pager
+   - editor
+   - sequence editor
+   - askpass
+   - external diff
+   - textconv where relevant
+   - custom command aliases
+   - credential helpers
+   - SSH command overrides
+   - other execution-capable Git config relevant to the allowed commands
+
+5. Add tests for hostile global/system Git configuration.
+   Use isolated temporary configuration locations.
+   Prove the canonical runner does not inherit unsafe system/global configuration.
+
+6. Add hook-execution tests.
+   Create a repository containing executable hooks that would leave a marker if run.
+   Execute all allowed inspection operations.
+   Assert the marker is never created.
+
+7. Add malicious fsmonitor tests.
+   Configure an executable fsmonitor command that would leave a marker.
+   Run allowed inspection operations.
+   Assert it cannot execute.
+
+8. Add pager/editor/external-diff tests.
+   Configure them to executable marker-producing commands.
+   Assert no allowed inspection operation executes them.
+
+9. Add symlink/path containment tests.
+   Cover:
+   - symlinked requested workspace
+   - symlink to another repository
+   - authorized canonical workspace vs symlink alias
+   - nested repository edge cases if supported
+   - missing .git
+   - .git file/worktree form if current implementation intends to support it
+
+   Authorization must be based on canonical resolved ownership/scope and must fail closed.
+
+10. Add argument-injection tests.
+    Attempt to abuse:
+    - operation names
+    - numeric limits
+    - paths
+    - revision-like strings if any API accepts them
+
+    Confirm user/model input cannot become arbitrary Git CLI options.
+
+11. Add timeout cleanup qualification.
+    Use a controlled test double/fake Git executable or equivalent safe fixture that intentionally hangs.
+
+    Verify:
+    - timeout fires
+    - child process is terminated
+    - no child process remains running
+    - operation fails closed
+    - no repository mutation occurs
+
+12. Add output-overflow qualification.
+    Use a controlled fake Git process that emits output beyond configured limits.
+
+    Verify:
+    - stdout limit is enforced
+    - stderr limit is enforced independently
+    - process is terminated on overflow
+    - buffers do not grow unbounded
+    - operation fails closed
+    - cleanup completes
+
+13. Verify optional locks and repository mutation.
+    Snapshot repository state before each allowed inspection operation.
+
+    Prove:
+    - tracked files unchanged
+    - index unchanged
+    - HEAD unchanged
+    - refs unchanged
+    - working tree unchanged except test-created fixtures
+    - Git inspection does not create persistent lock files
+    - inspection does not modify Git config
+
+14. Verify workspace authorization.
+    Add direct tests for:
+    - exact authorized workspace
+    - unauthorized sibling workspace
+    - parent directory
+    - child directory where not permitted
+    - nonexistent path
+    - non-directory path
+    - wrong repository
+    - canonical-path mismatch
+
+15. Remove or consolidate duplicated Git security logic only if the audit proves duplication can cause drift.
+    Do not refactor unrelated code.
+
+16. If a genuine weakness is found:
+    - fix the root cause in the canonical Git layer
+    - add a regression test first or alongside the fix
+    - do not weaken tests
+    - do not broaden Git functionality
+
+Roadmap
+1. Baseline
+   - Confirm current known-good tree.
+   - Run existing FlowDeck suite.
+   - Record current Git tests and canonical implementation behavior.
+
+2. Threat model
+   - Enumerate every execution-capable Git configuration surface relevant to allowed operations.
+   - Enumerate path, subprocess, timeout, and output-bound risks.
+
+3. Direct canonical tests
+   - Add a dedicated canonical Git test module if one does not exist.
+   - Test the security layer directly.
+
+4. Hostile configuration tests
+   - local config
+   - global config
+   - system config where safely emulatable
+   - hooks
+   - fsmonitor
+   - pager/editor
+   - external diff
+
+5. Containment tests
+   - canonical path
+   - symlinks
+   - wrong workspace
+   - missing repo
+
+6. Process-safety tests
+   - timeout
+   - cleanup
+   - stdout overflow
+   - stderr overflow
+
+7. Mutation-proof tests
+   - snapshot repository state
+   - run each allowed operation
+   - assert no persistent mutation
+
+8. Full regression
+   - existing Git wrapper tests
+   - new canonical Git tests
+   - all FlowDeck tests
+   - compilation
+   - targeted Ruff
+   - git diff --check
+   - migration initialization
+   - API smoke
+   - frontend production build
+
+9. Final security audit
+   Re-read the implementation after tests pass.
+   Confirm there is still:
+   - no shell invocation
+   - no arbitrary CLI argument channel
+   - no Git mutation
+   - no network Git operation
+   - no config write path
+   - no authority expansion
+
+10. Stop after this milestone.
+    Do not continue into Heidi orchestration, debug mutation, devops, FDX, Git mutation, or UI.
+
+Commands
+Run from the current repository root using runtime-derived paths only.
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git log -n 10 --oneline
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+
+grep -RInE 'inspect_git|GitInspection|git_readonly|create_subprocess_exec|hooksPath|fsmonitor|GIT_CONFIG|PAGER|EDITOR|DIFF' cptr tests --exclude-dir='__pycache__'
+
+After implementation:
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+
+python3 -m compileall -q cptr/flowdeck
+
+CHANGED_PY="$(git diff --name-only -- '*.py' | tr '\n' ' ')"
+if [ -n "$CHANGED_PY" ]; then
+  python3 -m ruff check $CHANGED_PY
+fi
+
+git diff --check
+
+git status --short
+git diff --stat
+git diff
+
+Use the existing repository migration-init, API smoke, and frontend build commands already proven in this environment.
+Do not invent a second setup or deployment path.
+
+Bug checks
+- Any allowed Git operation can execute repository hooks → FAIL
+- fsmonitor can execute → FAIL
+- pager/editor/external diff can execute → FAIL
+- hostile global/system config is inherited → FAIL
+- arbitrary Git option/argument injection is possible → FAIL
+- user-controlled operation becomes arbitrary Git command → FAIL
+- symlink bypasses authorized workspace equality → FAIL
+- unauthorized repository can be inspected → FAIL
+- process survives timeout → FAIL
+- process survives output overflow → FAIL
+- stdout/stderr can grow without bound → FAIL
+- inspection changes HEAD/index/refs/config/working tree → FAIL
+- persistent Git lock files remain → FAIL
+- Git network access is introduced → FAIL
+- Git mutation is introduced → FAIL
+- shell=True or shell command construction is introduced → FAIL
+- CPTR/FlowDeck authority expands → FAIL
+- authenticated specialist gateway behavior changes unnecessarily → FAIL
+- existing 70-test baseline regresses without a valid documented reason → FAIL
+
+Tests before commit
+Acceptance requires:
+
+1. Existing FlowDeck baseline remains passing.
+2. Direct canonical Git tests exist.
+3. Allowed status operation passes safely.
+4. Allowed log operation passes safely.
+5. Allowed diff operation passes safely.
+6. Unsupported Git operations fail closed.
+7. Arbitrary option/argument injection fails closed.
+8. Repository hooks cannot execute.
+9. Malicious fsmonitor cannot execute.
+10. Pager/editor execution cannot occur.
+11. External diff execution cannot occur.
+12. Hostile global config cannot affect execution.
+13. Hostile system config cannot affect execution where safely testable.
+14. Symlink-based workspace escape is rejected.
+15. Unauthorized workspace is rejected.
+16. Missing/non-repository workspace is rejected.
+17. Timeout kills and reaps the subprocess.
+18. Stdout overflow kills and reaps the subprocess.
+19. Stderr overflow kills and reaps the subprocess.
+20. Output remains bounded.
+21. Repository state remains unchanged after every allowed operation.
+22. Git config remains unchanged.
+23. No persistent lock files remain.
+24. Full FlowDeck suite passes.
+25. Python compilation passes.
+26. Targeted Ruff passes for changed files.
+27. git diff --check passes.
+28. Migration initialization passes.
+29. API smoke returns HTTP 200.
+30. Frontend production build passes.
+31. No authority was expanded.
+
+Evidence
+Closure report must include:
+
+- Threat model findings
+- Exact canonical Git security controls verified
+- Exact vulnerabilities found, if any
+- Exact root-cause fixes, if any
+- Exact adversarial tests added
+- Test names and pass counts
+- Timeout/overflow cleanup evidence
+- Repository before/after mutation evidence
+- Workspace/symlink containment evidence
+- Confirmation Git remains read-only
+- Confirmation no network Git operations exist
+- Confirmation no shell execution exists
+- Confirmation no arbitrary Git argument channel exists
+- Confirmation authenticated specialist gateway remains unchanged
+- Confirmation no authority expansion
+- Remaining risks
+- Final score
+
+Score
+>= 9/10 required for completion.
+Below 9/10 = NOT DONE.
+
+Commit/push
+Do NOT push to GitHub.
+
+Do not commit automatically.
+
+Complete implementation, tests, security audit, and closure evidence first.
+
+Leave the final verified diff available for review.
+
+Only make a local commit if I explicitly approve it afterward.
