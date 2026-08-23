@@ -1,0 +1,112 @@
+Assessment: 9.7/10
+
+The strongest parts are:
+
+exact frozen CPTR and FlowDeck baselines;
+explicit CPTR execution / FlowDeck coordination boundary;
+no second agent loop;
+disabled fast path;
+truly shadow-only Phase 2;
+strict prohibition on accidentally starting Phase 3;
+semantic parity instead of copying OpenCode runtime assumptions;
+Phase 3 contracts written before the durable engine exists;
+honest baseline-regression reporting.
+
+I would make only five small amendments before calling Issue #1 frozen.
+
+1. Make the disabled path stronger
+
+Add to Done looks like:
+
+When FlowDeck is disabled, execution must return to the native CPTR path before orchestration initialization. Importing or configuring FlowDeck must not start processes, initialize FDX, perform migrations, create database records, emit events, or instantiate model clients.
+
+This prevents a technically disabled feature from still creating startup overhead.
+
+2. Explicitly require reuse of CPTR's current agent loop
+
+You mention proving there is no second loop, but make the architecture contract explicit in Step 2 or Step 6:
+
+Phase 3 design must identify the exact existing CPTR agent/subagent execution primitive that SubagentExecutionPort will wrap. Creating a parallel model-call/tool-call execution loop is prohibited.
+
+This closes one of the biggest risks identified during review.
+
+3. Clarify shadow diagnostics persistence
+
+For Issue #1 I recommend:
+
+shadow diagnostics:
+in-memory / development logging only by default
+
+Do not start durable orchestration persistence early just to store shadow results.
+
+If diagnostics are logged, require:
+
+bounded size;
+redaction;
+no secrets;
+no raw model/provider payloads.
+4. Add the Phase 3 mutation safety rule explicitly
+
+Under Step 6 add:
+
+Any mutating operation that cannot later be positively reconciled must be designed to transition interrupted execution to MANUAL_REVIEW_REQUIRED; it must never be blindly retried.
+
+That is one of the most important conclusions from all external reviews.
+
+5. Check the Relevant files path prefix
+
+You list:
+
+artifacts/computer/cptr/...
+
+If that is the developer's Replit/project mount, keep it.
+
+If the developer is operating from the actual Git repository root, the canonical repo paths should instead be:
+
+pyproject.toml
+cptr/app.py
+cptr/events.py
+cptr/env.py
+cptr/socket/main.py
+cptr/utils/chat_task.py
+cptr/utils/async_subagents.py
+cptr/utils/model_targets.py
+cptr/utils/tools.py
+cptr/models/chats.py
+cptr/routers/events.py
+cptr/utils/identity.py
+
+The implementation itself should not hardcode artifacts/computer/.
+
+I would freeze Issue #1 with this additional acceptance block
+
+Add this near the end:
+
+## Safety gates
+
+This issue is not complete unless all of the following are proven:
+
+- FLOWDECK disabled reaches the original CPTR execution path before orchestration work begins.
+- No second model/tool execution loop exists.
+- Shadow mode launches no specialist, FDX process, command, mutation, browser action, Git action, MCP action, or extra model/provider request.
+- Shadow errors cannot alter or fail the native CPTR request.
+- Strict UNKNOWN governance resolves to DENY.
+- Registry, routing, delegation, and capabilities derive from one canonical source of truth.
+- High-risk capabilities exist only as contracts and are not executable in this milestone.
+- No OpenCode SDK/plugin runtime dependency is introduced.
+- No Phase 3 durable or mutating execution path exists.
+- Phase 3 design identifies the existing CPTR execution primitive that SubagentExecutionPort will reuse.
+- Phase 3 specifies intent-before-mutation, logical operation IDs, separate attempt IDs, OUTCOME_UNKNOWN reconciliation, and MANUAL_REVIEW_REQUIRED for unreconcilable operations.
+- Existing CPTR baseline failures are distinguished from regressions rather than suppressed.
+- Disabling FlowDeck after this change leaves normal CPTR behavior functionally unchanged.
+Recommendation
+
+Approve Issue #1 and start implementation.
+
+I would not expand its scope any further. In particular, do not let the developer opportunistically implement database tables, FDX, ApprovalPort, coding agents, worktree mutation, or a FlowDeck dashboard because they are "already in the area."
+
+The correct closure for #1 is:
+
+contracts + registry + capability/governance + disabled fast path + shadow router + parity tests + Phase 3 design freeze.
+
+Then review the actual closure evidence before opening #2 — Durable Orchestration Engine.
