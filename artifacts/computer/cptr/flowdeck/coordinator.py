@@ -40,6 +40,13 @@ class CoordinatorPolicyError(RuntimeError):
     """Raised when controlled coordination cannot be authorized safely."""
 
 
+MANUAL_REVIEW_PROVIDER_MESSAGE = (
+    "The model provider was unavailable (authentication, timeout, or availability "
+    "failure). No completion was claimed. Check the provider connection and review "
+    "the workspace before retrying."
+)
+
+
 @dataclass(frozen=True)
 class CoordinatorRequest:
     request_key: str
@@ -450,8 +457,20 @@ async def run_heidi_coordinator(
                 return terminal
             await store.mark_attempt_unknown(attempt.id, error="coordinator child interrupted")
             await store.finish_step(child_step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
-            await store.orphan_run(run.id)
-            raise
+            await store.require_manual_review(
+                run.id, reason="model provider authentication, timeout, or availability failure"
+            )
+            children.append(
+                {"specialist": item.specialist_id, "status": "manual_review_required"}
+            )
+            return CoordinatorResult(
+                "manual_review_required",
+                run.id,
+                tuple(children),
+                tuple(outputs),
+                outcome="manual_review",
+                message=MANUAL_REVIEW_PROVIDER_MESSAGE,
+            )
     await consume_steering()
     build_result: dict[str, Any] | None = None
     if build_request and all(item["status"] == "succeeded" for item in children):
@@ -488,8 +507,21 @@ async def run_heidi_coordinator(
                 terminal = await cancelled_result()
                 if terminal:
                     return terminal
-                await store.orphan_run(run.id)
-                raise
+                await store.require_manual_review(
+                    run.id,
+                    reason="model provider authentication, timeout, or availability failure",
+                )
+                children.append(
+                    {"specialist": "build-agent", "status": "manual_review_required"}
+                )
+                return CoordinatorResult(
+                    "manual_review_required",
+                    run.id,
+                    tuple(children),
+                    tuple(outputs),
+                    outcome="manual_review",
+                    message=MANUAL_REVIEW_PROVIDER_MESSAGE,
+                )
             children.append({"specialist": "build-agent", "status": build_result["status"]})
     if any(item["status"] == "failed" for item in children):
         status = RunStatus.FAILED

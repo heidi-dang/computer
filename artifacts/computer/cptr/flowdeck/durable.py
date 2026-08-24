@@ -935,6 +935,62 @@ class DurableFlowDeck:
 
         await self._transaction(operation)
 
+    async def require_manual_review(
+        self, run_id: str, *, reason: str, now: int | None = None
+    ) -> None:
+        """Close an interrupted run without converting uncertain work to success."""
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(
+                run.status,
+                {
+                    RunStatus.PENDING.value,
+                    RunStatus.RUNNING.value,
+                    RunStatus.RECOVERING.value,
+                },
+            )
+            operations = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckLogicalOperation).where(
+                            FlowDeckLogicalOperation.run_id == run_id
+                        )
+                    )
+                ).all()
+            )
+            for item in operations:
+                if item.status in {
+                    OperationStatus.INTENT_RECORDED.value,
+                    OperationStatus.RUNNING.value,
+                    OperationStatus.OUTCOME_UNKNOWN.value,
+                }:
+                    item.status = OperationStatus.MANUAL_REVIEW_REQUIRED.value
+                    item.updated_at = now
+            steps = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckStep).where(FlowDeckStep.run_id == run_id)
+                    )
+                ).all()
+            )
+            for step in steps:
+                if step.status in {StepStatus.PENDING.value, StepStatus.RUNNING.value}:
+                    step.status = StepStatus.MANUAL_REVIEW_REQUIRED.value
+                    step.updated_at = now
+            run.status = RunStatus.MANUAL_REVIEW_REQUIRED.value
+            run.updated_at = now
+            await self._event(
+                db,
+                run_id,
+                "RUN_MANUAL_REVIEW",
+                {"status": RunStatus.MANUAL_REVIEW_REQUIRED.value, "reason": reason},
+                now,
+            )
+
+        await self._transaction(operation)
+
     async def acquire_workspace_lease(
         self,
         *,

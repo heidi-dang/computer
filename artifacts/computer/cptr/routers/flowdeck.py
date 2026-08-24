@@ -260,17 +260,29 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                 content = result.message or (
                     "Heidi completed the FlowDeck orchestration."
                     if result.status == "succeeded"
-                    else ""
+                    else "FlowDeck requires manual review before completion."
                 )
+                terminal_result = result.status in {
+                    "succeeded",
+                    "failed",
+                    "cancelled",
+                    "manual_review",
+                    "manual_review_required",
+                }
+                if terminal_result:
+                    chat_meta = dict(chat.meta or {})
+                    chat_meta["flowdeck_run_id"] = result.run_id
+                    chat_meta["flowdeck_status"] = result.status
+                    await Chat.update_meta(chat.id, chat_meta, now_ms())
                 await ChatMessage.update(
                     assistant_message.id,
-                    content=content,
-                    done=True,
+                    **({"content": content, "done": True} if terminal_result else {}),
                     meta={
                         "agent": "heidi",
                         "flowdeck": True,
                         "flowdeck_run_id": result.run_id,
                         "outcome": result.outcome,
+                        **({"flowdeck_status": result.status} if terminal_result else {}),
                     },
                 )
                 await export_chat_to_file(request, chat.id)

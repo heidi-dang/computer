@@ -20,6 +20,11 @@
 
 	const isTerminal = $derived(terminalStatuses.has(status.toLowerCase()));
 	const isActive = $derived(!isTerminal && ['preparing', 'active', 'planning', 'verifying'].includes(status.toLowerCase()));
+const recoveryMessage = $derived(
+status.toLowerCase() === 'manual_review_required'
+? 'The model provider was unavailable. Check the provider connection and review the workspace before retrying. No completion was claimed.'
+: ''
+);
 
 	const label = $derived.by(() => {
 		switch (status.toLowerCase()) {
@@ -65,6 +70,9 @@
 			<span class="flowdeck-status-run" title={runId}>run {runId.slice(0, 8)}</span>
 		{/if}
 	</div>
+{#if recoveryMessage}
+<p class="flowdeck-status-recovery">{recoveryMessage}</p>
+{/if}
 {/if}
 
 <style>
@@ -108,6 +116,14 @@
 	.flowdeck-status-strip.is-terminal {
 		color: color-mix(in oklab, var(--app-fg) 52%, transparent);
 	}
+
+.flowdeck-status-recovery {
+margin: -0.1rem 0 0.35rem 1.15rem;
+max-width: 42rem;
+color: color-mix(in oklab, var(--app-fg) 58%, transparent);
+font-size: 0.6875rem;
+line-height: 1.35;
+}
 
 	@media (max-width: 430px) {
 		.flowdeck-status-strip {
