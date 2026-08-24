@@ -1,0 +1,1229 @@
+# Make Heidi Better Than Replit — Priority Build Specification
+
+The goal is not to copy Replit feature-for-feature.
+
+The target is:
+
+**Heidi should feel as easy as Replit for building an app, while being substantially stronger at autonomous engineering, debugging, verification, parallel execution, and user control.**
+
+Core architecture:
+
+```text
+User
+  ↓
+Heidi
+  ↓
+FlowDeck orchestration
+  ↓
+Build Agent
+  ↓
+CPTR execution engine
+  ├── CodeAct
+  ├── native tools
+  ├── browser
+  ├── terminal/process manager
+  ├── database
+  └── preview
+  ↓
+Independent verification
+```
+
+Heidi remains the coordinator.
+
+Build Agent performs implementation.
+
+CPTR remains the sole execution authority.
+
+FlowDeck remains orchestration, lifecycle, cancellation, evidence, and verification authority.
+
+---
+
+# 1. Idea → Working App
+
+## Target
+
+Heidi must be better than Replit at taking:
+
+```text
+"Build me an inventory management system."
+```
+
+and autonomously producing:
+
+```text
+requirements
+→ architecture
+→ database
+→ backend
+→ frontend
+→ authentication
+→ tests
+→ live preview
+→ browser verification
+→ production build
+→ verified result
+```
+
+The user should not need to manually choose frameworks, create folders, configure a dev server, wire a database, or repeatedly tell Heidi what to do next.
+
+## Implement `/build`
+
+When Heidi is selected:
+
+```text
+/build Build me an inventory management system
+```
+
+should trigger Build mode.
+
+Flow:
+
+```text
+Heidi
+  ↓
+Understand product intent
+  ↓
+Generate implementation contract
+  ↓
+Inspect existing workspace
+  ↓
+Choose architecture
+  ↓
+Create Build DAG
+  ↓
+Execute Build tasks
+  ↓
+Run application
+  ↓
+Open preview
+  ↓
+Browser-test application
+  ↓
+Repair defects
+  ↓
+Verify requirements
+  ↓
+Return working app
+```
+
+## Product Brief
+
+Before implementation, Heidi creates a lightweight internal product specification:
+
+```text
+Objective
+User flows
+Required screens
+Data model
+API requirements
+Authentication
+Responsive requirements
+Acceptance criteria
+```
+
+Do not ask the user dozens of questions if sensible defaults can be safely inferred.
+
+Only ask when a decision materially changes the product.
+
+## Smart defaults
+
+Heidi should detect the existing stack when a repository already exists.
+
+For a new application, use configurable preferred stacks rather than model improvisation.
+
+Example:
+
+```text
+Frontend preference
+Backend preference
+Database preference
+Authentication preference
+Package manager
+Testing framework
+Deployment target
+```
+
+Never hardcode these globally.
+
+## App completion contract
+
+Before building, define what "working" means.
+
+Example:
+
+```text
+✓ app starts
+✓ authentication works
+✓ dashboard loads
+✓ database persists data
+✓ create/edit/delete works
+✓ mobile layout works
+✓ production build passes
+✓ no browser console errors
+```
+
+Heidi cannot mark the job complete until the verifier checks the contract.
+
+---
+
+# 2. Autonomous Coding
+
+## Target
+
+The Build Agent should be capable of working for long periods without requiring repeated prompts.
+
+It should execute:
+
+```text
+inspect
+→ reason
+→ modify
+→ run
+→ observe
+→ repair
+→ verify
+```
+
+until the objective is satisfied or a genuine user decision/approval is required.
+
+## CodeAct as the primary Build execution mode
+
+Use CodeAct for multi-step coding work.
+
+Instead of:
+
+```text
+tool call
+→ model
+→ tool call
+→ model
+→ tool call
+→ model
+```
+
+prefer:
+
+```text
+model
+→ executable CodeAct program
+→ multiple qualified CPTR operations
+→ result
+```
+
+Persistent REPL state should survive across execution cycles within the same physical attempt.
+
+This reduces:
+
+```text
+token usage
+model round trips
+context pollution
+latency
+```
+
+The REPL remains sandboxed and has no authority beyond CPTR's qualified capabilities.
+
+## Structured coding capabilities
+
+Build Agent should receive APIs such as:
+
+```text
+code.search
+code.symbols
+code.references
+code.definition
+
+files.read
+files.create
+files.patch
+files.move
+files.delete
+
+tests.run
+build.run
+
+browser.inspect
+browser.screenshot
+browser.console
+browser.network
+
+runtime.start
+runtime.stop
+runtime.logs
+```
+
+Prefer patches and symbol-aware edits over whole-file rewrites.
+
+## Autonomous repair loop
+
+After every meaningful implementation:
+
+```text
+change
+→ typecheck
+→ tests
+→ build
+→ runtime
+→ browser
+```
+
+Failure:
+
+```text
+observe evidence
+→ identify cause
+→ repair
+→ rerun exact failed verification
+```
+
+Do not pile more code on top of unexplained failures.
+
+---
+
+# 3. Parallel Build Execution
+
+## Target
+
+Heidi should outperform Replit by combining safe parallelism with stronger authority and verification.
+
+Large tasks should become dependency-aware DAGs.
+
+Example:
+
+```text
+                    Repository map
+                          │
+                  Architecture plan
+                          │
+          ┌───────────────┼───────────────┐
+          ↓               ↓               ↓
+      Backend          Frontend       Database
+          │               │               │
+          └───────────────┼───────────────┘
+                          ↓
+                     Integration
+                          ↓
+                       Tester
+                          ↓
+                      Reviewer
+```
+
+## Isolated Build worktrees
+
+Every parallel mutation task must work in an isolated Git worktree.
+
+Example:
+
+```text
+main
+├── build/backend-01
+├── build/frontend-01
+├── build/database-01
+└── build/testing-01
+```
+
+No two mutation agents should freely edit the same canonical workspace concurrently.
+
+## Parallelize read-only work aggressively
+
+Safe parallel tasks:
+
+```text
+Mapper
+Researcher
+Architect
+Security Auditor
+Dependency analysis
+Test discovery
+Browser observation
+```
+
+These should run concurrently whenever dependencies allow.
+
+## Mutation scheduling
+
+Mutation tasks may run concurrently only when their file/ownership boundaries are proven non-conflicting.
+
+Otherwise FlowDeck serializes them.
+
+## Merge specialist
+
+Before combining independent Build tasks:
+
+```text
+compare common base
+→ inspect both diffs
+→ detect overlapping changes
+→ resolve conflicts
+→ run verification
+→ integrate
+```
+
+Never use blind automatic merge as completion evidence.
+
+## Dynamic DAG replanning
+
+If:
+
+```text
+Frontend completed
+Backend failed
+```
+
+Heidi should replan only the affected branch.
+
+Do not restart the whole job.
+
+---
+
+# 4. Root-Cause Engineering
+
+This should become one of Heidi's strongest advantages over Replit.
+
+## Primary rule
+
+**Never fix a symptom until the underlying failure path has been traced.**
+
+Forbidden pattern:
+
+```text
+error
+→ add fallback
+→ add retry
+→ add second state
+→ add special case
+→ original bug still exists
+```
+
+Required pattern:
+
+```text
+symptom
+→ reproduce
+→ trace
+→ determine authoritative state
+→ isolate failing boundary
+→ identify root cause
+→ minimal repair
+→ regression test
+→ full verification
+```
+
+## Root-Cause Debugger
+
+Create a dedicated debugging workflow.
+
+```text
+User:
+/debug steering gives Bad Gateway
+```
+
+Heidi performs:
+
+```text
+1. reproduce failure
+2. capture request identity
+3. inspect frontend request
+4. inspect proxy
+5. inspect API route
+6. inspect service
+7. inspect database state
+8. inspect lifecycle transition
+9. inspect child execution
+10. correlate timestamps
+11. identify first incorrect state
+12. fix that state
+```
+
+## Evidence graph
+
+For every defect, construct:
+
+```text
+Observed symptom
+    ↓
+Request/event
+    ↓
+Responsible component
+    ↓
+State transition
+    ↓
+Incorrect assumption/state
+    ↓
+Root cause
+```
+
+The agent should be able to report:
+
+```text
+Symptom:
+502 Bad Gateway
+
+Immediate failure:
+LifecycleError escaped route handler
+
+Why:
+late child SUCCEEDED transition attempted after parent CANCELLED
+
+Root cause:
+child completion path lacked parent terminal-state fencing
+
+Repair:
+reject late child transition before lifecycle mutation
+
+Regression:
+cancel child while provider completion races
+```
+
+This is much stronger than "I changed several things and it works now."
+
+## No speculative patch rule
+
+If the cause is unknown:
+
+```text
+UNKNOWN
+```
+
+and continue investigation.
+
+Do not start editing just because a probable cause exists.
+
+## Differential debugging
+
+When a feature previously worked:
+
+```text
+known-good SHA
+vs
+current SHA
+```
+
+Heidi should automatically inspect:
+
+```text
+relevant diff
+changed dependencies
+changed config
+changed schema
+changed runtime behavior
+```
+
+## Request tracing
+
+Introduce correlation IDs across:
+
+```text
+frontend
+→ API
+→ FlowDeck
+→ child task
+→ CPTR execution
+→ tool
+→ DB
+→ Socket.IO
+```
+
+One bug should be traceable as one lineage.
+
+## State-machine inspection
+
+Lifecycle bugs should be diagnosed against explicit state machines.
+
+For example:
+
+```text
+PENDING
+→ RUNNING
+→ SUCCEEDED
+
+PENDING
+→ RUNNING
+→ CANCELLED
+
+RUNNING
+→ OUTCOME_UNKNOWN
+```
+
+Illegal transitions should be captured as structured evidence.
+
+## Root-cause acceptance requirement
+
+A debugging task cannot be marked complete without:
+
+```text
+reproduction before fix
+root cause identified
+minimal fix
+regression reproducer now passing
+no fallback masking original failure
+relevant full regression green
+```
+
+---
+
+# 5. Deep Audit Mode
+
+Add:
+
+```text
+/audit
+```
+
+This should be more rigorous than a normal code review.
+
+## Audit dimensions
+
+```text
+Architecture
+Correctness
+Security
+Concurrency
+Persistence
+Lifecycle
+Cancellation
+Recovery
+Performance
+Frontend/backend contracts
+API behavior
+Realtime behavior
+Database integrity
+Tests
+Deployment assumptions
+Dead code
+Duplicated authority
+Error handling
+Observability
+```
+
+## Function-level tracing
+
+For critical features:
+
+```text
+UI action
+→ frontend function
+→ API
+→ service
+→ persistence
+→ background execution
+→ event emission
+→ frontend reconciliation
+```
+
+Audit the entire path.
+
+## Authority audit
+
+Heidi specifically checks:
+
+```text
+Who owns this state?
+Who is allowed to mutate it?
+Is there more than one source of truth?
+Can stale child state overwrite parent state?
+Can UI state become authoritative?
+Can retry duplicate side effects?
+```
+
+## Bug hunting
+
+Audit should actively attempt to find:
+
+```text
+race conditions
+TOCTOU
+double execution
+orphaned processes
+late events
+lost updates
+broken idempotency
+reconnect duplication
+stale caches
+incorrect error conversion
+silent fallbacks
+```
+
+not merely inspect code style.
+
+---
+
+# 6. Visual Design
+
+Replit is currently far ahead here.
+
+Heidi should eventually surpass it with a dedicated visual-design pipeline.
+
+## Design Agent
+
+Add:
+
+```text
+Designer
+```
+
+under Heidi.
+
+Responsibilities:
+
+```text
+visual hierarchy
+layout
+typography
+spacing
+responsive behavior
+motion
+accessibility
+component consistency
+design tokens
+```
+
+## `/design`
+
+Support:
+
+```text
+/design Create a premium dashboard design
+```
+
+and:
+
+```text
+/build
+```
+
+can automatically invoke Designer when UI work is substantial.
+
+## Multiple variants
+
+Before committing to a major design:
+
+```text
+Variant A — Minimal
+Variant B — Modern SaaS
+Variant C — Dense professional
+```
+
+Render actual previews.
+
+Allow:
+
+```text
+Apply A
+Mix A layout + C navigation
+```
+
+## Screenshot replication
+
+User uploads reference UI:
+
+```text
+image
+→ visual analysis
+→ layout reconstruction
+→ implementation
+→ screenshot comparison
+→ repair
+```
+
+Use objective screenshot-difference measurements where practical.
+
+## Design system extraction
+
+If an existing project exists:
+
+```text
+scan components
+→ colors
+→ typography
+→ radius
+→ spacing
+→ button styles
+→ cards
+→ forms
+```
+
+Create a workspace design model before making new components.
+
+Do not introduce visually inconsistent UI.
+
+## Responsive-first validation
+
+Automatically validate:
+
+```text
+320
+360
+375
+390
+414
+430
+768
+1024
+1280+
+```
+
+Detect:
+
+```text
+horizontal overflow
+clipped content
+unreachable controls
+bad wrapping
+composer displacement
+unsafe fixed positioning
+keyboard overlap
+```
+
+---
+
+# 7. Live Preview
+
+Build mode should include first-class preview infrastructure.
+
+## Managed runtime
+
+CPTR should automatically:
+
+```text
+discover project start command
+start application
+detect listening port
+health check
+maintain process
+capture logs
+restart when appropriate
+```
+
+## Preview panel
+
+Desktop:
+
+```text
+┌──────────────────────┬────────────────────────┐
+│ Heidi / Build        │ Preview                │
+│                      │                        │
+│ transcript           │ live application       │
+│ tools                │                        │
+│ steering             │                        │
+└──────────────────────┴────────────────────────┘
+```
+
+Mobile:
+
+```text
+Chat | Preview | Changes
+```
+
+## Automatic refresh
+
+File change:
+
+```text
+Build Agent modifies UI
+→ app reloads
+→ browser state updates
+→ verifier checks new page
+```
+
+## Preview states
+
+Display truthfully:
+
+```text
+Starting
+Ready
+Reloading
+Build failed
+Runtime crashed
+Disconnected
+```
+
+No infinite generic spinner.
+
+## Multi-preview
+
+Allow:
+
+```text
+Desktop
+Tablet
+Mobile
+```
+
+simultaneously later.
+
+---
+
+# 8. Browser Self-Testing
+
+This should become mandatory for visual/web Build tasks.
+
+## Browser Agent
+
+CPTR needs qualified browser actions:
+
+```text
+navigate
+click
+type
+select
+scroll
+inspect DOM
+read accessibility tree
+capture screenshot
+read console
+read network
+inspect cookies/storage where permitted
+```
+
+## Automatic smoke test
+
+After Build Agent says implementation is ready:
+
+```text
+launch browser
+→ open app
+→ interact with primary flow
+→ inspect console
+→ inspect failed network requests
+→ verify expected visible result
+```
+
+## Visual testing
+
+Heidi should inspect:
+
+```text
+desktop layout
+mobile layout
+loading states
+empty states
+errors
+dialogs
+navigation
+forms
+```
+
+## Console gate
+
+Production completion should normally reject:
+
+```text
+uncaught exception
+unhandled rejection
+repeated 500
+broken resource
+fatal hydration error
+```
+
+## Network gate
+
+Detect:
+
+```text
+401
+403
+404
+409
+422
+500
+502
+503
+WebSocket failure
+SSE disconnect loops
+```
+
+and automatically root-cause them.
+
+## Interaction exploration
+
+For unfamiliar apps:
+
+```text
+discover buttons
+discover forms
+discover navigation
+build interaction graph
+```
+
+Then cover important paths.
+
+## Browser repair loop
+
+```text
+browser failure
+→ trace frontend/backend path
+→ root cause
+→ repair
+→ reload
+→ rerun same interaction
+```
+
+This combines browser testing with Heidi's root-cause engine.
+
+---
+
+# 9. Built-In Database
+
+Build Agent should be able to provision and manage application databases.
+
+Initial targets:
+
+```text
+PostgreSQL
+SQLite
+```
+
+Later:
+
+```text
+MySQL
+Redis
+external managed databases
+```
+
+## Database Agent capabilities
+
+```text
+database.inspect
+database.create
+database.migrate
+database.seed
+database.query
+database.snapshot
+database.restore
+database.verify
+```
+
+## Database changes require verification
+
+Migration:
+
+```text
+snapshot
+→ apply migration
+→ inspect schema
+→ run application tests
+→ confirm data integrity
+```
+
+Failure:
+
+```text
+rollback/reconcile
+```
+
+## Schema intelligence
+
+Heidi should understand:
+
+```text
+tables
+relationships
+indexes
+constraints
+migration history
+query usage
+```
+
+and detect:
+
+```text
+missing indexes
+N+1 patterns
+unsafe nullable changes
+destructive migration
+schema drift
+```
+
+## Database preview
+
+Build UI should provide:
+
+```text
+Tables
+Rows
+Schema
+Migrations
+Queries
+```
+
+without requiring terminal access.
+
+---
+
+# 10. Built-In Authentication
+
+Authentication should be as easy as:
+
+```text
+/build add login with Google and email
+```
+
+but avoid CPTR lock-in.
+
+## Auth provider adapters
+
+Support configurable providers such as:
+
+```text
+Auth.js
+Clerk
+Supabase Auth
+Firebase Auth
+custom OAuth/OIDC
+application-native auth
+```
+
+## Heidi chooses based on project context
+
+Existing project:
+
+```text
+reuse current provider
+```
+
+New project:
+
+```text
+use configured preferred provider
+```
+
+Never silently replace an existing auth architecture.
+
+## Auth verification
+
+Automatically test:
+
+```text
+sign up
+sign in
+sign out
+protected route
+expired session
+unauthenticated API
+authorized API
+role restrictions
+reload persistence
+```
+
+## Security audit
+
+Check:
+
+```text
+token storage
+cookies
+CSRF
+CORS
+session expiration
+redirect validation
+authorization boundary
+password handling
+OAuth callback security
+```
+
+Authentication being functional is not enough; it must be verified.
+
+---
+
+# 11. Unified Build Experience
+
+The user experience should remain simple despite all this architecture.
+
+Example:
+
+```text
+Heidi selected
+
+/build Build a CRM for my business
+```
+
+UI:
+
+```text
+Heidi · Build
+Planning…
+
+Heidi → Mapper
+Inspecting workspace
+
+Heidi → Designer
+Preparing interface
+
+Heidi → Build Agent
+Building application
+
+Read package.json
+Edit schema
+Create dashboard
+Run migration
+Start application
+
+Heidi → Browser
+Testing application
+
+Heidi → Tester
+Running verification
+
+Heidi → Reviewer
+Reviewing changes
+
+✓ Verified
+```
+
+The user sees native CPTR transcript components.
+
+Do not expose an internal FlowDeck orchestration dashboard unless specifically requested.
+
+---
+
+# 12. Final Competitive Target
+
+| Area | Replit target | Heidi target |
+|---|---:|---:|
+| Idea → working app | 10 | **10+** |
+| Autonomous coding | 9.5 | **10** |
+| Parallel build execution | 10 | **10** |
+| Root-cause debugging | 8 | **10** |
+| Deep auditing | 8 | **10** |
+| Visual design | 10 | **10** |
+| Live preview | 10 | **10** |
+| Browser self-testing | 9.5 | **10** |
+| Built-in database | 10 | **10** |
+| Built-in authentication | 10 | **10** |
+| Verification authority | 8 | **10** |
+| Cancellation/recovery | 8.5 | **10** |
+| Provider independence | 6 | **10** |
+| Self-hosting | 4 | **10** |
+| Debug transparency | 7 | **10** |
+
+The objective is:
+
+> **Replit-level simplicity with substantially stronger engineering discipline.**
+
+Heidi should not simply generate more code when something goes wrong.
+
+Its defining advantage should be:
+
+```text
+UNDERSTAND
+→ TRACE
+→ PROVE ROOT CAUSE
+→ CHANGE
+→ TEST
+→ OBSERVE
+→ VERIFY
+```
+
+rather than:
+
+```text
+GUESS
+→ PATCH
+→ ADD FALLBACK
+→ ADD ANOTHER PATCH
+```
+
+That philosophy should apply to `/build`, `/debug`, `/audit`, and every specialist controlled by Heidi.
