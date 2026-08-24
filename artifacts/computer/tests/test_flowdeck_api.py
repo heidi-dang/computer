@@ -1,9 +1,11 @@
 import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from pydantic import ValidationError
 from starlette.requests import Request
 
@@ -13,6 +15,8 @@ from cptr.routers.flowdeck import (
     OrchestrationRequest,
     create_orchestration,
 )
+from cptr.models import Base
+from cptr.utils import db as db_module
 
 
 def request_with_key(key: str = "request-1234") -> Request:
@@ -31,6 +35,26 @@ def request_with_key(key: str = "request-1234") -> Request:
 
 
 class FlowDeckProductionApiTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.db_file = tempfile.NamedTemporaryFile(delete=False)
+        self.db_file.close()
+        self.engine = create_async_engine(
+            f"sqlite+aiosqlite:///{self.db_file.name}"
+        )
+        async with self.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
+        self.previous_engine = db_module._engine
+        self.previous_session_factory = db_module._async_session
+        db_module._engine = self.engine
+        db_module._async_session = self.session_factory
+
+    async def asyncTearDown(self):
+        db_module._engine = self.previous_engine
+        db_module._async_session = self.previous_session_factory
+        await self.engine.dispose()
+        os.unlink(self.db_file.name)
+
     def body(self):
         return OrchestrationRequest(workspace="/owned", objective="review the repository")
 
@@ -64,7 +88,16 @@ class FlowDeckProductionApiTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_authenticated_route_uses_server_model_and_only_coordinator(self):
-        fake_store = SimpleNamespace(session_factory=object())
+        fake_run = SimpleNamespace(
+            id="run-1",
+            status=RunStatus.PENDING.value,
+            request_key="request-1234",
+            workspace="/owned",
+        )
+        fake_store = SimpleNamespace(
+            session_factory=self.session_factory,
+            create_run=AsyncMock(return_value=(fake_run, True)),
+        )
         target = SimpleNamespace(
             kind="api",
             runtime_model="server-selected-model",
@@ -107,6 +140,8 @@ class FlowDeckProductionApiTests(unittest.IsolatedAsyncioTestCase):
             request.scope["app"] = SimpleNamespace(state=SimpleNamespace())
             response = await create_orchestration(request, self.body())
         self.assertEqual(response["run_id"], "run-1")
+        self.assertEqual(response["assistant_message"]["parent_id"], response["user_message"]["id"])
+        fake_store.create_run.assert_awaited_once()
         coordinator.assert_awaited_once()
         coordinator_request = coordinator.await_args.args[0]
         self.assertEqual(coordinator_request.model, "server-selected-model")
