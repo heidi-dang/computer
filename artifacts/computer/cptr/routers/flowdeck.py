@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -21,6 +22,9 @@ from cptr.flowdeck.coordinator import (
     run_heidi_coordinator,
 )
 from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
+from cptr.models import Chat, ChatMessage
+from cptr.utils.chat_export import export_chat_to_file
+from cptr.utils.config import now_ms
 from cptr.routers.gateway import _authenticate, _resolve_model
 from cptr.utils.config import check_access
 from cptr.utils.db import get_session_factory
@@ -36,6 +40,21 @@ class OrchestrationRequest(BaseModel):
     workspace: str = Field(min_length=1, max_length=4096)
     objective: str = Field(min_length=1, max_length=20_000)
     metadata: dict[str, Any] | None = None
+
+
+def _message_dict(message: ChatMessage) -> dict[str, Any]:
+    return {
+        "id": message.id,
+        "parent_id": message.parent_id,
+        "role": message.role,
+        "content": message.content,
+        "model": message.model,
+        "done": message.done,
+        "output": message.output,
+        "usage": message.usage,
+        "meta": message.meta,
+        "created_at": message.created_at,
+    }
 
 
 def _request_key(request: Request) -> str:
@@ -139,29 +158,101 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             target, _ = await _resolve_model(request, workspace, request.app.state)
         if target.kind != "api":
             raise HTTPException(503, "the CPTR API model is unavailable")
-        result = await run_heidi_coordinator(
-            CoordinatorRequest(
-                request_key=request_key,
-                task=body.objective,
-                workspace=workspace,
-                model=target.runtime_model,
-                connection=target.connection,
-                parent_chat_id="flowdeck-production",
-            ),
-            authenticated_request=request,
-            store=store,
+        metadata = body.metadata or {}
+        chat_id = str(metadata.get("chat_id") or "").strip()
+        parent_id = str(metadata.get("parent_id") or "").strip() or None
+        chat = await Chat.get_by_id(chat_id) if chat_id else None
+        if chat and chat.user_id != user_id:
+            raise HTTPException(404, "chat not found")
+        if chat is None:
+            chat = await Chat.create(
+                user_id=user_id,
+                title=body.objective[:50].strip() or "New Chat",
+                meta={"workspace": workspace, "model_id": target.full_model_id},
+                created_at=now_ms(),
+            )
+        user_message = await ChatMessage.create(
+            chat_id=chat.id,
+            role="user",
+            content=body.objective,
+            parent_id=parent_id,
+            model=target.full_model_id,
+            meta={"agent": "heidi", "flowdeck": True},
+            created_at=now_ms(),
         )
+        assistant_message = await ChatMessage.create(
+            chat_id=chat.id,
+            role="assistant",
+            content="",
+            parent_id=user_message.id,
+            model=target.full_model_id,
+            done=False,
+            output=[],
+            meta={"agent": "heidi", "flowdeck": True},
+            created_at=now_ms(),
+        )
+        await Chat.update_current_message(chat.id, assistant_message.id, now_ms())
+        await export_chat_to_file(request, chat.id)
+
+        # Reserve the durable run before returning. The coordinator continues
+        # independently so the UI can render the persisted messages and begin
+        # receiving native CPTR events immediately.
+        run, _ = await store.create_run(
+            request_key=request_key,
+            owner=user_id,
+            workspace=workspace,
+            step_name="heidi-coordinator",
+        )
+
+        async def run_in_background() -> None:
+            try:
+                result = await run_heidi_coordinator(
+                    CoordinatorRequest(
+                        request_key=request_key,
+                        task=body.objective,
+                        workspace=workspace,
+                        model=target.runtime_model,
+                        connection=target.connection,
+                        parent_chat_id=chat.id,
+                        parent_message_id=assistant_message.id,
+                    ),
+                    authenticated_request=request,
+                    store=store,
+                )
+                content = result.message or (
+                    "Heidi completed the FlowDeck orchestration."
+                    if result.status == "succeeded"
+                    else ""
+                )
+                await ChatMessage.update(
+                    assistant_message.id,
+                    content=content,
+                    done=True,
+                    meta={
+                        "agent": "heidi",
+                        "flowdeck": True,
+                        "flowdeck_run_id": result.run_id,
+                        "outcome": result.outcome,
+                    },
+                )
+                await export_chat_to_file(request, chat.id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("FlowDeck background orchestration failed")
+
+        asyncio.create_task(run_in_background())
     except (AuthenticatedGatewayError, CoordinatorPolicyError) as exc:
         raise HTTPException(403, str(exc)) from exc
     except Exception as exc:
         logger.exception("FlowDeck model or orchestration execution failed")
         raise HTTPException(503, "FlowDeck could not reach the configured API model") from exc
     return {
-        "run_id": result.run_id,
-        "status": result.status,
-        "children": list(result.children),
-        "outcome": result.outcome,
-        **({"message": result.message} if result.message else {}),
+        "run_id": run.id,
+        "status": run.status.lower(),
+        "chat_id": chat.id,
+        "user_message": _message_dict(user_message),
+        "assistant_message": _message_dict(assistant_message),
     }
 
 
@@ -187,12 +278,19 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
 @router.post("/orchestrations/{run_id}/cancel")
 async def cancel_orchestration(request: Request, run_id: str, workspace: str):
     user_id, canonical, run = await _owned_run(request, run_id, workspace)
-    if run.status == RunStatus.CANCELLED.value:
-        return _safe_run(run)
     try:
-        cancelled = await DurableFlowDeck(get_session_factory()).cancel_run(
-            run_id=run.id, owner=user_id, workspace=canonical
+        cancelled = (
+            run
+            if run.status == RunStatus.CANCELLED.value
+            else await DurableFlowDeck(get_session_factory()).cancel_run(
+                run_id=run.id, owner=user_id, workspace=canonical
+            )
         )
     except Exception as exc:
         raise HTTPException(409, "orchestration cannot be cancelled in its current state") from exc
+    # Durable cancellation is authoritative, but CPTR also needs to stop the
+    # native child task that may currently be inside model/tool execution.
+    from cptr.utils.chat_task import cancel_flowdeck_tasks
+
+    await cancel_flowdeck_tasks(run.id)
     return _safe_run(cancelled)

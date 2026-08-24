@@ -38,6 +38,7 @@ class CoordinatorRequest:
     model: str
     connection: dict[str, Any]
     parent_chat_id: str
+    parent_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +289,7 @@ async def run_heidi_coordinator(
                     model=request.model,
                     connection=request.connection,
                     parent_chat_id=request.parent_chat_id,
+                    parent_message_id=request.parent_message_id,
                     parent_flowdeck_run_id=run.id,
                     check=item.check,
                     trusted_repository=True,

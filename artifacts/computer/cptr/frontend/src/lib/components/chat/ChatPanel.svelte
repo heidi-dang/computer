@@ -1280,6 +1280,7 @@
 		flowdeckClarification = '';
 		autoScroll = true;
 		const parentId = activePath.length ? activePath[activePath.length - 1].msg.id : null;
+		const wasNewChat = !chatId;
 		const userId = `heidi-user-${Date.now()}`;
 		const assistantId = `heidi-assistant-${Date.now()}`;
 		flowdeckMessageId = assistantId;
@@ -1320,6 +1321,28 @@
 				},
 				`chat-flowdeck-${crypto.randomUUID()}`
 			);
+			// Heidi messages are real CPTR rows. Replace the optimistic pair
+			// immediately so polling, reconnects, and loadChat all converge on
+			// the same durable IDs instead of losing the turn.
+			const durableUser = result.user_message as ChatMessageRow | undefined;
+			const durableAssistant = result.assistant_message as ChatMessageRow | undefined;
+			chatId = String(result.chat_id || chatId || '');
+			if (durableUser && durableAssistant) {
+				allMessages = [
+					...allMessages.filter((message) => message.id !== userId && message.id !== assistantId),
+					durableUser,
+					durableAssistant
+				];
+				flowdeckMessageId = durableAssistant.id;
+				currentMessageId = flowdeckMessageId;
+				// Socket.IO can deliver child activity before the orchestration
+				// POST resolves. Reapply the buffered lifecycle/native events to
+				// the durable assistant after replacing the optimistic IDs.
+				for (const event of flowdeckEvents) applyFlowDeckEventToMessage(event);
+				if (wasNewChat && tabId) {
+					updateTab(tabId, chatId, text.slice(0, 40) || $t('chat.fallbackTitle'));
+				}
+			}
 			flowdeckRunId = result.run_id || '';
 			if (Array.isArray(result.events)) {
 				mergeFlowDeckEvents(result.events);

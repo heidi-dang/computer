@@ -280,6 +280,11 @@ class DurableFlowDeck:
                 select(FlowDeckRun).where(FlowDeckRun.request_key == request_key)
             )
 
+    async def get_run(self, run_id: str) -> FlowDeckRun | None:
+        """Read a run by ID for internal lifecycle fencing."""
+        async with self.session_factory() as db:
+            return await db.get(FlowDeckRun, run_id)
+
     async def get_run_for_owner(
         self, *, run_id: str, owner: str, workspace: str
     ) -> FlowDeckRun | None:

@@ -371,6 +371,7 @@ def _apply_skills_create_prompt(
 _tasks: dict[str, asyncio.Task] = {}  # message_id → asyncio.Task
 _task_state: dict[str, dict] = {}  # message_id → {content, output}
 _task_chat: dict[str, str] = {}  # message_id → chat_id
+_task_flowdeck_parent: dict[str, str] = {}  # message_id → parent FlowDeck run
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
 
 
@@ -441,6 +442,20 @@ async def cancel_task(message_id: str) -> bool:
         task.cancel()
         return True
     return False
+
+
+async def cancel_flowdeck_tasks(run_id: str) -> int:
+    """Cancel every registered native CPTR task belonging to a FlowDeck run."""
+    task_ids = [
+        message_id
+        for message_id, parent in _task_flowdeck_parent.items()
+        if parent == run_id
+    ]
+    cancelled = 0
+    for message_id in task_ids:
+        if await cancel_task(message_id):
+            cancelled += 1
+    return cancelled
 
 
 def is_running(message_id: str) -> bool:
@@ -1426,6 +1441,7 @@ async def run_chat_task(
     specialist_role: str | None = None,
     flowdeck_run_id: str | None = None,
     flowdeck_parent_run_id: str | None = None,
+    flowdeck_parent_message_id: str | None = None,
 ):
     """Plain async function. Makes raw API calls in a loop."""
     if request is None:
@@ -1441,6 +1457,65 @@ async def run_chat_task(
 
     async def emit(**data):
         """Stream an output delta to the user."""
+        if flowdeck_parent_run_id:
+            # A cancelled parent is a hard boundary. Do not relay a late
+            # provider/tool event into the durable Heidi transcript.
+            try:
+                from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
+                from cptr.utils.db import get_session_factory
+
+                parent_run = await DurableFlowDeck(get_session_factory()).get_run(
+                    flowdeck_parent_run_id
+                )
+                if parent_run and parent_run.status == RunStatus.CANCELLED.value:
+                    return
+            except Exception:
+                # Lifecycle persistence must not take down the native loop;
+                # the durable coordinator remains the authority.
+                logger.debug("[task %s] parent lifecycle check failed", message_id[:8])
+        if flowdeck_parent_message_id:
+            # Mirror native child activity into the real Heidi assistant row.
+            # This is persistence only; the browser still renders the normal
+            # CPTR event stream and does not get a second transcript.
+            try:
+                parent = await ChatMessage.get_by_id(flowdeck_parent_message_id)
+                if parent and parent.done is False:
+                    parent_content = parent.content or ""
+                    parent_output = list(parent.output or [])
+                    if "delta" in data:
+                        parent_content += str(data["delta"])
+                    item = data.get("output")
+                    if isinstance(item, dict):
+                        identity = item.get("id") or item.get("call_id")
+                        existing = next(
+                            (
+                                index
+                                for index, current in enumerate(parent_output)
+                                if identity
+                                and (
+                                    current.get("id") == identity
+                                    or current.get("call_id") == identity
+                                )
+                            ),
+                            None,
+                        )
+                        if existing is None:
+                            parent_output.append(item)
+                        else:
+                            parent_output[existing] = item
+                    if "delta" in data or isinstance(item, dict):
+                        await ChatMessage.update(
+                            flowdeck_parent_message_id,
+                            content=parent_content,
+                            output=parent_output,
+                            done=False,
+                        )
+            except Exception:
+                logger.debug(
+                    "[task %s] FlowDeck parent persistence failed",
+                    message_id[:8],
+                    exc_info=True,
+                )
         try:
             await emit_to_user(
                 user_id,
@@ -2956,6 +3031,7 @@ async def run_chat_task(
         _tasks.pop(message_id, None)
         _task_state.pop(message_id, None)
         _task_chat.pop(message_id, None)
+        _task_flowdeck_parent.pop(message_id, None)
         if chat_id not in get_active_chat_ids():
             try:
                 await Chat.touch(chat_id, now_ms())

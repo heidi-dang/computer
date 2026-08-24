@@ -2768,32 +2768,46 @@ async def _run_existing_subagent_chat(
     specialist_role: str | None = None,
     flowdeck_run_id: str | None = None,
     flowdeck_parent_run_id: str | None = None,
+    flowdeck_parent_message_id: str | None = None,
 ) -> str:
     """Run the agent loop for an already-created sub-agent chat."""
     from cptr.models import ChatMessage
     from cptr.utils.chat_task import run_chat_task
     from cptr.utils.model_targets import ApiModelTarget
 
-    await run_chat_task(
-        None,
-        message_id=assistant_msg_id,
-        chat_id=chat_id,
-        user_id=user_id,
-        target=ApiModelTarget(
-            kind="api",
-            connection=connection,
-            runtime_model=model,
-            full_model_id=model,
-        ),
-        workspace=workspace,
-        allowed_tool_names=allowed_tool_names,
-        tool_guard=tool_guard,
-        before_mutation=before_mutation,
-        after_mutation=after_mutation,
-        specialist_role=specialist_role,
-        flowdeck_run_id=flowdeck_run_id,
-        flowdeck_parent_run_id=flowdeck_parent_run_id,
+    task = asyncio.create_task(
+        run_chat_task(
+            None,
+            message_id=assistant_msg_id,
+            chat_id=chat_id,
+            user_id=user_id,
+            target=ApiModelTarget(
+                kind="api",
+                connection=connection,
+                runtime_model=model,
+                full_model_id=model,
+            ),
+            workspace=workspace,
+            allowed_tool_names=allowed_tool_names,
+            tool_guard=tool_guard,
+            before_mutation=before_mutation,
+            after_mutation=after_mutation,
+            specialist_role=specialist_role,
+            flowdeck_run_id=flowdeck_run_id,
+            flowdeck_parent_run_id=flowdeck_parent_run_id,
+            flowdeck_parent_message_id=flowdeck_parent_message_id,
+        )
     )
+    # Unlike the ordinary chat route, specialists historically awaited the
+    # loop directly and therefore were invisible to cancellation. Register
+    # them in the same CPTR task registry so Stop can cancel model/tool work.
+    from cptr.utils.chat_task import _task_chat, _task_flowdeck_parent, _tasks
+
+    _tasks[assistant_msg_id] = task
+    _task_chat[assistant_msg_id] = chat_id
+    if flowdeck_parent_run_id:
+        _task_flowdeck_parent[assistant_msg_id] = flowdeck_parent_run_id
+    await task
 
     result_msg = await ChatMessage.get_by_id(assistant_msg_id)
     output = result_msg.content if result_msg else "Sub-agent produced no output."

@@ -94,6 +94,7 @@ class CodingRequest:
     user_id: str
     task: str
     request_key: str
+    parent_message_id: str | None = None
 
 
 def coding_tool_names(role: str) -> frozenset[str]:
@@ -193,6 +194,7 @@ async def _native_run_coding_specialist(
     model: str,
     connection: dict[str, Any],
     parent_chat_id: str,
+    parent_message_id: str | None = None,
     parent_flowdeck_run_id: str | None = None,
     store: DurableFlowDeck | None = None,
 ) -> str:
@@ -409,6 +411,7 @@ async def _native_run_coding_specialist(
             specialist_role=request.role,
 			flowdeck_run_id=run.id,
             flowdeck_parent_run_id=parent_flowdeck_run_id,
+            flowdeck_parent_message_id=parent_message_id,
         )
     except BaseException:
         await store.mark_attempt_unknown(root_attempt.id, error="coding session interrupted")
@@ -470,6 +473,7 @@ async def _native_run_browser_debugger(
     model: str,
     connection: dict[str, Any],
     parent_chat_id: str,
+    parent_message_id: str | None = None,
     parent_flowdeck_run_id: str | None = None,
     store: DurableFlowDeck | None = None,
 ) -> str:
@@ -548,6 +552,7 @@ async def _native_run_browser_debugger(
             specialist_role=request.role,
 			flowdeck_run_id=run.id,
             flowdeck_parent_run_id=parent_flowdeck_run_id,
+            flowdeck_parent_message_id=parent_message_id,
         )
     except BaseException:
         await store.mark_attempt_unknown(attempt.id)
