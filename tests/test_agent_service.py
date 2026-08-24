@@ -338,6 +338,51 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
             any(call.kwargs.get("status") == "FAILED" for call in update.await_args_list)
         )
 
+    async def test_control_interrupt_is_not_classified_as_restart(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-control-race",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="continue the assigned work",
+            model_id="model-1",
+            output="baseline",
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        message = SimpleNamespace(
+            id="message-1",
+            chat_id="chat-1",
+            done=False,
+            content="baseline",
+            output=[],
+            meta={"interrupted_for_control": True},
+        )
+
+        class Store:
+            async def get(self, task_id):
+                return task
+
+            async def has_pending_control(self, task_id):
+                return True
+
+            async def update(self, *args, **kwargs):
+                raise AssertionError("control interruption must not be finalized as restart")
+
+        service.store = Store()
+        with (
+            patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
+            patch("cptr.utils.chat_task.is_running", return_value=False),
+        ):
+            result = await service.get_task("task-control-race", user_id="user-1")
+
+        self.assertEqual(result["status"], "RUNNING")
+        self.assertNotIn("interrupted by CPTR restart", str(result.get("error")))
+
     async def test_non_git_diff_returns_bounded_diagnostic(self):
         service = AgentService()
         workspace = SimpleNamespace(id="workspace-1", user_id="user-1", path="/disposable/non-git")

@@ -61,6 +61,9 @@ _BEARER_RE = re.compile(r"\bBearer\s+[A-Za-z0-9._~+/=-]{8,}", re.IGNORECASE)
 _KNOWN_TOKEN_RE = re.compile(
     r"\b(?:sk-(?:proj-)?[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9_]{8,}|AIza[A-Za-z0-9_-]{20,}|eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})\b"
 )
+_EXTERNAL_PATH_RE = re.compile(
+    r"(?<![\w:])/(?:home|Users|tmp|var|opt|srv|private|workspace)(?:/[^\s\"'`<>]+)+"
+)
 
 
 def _key_is_sensitive(key: Any) -> bool:
@@ -93,6 +96,11 @@ def redact_text(value: str) -> str:
     return text
 
 
+def redact_external_text(value: str) -> str:
+    """Redact secrets and host filesystem paths at an external API boundary."""
+    return _EXTERNAL_PATH_RE.sub("<workspace-path>", redact_text(value))
+
+
 def redact_sensitive(value: Any) -> Any:
     """Return a recursively redacted, JSON-compatible copy of ``value``."""
     if hasattr(value, "model_dump"):
@@ -116,4 +124,17 @@ def redact_sensitive(value: Any) -> Any:
     return value
 
 
-__all__ = ["REDACTED", "redact_sensitive", "redact_text"]
+def redact_external(value: Any) -> Any:
+    """Recursively apply secret and host-path redaction to returned data."""
+    if isinstance(value, dict):
+        return {key: redact_external(item) for key, item in redact_sensitive(value).items()}
+    if isinstance(value, list):
+        return [redact_external(item) for item in redact_sensitive(value)]
+    if isinstance(value, tuple):
+        return [redact_external(item) for item in redact_sensitive(value)]
+    if isinstance(value, str):
+        return redact_external_text(value)
+    return value
+
+
+__all__ = ["REDACTED", "redact_external", "redact_external_text", "redact_sensitive", "redact_text"]

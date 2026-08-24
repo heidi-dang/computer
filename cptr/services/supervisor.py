@@ -52,6 +52,7 @@ TERMINAL_TASK_STATUSES = {"COMPLETE", "COMPLETED", "SUCCEEDED", "FAILED", "ERROR
 APPROVAL_PATTERNS = (
     re.compile(r"\bgit\s+push\b", re.IGNORECASE),
     re.compile(r"\bpush\s+(?:to\s+)?(?:github|gitlab|origin)\b", re.IGNORECASE),
+    re.compile(r"\bpush\b.*\bexternal\s+git\s+remote\b", re.IGNORECASE),
     re.compile(r"\b(?:production|prod)\s+deploy(?:ment)?\b", re.IGNORECASE),
     re.compile(r"\b(?:deploy|release)\b", re.IGNORECASE),
     re.compile(
@@ -1194,11 +1195,18 @@ class AutonomousSupervisor:
     def _requires_approval(assignment: str) -> bool:
         for pattern in APPROVAL_PATTERNS:
             for match in pattern.finditer(assignment):
-                prefix = assignment[max(0, match.start() - 60) : match.start()]
-                if re.search(
-                    r"(?:\bdo\s+not\b|\bdon['’]?t\b|\bnever\b|\bwithout\b)"
-                    r"(?:\s+\w+){0,4}\s*$",
-                    prefix,
+                prefix = assignment[max(0, match.start() - 120) : match.start()]
+                # Treat a comma-separated negative list as one prohibition,
+                # while keeping a later positive sentence actionable.
+                clause = re.split(r"[.!?;\n]", prefix)[-1]
+                negative = re.search(
+                    r"\b(?:do\s+not|don['’]?t|never|without)\b",
+                    clause,
+                    re.IGNORECASE,
+                )
+                if negative and not re.search(
+                    r"\b(?:but|except|however|then)\b",
+                    clause[negative.end() :],
                     re.IGNORECASE,
                 ):
                     continue

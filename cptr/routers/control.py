@@ -18,7 +18,7 @@ from cptr.services.control_store import SqlSupervisorStore
 from cptr.services.supervisor import AutonomousSupervisor, MonitorState, MonitorStatus
 from cptr.services.supervisor_director import LocalSupervisorDirector, OpenAISupervisorDirector
 from cptr.utils.db import get_db
-from cptr.utils.redaction import redact_sensitive
+from cptr.utils.redaction import redact_external, redact_sensitive
 
 router = APIRouter(prefix="/api/control/v1", tags=["control"])
 
@@ -184,8 +184,7 @@ async def list_workspaces(request: Request):
     workspaces = await Workspace.get_by_user(user_id)
     return {
         "workspaces": [
-            {"workspace_id": workspace.id, "name": workspace.name, "path": workspace.path}
-            for workspace in workspaces
+            {"workspace_id": workspace.id, "name": workspace.name} for workspace in workspaces
         ]
     }
 
@@ -194,7 +193,7 @@ async def list_workspaces(request: Request):
 async def get_workspace(request: Request, workspace_id: str):
     user_id = await _user(request, "workspace:read")
     workspace = await _ensure_workspace(user_id, workspace_id)
-    return {"workspace_id": workspace.id, "name": workspace.name, "path": workspace.path}
+    return {"workspace_id": workspace.id, "name": workspace.name}
 
 
 @router.post("/tasks")
@@ -346,6 +345,13 @@ async def get_autonomous_events(request: Request, monitor_id: str):
         events.extend(
             {"scope_id": scope.scope_id, "status": status.value} for status in scope.history
         )
+    if monitor.status in {
+        MonitorStatus.COMPLETE,
+        MonitorStatus.BLOCKED,
+        MonitorStatus.FAILED,
+        MonitorStatus.CANCELLED,
+    }:
+        events.append({"monitor_id": monitor.monitor_id, "status": monitor.status.value})
     return {"monitor_id": monitor_id, "events": events}
 
 
@@ -364,7 +370,7 @@ async def get_autonomous_evidence(request: Request, monitor_id: str):
                 "evidence_id": item.evidence_id,
                 "scope_id": item.scope_id,
                 "kind": item.kind,
-                "payload": redact_sensitive(item.payload),
+                "payload": redact_external(item.payload),
                 "created_at": item.created_at,
             }
             for item in evidence

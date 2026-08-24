@@ -317,6 +317,7 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, MonitorStatus.CANCELLED)
         self.assertEqual(agent.cancelled, ["task_1"])
         self.assertEqual(state.scopes[0].status, ScopeStatus.CANCELLED)
+        self.assertEqual(state.scopes[0].history[-1], ScopeStatus.CANCELLED)
 
     async def test_cancel_does_not_overwrite_completed_monitor(self):
         store = InMemorySupervisorStore()
@@ -451,6 +452,17 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(AutonomousSupervisor._requires_approval("push to GitHub"))
         self.assertFalse(AutonomousSupervisor._requires_approval("do not deploy production"))
         self.assertFalse(AutonomousSupervisor._requires_approval("do not push to GitHub"))
+        self.assertFalse(
+            AutonomousSupervisor._requires_approval(
+                "Do not commit, push, deploy, access the network, access credentials, "
+                "or perform external actions."
+            )
+        )
+        self.assertTrue(
+            AutonomousSupervisor._requires_approval(
+                "Push the current commit to an external Git remote."
+            )
+        )
 
 
 if __name__ == "__main__":

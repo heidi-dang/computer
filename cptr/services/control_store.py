@@ -174,20 +174,22 @@ class SqlSupervisorStore:
                 .values(status=MonitorStatus.CANCELLED.value, updated_at=_now_ms())
             )
             if result.rowcount == 1:
-                await db.execute(
-                    update(AutonomousScope)
-                    .where(
-                        AutonomousScope.monitor_id == monitor_id,
-                        AutonomousScope.status.not_in(
-                            [ScopeStatus.VERIFIED.value, ScopeStatus.CANCELLED.value]
-                        ),
-                    )
-                    .values(
-                        status=ScopeStatus.CANCELLED.value,
-                        next_action=None,
-                        updated_at=_now_ms(),
-                    )
+                scope_result = await db.execute(
+                    select(AutonomousScope).where(AutonomousScope.monitor_id == monitor_id)
                 )
+                for scope in scope_result.scalars().all():
+                    if scope.status in {
+                        ScopeStatus.VERIFIED.value,
+                        ScopeStatus.CANCELLED.value,
+                    }:
+                        continue
+                    history = list(scope.history or [])
+                    if not history or history[-1] != ScopeStatus.CANCELLED.value:
+                        history.append(ScopeStatus.CANCELLED.value)
+                    scope.status = ScopeStatus.CANCELLED.value
+                    scope.history = history
+                    scope.next_action = None
+                    scope.updated_at = _now_ms()
                 await db.execute(
                     delete(AutonomousWorkspaceLease).where(
                         AutonomousWorkspaceLease.monitor_id == monitor_id
@@ -207,20 +209,24 @@ class SqlSupervisorStore:
                 .values(status=MonitorStatus.BLOCKED.value, updated_at=_now_ms())
             )
             if result.rowcount == 1:
-                await db.execute(
-                    update(AutonomousScope)
-                    .where(
-                        AutonomousScope.monitor_id == monitor_id,
-                        AutonomousScope.status.not_in(
-                            [ScopeStatus.VERIFIED.value, ScopeStatus.CANCELLED.value]
-                        ),
-                    )
-                    .values(
-                        status=ScopeStatus.BLOCKED.value,
-                        next_action="Owned execution did not quiesce within the cancellation bound.",
-                        updated_at=_now_ms(),
-                    )
+                scope_result = await db.execute(
+                    select(AutonomousScope).where(AutonomousScope.monitor_id == monitor_id)
                 )
+                for scope in scope_result.scalars().all():
+                    if scope.status in {
+                        ScopeStatus.VERIFIED.value,
+                        ScopeStatus.CANCELLED.value,
+                    }:
+                        continue
+                    history = list(scope.history or [])
+                    if not history or history[-1] != ScopeStatus.BLOCKED.value:
+                        history.append(ScopeStatus.BLOCKED.value)
+                    scope.status = ScopeStatus.BLOCKED.value
+                    scope.history = history
+                    scope.next_action = (
+                        "Owned execution did not quiesce within the cancellation bound."
+                    )
+                    scope.updated_at = _now_ms()
             await db.commit()
             return result.rowcount == 1
 
@@ -638,6 +644,24 @@ class ControlTaskStore:
                         )
             await db.commit()
             return len(messages)
+
+    async def has_pending_control(self, task_id: str, *, user_id: str | None = None) -> bool:
+        """Return whether a task still owns an undelivered control message.
+
+        A control interruption briefly has no in-memory worker while the next
+        generation is being installed.  This durable check prevents restart
+        reconciliation from turning that intentional gap into a terminal
+        failure.
+        """
+        async with await get_db() as db:
+            conditions = [
+                ControlMessage.task_id == task_id,
+                ControlMessage.status.in_(("QUEUED", "DELIVERED")),
+            ]
+            if user_id is not None:
+                conditions.append(ControlMessage.user_id == user_id)
+            result = await db.execute(select(ControlMessage.id).where(and_(*conditions)).limit(1))
+            return result.scalar_one_or_none() is not None
 
     async def enqueue_message(
         self,

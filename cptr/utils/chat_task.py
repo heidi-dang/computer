@@ -364,7 +364,11 @@ _task_state: dict[str, dict] = {}  # message_id → {content, output}
 _task_chat: dict[str, str] = {}  # message_id → chat_id
 _cancel_requested: set[str] = set()
 _control_interrupt_requested: set[str] = set()
+_interruption_reasons: dict[str, str] = {}
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
+
+CONTROL_INTERRUPT = "CONTROL_INTERRUPT"
+USER_CANCEL = "USER_CANCEL"
 
 
 def get_pending_input_lock(chat_id: str) -> asyncio.Lock:
@@ -434,6 +438,7 @@ async def cancel_task(
 ) -> bool:
     """Cancel one agent turn and wait for owned execution to quiesce."""
     _control_interrupt_requested.discard(message_id)
+    _interruption_reasons[message_id] = USER_CANCEL
     _cancel_requested.add(message_id)
     from cptr.utils.tools import cancel_owned_command_sessions
 
@@ -442,6 +447,7 @@ async def cancel_task(
     if not task:
         if commands_quiescent:
             _cancel_requested.discard(message_id)
+            _interruption_reasons.pop(message_id, None)
         return commands_quiescent
     task.cancel()
     try:
@@ -466,6 +472,9 @@ async def interrupt_for_control(
     task = _tasks.get(message_id)
     if task is None or task.done():
         return False
+    if message_id in _cancel_requested:
+        return False
+    _interruption_reasons[message_id] = CONTROL_INTERRUPT
     _control_interrupt_requested.add(message_id)
     from cptr.utils.tools import cancel_owned_command_sessions
 
@@ -488,7 +497,12 @@ def is_cancel_requested(message_id: str) -> bool:
 
 
 def is_control_interrupt_requested(message_id: str) -> bool:
-    return message_id in _control_interrupt_requested
+    return _interruption_reasons.get(message_id) == CONTROL_INTERRUPT
+
+
+def interruption_reason(message_id: str) -> str | None:
+    """Return the active execution interruption reason, if any."""
+    return _interruption_reasons.get(message_id)
 
 
 def is_running(message_id: str) -> bool:
@@ -3006,7 +3020,10 @@ async def run_chat_task(
                 content=content,
                 output=output_items,
                 done=False,
-                meta={"interrupted_for_control": True},
+                meta={
+                    "interrupted_for_control": True,
+                    "interruption_reason": CONTROL_INTERRUPT,
+                },
             )
         else:
             await _save_message("cancelled", content=content, output=output_items, done=True)
@@ -3173,3 +3190,4 @@ async def run_chat_task(
         finally:
             _cancel_requested.discard(message_id)
             _control_interrupt_requested.discard(message_id)
+            _interruption_reasons.pop(message_id, None)

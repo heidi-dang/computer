@@ -406,6 +406,20 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RedactionTests(unittest.TestCase):
+    def test_external_boundary_redacts_host_paths_but_keeps_relative_identity(self):
+        from cptr.utils.redaction import redact_external
+
+        value = {
+            "workspace_id": "fixture-1",
+            "raw_output": "read /home/tester/disposable/target.py and wrote target.py",
+        }
+
+        redacted = redact_external(value)
+
+        self.assertEqual(redacted["workspace_id"], "fixture-1")
+        self.assertNotIn("/home/tester/disposable", redacted["raw_output"])
+        self.assertIn("target.py", redacted["raw_output"])
+
     def test_redacts_nested_secrets_and_embedded_credentials(self):
         from cptr.utils.redaction import redact_sensitive
 

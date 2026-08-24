@@ -11,7 +11,12 @@ from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.models import Chat, ChatMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import get_db
-from cptr.utils.redaction import redact_sensitive, redact_text
+from cptr.utils.redaction import (
+    redact_external,
+    redact_external_text,
+    redact_sensitive,
+    redact_text,
+)
 
 
 class AgentService:
@@ -201,31 +206,46 @@ class AgentService:
             elif is_running(message.id):
                 status = "RUNNING"
             elif status in {"RUNNING", "PENDING"}:
-                status = "FAILED"
-                restart_error = error or "interrupted by CPTR restart"
-                await ChatMessage.update(
-                    message.id,
-                    done=True,
-                    meta={"error": restart_error},
+                has_pending_control = getattr(self.store, "has_pending_control", None)
+                pending_control = (
+                    await has_pending_control(task.id) if callable(has_pending_control) else False
                 )
-                error = restart_error
-                transition = getattr(self.store, "transition_terminal", None)
-                if callable(transition) and task.__class__ is ControlTask:
-                    await transition(
-                        task.id,
-                        status=status,
-                        error="interrupted by CPTR restart",
-                        updated_at=int(time.time() * 1000),
-                    )
+                if pending_control:
+                    # CONTROL_INTERRUPT intentionally leaves a short durable
+                    # gap between the old generation stopping and the
+                    # continuation being installed.  It is not a restart
+                    # failure and must remain eligible for delivery.
+                    status = "RUNNING"
+                    if isinstance(message.meta, dict) and message.meta.get(
+                        "interrupted_for_control"
+                    ):
+                        error = None
                 else:
-                    await self.store.update(
-                        task.id,
-                        status=status,
-                        error="interrupted by CPTR restart",
-                        updated_at=int(time.time() * 1000),
+                    status = "FAILED"
+                    restart_error = error or "interrupted by CPTR restart"
+                    await ChatMessage.update(
+                        message.id,
+                        done=True,
+                        meta={"error": restart_error},
                     )
+                    error = restart_error
+                    transition = getattr(self.store, "transition_terminal", None)
+                    if callable(transition) and task.__class__ is ControlTask:
+                        await transition(
+                            task.id,
+                            status=status,
+                            error="interrupted by CPTR restart",
+                            updated_at=int(time.time() * 1000),
+                        )
+                    else:
+                        await self.store.update(
+                            task.id,
+                            status=status,
+                            error="interrupted by CPTR restart",
+                            updated_at=int(time.time() * 1000),
+                        )
         output = message.content or ""
-        safe_output = redact_text(output)
+        safe_output = redact_external_text(output)
         if status != task.status or task.output != output:
             await self.store.update(
                 task.id,
@@ -239,10 +259,10 @@ class AgentService:
             "chat_id": task.chat_id,
             "message_id": task.message_id,
             "status": status,
-            "prompt": redact_text(task.prompt),
+            "prompt": redact_external(task.prompt),
             "model_id": task.model_id,
             "output": safe_output,
-            "raw_output": redact_sensitive(message.output or []),
+            "raw_output": redact_external(message.output or []),
             "error": redact_text(error) if error else None,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
