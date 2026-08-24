@@ -960,7 +960,7 @@
 	"chat.notification.inputBody": "Answer the prompt to continue.",
 	"chat.notification.finishedBody": "Task finished.",
 	"chat.notification.thisTool": "this tool",
-	"chat.greeting": "What can I help you with?",
+	"chat.greeting": "HEIDI: What can I help you with?",
 	"admin.toolServers": "Tool Servers",
 	"toolServers.title": "Tool Servers",
 	"toolServers.empty": "No tool servers configured",
