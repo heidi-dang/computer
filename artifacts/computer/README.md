@@ -120,6 +120,30 @@ Ask it to check a build, push a fix, or explain a file. Switch workspaces with `
 
 Turn each workspace into an OpenAI-compatible agent model with real machine access. Open WebUI Computer exposes `/v1/chat/completions`, so any client that speaks OpenAI, including [Open WebUI](https://github.com/open-webui/open-webui), can use a workspace with full agent capabilities: file access, terminal, web search, tools.
 
+## Realtime smoke check
+
+The repository includes an authenticated Socket.IO polling smoke runner at
+`tests/realtime_smoke.py`. It uses the declared `httpx` dependency directly,
+so it does not require the optional `aiohttp` or `requests` transport packages
+used by some Python Socket.IO clients. Pass either a `cptr_session` cookie or a
+session token, optionally send a provider-backed prompt, and receive a JSON
+report containing captured `events:chat` envelopes, their correlation to
+persisted `/api/chats/{chat_id}` messages, and separate non-empty success and
+provider-error assistant text:
+
+```bash
+python tests/realtime_smoke.py \
+  --url http://127.0.0.1:8000 \
+  --cookie "$CPTR_SESSION_COOKIE" \
+  --message "Say hello in one sentence" \
+  --model-id openai/gpt-4o \
+  --timeout 90
+```
+
+To observe an already-running chat instead, use `--chat-id` and omit
+`--message`/`--model-id`. The command exits non-zero if it receives no
+Socket.IO event or cannot correlate an event to a persisted chat message.
+
 ## More
 
 | | |

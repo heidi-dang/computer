@@ -9,3 +9,4 @@
 - [Visual regression surface checks](visual-regression-surfaces.md) — use layout/affordance assertions for live xterm and pixel snapshots for deterministic UI surfaces.
 - [Build Agent evidence](build-agent-evidence.md) — Build completion must trust durable child verifier outcomes, never compatibility return strings or specialist claims.
 - [Live build provider checks](live-build-provider-checks.md) — live /build smoke tests require an explicitly enabled mutation flag and a healthy configured model connection.
+- [Realtime smoke harness](realtime-smoke-harness.md) — use declared HTTP polling to avoid optional Socket.IO transport dependencies.
