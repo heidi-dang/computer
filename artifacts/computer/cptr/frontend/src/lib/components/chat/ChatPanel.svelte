@@ -26,7 +26,8 @@
 	import {
 		cancelFlowDeckOrchestration,
 		createFlowDeckOrchestration,
-		getFlowDeckOrchestration
+		getFlowDeckOrchestration,
+		steerFlowDeckOrchestration
 	} from '$lib/apis/flowdeck';
 	import type { ChatAgent } from '../common/AgentSelector.svelte';
 	import {
@@ -452,6 +453,22 @@
 			if (gen !== loadGeneration) return;
 			allMessages = data.messages;
 			loadChatSettings(data.chat.meta);
+			const flowdeckMeta = data.chat.meta as Record<string, any> | null;
+			const persistedFlowDeckRunId = String(flowdeckMeta?.flowdeck_run_id || '');
+			const persistedFlowDeckStatus = String(flowdeckMeta?.flowdeck_status || '').toLowerCase();
+			const activeFlowDeckAssistant = [...data.messages]
+				.reverse()
+				.find(
+					(message) =>
+						message.role === 'assistant' &&
+						(message.meta as any)?.flowdeck_run_id === persistedFlowDeckRunId
+				);
+			if (persistedFlowDeckRunId) {
+				flowdeckRunId = persistedFlowDeckRunId;
+				flowdeckStatus = persistedFlowDeckStatus || 'active';
+				flowdeckMessageId = activeFlowDeckAssistant?.id || flowdeckMessageId;
+				if (!isFlowDeckTerminal(flowdeckStatus)) startFlowDeckPolling(flowdeckRunId);
+			}
 			currentMessageId = data.chat.current_message_id;
 			contextUsage = data.context_usage ?? null;
 			setChatTasks(
@@ -1123,6 +1140,15 @@
 			inputText = '';
 			return;
 		}
+		if (
+			selectedAgent === 'heidi' &&
+			chatId &&
+			flowdeckRunId &&
+			!isFlowDeckTerminal(flowdeckStatus)
+		) {
+			await steerActiveFlowDeck(text);
+			return;
+		}
 		if (selectedAgent === 'heidi') {
 			await sendToFlowDeck(text);
 			return;
@@ -1258,6 +1284,55 @@
 			allMessages = allMessages.filter((m) => m.id !== tempId);
 			currentMessageId = parentId;
 			throw e;
+		} finally {
+			sending = false;
+			chatInputEl?.focus();
+		}
+	}
+
+	async function steerActiveFlowDeck(text: string) {
+		if (!chatId || !flowdeckRunId) return;
+		stopTtsPlayback();
+		sending = true;
+		inputText = '';
+		try {
+			const result = await steerFlowDeckOrchestration(
+				flowdeckRunId,
+				chatId,
+				text,
+				`chat-flowdeck-steer-${crypto.randomUUID()}`
+			);
+			if (!result.accepted) {
+				toast.message(result.message || 'Heidi is no longer running.');
+				return;
+			}
+			const steeringMessageId = String(result.message_id || '');
+			if (steeringMessageId && !allMessages.some((message) => message.id === steeringMessageId)) {
+				const parent = allMessages.find((message) => message.id === flowdeckMessageId);
+				allMessages = [
+					...allMessages,
+					{
+						id: steeringMessageId,
+						parent_id: parent?.id || null,
+						role: 'user',
+						content: text,
+						model: parent?.model || selectedModel,
+						done: true,
+						output: null,
+						usage: null,
+						meta: {
+							agent: 'heidi',
+							flowdeck: true,
+							flowdeck_steering: true,
+							flowdeck_run_id: flowdeckRunId,
+							queued: true
+						},
+						created_at: Date.now() / 1000
+					}
+				];
+			}
+		} catch (error) {
+			toast.error(error instanceof Error ? error.message : 'Heidi could not queue that instruction.');
 		} finally {
 			sending = false;
 			chatInputEl?.focus();

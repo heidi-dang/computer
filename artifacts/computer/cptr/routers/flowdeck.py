@@ -163,8 +163,13 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                 target, _ = await _resolve_model(request, workspace, request.app.state)
         else:
             target, _ = await _resolve_model(request, workspace, request.app.state)
-        if target.kind != "api":
+        if getattr(target, "kind", None) != "api":
             raise HTTPException(503, "the CPTR API model is unavailable")
+        full_model_id = str(
+            getattr(target, "full_model_id", None)
+            or getattr(target, "runtime_model", None)
+            or requested_model
+        )
         metadata = body.metadata or {}
         chat_id = str(metadata.get("chat_id") or "").strip()
         parent_id = str(metadata.get("parent_id") or "").strip() or None
@@ -175,7 +180,7 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             chat = await Chat.create(
                 user_id=user_id,
                 title=body.objective[:50].strip() or "New Chat",
-                meta={"workspace": workspace, "model_id": target.full_model_id},
+                meta={"workspace": workspace, "model_id": full_model_id},
                 created_at=now_ms(),
             )
         user_message = await ChatMessage.create(
@@ -183,7 +188,7 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             role="user",
             content=body.objective,
             parent_id=parent_id,
-            model=target.full_model_id,
+            model=full_model_id,
             meta={"agent": "heidi", "flowdeck": True},
             created_at=now_ms(),
         )
@@ -192,7 +197,7 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             role="assistant",
             content="",
             parent_id=user_message.id,
-            model=target.full_model_id,
+            model=full_model_id,
             done=False,
             output=[],
             meta={"agent": "heidi", "flowdeck": True},
@@ -218,6 +223,14 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             }
         )
         await Chat.update_meta(chat.id, chat_meta, now_ms())
+        await ChatMessage.update(
+            assistant_message.id,
+            meta={
+                "agent": "heidi",
+                "flowdeck": True,
+                "flowdeck_run_id": run.id,
+            },
+        )
 
         async def run_in_background() -> None:
             try:
@@ -226,7 +239,7 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                         request_key=request_key,
                         task=body.objective,
                         workspace=workspace,
-                        model=target.runtime_model,
+            model=getattr(target, "runtime_model", full_model_id),
                         connection=target.connection,
                         parent_chat_id=chat.id,
                         parent_message_id=assistant_message.id,
@@ -280,17 +293,22 @@ async def steer_orchestration(request: Request, run_id: str, body: SteeringReque
     checkpoint; this endpoint never injects data into a child executor.
     """
     user_id = await _authenticate_flowdeck(request)
+    chat = await Chat.get_by_id(body.chat_id)
+    if not chat or chat.user_id != user_id:
+        raise HTTPException(404, "chat not found")
+    workspace = str((chat.meta or {}).get("workspace") or "").strip()
+    if not workspace:
+        raise HTTPException(409, "chat has no FlowDeck workspace")
+    store = DurableFlowDeck(get_session_factory())
     try:
         workspace = await resolve_gateway_workspace(
-            session_factory=get_session_factory(),
+            session_factory=store.session_factory,
             user_id=user_id,
-            requested_workspace=str((await Chat.get_by_id(body.chat_id)).meta.get("workspace", ""))
-            if await Chat.get_by_id(body.chat_id)
-            else "",
+            requested_workspace=workspace,
         )
     except AuthenticatedGatewayError as exc:
         raise HTTPException(403, str(exc)) from exc
-    run = await DurableFlowDeck(get_session_factory()).get_run_for_owner(
+    run = await store.get_run_for_owner(
         run_id=run_id, owner=user_id, workspace=workspace
     )
     if not run:
@@ -303,9 +321,6 @@ async def steer_orchestration(request: Request, run_id: str, body: SteeringReque
             "message": "FlowDeck is no longer running; start a new Heidi prompt.",
         }
 
-    chat = await Chat.get_by_id(body.chat_id)
-    if not chat or chat.user_id != user_id:
-        raise HTTPException(404, "chat not found")
     chat_meta = dict(chat.meta or {})
     if chat_meta.get("flowdeck_run_id") != run.id:
         raise HTTPException(409, "chat is not attached to this FlowDeck run")
@@ -339,7 +354,11 @@ async def steer_orchestration(request: Request, run_id: str, body: SteeringReque
                 for message in messages
                 if message.role == "assistant"
                 and not message.done
-                and (message.meta or {}).get("flowdeck_run_id") == run.id
+                and (message.meta or {}).get("flowdeck") is True
+                and (
+                    (message.meta or {}).get("flowdeck_run_id") == run.id
+                    or (message.meta or {}).get("agent") == "heidi"
+                )
             ),
             None,
         )

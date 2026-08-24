@@ -1165,6 +1165,22 @@ class DurableFlowDeck:
             )
             return list(result.scalars().all())
 
+    async def record_event(
+        self, run_id: str, kind: str, payload: dict[str, Any]
+    ) -> FlowDeckEvent:
+        """Append a lifecycle event through the durable transaction boundary."""
+        now = self.clock()
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(
+                run.status,
+                {RunStatus.PENDING.value, RunStatus.RUNNING.value},
+            )
+            return await self._event(db, run_id, kind, payload, now)
+
+        return await self._transaction(operation)
+
     async def _event(
         self,
         db: AsyncSession,

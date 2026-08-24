@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy.exc import OperationalError
+
 from cptr.flowdeck.authenticated_gateway import (
     SpecialistDispatchRequest,
     _auth_user_id,
@@ -24,6 +26,8 @@ from cptr.flowdeck.durable import (
 )
 from cptr.flowdeck.errors import DelegationPolicyError, UnknownAgentError
 from cptr.flowdeck.registry import get_agent
+from cptr.models import ChatMessage
+from cptr.utils.config import now_ms
 
 
 class CoordinatorPolicyError(RuntimeError):
@@ -234,6 +238,38 @@ async def run_heidi_coordinator(
     children: list[dict[str, Any]] = []
     outputs: list[str] = []
 
+    async def consume_steering() -> list[str]:
+        """Consume queued Heidi instructions only between CPTR child runs."""
+        try:
+            messages = await ChatMessage.get_all_by_chat(request.parent_chat_id)
+        except OperationalError:
+            # Standalone coordinator callers may intentionally provision only
+            # FlowDeck tables. In the production CPTR app the chat table is
+            # present, so this preserves the existing coordinator contract
+            # without turning an optional steering read into a hard failure.
+            return []
+        pending = [
+            message
+            for message in messages
+            if message.role == "user"
+            and (message.meta or {}).get("flowdeck_steering") is True
+            and (message.meta or {}).get("flowdeck_run_id") == run.id
+            and not (message.meta or {}).get("flowdeck_steering_applied")
+        ]
+        instructions: list[str] = []
+        for message in pending:
+            meta = dict(message.meta or {})
+            meta["flowdeck_steering_applied"] = True
+            meta["flowdeck_steering_applied_at"] = now_ms()
+            await ChatMessage.update(message.id, meta=meta)
+            instructions.append(message.content)
+            await store.record_event(
+                run.id,
+                "STEERING_APPLIED",
+                {"message_id": message.id, "instruction": message.content},
+            )
+        return instructions
+
     async def cancelled_result() -> CoordinatorResult | None:
         current = await store.get_run_by_request_key(request.request_key)
         if current and current.status == RunStatus.CANCELLED.value:
@@ -246,6 +282,12 @@ async def run_heidi_coordinator(
         terminal = await cancelled_result()
         if terminal:
             return terminal
+        steering = await consume_steering()
+        objective = item.objective
+        if steering:
+            objective = f"{objective}\n\nHeidi steering instructions:\n" + "\n".join(
+                f"- {instruction}" for instruction in steering
+            )
         budget.consume_step()
         budget.consume_delegation()
         child_key = f"{request.request_key}:child:{index}:{item.specialist_id}"
@@ -284,7 +326,7 @@ async def run_heidi_coordinator(
                 SpecialistDispatchRequest(
                     role=item.specialist_id,
                     request_key=child_key,
-                    task=item.objective,
+                    task=objective,
                     workspace=root,
                     model=request.model,
                     connection=request.connection,
@@ -370,6 +412,7 @@ async def run_heidi_coordinator(
             await store.finish_step(child_step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
             await store.orphan_run(run.id)
             raise
+    await consume_steering()
     if any(item["status"] == "failed" for item in children):
         status = RunStatus.FAILED
     elif len(children) != len(plan) or any(

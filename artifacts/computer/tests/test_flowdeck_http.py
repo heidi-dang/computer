@@ -672,6 +672,97 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 "succeeded" if state != "succeeded" else "failed",
             )
 
+    async def test_active_run_steering_is_durable_and_idempotent(self):
+        async def submit(request, *, authenticated_request, store):
+            return CoordinatorResult("pending", request.request_key, (), ())
+
+        with (
+            patch.dict(os.environ, self.enabled_environment(), clear=False),
+            patch(
+                "cptr.routers.flowdeck._resolve_model",
+                new=AsyncMock(
+                    return_value=(
+                        SimpleNamespace(
+                            kind="api",
+                            runtime_model="test-model",
+                            full_model_id="provider/test-model",
+                            connection={},
+                        ),
+                        "provider/test-model",
+                    )
+                ),
+            ),
+            patch("cptr.routers.flowdeck.run_heidi_coordinator", new=submit),
+        ):
+            created = await self.request_run(key="steering-run-123")
+            self.assertEqual(created.status_code, 200)
+            payload = created.json()
+            from cptr.models import ChatMessage
+
+            async with self.session_factory() as session:
+                run = await session.get(FlowDeckRun, payload["run_id"])
+                run.status = "RUNNING"
+                await session.commit()
+            await ChatMessage.update(
+                payload["assistant_message"]["id"],
+                done=False,
+                meta={
+                    "agent": "heidi",
+                    "flowdeck": True,
+                    "flowdeck_run_id": payload["run_id"],
+                },
+            )
+            steer_url = f"/v1/flowdeck/orchestrations/{payload['run_id']}/steer"
+            headers = {
+                **self.headers(),
+                "Idempotency-Key": "steering-message-123",
+            }
+            first = await self.client.post(
+                steer_url,
+                headers=headers,
+                json={
+                    "chat_id": payload["chat_id"],
+                    "instruction": "also check the startup path",
+                },
+            )
+            replay = await self.client.post(
+                steer_url,
+                headers=headers,
+                json={
+                    "chat_id": payload["chat_id"],
+                    "instruction": "also check the startup path",
+                },
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.json()["accepted"], first.text)
+        self.assertFalse(first.json()["duplicate"])
+        self.assertEqual(replay.status_code, 200)
+        self.assertTrue(replay.json()["duplicate"])
+        self.assertEqual(first.json()["message_id"], replay.json()["message_id"])
+
+        messages = await ChatMessage.get_all_by_chat(payload["chat_id"])
+        steering = [
+            message
+            for message in messages
+            if (message.meta or {}).get("flowdeck_steering") is True
+        ]
+        self.assertEqual(len(steering), 1)
+        self.assertTrue((steering[0].meta or {}).get("queued"))
+
+        async with self.session_factory() as session:
+            run = await session.get(FlowDeckRun, payload["run_id"])
+            run.status = "CANCELLED"
+            await session.commit()
+        rejected = await self.client.post(
+            steer_url,
+            headers={**self.headers(), "Idempotency-Key": "steering-after-cancel-123"},
+            json={"chat_id": payload["chat_id"], "instruction": "too late"},
+        )
+        self.assertEqual(rejected.status_code, 200)
+        self.assertFalse(rejected.json()["accepted"])
+        self.assertEqual(rejected.json()["state"], "cancelled")
+
 
 if __name__ == "__main__":
     unittest.main()
