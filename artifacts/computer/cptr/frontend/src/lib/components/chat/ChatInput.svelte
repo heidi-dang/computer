@@ -74,8 +74,6 @@
 		voiceModeEnabled?: boolean;
 		sending: boolean;
 		streaming?: boolean;
-		flowdeckStatus?: string;
-		flowdeckRunId?: string;
 		workspace?: string;
 		placeholder?: string;
 		contextUsage?: ContextUsage | null;
@@ -112,8 +110,6 @@
 		voiceModeEnabled = $bindable(false),
 		sending,
 		streaming = false,
-		flowdeckStatus = '',
-		flowdeckRunId = '',
 		workspace = '',
 		placeholder = 'Message...',
 		contextUsage = null,
@@ -1555,10 +1551,7 @@ lowlight.highlight = (lang: string, value: string, opts?: any) => {
 	{/if}
 
 	<div
-		class="app-surface rounded-3xl shadow-lg border transition px-1 {selectedAgent === 'heidi' &&
-		(flowdeckStatus === 'active' || sending)
-			? 'flowdeck-composer-active'
-			: ''}"
+		class="app-surface rounded-3xl shadow-lg border transition px-1"
 	>
 		<!-- Uploaded Files Preview -->
 		{#if attachedUploads.length > 0}
@@ -1617,30 +1610,6 @@ lowlight.highlight = (lang: string, value: string, opts?: any) => {
 						</div>
 					</div>
 				{/each}
-			</div>
-		{/if}
-		{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
-			<div class="mx-2 mt-2 flex min-w-0 items-center gap-2 rounded-2xl border px-3 py-2 flowdeck-status-bar">
-				<span class="flowdeck-status-orb" aria-hidden="true"></span>
-				<span class="min-w-0 flex-1">
-					<strong class="block text-xs font-semibold">Heidi · FlowDeck</strong>
-					<span class="app-muted block truncate text-[0.6875rem]">
-						{sending && !flowdeckStatus
-							? 'Starting…'
-							: flowdeckStatus === 'active'
-								? 'Working'
-								: flowdeckStatus === 'planning'
-									? 'Planning'
-									: flowdeckStatus === 'verifying'
-										? 'Verifying'
-								: flowdeckStatus === 'succeeded'
-									? 'Complete'
-									: `Orchestration ${flowdeckStatus.replaceAll('_', ' ')}`}
-					</span>
-				</span>
-				{#if flowdeckRunId}
-					<span class="app-muted shrink-0 text-[0.6rem] font-mono">run {flowdeckRunId.slice(0, 8)}</span>
-				{/if}
 			</div>
 		{/if}
 		<!-- Editor area -->
@@ -1758,47 +1727,6 @@ lowlight.highlight = (lang: string, value: string, opts?: any) => {
 		@apply pt-2.5 pb-2 px-1 min-h-6 max-h-96 overflow-y-auto text-[0.8125rem] leading-relaxed outline-none break-words;
 		font-size: 0.8125rem;
 		color: var(--app-fg);
-	}
-
-	.flowdeck-composer-active {
-		border-color: color-mix(in oklab, #22d3ee 42%, transparent);
-		box-shadow:
-			0 0 0 1px color-mix(in oklab, #22d3ee 18%, transparent),
-			0 0 28px color-mix(in oklab, #22d3ee 12%, transparent);
-		animation: flowdeck-breathe 2.6s ease-in-out infinite;
-	}
-
-	.flowdeck-status-bar {
-		border-color: color-mix(in oklab, #22d3ee 32%, transparent);
-		background: color-mix(in oklab, #083344 20%, var(--app-surface));
-	}
-
-	.flowdeck-status-orb {
-		width: 0.55rem;
-		height: 0.55rem;
-		flex: 0 0 auto;
-		border-radius: 999px;
-		background: #22d3ee;
-		box-shadow: 0 0 0 0 color-mix(in oklab, #22d3ee 45%, transparent);
-		animation: flowdeck-pulse 1.7s ease-out infinite;
-	}
-
-	@keyframes flowdeck-breathe {
-		0%, 100% { box-shadow: 0 0 0 1px color-mix(in oklab, #22d3ee 14%, transparent), 0 0 20px color-mix(in oklab, #22d3ee 7%, transparent); }
-		50% { box-shadow: 0 0 0 1px color-mix(in oklab, #22d3ee 30%, transparent), 0 0 34px color-mix(in oklab, #22d3ee 15%, transparent); }
-	}
-
-	@keyframes flowdeck-pulse {
-		0% { box-shadow: 0 0 0 0 color-mix(in oklab, #22d3ee 45%, transparent); }
-		70% { box-shadow: 0 0 0 7px color-mix(in oklab, #22d3ee 0%, transparent); }
-		100% { box-shadow: 0 0 0 0 color-mix(in oklab, #22d3ee 0%, transparent); }
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.flowdeck-composer-active,
-		.flowdeck-status-orb {
-			animation: none;
-		}
 	}
 
 	/* Placeholder */

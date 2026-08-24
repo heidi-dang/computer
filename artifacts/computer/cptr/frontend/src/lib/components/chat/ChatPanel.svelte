@@ -62,6 +62,7 @@
 	} from '$lib/stores/audio';
 
 	import ChatInput from './ChatInput.svelte';
+	import FlowDeckStatusStrip from './FlowDeckStatusStrip.svelte';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ChatHistory from './ChatHistory.svelte';
@@ -149,6 +150,16 @@
 	let flowdeckClarification = $state('');
 	let flowdeckMessageId = $state<string | null>(null);
 	const FLOWDECK_EVENT_LIMIT = 200;
+	const FLOWDECK_TERMINAL_STATUSES = new Set([
+		'succeeded',
+		'completed',
+		'failed',
+		'cancelled',
+		'unknown',
+		'manual_review',
+		'manual_review_required',
+		'orphaned'
+	]);
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChatId);
