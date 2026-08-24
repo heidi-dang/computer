@@ -33,7 +33,15 @@ Or with [uv](https://docs.astral.sh/uv/): `uvx cptr@latest run`
 
 On Windows, if opening a terminal reports a missing `VCRUNTIME140.dll` or Universal CRT DLL, install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and restart `cptr`.
 
-Opens in your browser at `http://localhost:8000`.
+The server prints a one-time access URL. Open it manually, or pass
+`--open-browser` when you explicitly want CPTR to launch a browser tab:
+
+```bash
+cptr run --open-browser
+```
+
+Normal starts do not launch an external browser automatically, so service
+restarts and failed start retries cannot accumulate duplicate tabs.
 
 ### Access from your phone
 
