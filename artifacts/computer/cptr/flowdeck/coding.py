@@ -35,6 +35,19 @@ MINIMUM_BROWSER_TOOLS = frozenset(
     {"read_file", "search_files", "browser_navigate", "browser_snapshot", "browser_screenshot"}
 )
 PROTECTED_PATH_PARTS = frozenset({".git", ".env", ".cptr", "secrets"})
+SHARED_MUTATION_PATHS = frozenset(
+    {
+        ".gitignore",
+        "package.json",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+        "uv.lock",
+        "pyproject.toml",
+        "tsconfig.json",
+        "README.md",
+    }
+)
 
 
 class CodingPolicyError(RuntimeError):
@@ -97,6 +110,7 @@ class CodingRequest:
     request_key: str
     parent_message_id: str | None = None
     canonical_workspace: str | None = None
+    branch_scope: str | None = None
 
 
 def coding_tool_names(role: str) -> frozenset[str]:
@@ -124,6 +138,37 @@ def _safe_path(root: Path, raw_path: Any) -> bool:
         return False
 
 
+def _branch_mutation_path_allowed(
+    root: Path,
+    raw_path: Any,
+    branch_scope: str | None,
+) -> bool:
+    """Keep parallel mutation branches away from shared metadata and each other."""
+    if not branch_scope:
+        return True
+    try:
+        candidate = Path(str(raw_path))
+        resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+        relative = resolved.relative_to(root)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    if not relative.parts or relative.parts[0] in {".git", ".cptr"}:
+        return False
+    if relative.as_posix() in SHARED_MUTATION_PATHS:
+        return False
+    if branch_scope == "backend":
+        return not (
+            relative.parts[0] in {"frontend", "web"}
+            or relative.parts[:2] == ("cptr", "frontend")
+        )
+    if branch_scope == "frontend":
+        return (
+            relative.parts[0] in {"frontend", "web"}
+            or relative.parts[:2] == ("cptr", "frontend")
+        )
+    return False
+
+
 def coding_tool_guard(name: str, args: dict[str, Any], context: dict[str, Any]) -> bool:
     workspace = context.get("workspace")
     if not isinstance(workspace, str) or not workspace:
@@ -136,7 +181,16 @@ def coding_tool_guard(name: str, args: dict[str, Any], context: dict[str, Any]) 
         return False
     if name in {"browser_navigate", "browser_snapshot", "browser_screenshot"}:
         return browser_tool_guard(name, args, context)
-    return _safe_path(_root(workspace), args.get("path", "."))
+    root = _root(workspace)
+    if not _safe_path(root, args.get("path", ".")):
+        return False
+    if name in {"edit_file", "multi_edit_file", "write_file"}:
+        return _branch_mutation_path_allowed(
+            root,
+            args.get("path", "."),
+            context.get("branch_scope"),
+        )
+    return True
 
 
 def browser_tool_guard(name: str, args: dict[str, Any], context: dict[str, Any]) -> bool:
@@ -417,6 +471,7 @@ async def _native_run_coding_specialist(
             before_mutation=before_mutation,
             after_mutation=after_mutation,
             specialist_role=request.role,
+            branch_scope=request.branch_scope,
 			flowdeck_run_id=run.id,
             flowdeck_parent_run_id=parent_flowdeck_run_id,
             flowdeck_parent_message_id=parent_message_id,

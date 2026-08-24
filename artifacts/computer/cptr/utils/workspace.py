@@ -31,6 +31,8 @@ def ensure_cptr_gitignored(workspace: str | Path) -> None:
     ws = Path(workspace)
     if not (ws / ".git").exists():
         return
+    if (ws / ".git").is_file():
+        return
 
     gitignore = ws / ".gitignore"
     entry = ".cptr"

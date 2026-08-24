@@ -48,6 +48,7 @@ class SpecialistDispatchRequest:
     execution_mode: str = "tool_calling"
     codeact_program: str | None = None
     execution_workspace: str | None = None
+    branch_scope: str | None = None
 
 
 def _auth_user_id(request: Any) -> str:
@@ -136,6 +137,7 @@ async def dispatch_authenticated_specialist(
                 task=dispatch.task,
                 request_key=dispatch.request_key,
                 parent_message_id=dispatch.parent_message_id,
+                branch_scope=dispatch.branch_scope,
             ),
             model=dispatch.model,
             connection=dispatch.connection,

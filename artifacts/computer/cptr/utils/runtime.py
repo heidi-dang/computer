@@ -591,6 +591,11 @@ def _ensure_cptr_gitignored_for(path: Path) -> None:
     root = Path(*parts[: parts.index(".cptr")])
     if not (root / ".git").exists():
         return
+    # Parallel FlowDeck branches are Git worktrees.  Their .git file points
+    # at the shared repository metadata, so changing a branch .gitignore
+    # creates a false mutation overlap between otherwise independent branches.
+    if (root / ".git").is_file():
+        return
 
     gitignore = root / ".gitignore"
     entry = ".cptr"

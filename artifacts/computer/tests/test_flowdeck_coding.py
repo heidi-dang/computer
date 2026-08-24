@@ -102,6 +102,26 @@ class CodingContractTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    def test_parallel_branch_guard_rejects_shared_and_cross_branch_mutations(self):
+        (self.root / "frontend").mkdir()
+        context = {
+            "workspace": self.workspace.name,
+            "specialist_role": "backend-coder",
+            "branch_scope": "backend",
+        }
+        self.assertTrue(coding_tool_guard("write_file", {"path": "server.py"}, context))
+        self.assertFalse(coding_tool_guard("write_file", {"path": ".gitignore"}, context))
+        self.assertFalse(
+            coding_tool_guard("write_file", {"path": "frontend/app.js"}, context)
+        )
+        frontend_context = {**context, "specialist_role": "frontend-coder", "branch_scope": "frontend"}
+        self.assertTrue(
+            coding_tool_guard("write_file", {"path": "frontend/app.js"}, frontend_context)
+        )
+        self.assertFalse(
+            coding_tool_guard("write_file", {"path": "server.py"}, frontend_context)
+        )
+
     def test_browser_debugger_is_local_preview_read_only(self):
         request = self.request.__class__(
             **{**self.request.__dict__, "role": "browser-debugger"}

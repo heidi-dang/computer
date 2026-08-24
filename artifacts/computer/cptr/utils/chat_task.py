@@ -1475,6 +1475,7 @@ async def run_chat_task(
     before_mutation=None,
     after_mutation=None,
     specialist_role: str | None = None,
+    branch_scope: str | None = None,
     flowdeck_run_id: str | None = None,
     flowdeck_parent_run_id: str | None = None,
     flowdeck_parent_message_id: str | None = None,
@@ -2352,6 +2353,7 @@ async def run_chat_task(
             "before_mutation": before_mutation,
             "after_mutation": after_mutation,
             "specialist_role": specialist_role,
+            "branch_scope": branch_scope,
             "mutation_tool_names": (
                 frozenset({"edit_file", "multi_edit_file", "write_file"})
                 if before_mutation is not None
