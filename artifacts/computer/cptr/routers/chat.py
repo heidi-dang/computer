@@ -402,6 +402,7 @@ async def get_models(request: Request, refresh: bool = Query(False)):
                     "id": prefixed_id,
                     "name": model_id,
                     "provider": conn.get("provider", ""),
+                    "display_provider": conn.get("display_name") or conn.get("provider", ""),
                     "connection_id": conn["id"],
                     **{key: value for key, value in metadata.items() if key not in {"id", "provider", "connection_id"}},
                 }
@@ -681,7 +682,6 @@ async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
     from cptr.utils.ai import _openrouter_headers
 
     try:
-        secret = _get_jwt_secret()
         from cptr.utils.connection_credentials import connection_api_key
 
         api_key = connection_api_key(conn) or None
