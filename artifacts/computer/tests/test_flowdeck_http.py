@@ -262,6 +262,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_retry_and_reconnect_key_reuse_persists_one_run(self):
         calls = []
         created_flags = []
+        coordinator_calls = asyncio.Event()
 
         async def submit(request, *, authenticated_request, store):
             calls.append(request.request_key)
@@ -271,6 +272,8 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 workspace=request.workspace,
             )
             created_flags.append(created)
+            if len(calls) == 3:
+                coordinator_calls.set()
             return CoordinatorResult("pending", run.id, (), ())
 
         with (
@@ -300,6 +303,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             first = await self.request_run(key="same-key-123")
             retry = await self.request_run(key="same-key-123")
             reconnect = await self.request_run(key="same-key-123")
+            await asyncio.wait_for(coordinator_calls.wait(), timeout=2)
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(retry.status_code, 200)
@@ -309,7 +313,9 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             {first.json()["run_id"]},
         )
         self.assertEqual(calls, ["same-key-123"] * 3)
-        self.assertEqual(created_flags, [True, False, False])
+        # The HTTP route reserves the run before scheduling the coordinator so
+        # it can return immediately and accept steering without a second run.
+        self.assertEqual(created_flags, [False, False, False])
         async with self.session_factory() as session:
             from cptr.models.flowdeck import FlowDeckRun
 
@@ -531,10 +537,11 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(received[-1], objective)
         self.assertEqual(received, list(objectives))
-        self.assertEqual((await self.flowdeck_counts())["flowdeck_runs"], 0)
+        self.assertEqual((await self.flowdeck_counts())["flowdeck_runs"], len(objectives))
 
     async def test_active_cancellation_over_http_blocks_late_success(self):
         active = {}
+        active_ready = asyncio.Event()
 
         async def submit(request, *, authenticated_request, store):
             run, _ = await store.create_run(
@@ -557,6 +564,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 operation_id=operation.id, owner="user-a", fencing_epoch=0
             )
             active.update(store=store, attempt=attempt, run=run)
+            active_ready.set()
             return CoordinatorResult("pending", run.id, (), ())
 
         with (
@@ -573,6 +581,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             patch("cptr.routers.flowdeck.run_heidi_coordinator", new=submit),
         ):
             created = await self.request_run(key="active-cancel-123")
+            await asyncio.wait_for(active_ready.wait(), timeout=2)
             cancelled = await self.client.post(
                 f"/v1/flowdeck/orchestrations/{created.json()['run_id']}/cancel",
                 params={"workspace": str(self.root_a)},
@@ -638,8 +647,12 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.request_run(key="mutator-a-123"),
                 self.request_run(key="mutator-b-123"),
             )
-        self.assertEqual({first.json()["status"], second.json()["status"]},
-                         {"pending", "manual_review_required"})
+        # Creation is deliberately immediate; coordinator lease outcomes are
+        # reconciled asynchronously after both HTTP responses return.
+        self.assertEqual(
+            {first.json()["status"], second.json()["status"]},
+            {"pending"},
+        )
 
     async def test_status_endpoint_preserves_all_external_result_states(self):
         states = ("SUCCEEDED", "FAILED", "CANCELLED", "OUTCOME_UNKNOWN", "MANUAL_REVIEW_REQUIRED")
