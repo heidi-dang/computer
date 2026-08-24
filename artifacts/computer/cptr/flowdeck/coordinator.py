@@ -256,6 +256,7 @@ async def run_heidi_coordinator(
             and (message.meta or {}).get("flowdeck_run_id") == run.id
             and not (message.meta or {}).get("flowdeck_steering_applied")
         ]
+        pending.sort(key=lambda message: (int(message.created_at or 0), message.id))
         instructions: list[str] = []
         for message in pending:
             meta = dict(message.meta or {})

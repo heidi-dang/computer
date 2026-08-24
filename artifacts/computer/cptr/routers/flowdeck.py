@@ -270,6 +270,15 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                 logger.exception("FlowDeck background orchestration failed")
 
         asyncio.create_task(run_in_background())
+        # Let the task reach its first database checkpoint before returning.
+        # This keeps the durable run and native child registration observable
+        # to an immediate status, reconnect, or cancellation request.
+        # A coordinator may perform several awaited durable setup operations
+        # before its first observable state change. Give it a bounded chance
+        # to publish that state so immediate retries and cancellation requests
+        # cannot race an unstarted task.
+        for _ in range(16):
+            await asyncio.sleep(0)
     except (AuthenticatedGatewayError, CoordinatorPolicyError) as exc:
         raise HTTPException(403, str(exc)) from exc
     except Exception as exc:
@@ -369,6 +378,13 @@ async def steer_orchestration(request: Request, run_id: str, body: SteeringReque
                 "state": run.status.lower(),
                 "message": "FlowDeck has reached a safe terminal checkpoint; start a new Heidi prompt.",
             }
+        # created_at is millisecond precision, so several fast submissions
+        # can share a timestamp. Allocate a local monotonic position while
+        # holding the per-chat input lock; the coordinator can then consume
+        # instructions in the order users created them.
+        latest_created_at = max(
+            (int(message.created_at or 0) for message in messages), default=0
+        )
         steering = await ChatMessage.create(
             chat_id=chat.id,
             role="user",
@@ -382,7 +398,7 @@ async def steer_orchestration(request: Request, run_id: str, body: SteeringReque
                 "flowdeck_steering_key": request_key,
                 "queued": True,
             },
-            created_at=now_ms(),
+            created_at=max(now_ms(), latest_created_at + 1),
         )
     return {
         "ok": True,
