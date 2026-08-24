@@ -7,6 +7,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from cptr.codeact.capabilities import sdk_from_tool_context
 from cptr.codeact.contracts import CodeActConfig, CodeActIdentity, CodeActLimits, CodeActMode
@@ -24,6 +25,7 @@ from cptr.codeact.sandbox import CodeActSandboxError, validate_program
 from cptr.codeact.qualification import (
     FIXTURE_FILES,
     FixtureReadOnlyTools,
+    OpenAICompatibleQualificationRunner,
     QUALIFICATION_CASES,
     _final_value,
     _program_from_response,
@@ -296,6 +298,42 @@ class CodeActAdapterTests(unittest.TestCase):
             self.assertIn("ORCHID", await fixtures.invoke("read_file", {"path": "release.txt"}))
             with self.assertRaises(PermissionError):
                 await fixtures.invoke("shell.run", {})
+
+        asyncio.run(run())
+
+    def test_live_codeact_qualification_repairs_incorrect_program(self):
+        async def run():
+            runner = OpenAICompatibleQualificationRunner(
+                SimpleNamespace(
+                    runtime_model="fixture-model",
+                    full_model_id="fixture-model",
+                    connection={},
+                ),
+                FixtureReadOnlyTools(dict(FIXTURE_FILES)),
+            )
+            responses = iter(
+                [
+                    "data = cptr.files.read(path='inventory.txt')\nprint('FINAL: 0')",
+                    "data = cptr.files.read(path='inventory.txt')\nprint('FINAL: 18')",
+                ]
+            )
+
+            async def complete(_payload):
+                return (
+                    {
+                        "choices": [{"message": {"content": next(responses)}}],
+                        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                    },
+                    100,
+                )
+
+            runner._complete = complete
+            measurement = await runner(
+                QUALIFICATION_CASES[1], CodeActMode.READ_ONLY, None
+            )
+            self.assertEqual(measurement.result, "18")
+            self.assertEqual(measurement.cycles, 2)
+            self.assertEqual(measurement.capability_calls, 2)
 
         asyncio.run(run())
 

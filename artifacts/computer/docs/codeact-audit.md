@@ -39,6 +39,10 @@ loop, capability authorization, wall timeout, cancellation, and teardown. The
 worker uses a restricted builtin table, import allowlist, AST validation, CPU and
 address-space ceilings, and no host filesystem/environment API. Child exit,
 timeout, cancellation, and parent failure close the process and its pipes.
+Qualification additionally allows a bounded server-owned repair loop: an
+incorrect or failed generated program is reported back to the same model for a
+corrected program, without exposing the expected answer or changing capability
+policy.
 
 The configured address-space ceiling has a 1 GiB minimum floor because the
 container's Python launcher reserves a larger virtual arena before worker

@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 
 from cptr.codeact.benchmark import BenchmarkCase, BenchmarkReport, ProviderMeasurement, run_provider_benchmark
-from cptr.codeact.contracts import CodeActConfig, CodeActIdentity, CodeActMode
+from cptr.codeact.contracts import CodeActConfig, CodeActIdentity, CodeActLimits, CodeActMode
 from cptr.codeact.repl import CodeActRepl, ReadOnlyCapabilitySDK
 from cptr.utils.config import _get_jwt_secret
 from cptr.utils.crypto import decrypt_key
@@ -229,27 +229,6 @@ class OpenAICompatibleQualificationRunner:
 
     async def _run_codeact(self, case: BenchmarkCase) -> ProviderMeasurement:
         sdk = self.fixtures.codeact_sdk()
-        prompt = {
-            "model": self.target.runtime_model,
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Write only a valid Python program for a restricted read-only CodeAct worker. "
-                        "Use only cptr.files.read(path=...) and cptr.files.list(). "
-                        "Do not import modules, use Markdown, or include explanation. "
-                        f"Your program must inspect the fixture and print exactly {FINAL_PREFIX} <answer>."
-                    ),
-                },
-                {"role": "user", "content": case.prompt},
-            ],
-            "max_completion_tokens": 768,
-        }
-        data, context_bytes = await self._complete(prompt)
-        input_tokens, output_tokens, total_tokens = self._usage(data)
-        source = _program_from_response(
-            str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
-        )
         identity = CodeActIdentity(
             user_id="codeact-qualification",
             workspace="deterministic-fixture",
@@ -260,22 +239,76 @@ class OpenAICompatibleQualificationRunner:
         config = CodeActConfig(
             mode=CodeActMode.EVALUATION,
             allowed_roles=frozenset({"qualification"}),
+            limits=CodeActLimits(max_repair_cycles=4),
         )
-        repl = CodeActRepl(identity=identity, sdk=sdk, config=config)
-        try:
-            result = await repl.execute(source)
-            value = _final_value(result.output)
-        except Exception as exc:
-            value = f"ERROR: {type(exc).__name__}: {str(exc)[:200]}"
-        finally:
-            capability_calls = len(repl.capability_calls)
-            await repl.close(force=True)
+        system_prompt = (
+            "Write only a valid Python program for a restricted read-only CodeAct worker. "
+            "Use only cptr.files.read(path=...) and cptr.files.list(). "
+            "Read the named fixture before answering. Parse the returned text carefully; "
+            "for arithmetic, convert the relevant values to integers, and for record "
+            "lookups compare the field names and values. Do not guess, import modules, "
+            "use Markdown, print intermediate values, or include explanation. "
+            f"Your program must print exactly one line: {FINAL_PREFIX} <answer>."
+        )
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": case.prompt},
+        ]
+        input_tokens = output_tokens = total_tokens = context_bytes = 0
+        capability_calls = 0
+        value = ""
+        for attempt in range(config.limits.max_repair_cycles + 1):
+            data, request_bytes = await self._complete(
+                {
+                    "model": self.target.runtime_model,
+                    "messages": messages,
+                    "max_completion_tokens": 768,
+                }
+            )
+            in_tokens, out_tokens, tokens = self._usage(data)
+            input_tokens += in_tokens
+            output_tokens += out_tokens
+            total_tokens += tokens
+            context_bytes += request_bytes
+            source = _program_from_response(
+                str(((data.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
+            )
+            repl = CodeActRepl(identity=identity, sdk=sdk, config=config)
+            try:
+                result = await repl.execute(source)
+                value = _final_value(result.output)
+                if value == case.expected:
+                    break
+                feedback = (
+                    "The program ran but its extracted answer was incorrect. "
+                    f"It printed {result.output.strip()!r}. Re-read the fixture, "
+                    f"solve this task again: {case.prompt} "
+                    "Recompute the answer and return a corrected program only."
+                )
+            except Exception as exc:
+                value = f"ERROR: {type(exc).__name__}: {str(exc)[:200]}"
+                feedback = (
+                    f"The previous program failed with {value!r}. "
+                    f"Solve this task again: {case.prompt} "
+                    "Return a corrected valid program only; use the read-only cptr "
+                    "capability and print the required final line."
+                )
+            finally:
+                capability_calls += len(repl.capability_calls)
+                await repl.close(force=True)
+            if attempt < config.limits.max_repair_cycles:
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": source},
+                        {"role": "user", "content": feedback},
+                    ]
+                )
         return ProviderMeasurement(
             result=value,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            cycles=1,
+            cycles=attempt + 1,
             capability_calls=capability_calls,
             context_bytes=context_bytes,
         )
