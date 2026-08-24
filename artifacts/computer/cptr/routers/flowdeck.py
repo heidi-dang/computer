@@ -42,6 +42,13 @@ class OrchestrationRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class SteeringRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chat_id: str = Field(min_length=1, max_length=200)
+    instruction: str = Field(min_length=1, max_length=20_000)
+
+
 def _message_dict(message: ChatMessage) -> dict[str, Any]:
     return {
         "id": message.id,
@@ -203,6 +210,14 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             workspace=workspace,
             step_name="heidi-coordinator",
         )
+        chat_meta = dict(chat.meta or {})
+        chat_meta.update(
+            {
+                "flowdeck_run_id": run.id,
+                "flowdeck_status": run.status.lower(),
+            }
+        )
+        await Chat.update_meta(chat.id, chat_meta, now_ms())
 
         async def run_in_background() -> None:
             try:
@@ -253,6 +268,111 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
         "chat_id": chat.id,
         "user_message": _message_dict(user_message),
         "assistant_message": _message_dict(assistant_message),
+    }
+
+
+@router.post("/orchestrations/{run_id}/steer")
+async def steer_orchestration(request: Request, run_id: str, body: SteeringRequest):
+    """Persist one authenticated steering instruction for the active run.
+
+    Steering is deliberately separate from cancellation and from the native
+    CPTR queue. The coordinator consumes this durable record at its next safe
+    checkpoint; this endpoint never injects data into a child executor.
+    """
+    user_id = await _authenticate_flowdeck(request)
+    try:
+        workspace = await resolve_gateway_workspace(
+            session_factory=get_session_factory(),
+            user_id=user_id,
+            requested_workspace=str((await Chat.get_by_id(body.chat_id)).meta.get("workspace", ""))
+            if await Chat.get_by_id(body.chat_id)
+            else "",
+        )
+    except AuthenticatedGatewayError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    run = await DurableFlowDeck(get_session_factory()).get_run_for_owner(
+        run_id=run_id, owner=user_id, workspace=workspace
+    )
+    if not run:
+        raise HTTPException(404, "orchestration run not found")
+    if run.status not in {RunStatus.PENDING.value, RunStatus.RUNNING.value}:
+        return {
+            "ok": False,
+            "accepted": False,
+            "state": run.status.lower(),
+            "message": "FlowDeck is no longer running; start a new Heidi prompt.",
+        }
+
+    chat = await Chat.get_by_id(body.chat_id)
+    if not chat or chat.user_id != user_id:
+        raise HTTPException(404, "chat not found")
+    chat_meta = dict(chat.meta or {})
+    if chat_meta.get("flowdeck_run_id") != run.id:
+        raise HTTPException(409, "chat is not attached to this FlowDeck run")
+
+    from cptr.utils.chat_task import get_pending_input_lock
+
+    request_key = _request_key(request)
+    async with get_pending_input_lock(chat.id):
+        messages = await ChatMessage.get_all_by_chat(chat.id)
+        duplicate = next(
+            (
+                message
+                for message in messages
+                if (message.meta or {}).get("flowdeck_steering_key") == request_key
+            ),
+            None,
+        )
+        if duplicate:
+            return {
+                "ok": True,
+                "accepted": True,
+                "queued": True,
+                "duplicate": True,
+                "state": run.status.lower(),
+                "chat_id": chat.id,
+                "message_id": duplicate.id,
+            }
+        active_parent = next(
+            (
+                message
+                for message in messages
+                if message.role == "assistant"
+                and not message.done
+                and (message.meta or {}).get("flowdeck_run_id") == run.id
+            ),
+            None,
+        )
+        if active_parent is None:
+            return {
+                "ok": False,
+                "accepted": False,
+                "state": run.status.lower(),
+                "message": "FlowDeck has reached a safe terminal checkpoint; start a new Heidi prompt.",
+            }
+        steering = await ChatMessage.create(
+            chat_id=chat.id,
+            role="user",
+            content=body.instruction,
+            parent_id=active_parent.id,
+            model=(active_parent.model or ""),
+            meta={
+                "flowdeck": True,
+                "flowdeck_steering": True,
+                "flowdeck_run_id": run.id,
+                "flowdeck_steering_key": request_key,
+                "queued": True,
+            },
+            created_at=now_ms(),
+        )
+    return {
+        "ok": True,
+        "accepted": True,
+        "queued": True,
+        "duplicate": False,
+        "state": run.status.lower(),
+        "chat_id": chat.id,
+        "message_id": steering.id,
     }
 
 

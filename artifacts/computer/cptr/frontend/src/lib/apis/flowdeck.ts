@@ -64,3 +64,18 @@ export async function cancelFlowDeckOrchestration(
 	if (response.status === 204) return { run_id: runId };
 	return response.json();
 }
+
+export async function steerFlowDeckOrchestration(
+	runId: string,
+	chatId: string,
+	instruction: string,
+	idempotencyKey: string
+): Promise<FlowDeckOrchestration & { accepted?: boolean; queued?: boolean; duplicate?: boolean; message?: string }> {
+	return fetchJSON(`/v1/flowdeck/orchestrations/${encodeURIComponent(runId)}/steer`, {
+		...jsonBody({ chat_id: chatId, instruction }),
+		headers: {
+			'Content-Type': 'application/json',
+			'Idempotency-Key': idempotencyKey
+		}
+	});
+}
