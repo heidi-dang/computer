@@ -18,12 +18,16 @@ CHAT_PANEL = (
     / "chat"
     / "ChatPanel.svelte"
 )
+CHAT_INPUT = CHAT_PANEL.with_name("ChatInput.svelte")
+STATUS_STRIP = CHAT_PANEL.with_name("FlowDeckStatusStrip.svelte")
 
 
 class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source = CHAT_PANEL.read_text()
+        cls.chat_input_source = CHAT_INPUT.read_text()
+        cls.status_strip_source = STATUS_STRIP.read_text()
 
     def test_normal_and_flowdeck_paths_share_native_handler(self):
         self.assertGreaterEqual(
@@ -60,6 +64,31 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
         self.assertIn("flowdeck_parent_run_id?: string", self.source)
         self.assertIn("const parentRunId = data.flowdeck_parent_run_id || data.flowdeck_run_id", self.source)
         self.assertIn("parentRunId === flowdeckRunId", self.source)
+
+    def test_waiting_feedback_is_immediate_and_replaced_by_backend_activity(self):
+        self.assertIn("flowdeckStatus = 'preparing';", self.source)
+        self.assertIn("Preparing FlowDeck…", self.status_strip_source)
+        self.assertIn("flowDeckStatusForEvent", self.source)
+        self.assertIn("if (reportedStatus) flowdeckStatus = reportedStatus;", self.source)
+
+    def test_status_strip_is_outside_composer_and_terminal_states_are_static(self):
+        self.assertIn("<FlowDeckStatusStrip", self.source)
+        self.assertNotIn("FlowDeckStatusStrip", self.chat_input_source)
+        for status in (
+            "cancelled",
+            "succeeded",
+            "failed",
+            "unknown",
+            "manual_review",
+            "manual_review_required",
+            "orphaned",
+        ):
+            self.assertIn(f"'{status}'", self.status_strip_source)
+        self.assertIn("class:is-terminal={isTerminal}", self.status_strip_source)
+        self.assertIn("const isActive = $derived", self.status_strip_source)
+        self.assertNotIn("flowdeck-composer-active", self.chat_input_source)
+        self.assertNotIn("flowdeck-pulse", self.chat_input_source)
+        self.assertNotIn("flowdeck-breathe", self.chat_input_source)
 
 
 if __name__ == "__main__":

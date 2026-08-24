@@ -160,6 +160,10 @@
 		'manual_review_required',
 		'orphaned'
 	]);
+
+	function isFlowDeckTerminal(status: string) {
+		return FLOWDECK_TERMINAL_STATUSES.has(status.toLowerCase());
+	}
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChatId);
@@ -594,7 +598,7 @@
 	}) {
 		const parentRunId = data.flowdeck_parent_run_id || data.flowdeck_run_id;
 		if (parentRunId) {
-			if (!flowdeckRunId && flowdeckMessageId && flowdeckStatus === 'active') {
+			if (!flowdeckRunId && flowdeckMessageId && !isFlowDeckTerminal(flowdeckStatus)) {
 				flowdeckRunId = parentRunId;
 				startFlowDeckPolling(flowdeckRunId);
 			}
@@ -824,8 +828,21 @@
 		return null;
 	}
 
+	function flowDeckStatusForEvent(event: any): string | null {
+		const kind = String(event?.kind || event?.type || '').toUpperCase();
+		const reported = String(event?.status || event?.payload?.status || '').toLowerCase();
+		if (isFlowDeckTerminal(reported)) return reported;
+		if (reported && ['active', 'planning', 'verifying'].includes(reported)) return reported;
+		if (kind.includes('VERIF') || kind.includes('OUTCOME') || kind.includes('REVIEW')) return 'verifying';
+		if (kind.includes('STEP_STARTED') || kind.includes('PLAN')) return 'planning';
+		if (kind.includes('RUN_STARTED') || kind.includes('DISPATCH') || kind.includes('DELEGAT')) return 'active';
+		return null;
+	}
+
 	function applyFlowDeckEventToMessage(event: any) {
 		if (!flowdeckMessageId) return;
+		const reportedStatus = flowDeckStatusForEvent(event);
+		if (reportedStatus) flowdeckStatus = reportedStatus;
 		const message = allMessages.find((item) => item.id === flowdeckMessageId);
 		if (!message) return;
 		applyNativeTranscriptEvent(event, message);
@@ -853,7 +870,9 @@
 			kind === 'RUN_COMPLETED' ||
 			kind === 'RUN_CANCELLED' ||
 			kind === 'RUN_ORPHANED' ||
-			kind === 'RUN_FAILED'
+			kind === 'RUN_FAILED' ||
+			kind === 'RUN_UNKNOWN' ||
+			kind === 'RUN_MANUAL_REVIEW'
 		) {
 			flowdeckStatus =
 				eventStatus ||
@@ -1259,9 +1278,7 @@
 				if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events);
 			for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
 				if (
-					['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(
-						flowdeckStatus
-					)
+			isFlowDeckTerminal(flowdeckStatus)
 				) {
 					if (flowdeckMessageId) {
 						const message = allMessages.find((item) => item.id === flowdeckMessageId);
@@ -1285,7 +1302,8 @@
 		}
 		stopTtsPlayback();
 		sending = true;
-		flowdeckStatus = 'active';
+		// Show truthful feedback while the immediate durable-run POST is in flight.
+		flowdeckStatus = 'preparing';
 		flowdeckRunId = '';
 		flowdeckEvents = [];
 		flowdeckClarification = '';
@@ -1371,7 +1389,7 @@
 			}
 			if (
 				flowdeckRunId &&
-				!['succeeded', 'failed', 'cancelled', 'manual_review_required'].includes(flowdeckStatus)
+				!isFlowDeckTerminal(flowdeckStatus)
 			) {
 				startFlowDeckPolling(flowdeckRunId);
 			} else if (flowdeckStatus !== 'clarification' && flowdeckMessageId) {
@@ -2139,6 +2157,13 @@
 					</h1>
 				</div>
 
+				{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
+					<FlowDeckStatusStrip
+						status={flowdeckStatus}
+						runId={flowdeckRunId}
+						sending={sending}
+					/>
+				{/if}
 				<ChatInput
 					bind:this={chatInputEl}
 					bind:inputText
@@ -2149,8 +2174,6 @@
 					bind:requestParams
 					bind:voiceModeEnabled
 					{sending}
-					flowdeckStatus={flowdeckStatus}
-					flowdeckRunId={flowdeckRunId}
 					{workspace}
 					placeholder={$t('chat.placeholder', { name: workspaceDisplayName })}
 					tasks={chatTasks}
@@ -2272,6 +2295,13 @@
 						</button>
 					</div>
 				{/if}
+				{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
+					<FlowDeckStatusStrip
+						status={flowdeckStatus}
+						runId={flowdeckRunId}
+						sending={sending}
+					/>
+				{/if}
 				<ChatInput
 					bind:this={chatInputEl}
 					bind:inputText
@@ -2282,8 +2312,6 @@
 					bind:requestParams
 					bind:voiceModeEnabled
 					{sending}
-					flowdeckStatus={flowdeckStatus}
-					flowdeckRunId={flowdeckRunId}
 					{streaming}
 					{workspace}
 					{contextUsage}

@@ -1,0 +1,1203 @@
+Task
+CPTR CodeAct Execution Engine — Code Generation over Tool Calling + Persistent REPL
+
+Goal:
+
+Implement a production-grade CodeAct execution mode in CPTR inspired by the Strands Code Agent architecture.
+
+Instead of requiring the model to repeatedly emit individual structured tool calls such as:
+
+read_file(...)
+→ result returned to model
+search_files(...)
+→ result returned to model
+read_file(...)
+→ result returned to model
+
+allow the model to generate one executable code block that composes qualified CPTR capabilities:
+
+files = search_files("authentication")
+results = []
+
+for file in files:
+    content = read_file(file.path)
+    results.append(analyze(content))
+
+summary = summarize(results)
+
+The code executes inside a persistent, isolated REPL.
+
+Intermediate values remain native runtime objects and DO NOT need to be serialized back into the LLM context after every individual operation.
+
+Primary objectives:
+
+1. Reduce token overhead.
+2. Reduce model reasoning cycles.
+3. Reduce latency for multi-step tasks.
+4. Preserve intermediate data as native objects.
+5. Allow expressive loops, filtering, branching, aggregation, retries, and composition.
+6. Preserve all CPTR/FlowDeck security and authority boundaries.
+7. Keep the existing native tool-calling engine available.
+8. Never turn this into unrestricted host Python/shell execution.
+
+This is NOT:
+
+model
+→ unrestricted Python
+→ host OS
+
+It MUST be:
+
+model
+→ generated CodeAct program
+→ sandboxed persistent REPL
+→ CPTR capability library
+→ existing authenticated policy/tool boundary
+→ actual CPTR implementation
+→ evidence / result
+
+Architecture target:
+
+User
+  ↓
+Computer or Heidi
+  ↓
+CPTR model
+  ↓
+Execution planner
+  ↓
+CodeAct mode
+  ↓
+Generated Python program
+  ↓
+Persistent isolated REPL
+  ↓
+CPTR capability SDK
+  ├── files.read(...)
+  ├── files.search(...)
+  ├── files.list(...)
+  ├── browser.inspect(...)
+  ├── git.status(...)
+  ├── tests.run(...)
+  └── other explicitly qualified capabilities
+  ↓
+existing CPTR implementations
+  ↓
+tool/runtime evidence
+  ↓
+native transcript / FlowDeck verification
+
+The REPL is an execution composition layer.
+
+It is NOT a new authority layer.
+
+CPTR remains the model/tool execution owner.
+
+FlowDeck remains orchestration, capability, workspace, lease/fencing, cancellation/recovery, evidence, and completion authority for Heidi work.
+
+
+To dev
+
+1. AUDIT BEFORE IMPLEMENTATION
+
+First map the existing CPTR execution architecture completely.
+
+Inspect:
+
+- run_chat_task
+- start_task
+- native model loop
+- tool registration
+- tool dispatch
+- tool schemas
+- tool result serialization
+- streaming callbacks
+- task registry
+- task cancellation
+- shell/terminal execution
+- filesystem tools
+- browser tools
+- Git tools
+- MCP tools
+- authenticated workspace ownership
+- FlowDeck authenticated specialist gateway
+- specialist capability registry
+- Heidi coordinator
+- physical attempts
+- leases/fencing
+- evidence verification
+- transcript persistence
+- Socket.IO events
+- token accounting
+- model usage accounting
+
+Produce an execution call graph before changing anything.
+
+Identify:
+
+A. which CPTR tools can safely become CodeAct library functions
+B. which must remain direct/gated tools
+C. which must NEVER be exposed to CodeAct initially
+
+
+2. DO NOT REPLACE THE EXISTING AGENT ENGINE BLINDLY
+
+Introduce CodeAct as another CPTR execution strategy.
+
+Initial architecture:
+
+ExecutionMode:
+- TOOL_CALLING
+- CODEACT
+
+Do not immediately delete conventional tool calling.
+
+Existing native agent behavior must continue working.
+
+CodeAct should be introduced behind configuration/feature control until qualification is complete.
+
+No client-side authority field should be able to bypass server policy.
+
+
+3. BUILD A CPTR CAPABILITY SDK FOR THE REPL
+
+Do NOT expose arbitrary internal Python modules.
+
+Expose a narrow CPTR library.
+
+Example conceptual API:
+
+cptr.files.read(path)
+cptr.files.list(path)
+cptr.files.search(query, path=None)
+
+cptr.git.status()
+cptr.git.diff()
+
+cptr.browser.snapshot()
+cptr.browser.navigate(url)
+
+cptr.tests.run(check_id)
+
+The model should interact with these functions rather than raw tool-name JSON calls.
+
+Every function MUST internally reuse the existing qualified CPTR implementation.
+
+Do not duplicate filesystem, browser, Git, test, or other business logic inside the REPL layer.
+
+
+4. CAPABILITY FUNCTIONS MUST PRESERVE AUTHORITY
+
+Calling:
+
+cptr.files.read(...)
+
+inside CodeAct MUST have exactly the same or stricter authorization as invoking the existing read_file tool.
+
+The REPL cannot bypass:
+
+- authenticated user
+- workspace ownership
+- specialist role
+- capability registry
+- mutation policy
+- FlowDeck lease
+- fencing epoch
+- operation identity
+- approvals
+- cancellation
+- verification
+
+The CodeAct runtime only improves composition.
+
+It does not grant permission.
+
+
+5. START READ-ONLY
+
+First qualification should expose only low-risk read-oriented capabilities.
+
+Initial recommended CodeAct library:
+
+- read_file
+- list_directory
+- search_files
+- qualified Git read operations
+- browser read-only observation
+- structured metadata/query helpers
+
+Do NOT expose mutation in Phase 1.
+
+
+6. PERSISTENT REPL
+
+Implement a real stateful interpreter.
+
+Within one CPTR task / FlowDeck physical attempt:
+
+execution #1:
+
+files = cptr.files.search("auth")
+
+execution #2:
+
+important = [f for f in files if f.path.endswith(".py")]
+
+execution #3:
+
+contents = [cptr.files.read(f.path) for f in important]
+
+The variables:
+
+files
+important
+contents
+
+must remain available as native objects.
+
+Do not serialize them back through model messages unless the model explicitly prints/summarizes them.
+
+
+7. DEFINE THE PERSISTENCE LIFETIME EXPLICITLY
+
+Do NOT create one global REPL.
+
+Isolation unit should be approximately:
+
+authenticated user
++ workspace
++ CPTR task / FlowDeck physical attempt
+
+Recommended:
+
+one REPL session per active execution attempt
+
+not:
+
+one Python interpreter shared by every user
+
+Lifecycle:
+
+ATTEMPT START
+→ create REPL session
+
+multiple generated code cycles
+→ same REPL memory
+
+attempt completion/cancellation/failure
+→ destroy session
+
+retry
+→ new physical attempt
+→ new REPL unless an explicitly safe durable state restoration design exists
+
+Never restore arbitrary pickled interpreter memory across server restarts initially.
+
+
+8. REPL STATE IS EPHEMERAL EXECUTION STATE
+
+FlowDeck durable state remains authoritative.
+
+Do not make Python memory the durable source of truth.
+
+After process restart:
+
+- durable operations come from database
+- workspace truth comes from actual workspace
+- REPL memory is gone
+- recovery reconciles safely
+
+Do not pretend lost REPL memory survived.
+
+
+9. NATIVE OBJECT RETENTION
+
+This is one of the main performance requirements.
+
+Tool results called from CodeAct should be returned directly as useful Python objects where appropriate.
+
+Avoid this:
+
+function
+→ JSON string
+→ model
+→ JSON parse
+→ function
+
+Prefer:
+
+function
+→ Python object
+→ variable
+→ subsequent Python operation
+
+Design typed return objects where valuable.
+
+Examples:
+
+FileSearchResult
+FileContent
+GitStatus
+BrowserSnapshot
+TestResult
+
+But avoid creating a huge unnecessary object framework.
+
+Use lightweight dataclasses/typed structures where they improve composition.
+
+
+10. MODEL ACTION FORMAT
+
+When CodeAct is active, the model's primary action interface should be executable code rather than repeatedly selecting JSON tool calls.
+
+The model should know:
+
+- available modules/functions
+- signatures
+- docstrings
+- capability restrictions
+- examples
+- execution limits
+
+Do NOT dump implementation source into the prompt.
+
+Generate concise capability documentation dynamically from the server-authorized capability set.
+
+
+11. NO HIDDEN CAPABILITY DISCOVERY
+
+The model must only see functions it can actually call.
+
+For example a security-auditor REPL may expose:
+
+cptr.files.read
+cptr.files.list
+cptr.files.search
+cptr.git.status
+cptr.git.diff
+
+It must NOT even advertise:
+
+cptr.files.write
+cptr.shell.run
+cptr.deploy
+cptr.secrets
+cptr.git.push
+
+UNKNOWN → DENY remains mandatory.
+
+
+12. SANDBOX THE INTERPRETER
+
+This is mandatory.
+
+Do NOT use unrestricted:
+
+exec(model_generated_code, globals())
+
+against the CPTR backend process.
+
+The generated code is untrusted.
+
+The REPL must execute in a contained environment.
+
+Audit available sandbox mechanisms in the existing runtime and choose the strongest practical architecture.
+
+Required restrictions include:
+
+- import allowlist
+- no arbitrary Python imports
+- no subprocess unless explicitly mediated by a CPTR capability
+- no os.system
+- no socket/network access
+- no raw filesystem access outside CPTR capability APIs
+- no environment variable access
+- no server process introspection
+- no arbitrary sys.path traversal
+- no dynamic package installation
+- no native extension loading
+- no unsafe serialization
+- no ctypes
+- no multiprocessing escape
+- no arbitrary signal/process manipulation
+- no introspection path that trivially escapes sandbox
+
+Treat generated Python as hostile input.
+
+
+13. IMPORT ALLOWLIST
+
+Imports must be server-owned.
+
+Potential safe standard-library subset may include things such as:
+
+- math
+- statistics
+- collections
+- itertools
+- functools
+- re
+- json
+- datetime
+
+Only after explicit audit.
+
+Do not permit arbitrary import.
+
+The user/model cannot expand the allowlist.
+
+
+14. CPTR SDK OBJECT MUST NOT LEAK INTERNALS
+
+If exposing:
+
+cptr.files
+
+the implementation must not allow:
+
+cptr.files.__dict__
+cptr.files._internal_session
+cptr.files.backend
+etc.
+
+to reveal powerful backend objects.
+
+Use narrow proxy objects.
+
+Avoid exposing database sessions, request objects, service instances, credentials, or filesystem handles into the interpreter.
+
+
+15. CODE EXECUTION LIMITS
+
+Every execution block needs limits:
+
+- wall-clock timeout
+- CPU limit where practical
+- memory limit
+- output size limit
+- maximum generated code length
+- maximum number of capability calls
+- recursion protections
+- maximum loops/steps where practical
+- cancellation support
+
+An infinite loop must not wedge the API worker.
+
+
+16. CANCELLATION
+
+The Stop button must terminate:
+
+- FlowDeck run
+- active child specialist
+- active CodeAct execution
+- pending capability call
+- REPL session if necessary
+
+Cancellation must not merely hide the UI.
+
+Test:
+
+while True:
+    pass
+
+then Stop.
+
+The worker must terminate within a defined bounded interval.
+
+
+17. CODE EXECUTION STREAMING
+
+Reuse the native CPTR transcript.
+
+User should see something approximately like:
+
+Heidi / Computer
+Thinking…
+
+Code
+────────────────
+files = cptr.files.search("auth")
+
+for f in files:
+    ...
+────────────────
+
+Running…
+
+Read auth.py
+Read gateway.py
+Search permissions
+
+Output
+────────────────
+3 relevant files
+────────────────
+
+Do NOT introduce another huge FlowDeck-specific timeline.
+
+Use existing:
+
+- Thought
+- Code
+- Tool
+- Shell
+- Output
+- Error
+
+components.
+
+
+18. DO NOT EXPOSE PRIVATE CHAIN OF THOUGHT
+
+Generated action code can be displayed.
+
+Tool activity can be displayed.
+
+Results can be displayed.
+
+Do NOT expose private hidden model reasoning.
+
+The existing visible native "Thought" UX must only use whatever safe reasoning summary/events CPTR already intentionally surfaces.
+
+
+19. CODE BLOCK EXECUTION IDENTITY
+
+Every generated block needs:
+
+- task ID
+- run ID where applicable
+- step ID
+- logical operation ID where applicable
+- physical attempt ID
+- REPL session ID
+- code execution sequence ID
+- user ID server-side
+- workspace identity server-side
+- model identity
+- timestamp
+
+Do not trust the model to provide these.
+
+
+20. CAPABILITY CALL IDENTITY
+
+Every capability call from inside one code block needs its own trace identity.
+
+For example:
+
+Code execution 7
+
+├── capability call 7.1 read_file
+├── capability call 7.2 read_file
+├── capability call 7.3 search_files
+└── capability call 7.4 git.diff
+
+This is required for:
+
+- observability
+- cancellation
+- audit
+- evidence
+- debugging
+- deduplication
+
+
+21. TOKEN ACCOUNTING
+
+Measure the actual benefit.
+
+Capture comparable telemetry for:
+
+TOOL_CALLING
+vs
+CODEACT
+
+Track:
+
+- input tokens
+- output tokens
+- total tokens
+- reasoning/model cycles
+- number of model invocations
+- number of capability calls
+- execution latency
+- total task latency
+- bytes of tool results placed into model context
+- success/failure rate
+
+Do not claim performance improvement without measurement.
+
+
+22. CONTEXT REDUCTION
+
+The key optimization:
+
+Do NOT append every capability result to model history.
+
+Inside CodeAct:
+
+result = cptr.files.read(...)
+
+should remain in REPL memory.
+
+Return to the model only:
+
+- stdout explicitly emitted
+- execution errors
+- bounded summaries
+- explicitly requested observations
+- capability exceptions needed for self-correction
+
+Avoid flooding context with massive outputs.
+
+
+23. TRACEBACK SELF-CORRECTION
+
+When generated code fails safely:
+
+NameError
+TypeError
+CapabilityError
+etc.
+
+return a bounded sanitized traceback to the model.
+
+Allow it to produce a corrected code block.
+
+Set a maximum repair-cycle count.
+
+Do not allow infinite model-error loops.
+
+
+24. MUTATION PHASE — ONLY AFTER READ-ONLY QUALIFICATION
+
+Do not expose mutation until read-only CodeAct receives >=9/10 qualification.
+
+Later mutation architecture:
+
+model code
+→ cptr.files.write(...)
+→ FlowDeck logical operation
+→ active lease/fencing
+→ intent persisted
+→ mutation
+→ independent verification
+→ authoritative evidence
+
+A Python function call must not bypass the durable mutation engine.
+
+
+25. SHELL
+
+Do not expose arbitrary Python subprocess as the implementation of shell.
+
+If shell is eventually exposed:
+
+cptr.shell.run(qualified_command_id, ...)
+
+must use CPTR's qualified shell boundary.
+
+Do NOT expose:
+
+subprocess.run(...)
+os.system(...)
+pty
+shell=True
+
+inside the REPL.
+
+
+26. GIT
+
+Keep existing Git protections.
+
+Initially expose only qualified read-only operations.
+
+No generated Python should be able to instantiate Git or call the git binary directly.
+
+Later Git mutation remains separately gated.
+
+
+27. BROWSER
+
+Browser functions should wrap existing CPTR browser authority.
+
+Generated code may compose browser observations, but must not gain arbitrary network/socket access.
+
+
+28. MCP
+
+Do NOT automatically convert every MCP tool into a Python callable.
+
+MCP remains denied unless explicitly mapped and qualified.
+
+UNKNOWN MCP → DENY.
+
+
+29. FLOWDECK INTEGRATION
+
+Heidi should benefit significantly from CodeAct.
+
+Example:
+
+Heidi
+→ security-auditor
+→ CodeAct read-only REPL
+→ inspect 40 files using one or a few model cycles
+→ return condensed findings
+→ FlowDeck verifies completion
+
+Each specialist receives only its allowed CPTR capability SDK.
+
+The specialist must not see all CodeAct capabilities.
+
+
+30. NATIVE COMPUTER AGENT INTEGRATION
+
+Eventually Computer can support CodeAct as well.
+
+Do not force it before qualification.
+
+Possible server-owned execution policy:
+
+simple task
+→ normal tool calling
+
+complex compositional task
+→ CodeAct
+
+But do NOT add model-selected unrestricted switching initially.
+
+Start with an explicit server feature/config mode for evaluation.
+
+
+31. EVALUATION HARNESS
+
+Build repeatable A/B tests.
+
+Same model.
+Same prompts.
+Same workspace fixture.
+
+Compare:
+
+A. normal CPTR tool calling
+B. CodeAct
+
+Test workloads:
+
+- search + inspect many files
+- repository mapping
+- security audit
+- dependency analysis
+- test-result aggregation
+- structured data extraction
+- multi-file code understanding
+- browser observation aggregation
+
+Measure actual performance.
+
+
+32. PERFORMANCE TARGETS
+
+Do not hardcode Strands benchmark results as CPTR acceptance requirements.
+
+Instead establish CPTR baselines.
+
+Desired direction:
+
+- fewer model round trips
+- fewer tokens
+- lower context size
+- lower completion latency
+- same or higher task accuracy
+- no security regression
+
+Any meaningful improvement is acceptable initially if correctness/security remain intact.
+
+
+33. SECURITY ADVERSARIAL TESTS
+
+Test generated code attempts:
+
+import os
+import subprocess
+import socket
+import pathlib
+import sys
+import ctypes
+import multiprocessing
+import importlib
+
+open("/etc/passwd")
+
+__import__("os")
+
+getattr(...)
+object subclass traversal
+dunder traversal
+globals()
+locals()
+vars()
+compile()
+eval()
+exec()
+
+environment access
+
+network socket creation
+
+fork/process creation
+
+package installation
+
+filesystem traversal
+
+accessing CPTR service internals
+
+credential discovery
+
+Sandbox escape attempts must fail.
+
+
+34. CROSS-USER ISOLATION
+
+Create:
+
+User A / workspace A
+User B / workspace B
+
+Ensure:
+
+- separate REPL processes/sessions
+- separate capability contexts
+- no shared Python objects
+- no variable leakage
+- no workspace leakage
+- no cached object leakage
+
+
+35. CONCURRENT RUN ISOLATION
+
+Two runs in the same account must not accidentally share variables unless explicitly designed.
+
+Default:
+
+one attempt = one REPL.
+
+
+36. RESOURCE CLEANUP
+
+Verify REPL teardown on:
+
+- success
+- failure
+- cancel
+- timeout
+- model error
+- client disconnect
+- server shutdown
+- orphan recovery
+
+No zombie interpreters.
+
+
+37. RESTART BEHAVIOR
+
+If API restarts during CodeAct:
+
+- interpreter is lost
+- durable task remains
+- execution does not pretend REPL memory survived
+- active uncertain mutation follows existing reconciliation rules
+- read-only work may safely restart when policy permits
+
+
+38. UI
+
+Do not build a separate CodeAct application.
+
+Integrate into native CPTR chat.
+
+The user should see:
+
+Code
+Running
+Tool activities
+Output
+
+using the same visual system as native CPTR.
+
+Add a small indicator when useful:
+
+Code execution · 4 capability calls · 1.3s
+
+Keep mobile-first behavior.
+
+
+39. FEATURE FLAGS / KILL SWITCH
+
+CodeAct must have:
+
+- global enable
+- per-role enable
+- immediate kill switch
+
+Initially disabled by default until qualification completes.
+
+Turning it off must return CPTR to normal tool calling without database damage.
+
+
+40. DO NOT ADD A SECOND MODEL LOOP
+
+CodeAct changes the action interface.
+
+It does NOT create another autonomous agent.
+
+Correct:
+
+CPTR model
+→ code
+→ interpreter
+→ capability functions
+
+Incorrect:
+
+CPTR model
+→ CodeAct agent
+→ another model
+→ tools
+
+
+Roadmap
+
+Phase 0
+Architecture audit and benchmark baseline
+
+Phase 1
+CodeAct contracts and capability SDK
+
+Phase 2
+Sandboxed persistent REPL
+
+Phase 3
+Read-only capabilities
+
+Phase 4
+Native transcript integration
+
+Phase 5
+Cancellation/resource lifecycle
+
+Phase 6
+FlowDeck read-only specialist integration
+
+Phase 7
+Security adversarial qualification
+
+Phase 8
+Performance A/B benchmark
+
+Phase 9
+Recovery/concurrency qualification
+
+Phase 10
+Read-only production acceptance
+
+STOP.
+
+Do NOT start mutation CodeAct until Phase 10 scores >=9/10.
+
+
+Commands
+
+Use repository-derived paths only.
+
+ROOT="$(git rev-parse --show-toplevel)"
+APP_ROOT="$ROOT/artifacts/computer"
+cd "$APP_ROOT"
+
+git status --short
+git branch --show-current
+git rev-parse HEAD
+git log -n 20 --oneline
+
+# Establish the current baseline using the repository's existing test commands.
+
+python3 -m unittest discover -s tests -p 'test_flowdeck*.py'
+python3 -m unittest discover -s tests -p 'test_*.py'
+
+python3 -m compileall -q cptr
+
+cd cptr/frontend
+
+# Use existing package manager/scripts.
+pnpm run check
+pnpm run build
+
+cd "$APP_ROOT"
+
+git diff --check
+
+Do not assume pytest is required.
+Use the project's established test runner.
+
+
+Bug checks
+
+- Generated code executes in API process unrestricted → FAIL
+- arbitrary import possible → FAIL
+- raw filesystem access possible → FAIL
+- environment-variable access possible → FAIL
+- arbitrary network possible → FAIL
+- subprocess escape possible → FAIL
+- unrestricted shell possible → FAIL
+- CPTR internal service object leaked into REPL → FAIL
+- user can expand capability set → FAIL
+- model can expand import allowlist → FAIL
+- CodeAct bypasses workspace ownership → FAIL
+- CodeAct bypasses FlowDeck specialist policy → FAIL
+- mutation bypasses lease/fencing → FAIL
+- mutation happens before durable intent → FAIL
+- Stop does not terminate interpreter → FAIL
+- infinite loop wedges API → FAIL
+- REPL memory leaks between users → FAIL
+- REPL memory leaks between unrelated attempts → FAIL
+- REPL becomes durable source of truth → FAIL
+- restart assumes interpreter survived → FAIL
+- massive tool results still copied into model context → FAIL
+- model receives every intermediate object/result → FAIL
+- CodeAct creates second model loop → FAIL
+- CodeAct breaks native CPTR tool calling → FAIL
+- Heidi streaming regresses → FAIL
+- chat persistence regresses → FAIL
+- cancellation regresses → FAIL
+- mobile transcript regresses → FAIL
+
+
+Tests before commit
+
+Acceptance requires:
+
+1. Existing CPTR baseline passes before implementation.
+2. Existing FlowDeck baseline passes before implementation.
+3. Existing frontend build/typecheck passes.
+4. CodeAct is feature controlled.
+5. CodeAct disabled path changes no normal behavior.
+6. Persistent REPL works across multiple execution blocks.
+7. Python variables survive across blocks.
+8. Native result objects survive without model serialization.
+9. REPL isolated per attempt.
+10. REPL isolated per user.
+11. REPL isolated per workspace.
+12. REPL destroyed after completion.
+13. REPL destroyed after cancellation.
+14. REPL destroyed after timeout.
+15. Infinite loop is terminated.
+16. Import allowlist enforced.
+17. os blocked.
+18. subprocess blocked.
+19. socket blocked.
+20. ctypes blocked.
+21. arbitrary file open blocked.
+22. environment access blocked.
+23. dynamic import escape blocked.
+24. capability SDK exposes no dangerous internals.
+25. Capability functions reuse existing CPTR implementations.
+26. Workspace authorization preserved.
+27. FlowDeck role capabilities preserved.
+28. UNKNOWN capability denied.
+29. Read-only specialist cannot mutate.
+30. Code blocks stream using native CPTR UI.
+31. Capability calls stream using native tool UI.
+32. Output is bounded.
+33. Traceback is bounded/sanitized.
+34. Model can self-correct a safe code error.
+35. Repair cycles are bounded.
+36. Stop cancels CodeAct immediately/bounded.
+37. No late output appears after authoritative cancel.
+38. Reload/reconnect does not duplicate transcript.
+39. No second realtime system is introduced.
+40. No second model loop introduced.
+41. Existing native tool-calling mode still works.
+42. Same model can A/B tool calling vs CodeAct.
+43. Token usage is measured.
+44. Model cycle count is measured.
+45. Latency is measured.
+46. Context-result bytes are measured.
+47. Benchmark results documented without exaggeration.
+48. Existing FlowDeck suite passes.
+49. Existing complete backend suite passes.
+50. Frontend typecheck passes.
+51. Frontend production build passes.
+52. Python compilation passes.
+53. git diff --check passes.
+54. API smoke passes.
+55. No authority expansion occurs.
+
+
+Evidence
+
+Final Phase-10 closure report must include:
+
+- PASS / FAIL
+- score
+- branch / HEAD
+- working-tree status
+- architecture before/after
+- exact CodeAct execution flow
+- interpreter implementation
+- sandbox model
+- import allowlist
+- capability SDK
+- capability authorization path
+- REPL lifecycle
+- persistence lifetime
+- cancellation behavior
+- timeout/resource limits
+- cross-user isolation
+- cross-run isolation
+- restart/recovery behavior
+- transcript integration
+- Heidi integration
+- native Computer compatibility
+- security adversarial test results
+- benchmark methodology
+- normal tool-calling results
+- CodeAct results
+- token comparison
+- model-cycle comparison
+- latency comparison
+- context-size comparison
+- correctness comparison
+- exact FlowDeck test count
+- exact backend test count
+- frontend check/build results
+- API smoke
+- remaining risks
+- confirmation no second model loop
+- confirmation CPTR remains sole model/tool execution owner
+- confirmation FlowDeck remains orchestration/evidence authority
+- confirmation CodeAct remains read-only for initial qualification
+- confirmation disabled mode preserves native behavior
+
+Score
+
+>= 9/10 required before enabling CodeAct read-only production use.
+
+Do NOT enable mutation CodeAct at the end of this task.
+
+Mutation must be a separate qualification phase.
+
+Commit/push
+
+Do NOT push to GitHub.
+
+Do NOT deploy/publish.
+
+Do NOT automatically merge to main.
+
+Leave the final verified implementation available for review.
+
+Only commit when explicitly approved.
