@@ -40,6 +40,7 @@
 
 	let saving = $state(false);
 	let verifying = $state(false);
+	const enabledCount = $derived(servers.filter((server) => server.enabled).length);
 
 	// Verify result
 	let verifyResult = $state<{ ok: boolean; tools?: any[]; message?: string } | null>(null);
@@ -259,10 +260,19 @@
 	onMount(load);
 </script>
 
-<div class="flex items-center justify-between mb-4">
-	<h2 class="text-sm font-medium text-gray-900 dark:text-white">{$t('toolServers.title')}</h2>
+<div class="mb-5 flex items-start justify-between gap-4">
+	<div>
+		<div class="mb-1 flex items-center gap-2">
+			<h2 class="text-base font-semibold tracking-tight text-gray-900 dark:text-white">{$t('toolServers.title')}</h2>
+			<span class="rounded-full bg-emerald-500/10 px-2 py-0.5 font-mono text-[0.625rem] text-emerald-600 dark:text-emerald-300">
+				{enabledCount}/{servers.length}
+			</span>
+		</div>
+		<p class="text-[0.6875rem] text-gray-400 dark:text-gray-500">Connected sources for external capabilities.</p>
+	</div>
 	<button
-		class="flex items-center justify-center w-6 h-6 rounded-lg text-gray-400 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300 transition-colors duration-75"
+		aria-label={$t('toolServers.add')}
+		class="flex size-8 items-center justify-center rounded-xl bg-gray-900 text-white shadow-sm transition-all duration-150 hover:-translate-y-px hover:bg-gray-700 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
 		onclick={() => openCreate()}
 	>
 		<Icon name="plus" size={14} />
@@ -274,33 +284,42 @@
 		<Spinner size={16} />
 	</div>
 {:else}
-	<div>
+	<div class="flex flex-col gap-2">
 		{#each servers as s}
-			<div class="group flex items-center gap-2 w-full h-7 text-left">
-				<span
-					class="text-[0.625rem] font-mono shrink-0
-					{s.type === 'mcp' || s.type === 'mcp_stdio'
-						? 'text-purple-500 dark:text-purple-400'
-						: 'text-blue-500 dark:text-blue-400'}"
-				>
-					{s.type === 'mcp' ? 'MCP' : s.type === 'mcp_stdio' ? 'STDIO' : 'API'}
+			<div class="group flex w-full items-center gap-3 rounded-2xl border border-gray-200/70 px-3 py-2.5 text-left transition-all duration-200 hover:-translate-y-px hover:border-gray-300 hover:bg-gray-50/70 dark:border-white/7 dark:hover:border-white/12 dark:hover:bg-white/4">
+				<span class="flex size-8 shrink-0 items-center justify-center rounded-xl {s.enabled ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : 'bg-gray-100 text-gray-400 dark:bg-white/5 dark:text-gray-600'}">
+					<Icon name={s.type === 'mcp_stdio' ? 'terminal' : 'globe'} size={14} />
 				</span>
-				<button
-					type="button"
-					class="flex-1 min-w-0 text-left text-[0.8125rem] truncate
-					{s.enabled ? 'text-gray-700 dark:text-gray-300' : 'text-gray-400 dark:text-gray-600'}"
-					onclick={() => openEdit(s)}
-				>
-					{s.name || s.command || s.url}
-				</button>
+				<div class="min-w-0 flex-1">
+					<div class="flex min-w-0 items-center gap-2">
+						<button
+							type="button"
+							class="min-w-0 truncate text-left text-[0.8125rem] font-medium {s.enabled ? 'text-gray-800 dark:text-gray-200' : 'text-gray-400 dark:text-gray-600'}"
+							onclick={() => openEdit(s)}
+						>
+							{s.name || s.command || s.url}
+						</button>
+						<span class="shrink-0 font-mono text-[0.5625rem] uppercase tracking-wider text-gray-400 dark:text-gray-600">
+							{s.type === 'mcp' ? 'MCP' : s.type === 'mcp_stdio' ? 'STDIO' : 'API'}
+						</span>
+					</div>
+					<div class="mt-0.5 flex items-center gap-1.5 text-[0.625rem] text-gray-400 dark:text-gray-600">
+						<span class="size-1.5 rounded-full {s.enabled ? 'bg-emerald-500' : 'bg-gray-300 dark:bg-gray-700'}"></span>
+						{s.enabled ? 'Available' : 'Paused'}
+					</div>
+				</div>
 				<ToggleSwitch value={s.enabled} onchange={(value) => toggleEnabled(s, value)} />
 			</div>
 		{/each}
 
 		{#if servers.length === 0}
-			<p class="text-[0.8125rem] text-gray-400 dark:text-gray-600 py-4">
-				{$t('toolServers.empty')}
-			</p>
+			<div class="rounded-2xl border border-dashed border-gray-200 p-6 text-center dark:border-white/8">
+				<div class="mx-auto mb-2 flex size-9 items-center justify-center rounded-xl bg-gray-100 text-gray-400 dark:bg-white/5 dark:text-gray-600">
+					<Icon name="globe" size={16} />
+				</div>
+				<p class="text-[0.75rem] text-gray-500 dark:text-gray-400">{$t('toolServers.empty')}</p>
+				<p class="mt-1 text-[0.625rem] text-gray-400 dark:text-gray-600">Add a source to make more tools available.</p>
+			</div>
 		{/if}
 	</div>
 {/if}

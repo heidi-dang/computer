@@ -519,8 +519,22 @@
 	});
 </script>
 
-<div class="flex flex-col h-full w-full">
-	<div bind:this={containerEl} class="flex-1 min-h-0 pt-1 pl-2 overflow-hidden"></div>
+<div class="flex h-full w-full flex-col overflow-hidden bg-[color-mix(in_oklab,var(--app-bg)_96%,var(--app-fg))]">
+	<div class="flex h-9 shrink-0 items-center justify-between border-b border-gray-200/60 px-3 dark:border-white/6">
+		<div class="flex min-w-0 items-center gap-2">
+			<span class="flex size-5 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-300">
+				<span class="size-1.5 rounded-full bg-emerald-500 shadow-[0_0_0_3px_color-mix(in_srgb,#10b981_14%,transparent)]"></span>
+			</span>
+			<span class="truncate text-[0.6875rem] font-medium text-gray-700 dark:text-gray-300">Shell</span>
+			<span class="font-mono text-[0.5625rem] uppercase tracking-wider text-gray-400 dark:text-gray-600">
+				{readOnly ? 'Read only' : 'Live session'}
+			</span>
+		</div>
+		<div class="hidden items-center gap-2 font-mono text-[0.5625rem] text-gray-400 dark:text-gray-600 sm:flex">
+			<span>PTY</span><span class="text-gray-300 dark:text-gray-700">·</span><span>⌘K shortcuts</span>
+		</div>
+	</div>
+	<div bind:this={containerEl} class="min-h-0 flex-1 overflow-hidden px-2 pt-2"></div>
 	<!-- On mobile, xterm's textarea gets moved here as a flex sibling -->
 </div>
 

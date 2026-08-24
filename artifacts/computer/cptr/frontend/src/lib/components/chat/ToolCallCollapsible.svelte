@@ -75,13 +75,13 @@
 	<div
 		role="button"
 		tabindex="0"
-		class="w-full min-w-0 text-left text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition cursor-pointer"
+		class="w-full min-w-0 cursor-pointer rounded-xl border border-transparent px-2 py-1.5 text-left text-gray-500 transition-all duration-200 hover:border-gray-200/70 hover:bg-gray-50/70 hover:text-gray-700 dark:hover:border-white/7 dark:hover:bg-white/4 dark:hover:text-gray-300"
 		aria-expanded={expanded}
 		aria-controls={callId}
 		onclick={toggleExpanded}
 		onkeydown={handleRowKeydown}
 	>
-		<div class="flex items-center gap-1.5 text-sm min-w-0 {isExecuting ? 'shimmer' : ''}">
+		<div class="flex min-w-0 items-center gap-2 text-sm {isExecuting ? 'shimmer' : ''}">
 			{#if isExecuting}
 				<div class="flex justify-center text-center">
 					<svg
@@ -175,8 +175,15 @@
 				</div>
 			{/if}
 
-			<div class="flex-1 min-w-0 line-clamp-1">
-				<span class="font-normal">{toolLabel(toolName, args)}</span>
+			<div class="flex min-w-0 flex-1 items-center gap-2 line-clamp-1">
+				<span class="truncate font-medium">{toolLabel(toolName, args)}</span>
+				{#if isExecuting}
+					<span class="shrink-0 rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[0.5625rem] font-medium uppercase tracking-wider text-amber-600 dark:text-amber-300">Running</span>
+				{:else if isDone}
+					<span class="shrink-0 rounded-full bg-emerald-500/10 px-1.5 py-0.5 text-[0.5625rem] font-medium uppercase tracking-wider text-emerald-600 dark:text-emerald-300">Done</span>
+				{:else if isRejected}
+					<span class="shrink-0 rounded-full bg-red-500/10 px-1.5 py-0.5 text-[0.5625rem] font-medium uppercase tracking-wider text-red-600 dark:text-red-300">Blocked</span>
+				{/if}
 			</div>
 
 			{#if isPending && chatId}
@@ -227,7 +234,7 @@
 			<div
 				class={isAskUser
 					? 'ml-5 mt-1.5 space-y-1.5 text-xs leading-relaxed'
-					: 'border border-gray-50 dark:border-gray-850/30 rounded-2xl my-1.5 p-3 space-y-3 overflow-hidden'}
+					: 'my-1.5 space-y-3 overflow-hidden rounded-2xl border border-gray-200/70 bg-gray-50/40 p-3 dark:border-white/7 dark:bg-white/3'}
 			>
 				{#if isAskUser}
 					{#each askUserQuestions as question}
