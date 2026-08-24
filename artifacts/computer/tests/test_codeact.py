@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import unittest
 from pathlib import Path
 
 from cptr.codeact.capabilities import sdk_from_tool_context
 from cptr.codeact.contracts import CodeActConfig, CodeActIdentity, CodeActLimits, CodeActMode
-from cptr.codeact.repl import CodeActCapabilityError, CodeActRepl, ReadOnlyCapabilitySDK
+from cptr.codeact.repl import CodeActRepl, ReadOnlyCapabilitySDK
 from cptr.codeact.runner import run_read_only_attempt
-from cptr.codeact.benchmark import BenchmarkCase, run_same_model_ab
+from cptr.codeact.benchmark import (
+    BenchmarkCase,
+    ProviderMeasurement,
+    run_provider_benchmark,
+    run_same_model_ab,
+)
 from cptr.codeact.telemetry import ExecutionTelemetry
 from cptr.codeact.sandbox import CodeActSandboxError, validate_program
 
@@ -158,11 +162,41 @@ class CodeActAdapterTests(unittest.TestCase):
                 [BenchmarkCase("file-list", "list files", ["a.py"])],
                 native_runner=native,
                 codeact_runner=codeact,
+                model_id="same-model",
             )
 
         observations = asyncio.run(run())
         self.assertEqual([item.mode for item in observations], [CodeActMode.DISABLED, CodeActMode.READ_ONLY])
         self.assertTrue(all(item.telemetry["correctness"] for item in observations))
+        self.assertEqual({item.telemetry["model_id"] for item in observations}, {"same-model"})
+
+    def test_provider_benchmark_reports_metrics_security_and_decision(self):
+        async def run():
+            async def provider(case, mode, telemetry):
+                telemetry.cycles = 2
+                return ProviderMeasurement(
+                    result=case.expected,
+                    input_tokens=10,
+                    output_tokens=5,
+                    cycles=2,
+                    capability_calls=1 if mode is CodeActMode.READ_ONLY else 0,
+                    context_bytes=42,
+                )
+
+            return await run_provider_benchmark(
+                [BenchmarkCase("sum", "calculate", 3)],
+                model_id="same-model",
+                provider_runner=provider,
+                provider_backed=True,
+            )
+
+        report = asyncio.run(run())
+        self.assertEqual(report.decision, "enable-read-only")
+        self.assertEqual(report.score, 100.0)
+        self.assertEqual(len(report.security), 7)
+        self.assertTrue(all(item.blocked for item in report.security))
+        self.assertEqual(report.observations[0].telemetry["cycles"], 2)
+        self.assertEqual(report.observations[0].telemetry["context_bytes"], 42)
 
 
 if __name__ == "__main__":

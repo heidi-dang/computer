@@ -32,6 +32,8 @@ BLOCKED_NAMES = frozenset(
         "exit",
         "quit",
         "memoryview",
+        "bytearray",
+        "bytes",
         "object",
         "type",
         "super",
