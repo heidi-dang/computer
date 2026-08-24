@@ -86,16 +86,22 @@ async def _run_check(
     root: Path,
     timeout_seconds: float,
 ) -> tuple[int, bytes, bytes]:
+    child_env = {
+        "PATH": os.environ.get("PATH") or "/usr/bin:/bin",
+        "HOME": str(root),
+    }
+    # Structured checks that import CPTR must use the same control-plane
+    # database as their authenticated parent, without inheriting secrets or
+    # unrelated ambient environment.
+    if data_dir := os.environ.get("CPTR_DATA_DIR"):
+        child_env["CPTR_DATA_DIR"] = data_dir
     process = await asyncio.create_subprocess_exec(
         *_command_for(check),
         cwd=str(root),
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={
-            "PATH": os.environ.get("PATH") or "/usr/bin:/bin",
-            "HOME": str(root),
-        },
+        env=child_env,
         start_new_session=True,
     )
     try:

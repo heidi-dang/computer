@@ -11,3 +11,5 @@
 - [Live build provider checks](live-build-provider-checks.md) — live /build smoke tests require an explicitly enabled mutation flag and a healthy configured model connection.
 - [Realtime smoke harness](realtime-smoke-harness.md) — use declared HTTP polling to avoid optional Socket.IO transport dependencies.
 - [Provider discovery fail-closed](provider-discovery-fail-closed.md) — HTTP 405 model enumeration means unverified, never available or an excuse for silent model switching.
+- [FlowDeck child completion](flowdeck-child-completion.md) — child native done events must not terminalize the parent transcript; only the parent run owns native completion.
+- [Structured tester environment](structured-tester-environment.md) — authenticated tester subprocesses need the explicit CPTR data directory, but must not inherit ambient secrets or environment.

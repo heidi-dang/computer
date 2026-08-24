@@ -772,6 +772,17 @@
 		}
 		if (data.error) toast.error(data.error, { duration: 8000 });
 		if (!data.done) return;
+		const isChildFlowDeckCompletion =
+			data.flowdeck_parent_run_id &&
+			data.flowdeck_run_id &&
+			data.flowdeck_parent_run_id !== data.flowdeck_run_id;
+		if (isChildFlowDeckCompletion) {
+			// Child native events share Heidi's transcript message, but only the
+			// parent run may end native streaming or move the durable status to
+			// verification. Child completion is already represented by the
+			// FlowDeck event bridge above.
+			return;
+		}
 
 		flushTtsBuffer();
 		sending = false;

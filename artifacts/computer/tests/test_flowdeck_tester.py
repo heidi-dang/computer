@@ -15,6 +15,7 @@ from cptr.flowdeck.tester import (
     TEST_CHECKS,
     TesterPolicyError,
     TesterRequest,
+    _run_check,
     run_tester,
     validate_tester_request,
 )
@@ -176,3 +177,44 @@ class TesterTests(unittest.IsolatedAsyncioTestCase):
 
     def test_structured_checks_have_no_shell_string(self):
         self.assertEqual(TEST_CHECKS, {"tests", "build", "typecheck", "lint"})
+
+    async def test_structured_check_inherits_only_control_plane_data_directory(self):
+        captured = {}
+
+        async def fake_process(*args, **kwargs):
+            captured.update(kwargs)
+
+            class Process:
+                pid = 1
+                stdout = asyncio.StreamReader()
+                stderr = asyncio.StreamReader()
+                returncode = 0
+
+                async def wait(self):
+                    return 0
+
+            return Process()
+
+        with patch.dict(
+            os.environ,
+            {
+                "CPTR_DATA_DIR": "/tmp/control-plane-data",
+                "CPTR_TEST_SECRET": "must-not-be-inherited",
+            },
+            clear=False,
+        ), patch(
+            "cptr.flowdeck.tester.asyncio.create_subprocess_exec",
+            new=fake_process,
+        ), patch(
+            "cptr.flowdeck.tester._read_bounded",
+            new=AsyncMock(return_value=b""),
+        ):
+            await _run_check(
+                "tests",
+                root=Path(self.workspace.name),
+                timeout_seconds=1,
+            )
+
+        self.assertEqual(captured["env"]["CPTR_DATA_DIR"], "/tmp/control-plane-data")
+        self.assertNotIn("CPTR_TEST_SECRET", captured["env"])
+        self.assertNotIn("DATABASE_URL", captured["env"])

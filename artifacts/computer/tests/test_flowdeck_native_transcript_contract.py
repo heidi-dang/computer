@@ -65,6 +65,13 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
         self.assertIn("const parentRunId = data.flowdeck_parent_run_id || data.flowdeck_run_id", self.source)
         self.assertIn("parentRunId === flowdeckRunId", self.source)
 
+    def test_child_completion_cannot_terminalize_parent_native_transcript(self):
+        self.assertIn("const isChildFlowDeckCompletion =", self.source)
+        self.assertIn("data.flowdeck_parent_run_id !== data.flowdeck_run_id", self.source)
+        self.assertIn("if (isChildFlowDeckCompletion)", self.source)
+        self.assertIn("only the", self.source)
+        self.assertIn("parent run may end native streaming", self.source)
+
     def test_waiting_feedback_is_immediate_and_replaced_by_backend_activity(self):
         self.assertIn("flowdeckStatus = 'preparing';", self.source)
         self.assertIn("Preparing FlowDeck…", self.status_strip_source)
