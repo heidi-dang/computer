@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { chatModels } from '$lib/stores/chat';
+	import { chatModels, refreshChatState } from '$lib/stores/chat';
 	import DropdownMenu from '../DropdownMenu.svelte';
 	import { t } from '$lib/i18n';
 
@@ -29,6 +29,7 @@
 	let search = $state('');
 	let highlightedIndex = $state(0);
 	let isSmallViewport = $state(false);
+	let refreshing = $state(false);
 
 	const selectorMaxHeight = $derived(isSmallViewport ? '7.5rem' : '15rem');
 
@@ -57,11 +58,13 @@
 					]
 				: []),
 			...filtered.map((m) => ({
-				label: `${m.provider} / ${m.name}`,
-				tooltip: `${m.provider} / ${m.name}`,
+				label: `${m.provider} / ${m.name}${m.availability !== 'available' ? ` · ${m.availability || 'unknown'}` : ''}`,
+				tooltip: `${m.provider} / ${m.name} — ${m.availability_reason || 'Availability confirmed'}`,
 				active: m.id === selectedModel,
 				check: true,
+				disabled: m.availability !== 'available',
 				onclick: () => {
+					if (m.availability !== 'available') return;
 					selectedModel = m.id;
 					onchange?.(m.id);
 				}
@@ -91,6 +94,16 @@
 		await tick();
 		searchInputEl?.focus();
 		searchInputEl?.select();
+	}
+
+	async function refreshModels() {
+		if (refreshing) return;
+		refreshing = true;
+		try {
+			await refreshChatState(true);
+		} finally {
+			refreshing = false;
+		}
 	}
 
 	function selectedIndex() {
@@ -220,6 +233,16 @@
 							}
 						}}
 					/>
+					<button
+						type="button"
+						class="shrink-0 rounded p-1 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+						title="Refresh model availability"
+						aria-label="Refresh model availability"
+						disabled={refreshing}
+						onclick={refreshModels}
+					>
+						<span class:animate-spin={refreshing}>↻</span>
+					</button>
 				</div>
 			{/snippet}
 			{#snippet empty()}

@@ -285,15 +285,23 @@ export interface ChatModel {
 	name: string;
 	provider: string;
 	connection_id: string;
+availability?: 'available' | 'unavailable' | 'unknown' | 'checking' | 'configuration_required';
+availability_reason?: string;
+input_price_per_1m?: number | null;
+output_price_per_1m?: number | null;
+cached_input_price_per_1m?: number | null;
+reasoning_price_per_1m?: number | null;
+pricing_source?: string | null;
+pricing_updated_at?: string | number | null;
 }
 
 export const chatModels = writable<ChatModel[]>([]);
 export const defaultModel = writable<string | null>(null);
 
-export async function refreshChatState() {
+export async function refreshChatState(forceRefresh = false) {
 	try {
 		const data = await fetchJSON<{ models: ChatModel[]; default: string | null }>(
-			'/api/chats/models'
+`/api/chats/models${forceRefresh ? '?refresh=true' : ''}`
 		);
 		chatModels.set(data.models);
 		defaultModel.set(data.default);

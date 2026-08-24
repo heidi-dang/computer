@@ -3,9 +3,10 @@
 		status?: string;
 		runId?: string;
 		sending?: boolean;
+		telemetry?: { input_tokens: number; output_tokens: number; total_tokens: number; cost: number | null };
 	}
 
-	let { status = '', runId = '', sending = false }: Props = $props();
+	let { status = '', runId = '', sending = false, telemetry = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: null } }: Props = $props();
 
 	const terminalStatuses = new Set([
 		'cancelled',
@@ -69,6 +70,11 @@ status.toLowerCase() === 'manual_review_required'
 		{#if runId}
 			<span class="flowdeck-status-run" title={runId}>run {runId.slice(0, 8)}</span>
 		{/if}
+		{#if telemetry.total_tokens > 0}
+			<span class="flowdeck-status-telemetry" title="Authoritative provider-reported token usage">
+				{telemetry.total_tokens.toLocaleString()} tokens{telemetry.cost !== null ? ` · $${telemetry.cost.toFixed(4)}` : ' · cost unknown'}
+			</span>
+		{/if}
 	</div>
 {#if recoveryMessage}
 <p class="flowdeck-status-recovery">{recoveryMessage}</p>
@@ -109,6 +115,15 @@ status.toLowerCase() === 'manual_review_required'
 		font: 0.6rem ui-monospace, SFMono-Regular, monospace;
 	}
 
+	.flowdeck-status-telemetry {
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: color-mix(in oklab, var(--app-fg) 45%, transparent);
+	}
+
 	.flowdeck-status-strip.is-active .flowdeck-status-mark {
 		color: color-mix(in oklab, var(--app-fg) 62%, transparent);
 	}
@@ -132,6 +147,9 @@ line-height: 1.35;
 
 		.flowdeck-status-run {
 			display: none;
+		}
+		.flowdeck-status-telemetry {
+			max-width: 12rem;
 		}
 	}
 

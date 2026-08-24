@@ -16,6 +16,8 @@
 		image?: string;
 		/** Optional check mark on the right when active. */
 		check?: boolean;
+		/** Disable selection while retaining the row for status explanation. */
+		disabled?: boolean;
 		/** Optional keyboard shortcut hint displayed as a single pill on the right. */
 		shortcut?: string;
 		/** Optional trailing action button, e.g. row options. */
@@ -400,14 +402,16 @@
 						class="group menu-row flex items-center gap-1 w-full h-6 rounded-xl text-xs transition-colors duration-75 {item.active ||
 						item.highlighted
 							? 'app-interactive-active'
-							: ''}"
+: ''} {item.disabled ? 'opacity-45 cursor-not-allowed' : ''}"
 						data-menu-highlighted={item.highlighted ? 'true' : undefined}
 						data-menu-active={item.active ? 'true' : undefined}
 					>
 						<button
-							class="flex items-center gap-2 min-w-0 flex-1 h-full px-2 text-inherit"
+class="flex items-center gap-2 min-w-0 flex-1 h-full px-2 text-inherit"
+disabled={item.disabled}
 							use:tooltip={item.tooltip ? { content: item.tooltip, placement: 'top' } : null}
 							onclick={() => {
+if (item.disabled) return;
 								item.onclick();
 								onclose();
 							}}

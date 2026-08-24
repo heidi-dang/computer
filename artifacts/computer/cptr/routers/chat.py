@@ -272,26 +272,88 @@ async def _get_connections() -> list[dict]:
 # ── Model cache (app.state) ─────────────────────────────────
 
 
-async def _get_connection_models(conn: dict, app_state) -> list[str]:
-    """Get models for a connection: from stored data, cache, or auto-discover."""
-    stored = conn.get("data", {}).get("models")
-    if stored:
-        return stored
+MODEL_DISCOVERY_TTL_SECONDS = 300
 
+
+def _normalise_model_metadata(model_id: str, raw: dict | None = None) -> dict:
+    raw = raw if isinstance(raw, dict) else {}
+    pricing = raw.get("pricing") if isinstance(raw.get("pricing"), dict) else raw
+
+    def price(*keys):
+        for key in keys:
+            value = pricing.get(key)
+            try:
+                if value is not None and float(value) >= 0:
+                    return float(value)
+            except (TypeError, ValueError):
+                pass
+        return None
+
+    return {
+        "id": model_id,
+        "input_price_per_1m": price("input_price_per_1m", "prompt", "input"),
+        "output_price_per_1m": price("output_price_per_1m", "completion", "output"),
+        "cached_input_price_per_1m": price("cached_input_price_per_1m", "cache_read"),
+        "reasoning_price_per_1m": price("reasoning_price_per_1m", "reasoning"),
+        "pricing_source": raw.get("pricing_source") or raw.get("source"),
+        "pricing_updated_at": raw.get("pricing_updated_at") or raw.get("updated_at"),
+    }
+
+
+async def _get_connection_model_metadata(conn: dict, app_state, force_refresh: bool = False) -> dict[str, dict]:
+    """Return model metadata from the configured source or provider discovery.
+
+    Configured model IDs are deliberately `unknown` until a provider discovery
+    response confirms them; configuration alone is not a health check.
+    """
+    data = conn.get("data") or {}
+    stored = data.get("models") or []
+    configured_metadata = data.get("model_metadata") or {}
     conn_id = conn.get("id", "")
-    cache = getattr(app_state, "MODELS", None)
+    cache = getattr(app_state, "MODEL_METADATA", None)
     if cache is None:
         cache = {}
-        app_state.MODELS = cache
+        app_state.MODEL_METADATA = cache
+    now = datetime.now(timezone.utc).timestamp()
+    cached = cache.get(conn_id)
+    if cached and not force_refresh and now - cached["checked_at"] < MODEL_DISCOVERY_TTL_SECONDS:
+        return cached["models"]
 
-    if conn_id in cache:
-        return cache[conn_id]
+    result = {
+        model_id: {
+            **_normalise_model_metadata(model_id, configured_metadata.get(model_id)),
+            "provider": conn.get("provider", ""),
+            "connection_id": conn_id,
+            "availability": "unknown",
+            "availability_reason": "Provider health has not been confirmed",
+        }
+        for model_id in stored
+        if isinstance(model_id, str) and model_id
+    }
+    discovered = await _fetch_provider_model_records(conn)
+    if discovered is not None:
+        for record in discovered:
+            model_id = record["id"]
+            result[model_id] = {
+                **result.get(model_id, _normalise_model_metadata(model_id)),
+                **_normalise_model_metadata(model_id, record),
+                "provider": conn.get("provider", ""),
+                "connection_id": conn_id,
+                "availability": "available",
+                "availability_reason": "Confirmed by provider discovery",
+            }
+    elif result and not conn.get("api_key"):
+        for item in result.values():
+            item["availability"] = "configuration_required"
+            item["availability_reason"] = "Provider credentials are not configured"
 
-    models = await _fetch_provider_models(conn)
-    if models is not None:
-        cache[conn_id] = models
-        return models
-    return cache.get(conn_id, [])
+    cache[conn_id] = {"checked_at": now, "models": result}
+    return result
+
+
+async def _get_connection_models(conn: dict, app_state) -> list[str]:
+    """Get models for a connection: from stored data, cache, or auto-discover."""
+    return list((await _get_connection_model_metadata(conn, app_state)).keys())
 
 
 async def warm_model_cache(app_state) -> None:
@@ -308,10 +370,11 @@ async def warm_model_cache(app_state) -> None:
 def invalidate_model_cache(app_state):
     """Clear cached models. Call after connection create/update/delete."""
     app_state.MODELS = {}
+    app_state.MODEL_METADATA = {}
 
 
 @router.get("/models")
-async def get_models(request: Request):
+async def get_models(request: Request, refresh: bool = Query(False)):
     """Aggregate available models across all connections.
 
     If a connection has data.models set, use those.
@@ -322,11 +385,11 @@ async def get_models(request: Request):
     models = []
 
     for conn in connections:
-        model_ids = await _get_connection_models(conn, request.app.state)
+        model_metadata = await _get_connection_model_metadata(conn, request.app.state, refresh)
 
         prefix = (conn.get("prefix_id") or "").strip()
 
-        for model_id in model_ids or []:
+        for model_id, metadata in model_metadata.items():
             prefixed_id = f"{prefix}/{model_id}" if prefix else model_id
             models.append(
                 {
@@ -334,6 +397,7 @@ async def get_models(request: Request):
                     "name": model_id,
                     "provider": conn.get("provider", ""),
                     "connection_id": conn["id"],
+                    **{key: value for key, value in metadata.items() if key not in {"id", "provider", "connection_id"}},
                 }
             )
 
@@ -604,8 +668,8 @@ async def get_usage(request: Request, days: int | None = Query(None, ge=7, le=73
     }
 
 
-async def _fetch_provider_models(conn: dict) -> list[str] | None:
-    """Discover models from a provider's /models endpoint."""
+async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
+    """Discover provider model records without inventing metadata."""
     import httpx
 
     from cptr.utils.ai import _openrouter_headers
@@ -629,9 +693,9 @@ async def _fetch_provider_models(conn: dict) -> list[str] | None:
                 )
                 if r.status_code == 200:
                     data = r.json()
-                    models = [m["id"] for m in data.get("data", [])]
-                    log.info("Auto-discovered %d models from %s", len(models), url)
-                    return models
+                    records = [m for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+                    log.info("Auto-discovered %d models from %s", len(records), url)
+                    return records
                 else:
                     log.warning(
                         "Model auto-discovery failed for %s: HTTP %d",
@@ -651,9 +715,9 @@ async def _fetch_provider_models(conn: dict) -> list[str] | None:
                 )
                 if r.status_code == 200:
                     data = r.json()
-                    models = [m["id"] for m in data.get("data", [])]
-                    log.info("Auto-discovered %d models from %s", len(models), url)
-                    return models
+                    records = [m for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
+                    log.info("Auto-discovered %d models from %s", len(records), url)
+                    return records
                 else:
                     log.warning(
                         "Model auto-discovery failed for %s: HTTP %d",
@@ -668,6 +732,12 @@ async def _fetch_provider_models(conn: dict) -> list[str] | None:
         log.exception("Model auto-discovery error for connection %s", conn.get("id", "?"))
 
     return None
+
+
+async def _fetch_provider_models(conn: dict) -> list[str] | None:
+    """Backward-compatible model discovery helper."""
+    records = await _fetch_provider_model_records(conn)
+    return [record["id"] for record in records] if records is not None else None
 
 
 # ── Get a chat with all messages ────────────────────────────

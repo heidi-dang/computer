@@ -146,6 +146,30 @@
 	let sending = $state(false);
 	let flowdeckStatus = $state('');
 	let flowdeckRunId = $state('');
+	const flowdeckTelemetry = $derived.by(() => {
+		const totals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: null as number | null };
+		const seen = new Set<string>();
+		const model = $chatModels.find((item) => item.id === selectedModel);
+		const inputPrice = model?.input_price_per_1m;
+		const outputPrice = model?.output_price_per_1m;
+		for (const message of allMessages) {
+			if (message.role !== 'assistant' || !message.usage || seen.has(message.id)) continue;
+			if (!message.meta?.flowdeck && message.meta?.flowdeck_run_id !== flowdeckRunId) continue;
+			seen.add(message.id);
+			const usage = message.usage;
+			totals.input_tokens += Number(usage.input_tokens || 0);
+			totals.output_tokens += Number(usage.output_tokens || 0);
+			totals.total_tokens += Number(usage.total_tokens || 0);
+			if (inputPrice !== null && inputPrice !== undefined && outputPrice !== null && outputPrice !== undefined) {
+				totals.cost =
+					(totals.cost || 0) +
+					(Number(usage.input_tokens || 0) * inputPrice +
+						Number(usage.output_tokens || 0) * outputPrice) /
+						1_000_000;
+			}
+		}
+		return totals;
+	});
 	let flowdeckPoller: ReturnType<typeof setInterval> | null = null;
 	let flowdeckEvents = $state<any[]>([]);
 	let flowdeckClarification = $state('');
@@ -2240,6 +2264,7 @@
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
 						sending={sending}
+telemetry={flowdeckTelemetry}
 					/>
 				{/if}
 				<ChatInput
@@ -2378,6 +2403,7 @@
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
 						sending={sending}
+telemetry={flowdeckTelemetry}
 					/>
 				{/if}
 				<ChatInput
