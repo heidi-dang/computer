@@ -587,8 +587,15 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 params={"workspace": str(self.root_a)},
                 headers=self.headers(),
             )
+            repeated = await self.client.post(
+                f"/v1/flowdeck/orchestrations/{created.json()['run_id']}/cancel",
+                params={"workspace": str(self.root_a)},
+                headers=self.headers(),
+            )
         self.assertEqual(cancelled.status_code, 200)
         self.assertEqual(cancelled.json()["status"], "cancelled")
+        self.assertEqual(repeated.status_code, 200)
+        self.assertEqual(repeated.json()["status"], "cancelled")
         self.assertEqual(
             (await active["store"].get_run_operations(active["run"].id))[0].status,
             OperationStatus.OUTCOME_UNKNOWN.value,
