@@ -30,20 +30,40 @@ class ParentBuildCancelled(RuntimeError):
     """Raised when the durable parent is cancelled while a child is running."""
 
 
-async def _dispatch_with_parent_cancellation(callback, *, store, parent_run_id: str):
+async def _dispatch_with_parent_cancellation(
+    callback,
+    *,
+    store,
+    parent_run_id: str,
+    timeout_seconds: float | None = None,
+):
     task = asyncio.create_task(callback())
     try:
-        while not task.done():
-            done, _ = await asyncio.wait((task,), timeout=0.25)
-            if done:
-                break
-            current = await store.get_run(parent_run_id)
-            if current is not None and current.status == RunStatus.CANCELLED.value:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
-                raise ParentBuildCancelled()
-        return await task
+        if timeout_seconds is None:
+            while not task.done():
+                done, _ = await asyncio.wait((task,), timeout=0.25)
+                if done:
+                    break
+                current = await store.get_run(parent_run_id)
+                if current is not None and current.status == RunStatus.CANCELLED.value:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    raise ParentBuildCancelled()
+            return await task
+
+        async with asyncio.timeout(timeout_seconds):
+            while not task.done():
+                done, _ = await asyncio.wait((task,), timeout=0.25)
+                if done:
+                    break
+                current = await store.get_run(parent_run_id)
+                if current is not None and current.status == RunStatus.CANCELLED.value:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                    raise ParentBuildCancelled()
+            return await task
     finally:
         if not task.done():
             task.cancel()
@@ -186,24 +206,26 @@ async def run_parallel_build_mutations(
             )
             key = f"{request.request_key}:build:node:{node.key}:attempt:{claimed.attempt}"
             focus = dict(branch_focus)[node.key]
+            child_dispatch = SpecialistDispatchRequest(
+                role=node.role,
+                request_key=key,
+                task=_node_task(request.task, build_request, planning_context, focus)
+                + instructions,
+                workspace=request.workspace,
+                execution_workspace=node.worktree,
+                model=request.model,
+                connection=request.connection,
+                parent_chat_id=request.parent_chat_id,
+                parent_message_id=request.parent_message_id,
+                parent_flowdeck_run_id=request.parent_flowdeck_run_id,
+                trusted_repository=True,
+                repository_identity=f"authenticated-workspace:{request.workspace}",
+            )
+
             async def dispatch_child():
                 return await dispatch_authenticated_specialist(
                     authenticated_request,
-                    SpecialistDispatchRequest(
-                        role=node.role,
-                        request_key=key,
-                        task=_node_task(request.task, build_request, planning_context, focus)
-                        + instructions,
-                        workspace=request.workspace,
-                        execution_workspace=node.worktree,
-                        model=request.model,
-                        connection=request.connection,
-                        parent_chat_id=request.parent_chat_id,
-                        parent_message_id=request.parent_message_id,
-                        parent_flowdeck_run_id=request.parent_flowdeck_run_id,
-                        trusted_repository=True,
-                        repository_identity=f"authenticated-workspace:{request.workspace}",
-                    ),
+                    child_dispatch,
                     store=store,
                 )
 
@@ -212,6 +234,7 @@ async def run_parallel_build_mutations(
                     dispatch_child,
                     store=store,
                     parent_run_id=request.parent_flowdeck_run_id,
+                    timeout_seconds=child_dispatch.timeout_seconds,
                 )
                 child_ok, child_id = await _child_is_authoritative(store, key)
                 if not child_ok:

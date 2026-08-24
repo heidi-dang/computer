@@ -1,3 +1,4 @@
+import asyncio
 import os
 import subprocess
 import tempfile
@@ -11,7 +12,10 @@ from starlette.requests import Request
 
 from cptr.flowdeck.build import create_build_request
 from cptr.flowdeck.build_agent import BuildAgentRequest
-from cptr.flowdeck.build_parallel import run_parallel_build_mutations
+from cptr.flowdeck.build_parallel import (
+    _dispatch_with_parent_cancellation,
+    run_parallel_build_mutations,
+)
 from cptr.flowdeck.durable import DurableFlowDeck, RunStatus, StepStatus
 from cptr.models import Base
 from cptr.models.flowdeck import FlowDeckRun
@@ -19,6 +23,30 @@ from cptr.models.workspaces import Workspace
 
 
 class ParallelBuildAgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_child_dispatch_timeout_cancels_callback(self):
+        cancelled = False
+
+        async def callback():
+            nonlocal cancelled
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+
+        class Store:
+            async def get_run(self, _run_id):
+                return type("Run", (), {"status": RunStatus.RUNNING.value})()
+
+        with self.assertRaises(asyncio.TimeoutError):
+            await _dispatch_with_parent_cancellation(
+                callback,
+                store=Store(),
+                parent_run_id="parent",
+                timeout_seconds=0.01,
+            )
+        self.assertTrue(cancelled)
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.root = Path(self.temp.name).resolve()
