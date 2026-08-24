@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, field
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any
 
+from cptr.utils.redaction import redact_sensitive
+
 logger = logging.getLogger(__name__)
 
 MAX_STRING_LENGTH = 1000
@@ -107,30 +109,13 @@ class Event:
 
 
 def _sanitize(value: Any) -> Any:
-    if hasattr(value, "model_dump"):
-        value = value.model_dump()
-
+    value = redact_sensitive(value)
     if isinstance(value, dict):
-        sanitized = {}
-        for key, item in value.items():
-            normalized = str(key).lower().replace("-", "_")
-            if (
-                normalized in SENSITIVE_KEYS
-                or normalized.endswith("_token")
-                or normalized.endswith("_secret")
-                or normalized.endswith("_api_key")
-                or normalized.endswith("_key")
-            ):
-                continue
-            sanitized[key] = _sanitize(item)
-        return sanitized
-
-    if isinstance(value, (list, tuple, set)):
+        return {key: _sanitize(item) for key, item in value.items()}
+    if isinstance(value, list):
         return [_sanitize(item) for item in value]
-
     if isinstance(value, str) and len(value) > MAX_STRING_LENGTH:
         return f"{value[:MAX_STRING_LENGTH]}..."
-
     return value
 
 
@@ -179,7 +164,7 @@ def build_event(
         actor=actor_payload,
         subject=_sanitize(subject) if subject else None,
         data=_sanitize(data or {}),
-        message=message,
+        message=redact_sensitive(message),
     )
 
 

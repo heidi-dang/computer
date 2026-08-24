@@ -1526,21 +1526,27 @@ async def run_chat_task(
 
     async def emit(**data):
         """Stream an output delta to the user."""
+        from cptr.utils.redaction import redact_sensitive
+
+        safe_data = redact_sensitive(data)
         try:
-            await emit_to_user(user_id, {"chat_id": chat_id, "message_id": message_id, **data})
+            await emit_to_user(
+                user_id,
+                {"chat_id": chat_id, "message_id": message_id, **safe_data},
+            )
         except Exception:
             # Socket failure must not prevent the queue push below,
             # otherwise the gateway SSE stream hangs forever.
             logger.debug("[task %s] emit_to_user failed", message_id[:8], exc_info=True)
         # Push to gateway queue if present
         if output_queue is not None:
-            if "delta" in data:
-                await output_queue.put({"type": "delta", "content": data["delta"]})
-            elif "output" in data:
-                await output_queue.put({"type": "output", "item": data["output"]})
-            elif data.get("done"):
-                if "error" in data:
-                    await output_queue.put({"type": "error", "message": data["error"]})
+            if "delta" in safe_data:
+                await output_queue.put({"type": "delta", "content": safe_data["delta"]})
+            elif "output" in safe_data:
+                await output_queue.put({"type": "output", "item": safe_data["output"]})
+            elif safe_data.get("done"):
+                if "error" in safe_data:
+                    await output_queue.put({"type": "error", "message": safe_data["error"]})
                 else:
                     await output_queue.put({"type": "done", "finish_reason": "stop"})
 
@@ -1583,12 +1589,22 @@ async def run_chat_task(
                 control_store = ControlTaskStore()
                 consumed_at = now_ms()
                 for control_message_id in control_message_ids:
-                    await control_store.update_message(
-                        str(control_message_id),
-                        status="CONSUMED",
-                        consumed_at=consumed_at,
-                        updated_at=consumed_at,
-                    )
+                    control_message = await control_store.get_message(str(control_message_id))
+                    consume = getattr(control_store, "consume_message", None)
+                    if control_message is not None and callable(consume):
+                        await consume(
+                            str(control_message_id),
+                            task_id=control_message.task_id,
+                            message_id_for_run=message_id,
+                            now=consumed_at,
+                        )
+                    else:
+                        await control_store.update_message(
+                            str(control_message_id),
+                            status="CONSUMED",
+                            consumed_at=consumed_at,
+                            updated_at=consumed_at,
+                        )
     content = (msg.content or "") if msg else ""
     output_items: list[dict] = list(msg.output or []) if msg else []
     text_buffer = ""  # Accumulates text between tool calls
@@ -1639,6 +1655,8 @@ async def run_chat_task(
 
     async def _save_message(save_reason: str, **kwargs) -> bool:
         """Persist a message update and log enough detail to debug skipped saves."""
+        from cptr.utils.redaction import redact_sensitive, redact_text
+
         if kwargs.get("done") is True:
             from cptr.utils.tools import wait_for_owned_command_sessions
 
@@ -1650,6 +1668,12 @@ async def run_chat_task(
                 kwargs = {**kwargs, "done": False, "meta": meta}
         saved_output = kwargs.get("output", output_items)
         saved_content = kwargs.get("content", content)
+        kwargs["output"] = redact_sensitive(saved_output)
+        kwargs["content"] = redact_text(saved_content or "")
+        if "meta" in kwargs:
+            kwargs["meta"] = redact_sensitive(kwargs.get("meta"))
+        saved_output = kwargs["output"]
+        saved_content = kwargs["content"]
         counts, reasoning_count, reasoning_chars = _output_debug_stats(saved_output)
         logger.info(
             "[task %s] db save (%s) begin: done=%s content=%d chars output=%d items reasoning=%d items/%d chars types=%s",

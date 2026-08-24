@@ -29,6 +29,7 @@ from cptr.services.supervisor import (
     ScopeStatus,
 )
 from cptr.utils.db import get_db
+from cptr.utils.redaction import redact_sensitive
 
 
 def _now_ms() -> int:
@@ -124,6 +125,7 @@ class SqlSupervisorStore:
                 target.status = scope.status.value
                 target.attempt_count = scope.attempt_count
                 target.worker_task_ids = list(scope.worker_task_ids)
+                target.steering_requests = list(scope.steering_requests)
                 target.verification_evidence = list(scope.verification_evidence)
                 target.failure_evidence = list(scope.failure_evidence)
                 target.failure_signature_counts = dict(scope.failure_signature_counts)
@@ -249,7 +251,7 @@ class SqlSupervisorStore:
             monitor_id=monitor_id,
             scope_id=scope_id,
             kind=kind,
-            payload=dict(payload),
+            payload=redact_sensitive(payload),
             created_at=_now_ms(),
         )
         async with await get_db() as db:
@@ -261,7 +263,7 @@ class SqlSupervisorStore:
             monitor_id=row.monitor_id,
             scope_id=row.scope_id,
             kind=row.kind,
-            payload=dict(row.payload or {}),
+            payload=redact_sensitive(row.payload or {}),
             created_at=row.created_at,
         )
 
@@ -278,11 +280,16 @@ class SqlSupervisorStore:
                     monitor_id=item.monitor_id,
                     scope_id=item.scope_id,
                     kind=item.kind,
-                    payload=dict(item.payload or {}),
+                    payload=redact_sensitive(item.payload or {}),
                     created_at=item.created_at,
                 )
                 for item in result.scalars().all()
             ]
+
+    async def get_message(self, message_id: str) -> ControlMessage | None:
+        """Read a durable control message for autonomous provenance checks."""
+        async with await get_db() as db:
+            return await db.get(ControlMessage, message_id)
 
     async def create_approval(self, monitor_id: str, operation: str, reason: str) -> ApprovalRecord:
         now = _now_ms()
@@ -454,6 +461,7 @@ class SqlSupervisorStore:
             status=scope.status.value,
             attempt_count=scope.attempt_count,
             worker_task_ids=list(scope.worker_task_ids),
+            steering_requests=list(scope.steering_requests),
             verification_evidence=list(scope.verification_evidence),
             failure_evidence=list(scope.failure_evidence),
             failure_signature_counts=dict(scope.failure_signature_counts),
@@ -474,6 +482,7 @@ class SqlSupervisorStore:
             status=ScopeStatus(row.status),
             attempt_count=row.attempt_count,
             worker_task_ids=list(row.worker_task_ids or []),
+            steering_requests=list(getattr(row, "steering_requests", None) or []),
             verification_evidence=list(row.verification_evidence or []),
             failure_evidence=list(row.failure_evidence or []),
             failure_signature_counts=dict(row.failure_signature_counts or {}),
@@ -615,6 +624,9 @@ class ControlTaskStore:
         dedupe_key: str,
         chat_message_id: str | None,
         now: int,
+        monitor_id: str | None = None,
+        scope_id: str | None = None,
+        intended_message_id: str | None = None,
     ) -> ControlMessage:
         """Create or return one durable follow-up message by its retry key."""
         async with await get_db() as db:
@@ -636,6 +648,9 @@ class ControlTaskStore:
                 content=content,
                 dedupe_key=dedupe_key,
                 status="QUEUED",
+                monitor_id=monitor_id,
+                scope_id=scope_id,
+                intended_message_id=intended_message_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -662,8 +677,41 @@ class ControlTaskStore:
         if not values:
             return False
         async with await get_db() as db:
+            statement = update(ControlMessage).where(ControlMessage.id == message_id)
+            if values.get("status") not in {None, "CANCELLED"}:
+                statement = statement.where(ControlMessage.status != "CANCELLED")
+            if values.get("status") == "DELIVERED":
+                statement = statement.where(ControlMessage.status == "QUEUED")
+            elif values.get("status") == "CONSUMED":
+                statement = statement.where(ControlMessage.status == "DELIVERED")
+            result = await db.execute(statement.values(**values))
+            await db.commit()
+            return result.rowcount == 1
+
+    async def consume_message(
+        self,
+        message_id: str,
+        *,
+        task_id: str,
+        message_id_for_run: str,
+        now: int,
+    ) -> bool:
+        """Atomically record one consumption and preserve cancellation races."""
+        async with await get_db() as db:
             result = await db.execute(
-                update(ControlMessage).where(ControlMessage.id == message_id).values(**values)
+                update(ControlMessage)
+                .where(
+                    ControlMessage.id == message_id,
+                    ControlMessage.status == "DELIVERED",
+                    ControlMessage.task_id == task_id,
+                )
+                .values(
+                    status="CONSUMED",
+                    consumed_at=now,
+                    consumed_task_id=task_id,
+                    consumed_message_id=message_id_for_run,
+                    updated_at=now,
+                )
             )
             await db.commit()
             return result.rowcount == 1

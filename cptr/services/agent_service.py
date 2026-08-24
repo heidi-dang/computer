@@ -11,6 +11,7 @@ from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.models import Chat, ChatMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import get_db
+from cptr.utils.redaction import redact_sensitive, redact_text
 
 
 class AgentService:
@@ -158,6 +159,7 @@ class AgentService:
             raise KeyError("task output not found")
         status = task.status
         error = (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
+        error = redact_text(error) if error else None
         if message.done:
             desired_status = (
                 status
@@ -214,11 +216,12 @@ class AgentService:
                         updated_at=int(time.time() * 1000),
                     )
         output = message.content or ""
+        safe_output = redact_text(output)
         if status != task.status or task.output != output:
             await self.store.update(
                 task.id,
                 status=status,
-                output={"content": output},
+                output={"content": safe_output},
                 updated_at=int(time.time() * 1000),
             )
         return {
@@ -227,11 +230,11 @@ class AgentService:
             "chat_id": task.chat_id,
             "message_id": task.message_id,
             "status": status,
-            "prompt": task.prompt,
+            "prompt": redact_text(task.prompt),
             "model_id": task.model_id,
-            "output": output,
-            "raw_output": message.output or [],
-            "error": error,
+            "output": safe_output,
+            "raw_output": redact_sensitive(message.output or []),
+            "error": redact_text(error) if error else None,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
         }
@@ -241,8 +244,8 @@ class AgentService:
         return {
             "task_id": task["id"],
             "status": task["status"],
-            "content": task["output"],
-            "raw_output": task["raw_output"],
+            "content": redact_text(task["output"]),
+            "raw_output": redact_sensitive(task["raw_output"]),
         }
 
     async def send_message(
@@ -252,6 +255,7 @@ class AgentService:
         user_id: str,
         content: str,
         idempotency_key: str | None = None,
+        provenance: dict[str, str | None] | None = None,
     ) -> dict[str, Any]:
         task = await self.store.get(task_id)
         if task is None or task.user_id != user_id:
@@ -271,6 +275,9 @@ class AgentService:
             dedupe_key=dedupe_key,
             chat_message_id=None,
             now=now,
+            monitor_id=(provenance or {}).get("monitor_id"),
+            scope_id=(provenance or {}).get("scope_id"),
+            intended_message_id=(provenance or {}).get("intended_message_id"),
         )
         message_id = control_message.chat_message_id
         if not message_id:
