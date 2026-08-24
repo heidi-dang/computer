@@ -18,6 +18,9 @@ from cptr.flowdeck.durable import (
     StepStatus,
 )
 from cptr.flowdeck.errors import DelegationPolicyError
+from cptr.codeact.contracts import CodeActConfig, CodeActIdentity
+from cptr.codeact.capabilities import sdk_from_tool_context
+from cptr.codeact.runner import run_read_only_attempt
 
 MAPPER_TOOL_NAMES = frozenset({"read_file", "list_directory", "search_files"})
 MAPPER_CAPABILITIES = frozenset({Capability.READ_FILES, Capability.SEARCH_FILES})
@@ -48,6 +51,9 @@ class MapperRequest:
     parent_chat_id: str
     parent_message_id: str | None = None
     parent_flowdeck_run_id: str | None = None
+    execution_mode: str = "tool_calling"
+    codeact_program: str | None = None
+    authenticated_request: Any = None
 
 
 def _workspace_root(workspace: str) -> Path:
@@ -144,6 +150,9 @@ async def _native_run_read_only_specialist(
         parent_chat_id=request.parent_chat_id,
         parent_message_id=request.parent_message_id,
         parent_flowdeck_run_id=request.parent_flowdeck_run_id,
+        execution_mode=request.execution_mode,
+        codeact_program=request.codeact_program,
+        authenticated_request=request.authenticated_request,
     )
 
     run, created = await store.create_run(
@@ -183,33 +192,147 @@ async def _native_run_read_only_specialist(
 
     heartbeat_task = asyncio.create_task(heartbeat())
     try:
-        from cptr.utils.tools import _create_subagent_chat, _run_existing_subagent_chat
+        if request.execution_mode == "codeact":
+            codeact_config = CodeActConfig.from_env()
+            if not codeact_config.allows_role(specialist_id):
+                raise MapperPolicyError("CodeAct read-only execution is not enabled for this role")
+            if not request.codeact_program:
+                raise MapperPolicyError("CodeAct requires a server-generated program")
+            from cptr.models import ChatMessage
+            from cptr.utils.tools import _create_subagent_chat
+            from cptr.utils.config import now_ms
 
-        chat, _, assistant = await _create_subagent_chat(
-            None,
-            task=_specialist_prompt(specialist_id, request.task),
-            context=f"Owned workspace: {request.workspace}",
-            workspace=request.workspace,
-            model=request.model,
-            user_id=request.user_id,
-            parent_chat_id=request.parent_chat_id,
-            child_type=f"flowdeck-{specialist_id}",
-            extra_meta={"flowdeck_run_id": run.id, "flowdeck_attempt_id": attempt.id},
-        )
-        result = await _run_existing_subagent_chat(
-            assistant_msg_id=assistant.id,
-            chat_id=chat.id,
-            workspace=request.workspace,
-            connection=request.connection,
-            model=request.model,
-            user_id=request.user_id,
-            config={"max_output": 30_000},
-            allowed_tool_names=READ_ONLY_TOOL_NAMES,
-            tool_guard=mapper_tool_guard,
-            flowdeck_run_id=run.id,
-            flowdeck_parent_run_id=request.parent_flowdeck_run_id,
-            flowdeck_parent_message_id=request.parent_message_id,
-        )
+            # Keep CodeAct on the native persisted transcript path. The worker
+            # never owns a second chat or renderer.
+            chat, _, assistant = await _create_subagent_chat(
+                request.authenticated_request,
+                task=_specialist_prompt(specialist_id, request.task),
+                context=f"Owned workspace: {request.workspace}",
+                workspace=request.workspace,
+                model=request.model,
+                user_id=request.user_id,
+                parent_chat_id=request.parent_chat_id,
+                child_type=f"flowdeck-{specialist_id}-codeact",
+                extra_meta={"flowdeck_run_id": run.id, "flowdeck_attempt_id": attempt.id},
+            )
+            if assistant is None:
+                raise MapperPolicyError("CodeAct transcript assistant row was not created")
+            from cptr.socket.main import emit_to_user
+
+            async def emit_codeact(event: dict[str, Any]) -> None:
+                event_kind = str(event.get("type", "codeact_activity"))
+                payload = dict(event)
+                payload.pop("type", None)
+                await emit_to_user(
+                    request.user_id,
+                    {
+                        "type": "chat:message",
+                        "chat_id": chat.id,
+                        "message_id": assistant.id,
+                        "flowdeck_parent_run_id": request.parent_flowdeck_run_id,
+                        "flowdeck_run_id": run.id,
+                        "kind": event_kind,
+                        "payload": payload,
+                        "output": (
+                            {
+                                "type": "message",
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": (
+                                            f"Code execution · {len(event.get('capabilities', ())) } capabilities"
+                                            if event_kind == "codeact_started"
+                                            else str(event.get("output") or event.get("error") or event_kind)
+                                        ),
+                                    }
+                                ],
+                            }
+                            if event_kind != "codeact_cancelled"
+                            else None
+                        ),
+                    },
+                )
+
+            native_context = {
+                "request": request.authenticated_request,
+                "workspace": request.workspace,
+                "user_id": request.user_id,
+                "model_id": request.model,
+                "allowed_tool_names": READ_ONLY_TOOL_NAMES,
+                "tool_guard": mapper_tool_guard,
+            }
+            result = await run_read_only_attempt(
+                identity=CodeActIdentity(
+                    user_id=request.user_id,
+                    workspace=request.workspace,
+                    task_id=request.request_key,
+                    run_id=run.id,
+                    step_id=step.id,
+                    operation_id=operation.id,
+                    attempt_id=attempt.id,
+                    model_id=request.model,
+                ),
+                sdk=sdk_from_tool_context(native_context),
+                program=request.codeact_program,
+                config=codeact_config,
+                role=specialist_id,
+                emit=emit_codeact,
+            )
+            result_text = result.output
+            await ChatMessage.update(
+                assistant.id,
+                content=result_text,
+                done=True,
+                updated_at=now_ms(),
+            )
+            evidence = {
+                "source": "codeact-worker",
+                "authoritative": True,
+                "observation": "read_only_codeact_return",
+                "observed_outcome": "succeeded",
+                "chat_id": chat.id,
+                "attempt_id": attempt.id,
+                "execution_id": result.execution_id,
+                "capability_calls": len(result.capability_calls),
+            }
+        else:
+            from cptr.utils.tools import _create_subagent_chat, _run_existing_subagent_chat
+
+            chat, _, assistant = await _create_subagent_chat(
+                None,
+                task=_specialist_prompt(specialist_id, request.task),
+                context=f"Owned workspace: {request.workspace}",
+                workspace=request.workspace,
+                model=request.model,
+                user_id=request.user_id,
+                parent_chat_id=request.parent_chat_id,
+                child_type=f"flowdeck-{specialist_id}",
+                extra_meta={"flowdeck_run_id": run.id, "flowdeck_attempt_id": attempt.id},
+            )
+            result_text = await _run_existing_subagent_chat(
+                assistant_msg_id=assistant.id,
+                chat_id=chat.id,
+                workspace=request.workspace,
+                connection=request.connection,
+                model=request.model,
+                user_id=request.user_id,
+                config={"max_output": 30_000},
+                allowed_tool_names=READ_ONLY_TOOL_NAMES,
+                tool_guard=mapper_tool_guard,
+                flowdeck_run_id=run.id,
+                flowdeck_parent_run_id=request.parent_flowdeck_run_id,
+                flowdeck_parent_message_id=request.parent_message_id,
+            )
+            evidence = {
+                "source": "runtime",
+                "authoritative": True,
+                "observation": "native_loop_return",
+                "observed_outcome": "succeeded",
+                "chat_id": chat.id,
+                "attempt_id": attempt.id,
+                "specialist_claim": None,
+            }
     except BaseException:
         await store.mark_attempt_unknown(attempt.id)
         await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
@@ -225,19 +348,11 @@ async def _native_run_read_only_specialist(
         owner=_READ_ONLY_OWNER,
         fencing_epoch=0,
         outcome="succeeded",
-        evidence={
-            "source": "runtime",
-            "authoritative": True,
-            "observation": "native_loop_return",
-            "observed_outcome": "succeeded",
-            "chat_id": chat.id,
-            "attempt_id": attempt.id,
-            "specialist_claim": None,
-        },
+        evidence=evidence,
     )
     await store.finish_step(step.id, status=StepStatus.SUCCEEDED)
     await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
-    return result
+    return result_text
 
 
 async def run_read_only_specialist(
@@ -264,6 +379,9 @@ async def run_read_only_specialist(
             connection=request.connection,
             parent_chat_id=request.parent_chat_id,
                 parent_flowdeck_run_id=request.parent_flowdeck_run_id,
+            execution_mode=request.execution_mode,
+            codeact_program=request.codeact_program,
+            authenticated_request=request.authenticated_request,
         ),
         store=store,
     )

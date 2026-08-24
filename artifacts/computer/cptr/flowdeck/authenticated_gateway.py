@@ -44,6 +44,8 @@ class SpecialistDispatchRequest:
     trusted_repository: bool = True
     repository_identity: str = ""
     timeout_seconds: float = 120
+    execution_mode: str = "tool_calling"
+    codeact_program: str | None = None
 
 
 def _auth_user_id(request: Any) -> str:
@@ -160,6 +162,9 @@ async def dispatch_authenticated_specialist(
                 parent_chat_id=dispatch.parent_chat_id,
                 parent_message_id=dispatch.parent_message_id,
                 parent_flowdeck_run_id=dispatch.parent_flowdeck_run_id,
+                execution_mode=dispatch.execution_mode,
+                codeact_program=dispatch.codeact_program,
+                authenticated_request=request,
             ),
             dispatch.role,
             store=store,
