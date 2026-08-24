@@ -289,12 +289,14 @@ class DurableFlowDeck:
         specs = tuple(
             ParallelBuildNode(
                 key=str(node["key"]),
+                role=str(node.get("role", "")),
                 dependencies=tuple(node.get("dependencies", ())),
                 mutation=bool(node.get("mutation", False)),
                 workspace=workspace,
                 worktree=node.get("worktree"),
                 common_base=node.get("common_base"),
                 overlap_paths=tuple(node.get("overlap_paths", ())),
+                branch=node.get("branch"),
             )
             for node in nodes
         )
@@ -320,14 +322,21 @@ class DurableFlowDeck:
                 FlowDeckBuildNode(
                     run_id=run_id,
                     node_key=spec.key,
+                    role=spec.role or None,
                     dependencies=list(spec.dependencies),
                     mutation=1 if spec.mutation else 0,
                     workspace=workspace,
                     worktree=spec.worktree,
+                    branch=spec.branch,
                     common_base=spec.common_base,
                     overlap_paths=list(spec.overlap_paths),
                     status="PENDING",
                     attempt=0,
+                    owner=None,
+                    fencing_epoch=0,
+                    authoritative_evidence=None,
+                    integration_status="PENDING",
+                    retry_count=0,
                     created_at=now,
                     updated_at=now,
                 )
@@ -350,7 +359,15 @@ class DurableFlowDeck:
             )
             return list(result.all())
 
-    async def claim_build_node(self, *, run_id: str, node_key: str, now: int | None = None) -> FlowDeckBuildNode:
+    async def claim_build_node(
+        self,
+        *,
+        run_id: str,
+        node_key: str,
+        owner: str = "flowdeck-scheduler",
+        fencing_epoch: int = 0,
+        now: int | None = None,
+    ) -> FlowDeckBuildNode:
         """Atomically claim a ready node; dependency state is checked in the transaction."""
         now = self.clock() if now is None else now
 
@@ -381,8 +398,22 @@ class DurableFlowDeck:
                 raise LifecycleError("Build node dependencies are not complete")
             node.status = "RUNNING"
             node.attempt += 1
+            node.owner = owner
+            node.fencing_epoch = fencing_epoch
+            node.authoritative_evidence = None
             node.updated_at = now
-            await self._event(db, run_id, "BUILD_NODE_CLAIMED", {"node_key": node_key}, now)
+            await self._event(
+                db,
+                run_id,
+                "BUILD_NODE_CLAIMED",
+                {
+                    "node_key": node_key,
+                    "attempt": node.attempt,
+                    "owner": owner,
+                    "fencing_epoch": fencing_epoch,
+                },
+                now,
+            )
             return node
 
         return await self._transaction(operation)
@@ -394,6 +425,9 @@ class DurableFlowDeck:
         node_key: str,
         attempt: int,
         status: str,
+        owner: str | None = None,
+        fencing_epoch: int | None = None,
+        evidence: dict[str, Any] | None = None,
         now: int | None = None,
     ) -> FlowDeckBuildNode:
         if status not in {"SUCCEEDED", "FAILED", "CANCELLED", "CONFLICT"}:
@@ -409,10 +443,153 @@ class DurableFlowDeck:
             )
             if not node or node.attempt != attempt or node.status != "RUNNING":
                 raise StaleWriterError("stale Build node completion")
+            if owner is not None and node.owner != owner:
+                raise StaleWriterError("Build node owner is stale")
+            if fencing_epoch is not None and node.fencing_epoch != fencing_epoch:
+                raise StaleWriterError("Build node fencing epoch is stale")
+            expected_attempt_id = f"build-node:{run_id}:{node_key}:{attempt}"
+            terminal_evidence = evidence or {
+                "source": "verifier",
+                "authoritative": True,
+                "observation": "verifier_check",
+                "observed_outcome": status.lower(),
+                "attempt_id": expected_attempt_id,
+                "specialist_claim": None,
+            }
+            if terminal_evidence.get("attempt_id") != expected_attempt_id:
+                raise StaleWriterError("Build node evidence attempt is stale")
+            validate_terminal_evidence(
+                terminal_evidence,
+                outcome=status.lower(),
+                attempt_id=expected_attempt_id,
+            )
             node.status = status
+            node.authoritative_evidence = terminal_evidence
+            node.integration_status = "READY" if status == "SUCCEEDED" else status
             node.updated_at = now
             await self._event(
-                db, run_id, "BUILD_NODE_FINISHED", {"node_key": node_key, "status": status}, now
+                db,
+                run_id,
+                "BUILD_NODE_FINISHED",
+                {
+                    "node_key": node_key,
+                    "status": status,
+                    "attempt": attempt,
+                    "owner": node.owner,
+                    "fencing_epoch": node.fencing_epoch,
+                    "evidence": terminal_evidence,
+                },
+                now,
+            )
+            return node
+
+        return await self._transaction(operation)
+
+    async def retry_build_node(
+        self,
+        *,
+        run_id: str,
+        node_key: str,
+        max_retries: int = 1,
+        now: int | None = None,
+    ) -> bool:
+        """Requeue one failed node within a bounded retry budget."""
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            node = await db.scalar(
+                select(FlowDeckBuildNode).where(
+                    FlowDeckBuildNode.run_id == run_id,
+                    FlowDeckBuildNode.node_key == node_key,
+                )
+            )
+            if not node or node.status != "FAILED":
+                return False
+            if node.retry_count >= max_retries:
+                return False
+            node.status = "PENDING"
+            node.retry_count += 1
+            node.owner = None
+            node.authoritative_evidence = None
+            node.integration_status = "PENDING"
+            node.updated_at = now
+            await self._event(
+                db,
+                run_id,
+                "BUILD_NODE_REQUEUED",
+                {"node_key": node_key, "retry_count": node.retry_count},
+                now,
+            )
+            return True
+
+        return await self._transaction(operation)
+
+    async def mark_build_node_integration(
+        self,
+        *,
+        run_id: str,
+        node_key: str,
+        status: str,
+        changed_paths: tuple[str, ...] = (),
+        commit_hash: str | None = None,
+        error: str | None = None,
+        now: int | None = None,
+    ) -> FlowDeckBuildNode:
+        """Persist the bounded integration result after a successful child."""
+        if status not in {"SUCCEEDED", "CONFLICT"}:
+            raise LifecycleError("invalid Build node integration status")
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            node = await db.scalar(
+                select(FlowDeckBuildNode).where(
+                    FlowDeckBuildNode.run_id == run_id,
+                    FlowDeckBuildNode.node_key == node_key,
+                )
+            )
+            if not node or node.status not in {"SUCCEEDED", "CONFLICT"}:
+                raise StaleWriterError("Build node is not integration-ready")
+            if node.integration_status == status:
+                existing = node.authoritative_evidence or {}
+                if (
+                    tuple(existing.get("changed_paths") or ()) != tuple(changed_paths)
+                    or existing.get("commit_hash") != commit_hash
+                    or existing.get("error") != error
+                ):
+                    raise StaleWriterError("conflicting Build integration replay")
+                return node
+            attempt_id = f"build-node:{run_id}:{node_key}:{node.attempt}"
+            outcome = "succeeded" if status == "SUCCEEDED" else "conflict"
+            evidence = {
+                **(node.authoritative_evidence or {}),
+                "source": "verifier",
+                "authoritative": True,
+                "observation": "verifier_check",
+                "observed_outcome": outcome,
+                "attempt_id": attempt_id,
+                "changed_paths": list(changed_paths),
+                "commit_hash": commit_hash,
+                "error": error,
+                "specialist_claim": None,
+            }
+            validate_terminal_evidence(evidence, outcome=outcome, attempt_id=attempt_id)
+            node.status = status
+            node.integration_status = status
+            node.authoritative_evidence = evidence
+            node.updated_at = now
+            await self._event(
+                db,
+                run_id,
+                "BUILD_NODE_INTEGRATED",
+                {
+                    "node_key": node_key,
+                    "status": status,
+                    "changed_paths": list(changed_paths),
+                    "commit_hash": commit_hash,
+                    "error": error,
+                    "evidence": evidence,
+                },
+                now,
             )
             return node
 

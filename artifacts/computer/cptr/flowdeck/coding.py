@@ -17,6 +17,7 @@ from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import Capability, FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck, OperationStatus, RunStatus, StepStatus
 from cptr.models.workspaces import Workspace
+from cptr.flowdeck.worktrees import validate_execution_worktree
 
 STRUCTURED_MUTATION_TOOLS = frozenset(
     {"read_file", "search_files", "edit_file", "multi_edit_file", "write_file"}
@@ -95,6 +96,7 @@ class CodingRequest:
     task: str
     request_key: str
     parent_message_id: str | None = None
+    canonical_workspace: str | None = None
 
 
 def coding_tool_names(role: str) -> frozenset[str]:
@@ -161,6 +163,8 @@ def validate_coding_request(request: CodingRequest, config: FlowDeckConfig) -> N
     if not config.mutating_agents:
         raise CodingPolicyError("mutation roles require explicit mutation enablement")
     _root(request.workspace)
+    if request.canonical_workspace:
+        _root(request.canonical_workspace)
     coding_tool_names(request.role)
 
 
@@ -202,11 +206,17 @@ async def _native_run_coding_specialist(
     validate_coding_request(request, config)
     if store is None:
         raise CodingPolicyError("native coding execution requires a durable FlowDeck store")
-    root = await resolve_authorized_workspace(
+    canonical_root = await resolve_authorized_workspace(
         session_factory=store.session_factory,
         user_id=request.user_id,
-        workspace=request.workspace,
+        workspace=request.canonical_workspace or request.workspace,
     )
+    root = _root(request.workspace)
+    if root != canonical_root:
+        try:
+            await validate_execution_worktree(str(canonical_root), str(root))
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise CodingPolicyError("coding execution path is not an owned worktree") from exc
     run, created = await store.create_run(
         request_key=request.request_key,
         owner=request.user_id,

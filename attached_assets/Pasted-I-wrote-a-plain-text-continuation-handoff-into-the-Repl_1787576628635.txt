@@ -1,0 +1,59 @@
+I wrote a plain-text continuation handoff into the Replit workspace and verified the remote file byte-for-byte by matching SHA-256 checksums.
+
+Report path:
+
+/home/runner/workspace/docs/superpowers/reports/2026-08-24-cptr-phase3-acceptance-handoff.txt
+
+Report SHA-256:
+
+7fd834e48eb71a9ceed9a0f21f6d5a150e8824ce3e843c913019ef222422129a
+
+Current repository state:
+
+Branch: control-plane-integration
+
+Starting HEAD: 65520952bc3b0e6a049ee3e453a6404b41ce3722
+
+Final HEAD: 65520952bc3b0e6a049ee3e453a6404b41ce3722
+
+The Phase 3 implementation remains uncommitted. No commit, push, deploy, publish, credential rotation, DNS change, or Phase 4 work was performed.
+
+Final stop audit:
+
+git diff –check was clean.
+
+No aggregate pytest process remained.
+
+The final backend aggregate was not clean:
+
+205 passed, 1 failed, 2 warnings, 43 subtests passed in 86.83 seconds.
+
+Exit code: 1.
+
+The failure was the HTTP teardown cleanup case:
+
+artifacts/computer/tests/test_flowdeck_http.py::FlowDeckProductionHttpTests::test_same_workspace_http_mutators_obey_existing_lease
+
+The test body passed, but async teardown reported a non-empty TemporaryDirectory while a background orchestration task was being cancelled. The isolated test rerun passed:
+
+1 passed in 2.48 seconds.
+
+A later aggregate attempt was stopped before a final result and is explicitly recorded as unverified.
+
+The handoff also records:
+
+* Focused Phase 3 and durable tests: 18 passed, 5 subtests passed.
+* Targeted Ruff: passed.
+* Python compilation: passed.
+* Deterministic coordinator-level authenticated /build fixture: passed.
+* Common immutable base: passed in that fixture.
+* Backend and frontend mutation children: both integrated successfully in that fixture.
+* Positive durable parallel-overlap interval: recorded.
+* Canonical workspace clean after successful integration.
+* Production tester verification under simultaneous worktrees: not verified because it encountered “workspace lease is stale or unavailable”.
+* Retry, steering, cancellation, restart recovery, full orphan cleanup, reload/reconnect, and the complete adversarial security/authority matrix: still open.
+* Phase 3 remains ACTIVE.
+* The acceptance threshold is not met.
+* Replit should not claim closure or start Phase 4.
+
+Replit can continue directly from the handoff file without needing another summary from me.

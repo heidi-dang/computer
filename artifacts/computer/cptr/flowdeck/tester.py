@@ -93,7 +93,10 @@ async def _run_check(
         stdin=asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env={"PATH": "/usr/bin:/bin", "HOME": str(root)},
+        env={
+            "PATH": os.environ.get("PATH") or "/usr/bin:/bin",
+            "HOME": str(root),
+        },
         start_new_session=True,
     )
     try:

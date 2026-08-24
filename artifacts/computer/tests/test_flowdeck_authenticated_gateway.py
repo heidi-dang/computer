@@ -170,6 +170,63 @@ class AuthenticatedGatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn(result, {"coder", "browser", "readonly"})
 
+    async def test_coding_dispatch_can_use_only_an_authenticated_repository_worktree(self):
+        import subprocess
+        from dataclasses import replace
+
+        subprocess.check_call(("git", "-C", str(self.root), "init", "-q"))
+        subprocess.check_call(("git", "-C", str(self.root), "config", "user.name", "test"))
+        subprocess.check_call(("git", "-C", str(self.root), "config", "user.email", "test@example.invalid"))
+        (self.root / "README.md").write_text("base\n")
+        subprocess.check_call(("git", "-C", str(self.root), "add", "README.md"))
+        subprocess.check_call(("git", "-C", str(self.root), "commit", "-qm", "base"))
+        from cptr.flowdeck.worktrees import create_worktree, remove_worktree
+
+        handle = await create_worktree(
+            canonical_workspace=str(self.root),
+            run_id="gateway",
+            node_key="backend",
+        )
+        try:
+            with patch.dict(
+                os.environ,
+                {
+                    "CPTR_FLOWDECK_ENABLED": "true",
+                    "CPTR_FLOWDECK_MODE": "controlled",
+                    "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                    "CPTR_FLOWDECK_MUTATING_AGENTS": "true",
+                    "CPTR_FLOWDECK_CODING_ROLE": "backend-coder",
+                },
+                clear=False,
+            ), patch(
+                "cptr.flowdeck.authenticated_gateway._native_run_coding_specialist",
+                new=AsyncMock(return_value="coder"),
+            ) as native:
+                result = await dispatch_authenticated_specialist(
+                    auth_request("owner"),
+                    replace(
+                        self.dispatch(role="backend-coder"),
+                        execution_workspace=handle.path,
+                    ),
+                    store=self.store,
+                )
+            self.assertEqual(result, "coder")
+            request = native.call_args.args[0]
+            self.assertEqual(request.workspace, handle.path)
+            self.assertEqual(request.canonical_workspace, str(self.root))
+        finally:
+            await remove_worktree(handle)
+
+        with self.assertRaises(AuthenticatedGatewayError):
+            await dispatch_authenticated_specialist(
+                auth_request("owner"),
+                replace(
+                    self.dispatch(role="backend-coder"),
+                    execution_workspace=str(Path(self.temp.name).parent),
+                ),
+                store=self.store,
+            )
+
     async def test_compatibility_boundaries_reject_missing_authenticated_context(self):
         coding = CodingRequest(
             role="backend-coder",

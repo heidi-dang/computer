@@ -6,7 +6,7 @@ from typing import Any
 
 
 TERMINAL_EVIDENCE_OUTCOMES = frozenset(
-    {"succeeded", "failed", "cancelled", "unknown", "manual_review_required"}
+    {"succeeded", "failed", "cancelled", "conflict", "unknown", "manual_review_required"}
 )
 
 

@@ -15,6 +15,8 @@ from cptr.flowdeck.authenticated_gateway import (
     dispatch_authenticated_specialist,
 )
 from cptr.flowdeck.build import BuildRequest
+from cptr.flowdeck.build_parallel import run_parallel_build_mutations
+from cptr.utils.git import is_repo
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import Capability, FlowDeckMode
 from cptr.flowdeck.durable import (
@@ -217,21 +219,41 @@ async def run_build_agent(
             },
         )
 
-    mutation_outcome, _ = await _run_parent_operation(
+    parallel_result: dict[str, Any] | None = None
+    if await is_repo(request.workspace):
+        parallel_result = await run_parallel_build_mutations(
+            request,
+            build_request=build_request,
+            authenticated_request=authenticated_request,
+            store=store,
+            planning_outputs=planning_outputs,
+            steering_checkpoint=steering_checkpoint,
+            coding_role=config.coding_role,
+        )
+        mutation_outcome = parallel_result["status"]
+    else:
+        mutation_outcome, _ = await _run_parent_operation(
         store=store,
         parent=request,
         name="mutation",
         capability=Capability.WRITE_FILES.value,
         target=config.coding_role,
         callback=mutate,
-    )
+    ) if parallel_result is None else (mutation_outcome, {})
     if mutation_outcome != "succeeded":
         await store.record_event(
             request.parent_flowdeck_run_id,
             "BUILD_AGENT_MUTATION_FAILED",
             {"status": mutation_outcome},
         )
-        return {"status": "failed", "evidence": {}}
+        return {
+            "status": (
+                parallel_result["status"]
+                if parallel_result is not None
+                else "failed"
+            ),
+            "evidence": {},
+        }
 
     evidence_by_check: dict[str, str] = {}
     for check in build_request.completion.required_checks:

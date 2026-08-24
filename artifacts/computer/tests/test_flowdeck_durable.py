@@ -457,6 +457,92 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
                 now=112,
             )
 
+    async def test_build_node_metadata_is_fenced_and_conflict_is_terminal(self):
+        run, _ = await self._run_and_intent("build-request")
+        nodes = await self.store.create_build_nodes(
+            run_id=run.id,
+            workspace="/workspace",
+            nodes=[
+                {
+                    "key": "backend",
+                    "role": "backend-coder",
+                    "mutation": True,
+                    "worktree": "/workspace-backend",
+                    "branch": "cptr/build/backend",
+                    "common_base": "a" * 40,
+                }
+            ],
+            now=self.now,
+        )
+        self.assertEqual(nodes[0].role, "backend-coder")
+        claimed = await self.store.claim_build_node(
+            run_id=run.id,
+            node_key="backend",
+            owner="node-owner",
+            fencing_epoch=7,
+            now=self.now + 1,
+        )
+        finished = await self.store.finish_build_node(
+            run_id=run.id,
+            node_key="backend",
+            attempt=claimed.attempt,
+            owner="node-owner",
+            fencing_epoch=7,
+            status="SUCCEEDED",
+            now=self.now + 2,
+        )
+        self.assertTrue(finished.authoritative_evidence["authoritative"])
+        integrated = await self.store.mark_build_node_integration(
+            run_id=run.id,
+            node_key="backend",
+            status="SUCCEEDED",
+            changed_paths=("backend.py",),
+            commit_hash="b" * 40,
+            now=self.now + 3,
+        )
+        replayed = await self.store.mark_build_node_integration(
+            run_id=run.id,
+            node_key="backend",
+            status="SUCCEEDED",
+            changed_paths=("backend.py",),
+            commit_hash="b" * 40,
+            now=self.now + 4,
+        )
+        self.assertEqual(replayed.id, integrated.id)
+        events = await self.store.list_events(run.id)
+        self.assertEqual(
+            sum(event.kind == "BUILD_NODE_INTEGRATED" for event in events),
+            1,
+        )
+        with self.assertRaises(StaleWriterError):
+            await self.store.mark_build_node_integration(
+                run_id=run.id,
+                node_key="backend",
+                status="SUCCEEDED",
+                changed_paths=("different.py",),
+                commit_hash="b" * 40,
+                now=self.now + 5,
+            )
+        conflicted = await self.store.mark_build_node_integration(
+            run_id=run.id,
+            node_key="backend",
+            status="CONFLICT",
+            changed_paths=("shared.py",),
+            error="overlapping cherry-pick",
+            now=self.now + 3,
+        )
+        self.assertEqual(conflicted.status, "CONFLICT")
+        with self.assertRaises(StaleWriterError):
+            await self.store.finish_build_node(
+                run_id=run.id,
+                node_key="backend",
+                attempt=claimed.attempt,
+                owner="node-owner",
+                fencing_epoch=7,
+                status="SUCCEEDED",
+                now=self.now + 4,
+            )
+
     async def test_orphan_recovery_is_exclusive_and_fenced(self):
         run, _ = await self._run_and_intent()
         await self.store.heartbeat_run(run.id, now=100)

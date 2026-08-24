@@ -1,0 +1,217 @@
+CPTR PHASE 3 ACCEPTANCE HANDOFF
+Date: 2026-08-24
+Status: ACTIVE. Do not start Phase 4.
+
+The acceptance pass was stopped at the user's request. No push, deploy,
+publish, credential rotation, DNS change, or commit was performed.
+
+REPOSITORY STATE
+
+Branch: control-plane-integration
+Starting HEAD: 65520952bc3b0e6a049ee3e453a6404b41ce3722
+Final HEAD: 65520952bc3b0e6a049ee3e453a6404b41ce3722
+
+The Phase 3 implementation remains uncommitted. Final read-only audit:
+git diff --check was clean, no aggregate pytest process remained.
+
+Current changed/untracked scope:
+ M artifacts/computer/cptr/flowdeck/authenticated_gateway.py
+ M artifacts/computer/cptr/flowdeck/build_agent.py
+ M artifacts/computer/cptr/flowdeck/coding.py
+ M artifacts/computer/cptr/flowdeck/durable.py
+ M artifacts/computer/cptr/flowdeck/evidence.py
+ M artifacts/computer/cptr/flowdeck/parallel.py
+ M artifacts/computer/cptr/flowdeck/tester.py
+ M artifacts/computer/cptr/models/flowdeck.py
+ M artifacts/computer/tests/test_flowdeck_authenticated_gateway.py
+ M artifacts/computer/tests/test_flowdeck_durable.py
+?? artifacts/computer/cptr/flowdeck/build_parallel.py
+?? artifacts/computer/cptr/flowdeck/worktrees.py
+?? artifacts/computer/migrations/versions/0009_parallel_build_nodes.py
+?? artifacts/computer/tests/test_flowdeck_build_parallel.py
+?? artifacts/computer/tests/test_flowdeck_worktrees.py
+?? docs/
+
+RE-AUDIT
+
+The reported branch and HEAD matched. The implementation was inspected before
+repairs. No root AGENTS.md exists; the only discovered AGENTS.md is under the
+vendored Cytoscape node_modules tree. The Phase 3 plan was read. Its real
+authenticated end-to-end and exact-scope reporting items were still unchecked
+at the start.
+
+IMPLEMENTATION SCOPE
+
+Implementation: artifacts/computer/cptr/flowdeck/build_parallel.py,
+worktrees.py, authenticated_gateway.py, coding.py, durable.py, evidence.py,
+parallel.py, build_agent.py, tester.py, models/flowdeck.py, and the modified
+tests.
+Migration: artifacts/computer/migrations/versions/0009_parallel_build_nodes.py
+DAG/scheduler: flowdeck/build_parallel.py and durable/model/parallel changes
+Worktree manager: flowdeck/worktrees.py
+Authenticated gateway: flowdeck/authenticated_gateway.py
+Coding/verification: flowdeck/coding.py and flowdeck/tester.py
+
+REPAIRS MADE BEFORE STOP
+
+1. Added authenticated isolated verification before commit/integration. A
+   verification failure records durable evidence and prevents integration.
+2. Made integration completion idempotent; conflicting replay raises a stale
+   writer error; child and verifier evidence is retained.
+3. Preserved the Replit/Nix-managed PATH for the allowlisted tester subprocess.
+4. Added durable child execution timestamps and a positive overlap event.
+5. Updated focused fixtures for verifier calls and failed-verification safety.
+
+TEST RESULTS
+
+Initial complete aggregate, before final repairs:
+Command: ./.pythonlibs/bin/pytest -q artifacts/computer/tests
+Result: 205 passed, 2 warnings, 43 subtests passed in 91.41s (0:01:31)
+Exit code 0; failed 0; skipped 0. Warnings were pytest collection warnings
+for TesterPolicyError and TesterRequest.
+
+Focused rerun after repairs:
+Command: ./.pythonlibs/bin/pytest -q artifacts/computer/tests/test_flowdeck_build_parallel.py artifacts/computer/tests/test_flowdeck_durable.py
+Result: 18 passed, 5 subtests passed in 16.93s; exit code 0.
+
+Final aggregate rerun after repairs:
+Command: ./.pythonlibs/bin/pytest -q artifacts/computer/tests
+Result: 205 passed, 1 failed, 2 warnings, 43 subtests passed in 86.83s
+(0:01:26); exit code 1.
+
+Failure:
+artifacts/computer/tests/test_flowdeck_http.py::FlowDeckProductionHttpTests::test_same_workspace_http_mutators_obey_existing_lease
+The test body passed, but asyncTearDown failed because TemporaryDirectory.cleanup
+reported Directory not empty; captured asyncio output showed cancellation of a
+background create_orchestration task. Isolated reproduction passed:
+./.pythonlibs/bin/pytest -q artifacts/computer/tests/test_flowdeck_http.py::FlowDeckProductionHttpTests::test_same_workspace_http_mutators_obey_existing_lease
+Result: 1 passed in 2.48s; exit code 0.
+
+A third aggregate was started but stopped before a final result was captured.
+It must not be treated as passing or as a replacement for the failed aggregate.
+
+Static checks:
+Targeted Ruff on Phase 3 changed files: All checks passed; exit code 0.
+python3 -m compileall -q artifacts/computer/cptr artifacts/computer/tests
+No output; exit code 0.
+
+Frontend:
+Before final tester/timestamp repairs, npm run check passed with 0 errors and
+198 warnings, and npm run build passed with pre-existing warnings. Post-repair
+frontend commands were interrupted because concurrent long-running processes
+starved the aggregate; rerun them serially.
+
+AUTHENTICATED /build EVIDENCE
+
+A disposable Git repository was exercised through the real Heidi coordinator
+and authenticated gateway with durable SQLite, real worktree creation, actual
+file writes, child commits, cherry-pick integration, durable events, and native
+tester command execution at the provider/model boundary.
+
+Limitation: the successful coordinator fixture used a deterministic tester
+fixture for the verification boundary. It is not final proof of the production
+tester lease path under simultaneous worktree verification. A production tester
+run exposed "workspace lease is stale or unavailable" during parallel verifier
+attempts. This remains an open Phase 3 gate. The earlier frontend "npm not
+found" issue was repaired by preserving the Replit PATH.
+
+Deterministic coordinator fixture:
+Base SHA: caf8c6fc87e62d9ba0f791397247c0246804f372
+Parent: SUCCEEDED
+Children: mapper SUCCEEDED, architect SUCCEEDED, build-agent SUCCEEDED
+Mutation nodes: backend SUCCEEDED, frontend SUCCEEDED
+Backend base: caf8c6fc87e62d9ba0f791397247c0246804f372
+Frontend base: caf8c6fc87e62d9ba0f791397247c0246804f372
+Common-base result: PASS for this fixture.
+Final canonical files: backend.py and frontend.py.
+Canonical status: clean.
+Final worktree list: one primary worktree; no fixture-owned child worktree.
+Recent commits: CPTR Build node frontend; CPTR Build node backend; base.
+
+Backend child_run_id: 44f1fbbb-1572-4dcd-a87a-11932e295a27
+Backend verifier_child_run_id: 39149334-8406-4c94-8fdb-a9e2a9bb9c6b
+Backend commit: 4a45bfa1b59df49644b71f7b0cc66d0d67e6cbce
+Frontend child_run_id: d1741155-cb8c-4aeb-bc6d-9949fb0acc41
+Frontend verifier_child_run_id: 01239af0-e90b-42ce-b663-29e00d7afe2d
+Frontend commit: bd6270acf93f3f8e698581802609a4c58a220f08
+
+Parallel overlap event: BUILD_EXECUTION_OVERLAP_DETECTED
+overlap_start: 1787575633149163695
+overlap_end:   1787575634194754445
+The interval is positive; the two mutation children genuinely overlapped.
+Native events included the parent/child lifecycle, DAG creation, node claims,
+node finishes, overlap, integrations, completion evidence, and RUN_COMPLETED.
+
+ACCEPTANCE MATRIX AT STOP
+
+Real authenticated parallel /build with production tester: NOT VERIFIED.
+Coordinator-level deterministic fixture passed; production tester lease behavior
+needs repair or a narrowly evidenced explanation.
+
+Common immutable base: PASS in deterministic fixture.
+Canonical isolation: focused tests exist, but the full live escape matrix for
+relative traversal, absolute canonical path, stale reference, symlink, and
+direct coding-tool path was not independently closed.
+Non-overlapping integration: PASS in deterministic fixture for backend.py plus
+frontend.py, with clean canonical status and successful node integrations.
+Same-file conflict: replay/conflict durable unit coverage passed; full
+authenticated same-line conflict fixture not closed.
+Verification before integration: focused PASS; failed isolated verification did
+not integrate the mutation.
+Branch-local retry and retry bound: required attempt-count fixtures not closed.
+Steering: not independently closed.
+Cancellation/repeated cancellation/late completion rejection: not closed.
+Restart recovery: not closed.
+Orphan cleanup: success fixture clean; all failure/conflict/cancellation paths
+not independently closed.
+Idempotency: integration replay focused coverage passed; all requested replay
+evidence was not captured.
+Native transcript: native lifecycle and child/verifier identity appeared; full
+ordering/deduplication matrix remains open.
+Reload/reconnect: not independently closed.
+Global model/provider/security authority: static review and existing focused
+coverage did not show a second model loop, unrestricted shell, arbitrary push,
+deployment, publishing, MCP/FDX enablement, client-controlled identity, or
+canonical-workspace bypass. The complete proof matrix was not captured.
+
+OPEN GATES
+
+P0: None identified from the work completed.
+
+P1:
+1. Production authenticated tester verification under simultaneous worktrees
+   reports "workspace lease is stale or unavailable".
+2. Final backend aggregate is not clean; reproduce the order-sensitive HTTP
+   teardown failure and patch only if it is a Phase 3 regression.
+3. Required adversarial evidence is incomplete: conflict, retry/retry-bound,
+   steering, cancellation, restart recovery, all-terminal orphan cleanup,
+   reload/reconnect, and the full security/authority matrix.
+
+P2:
+Frontend post-repair check/build need serial reruns and exact results. Existing
+full-repository Ruff debt is not a Phase 3 blocker unless newly introduced.
+
+NEXT CONTINUATION COMMANDS
+
+Work only in /home/runner/workspace. Do not reset/discard the dirty tree. Do not
+commit, push, deploy, publish, rotate credentials, change DNS, or start Phase 4.
+
+1. Run the complete aggregate alone and preserve durable output:
+   ./.pythonlibs/bin/pytest -q artifacts/computer/tests
+2. Reproduce the HTTP teardown failure and inspect Phase 3 causality first.
+3. Rerun the real authenticated disposable /build fixture with production
+   tester; capture files, branches, worktrees, commits, DB, FlowDeck, and
+   native transcript evidence.
+4. Complete conflict, failed verification, branch retry, retry bound, steering,
+   repeated cancellation, restart recovery, terminal orphan cleanup, replay,
+   and reload/reconnect fixtures.
+5. Run serially: npm run check; npm run build.
+6. Rerun Ruff, compileall, git diff --check, and final git/worktree status with
+   exact counts, warnings, durations, and exit codes.
+
+FINAL DECISION AT STOP
+
+Phase 3 remains ACTIVE. The acceptance threshold is not met because the final
+aggregate is not clean and the production-tester authenticated parallel /build
+gate plus several required lifecycle fixtures are not independently verified.
+Do not claim closure and do not start Phase 4.

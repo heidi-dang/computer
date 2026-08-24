@@ -23,6 +23,7 @@ from cptr.flowdeck.execution import (
     _native_run_read_only_specialist,
 )
 from cptr.models.workspaces import Workspace
+from cptr.flowdeck.worktrees import validate_execution_worktree
 
 
 class AuthenticatedGatewayError(RuntimeError):
@@ -46,6 +47,7 @@ class SpecialistDispatchRequest:
     timeout_seconds: float = 120
     execution_mode: str = "tool_calling"
     codeact_program: str | None = None
+    execution_workspace: str | None = None
 
 
 def _auth_user_id(request: Any) -> str:
@@ -116,11 +118,20 @@ async def dispatch_authenticated_specialist(
         user_id=user_id,
         requested_workspace=workspace,
     )
+    execution_workspace = workspace
+    if dispatch.execution_workspace is not None:
+        try:
+            execution_workspace = str(
+                await validate_execution_worktree(workspace, dispatch.execution_workspace)
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise AuthenticatedGatewayError("execution workspace is not an owned repository worktree") from exc
     if dispatch.role in {"backend-coder", "frontend-coder"}:
         return await _native_run_coding_specialist(
             CodingRequest(
                 role=dispatch.role,
-                workspace=workspace,
+                workspace=execution_workspace,
+                canonical_workspace=workspace,
                 user_id=user_id,
                 task=dispatch.task,
                 request_key=dispatch.request_key,
@@ -176,7 +187,7 @@ async def dispatch_authenticated_specialist(
             await run_tester(
                 TesterRequest(
                     request_key=dispatch.request_key,
-                    workspace=workspace,
+                    workspace=execution_workspace,
                     user_id=user_id,
                     check=dispatch.check,
                     trusted_repository=dispatch.trusted_repository,

@@ -35,6 +35,8 @@ class ParallelBuildNode:
     worktree: str | None = None
     common_base: str | None = None
     overlap_paths: tuple[str, ...] = ()
+    role: str = ""
+    branch: str | None = None
 
 
 @dataclass(frozen=True)
