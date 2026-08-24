@@ -410,6 +410,18 @@ class AgentService:
         result["is_repo"] = True
         return result
 
+    async def get_workspace_fingerprint(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
+        """Return bounded content evidence for steering-effect attribution."""
+        async with await get_db() as db:
+            workspace = await db.get(Workspace, workspace_id)
+            if workspace is None or workspace.user_id != user_id:
+                raise KeyError("workspace not found")
+        from cptr.utils.identity import identity_for_user_id
+        from cptr.utils.workspace_fingerprint import snapshot_workspace
+
+        identity = await identity_for_user_id(user_id)
+        return await snapshot_workspace(workspace.path, identity)
+
     async def get_verification_evidence(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
         async with await get_db() as db:
             workspace = await db.get(Workspace, workspace_id)

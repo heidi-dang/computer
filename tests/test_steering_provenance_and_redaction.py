@@ -39,6 +39,17 @@ class ProvenanceAgent:
         return {"id": task_id, "status": "CANCELLED", "cancelled": True}
 
 
+class SnapshotProvenanceAgent(ProvenanceAgent):
+    def __init__(self, control_message, snapshots):
+        super().__init__(control_message)
+        self.snapshots = list(snapshots)
+
+    async def get_workspace_fingerprint(self, workspace_id, **kwargs):
+        if len(self.snapshots) > 1:
+            return self.snapshots.pop(0)
+        return self.snapshots[0]
+
+
 class ProvenanceStore(InMemorySupervisorStore):
     async def get_message(self, message_id):
         return self.control_message
@@ -158,6 +169,152 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
         self.assertEqual(director.evaluations, 0)
+
+    async def test_same_worker_tracked_file_effect_is_observed(self):
+        message = SimpleNamespace(
+            id="control-1",
+            status="CONSUMED",
+            task_id="task_1",
+            consumed_task_id="task_1",
+            consumed_message_id="message-2",
+            consumed_at=20,
+        )
+        store = ProvenanceStore()
+        store.control_message = message
+        agent = SnapshotProvenanceAgent(
+            message,
+            [
+                {"fingerprint": "tracked-after", "files": [{"path": "fixture.txt"}]},
+            ],
+        )
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=AcceptingDirector())
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the steering change",
+            acceptance_criteria=["fixture.txt contains the steering marker"],
+            model_id="model-1",
+        )
+        await supervisor.run_once(monitor.monitor_id)
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id="control-1",
+            intended_task_id="task_1",
+            intended_generation_id="message-1",
+            baseline_workspace_snapshot={
+                "fingerprint": "tracked-before",
+                "files": [{"path": "fixture.txt"}],
+            },
+        )
+
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
+        record = state.scopes[0].steering_requests[0]
+        self.assertEqual(record["intended_task_id"], "task_1")
+        self.assertEqual(record["consumed_task_id"], "task_1")
+        self.assertEqual(record["consumed_message_id"], "message-2")
+        self.assertEqual(record["effect_status"], "EFFECT_OBSERVED")
+        self.assertEqual(record["baseline_workspace_fingerprint"], "tracked-before")
+        self.assertEqual(record["post_consumption_workspace_fingerprint"], "tracked-after")
+
+    async def test_same_worker_existing_untracked_file_content_effect_is_observed(self):
+        message = SimpleNamespace(
+            id="control-1",
+            status="CONSUMED",
+            task_id="task_1",
+            consumed_task_id="task_1",
+            consumed_message_id="message-2",
+            consumed_at=20,
+        )
+        store = ProvenanceStore()
+        store.control_message = message
+        agent = SnapshotProvenanceAgent(
+            message,
+            [
+                {
+                    "fingerprint": "untracked-after",
+                    "files": [{"path": "fixture.txt", "sha256": "base-plus-steering"}],
+                },
+            ],
+        )
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=AcceptingDirector())
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the steering change",
+            acceptance_criteria=["fixture.txt contains the steering marker"],
+            model_id="model-1",
+        )
+        await supervisor.run_once(monitor.monitor_id)
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id="control-1",
+            intended_task_id="task_1",
+            intended_generation_id="message-1",
+            baseline_workspace_snapshot={
+                "fingerprint": "untracked-before",
+                "files": [{"path": "fixture.txt", "sha256": "base"}],
+            },
+        )
+
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
+        self.assertEqual(state.scopes[0].steering_requests[0]["effect_status"], "EFFECT_OBSERVED")
+
+    async def test_consumed_same_worker_without_effect_converges_without_verification(self):
+        message = SimpleNamespace(
+            id="control-1",
+            status="CONSUMED",
+            task_id="task_1",
+            consumed_task_id="task_1",
+            consumed_message_id="message-2",
+            consumed_at=20,
+        )
+        store = ProvenanceStore()
+        store.control_message = message
+        agent = SnapshotProvenanceAgent(
+            message,
+            [{"fingerprint": "unchanged", "files": [{"path": "fixture.txt", "sha256": "base"}]}],
+        )
+        director = AcceptingDirector()
+        supervisor = AutonomousSupervisor(
+            store=store,
+            agent=agent,
+            director=director,
+            max_attempts=1,
+        )
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the steering change",
+            acceptance_criteria=["fixture.txt contains the steering marker"],
+            model_id="model-1",
+        )
+        await supervisor.run_once(monitor.monitor_id)
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id="control-1",
+            intended_task_id="task_1",
+            intended_generation_id="message-1",
+            baseline_workspace_snapshot={"fingerprint": "unchanged", "files": []},
+        )
+
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertEqual(state.status.value, "BLOCKED")
+        self.assertNotEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
+        self.assertEqual(director.evaluations, 0)
+        self.assertEqual(
+            state.scopes[0].steering_requests[0]["effect_status"], "EFFECT_NOT_OBSERVED"
+        )
 
 
 class RedactionTests(unittest.TestCase):

@@ -6,7 +6,7 @@ import secrets
 import time
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from cptr.models import (
@@ -105,6 +105,7 @@ class SqlSupervisorStore:
                 MonitorStatus.FAILED.value,
                 MonitorStatus.CANCEL_REQUESTED.value,
             }
+            releasable_terminal = terminal - {MonitorStatus.CANCEL_REQUESTED.value}
             if row.status in terminal and row.status != monitor.status.value:
                 await db.rollback()
                 return
@@ -133,6 +134,12 @@ class SqlSupervisorStore:
                 target.next_action = scope.next_action
                 target.history = [item.value for item in scope.history]
                 target.updated_at = scope.updated_at
+            if monitor.status in releasable_terminal:
+                await db.execute(
+                    delete(AutonomousWorkspaceLease).where(
+                        AutonomousWorkspaceLease.monitor_id == monitor.monitor_id
+                    )
+                )
             await db.commit()
 
     async def request_cancel_monitor(self, monitor_id: str) -> bool:
@@ -179,6 +186,11 @@ class SqlSupervisorStore:
                         status=ScopeStatus.CANCELLED.value,
                         next_action=None,
                         updated_at=_now_ms(),
+                    )
+                )
+                await db.execute(
+                    delete(AutonomousWorkspaceLease).where(
+                        AutonomousWorkspaceLease.monitor_id == monitor_id
                     )
                 )
             await db.commit()
@@ -355,6 +367,19 @@ class SqlSupervisorStore:
         now = _now_ms()
         token = secrets.token_urlsafe(18)
         async with await get_db() as db:
+            existing = await db.get(AutonomousWorkspaceLease, workspace_id)
+            if existing is not None and existing.monitor_id != monitor_id:
+                owner = await db.get(AutonomousMonitor, existing.monitor_id)
+                terminal_owner = owner is None or owner.status in {
+                    MonitorStatus.COMPLETE.value,
+                    MonitorStatus.CANCELLED.value,
+                    MonitorStatus.BLOCKED.value,
+                    MonitorStatus.FAILED.value,
+                }
+                if not terminal_owner:
+                    return False
+                await db.delete(existing)
+                await db.flush()
             updated = await db.execute(
                 update(AutonomousWorkspaceLease)
                 .where(

@@ -399,6 +399,13 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
 
         if not is_running(worker_task.message_id):
             raise HTTPException(status_code=409, detail="monitor worker is not actively running")
+        get_workspace_fingerprint = getattr(agent, "get_workspace_fingerprint", None)
+        baseline_workspace_snapshot = (
+            await get_workspace_fingerprint(monitor.workspace_id, user_id=user_id)
+            if callable(get_workspace_fingerprint)
+            else None
+        )
+        baseline_workspace_snapshot = redact_sensitive(baseline_workspace_snapshot)
         baseline_diff = await agent.get_diff(monitor.workspace_id, user_id=user_id)
         baseline_diff_fingerprint = hashlib.sha256(
             json.dumps(redact_sensitive(baseline_diff), sort_keys=True, default=str).encode("utf-8")
@@ -421,6 +428,7 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
             intended_task_id=task_id,
             intended_generation_id=worker_task.message_id,
             baseline_diff_fingerprint=baseline_diff_fingerprint,
+            baseline_workspace_snapshot=baseline_workspace_snapshot,
         )
         return response
     except KeyError as exc:

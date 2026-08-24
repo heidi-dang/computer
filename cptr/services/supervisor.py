@@ -21,6 +21,7 @@ from typing import Any, Protocol
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.services.verification import DefaultIndependentVerifier, IndependentVerifier
 from cptr.utils.redaction import redact_sensitive
+from cptr.utils.workspace_fingerprint import changed_paths
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,7 @@ class MonitorStatus(StrEnum):
 TERMINAL_TASK_STATUSES = {"COMPLETE", "COMPLETED", "SUCCEEDED", "FAILED", "ERROR", "CANCELLED"}
 APPROVAL_PATTERNS = (
     re.compile(r"\bgit\s+push\b", re.IGNORECASE),
+    re.compile(r"\bpush\s+(?:to\s+)?(?:github|gitlab|origin)\b", re.IGNORECASE),
     re.compile(r"\b(?:production|prod)\s+deploy(?:ment)?\b", re.IGNORECASE),
     re.compile(r"\b(?:deploy|release)\b", re.IGNORECASE),
     re.compile(
@@ -210,10 +212,13 @@ class InMemorySupervisorStore:
             MonitorStatus.FAILED,
             MonitorStatus.CANCEL_REQUESTED,
         }
+        releasable_terminal = terminal - {MonitorStatus.CANCEL_REQUESTED}
         if existing and existing.status in terminal and monitor.status != existing.status:
             return
         monitor.updated_at = int(time.time() * 1000)
         self.monitors[monitor.monitor_id] = monitor
+        if monitor.status in releasable_terminal:
+            await self.release_workspace(monitor.workspace_id, monitor.monitor_id)
 
     async def request_cancel_monitor(self, monitor_id: str) -> bool:
         monitor = self.monitors.get(monitor_id)
@@ -239,6 +244,7 @@ class InMemorySupervisorStore:
             if scope.status not in {ScopeStatus.VERIFIED, ScopeStatus.CANCELLED}:
                 scope.transition(ScopeStatus.CANCELLED)
             scope.next_action = None
+        await self.release_workspace(monitor.workspace_id, monitor.monitor_id)
         return True
 
     async def cancel_monitor(self, monitor_id: str) -> bool:
@@ -311,7 +317,16 @@ class InMemorySupervisorStore:
     async def claim_workspace(self, workspace_id: str, monitor_id: str) -> bool:
         current = self._workspace_leases.get(workspace_id)
         if current is not None and current != monitor_id:
-            return False
+            owner = self.monitors.get(current)
+            if owner is None or owner.status in {
+                MonitorStatus.COMPLETE,
+                MonitorStatus.CANCELLED,
+                MonitorStatus.BLOCKED,
+                MonitorStatus.FAILED,
+            }:
+                self._workspace_leases.pop(workspace_id, None)
+            else:
+                return False
         self._workspace_leases[workspace_id] = monitor_id
         return True
 
@@ -420,6 +435,7 @@ class AutonomousSupervisor:
         intended_task_id: str,
         intended_generation_id: str | None,
         baseline_diff_fingerprint: str | None = None,
+        baseline_workspace_snapshot: dict[str, Any] | None = None,
     ) -> MonitorState:
         """Bind autonomous control to the worker generation it targeted."""
         monitor = await self._required_monitor(monitor_id)
@@ -431,6 +447,13 @@ class AutonomousSupervisor:
             "intended_task_id": intended_task_id,
             "intended_generation_id": intended_generation_id,
             "baseline_diff_fingerprint": baseline_diff_fingerprint,
+            "baseline_workspace_snapshot": baseline_workspace_snapshot,
+            "baseline_workspace_fingerprint": (baseline_workspace_snapshot or {}).get(
+                "fingerprint"
+            ),
+            "post_consumption_workspace_fingerprint": None,
+            "effect_observed_at": None,
+            "effect_status": "PENDING",
             "status": "QUEUED",
         }
         if not any(
@@ -646,6 +669,27 @@ class AutonomousSupervisor:
                 )
                 return
 
+            effect_failure = await self._observe_steering_effects(
+                monitor, scope, task_id, steering_records
+            )
+            if effect_failure is not None:
+                await self._append_evidence(
+                    monitor,
+                    scope,
+                    "steering_provenance",
+                    {"requests": steering_records, "status": "NOT_VERIFIED"},
+                )
+                await self._repair_or_block(
+                    monitor,
+                    scope,
+                    {
+                        "category": "steering_effect_not_observed",
+                        "scope_id": scope.scope_id,
+                        "message": effect_failure,
+                    },
+                )
+                return
+
         scope.transition(ScopeStatus.AGENT_COMPLETE)
         scope.transition(ScopeStatus.VERIFYING)
         evidence = {
@@ -654,35 +698,6 @@ class AutonomousSupervisor:
         }
         if steering_records:
             evidence["steering_provenance"] = steering_records
-            unchanged = next(
-                (
-                    item
-                    for item in steering_records
-                    if item.get("baseline_diff_fingerprint")
-                    and hashlib.sha256(
-                        json.dumps(
-                            redact_sensitive(evidence["diff"]), sort_keys=True, default=str
-                        ).encode("utf-8")
-                    ).hexdigest()
-                    == item["baseline_diff_fingerprint"]
-                ),
-                None,
-            )
-            if unchanged is not None:
-                await self._append_evidence(
-                    monitor,
-                    scope,
-                    "steering_provenance",
-                    {
-                        "requests": steering_records,
-                        "unchanged_request": unchanged,
-                        "status": "EFFECT_NOT_OBSERVED",
-                    },
-                )
-                scope.next_action = (
-                    "The intended worker consumed steering but produced no new workspace evidence."
-                )
-                return
         if not await self._monitor_is_running(monitor.monitor_id):
             return
         get_verification_evidence = getattr(self.agent, "get_verification_evidence", None)
@@ -751,8 +766,51 @@ class AutonomousSupervisor:
                 },
             )
             return
+        verification_fingerprint = hashlib.sha256(
+            json.dumps(
+                redact_sensitive(
+                    {
+                        "scope_id": scope.scope_id,
+                        "task_id": task_id,
+                        "generation_id": next(
+                            (
+                                item.get("consumed_message_id")
+                                for item in steering_records
+                                if item.get("consumed_task_id") == task_id
+                            ),
+                            None,
+                        ),
+                        "evidence": evidence,
+                        "steering": steering_records,
+                    }
+                ),
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        if scope.last_decision.get("_verification_fingerprint") == verification_fingerprint:
+            await self._append_evidence(
+                monitor,
+                scope,
+                "verification_convergence",
+                {"status": "UNCHANGED", "fingerprint": verification_fingerprint},
+            )
+            await self._repair_or_block(
+                monitor,
+                scope,
+                {
+                    "category": "verification_unchanged",
+                    "scope_id": scope.scope_id,
+                    "message": "verification evidence did not change between attempts",
+                },
+            )
+            return
+        scope.last_decision["_verification_fingerprint"] = verification_fingerprint
         self._sync_director_state(monitor)
-        scope.last_decision = decision.__dict__.copy()
+        scope.last_decision = {
+            **decision.__dict__,
+            "_verification_fingerprint": verification_fingerprint,
+        }
         await self._append_evidence(monitor, scope, "director_decision", scope.last_decision)
         if decision.scope_satisfied and not decision.defects and not decision.regressions:
             scope.verification_evidence.append(evidence)
@@ -852,6 +910,7 @@ class AutonomousSupervisor:
             )
             monitor.approval_id = approval.approval_id
             monitor.status = MonitorStatus.APPROVAL_REQUIRED
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
             await self._append_evidence(
                 monitor,
                 scope,
@@ -866,9 +925,15 @@ class AutonomousSupervisor:
         if not await self.store.claim_workspace(monitor.workspace_id, monitor.monitor_id):
             scope.next_action = "Waiting for the workspace writer lease to be released."
             return
+        delegated = False
         try:
             await self._delegate(monitor, scope, assignment)
+            delegated = (
+                await self._monitor_is_running(monitor.monitor_id)
+                and scope.status == ScopeStatus.WORKING
+            )
         except Exception:  # noqa: BLE001 - a worker provider failure must be persisted
+            await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
             scope.attempt_count += 1
             failure = {
                 "category": "worker_start_failure",
@@ -899,6 +964,9 @@ class AutonomousSupervisor:
                 scope.next_action = (
                     f"[{escalation}] Resolve the worker-start failure and retry the assignment."
                 )
+        finally:
+            if not delegated:
+                await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
 
     async def _delegate(self, monitor: MonitorState, scope: ScopeRecord, assignment: str) -> None:
         if not await self._monitor_is_running(monitor.monitor_id):
@@ -907,8 +975,10 @@ class AutonomousSupervisor:
         key = f"{monitor.monitor_id}:{scope.scope_id}:{scope.attempt_count + 1}"
         scoped_assignment = (
             f"Work only in the CPTR workspace identified by {monitor.workspace_id}. "
+            "workspace_scope=current. "
             "Do not search, read, modify, or verify other workspaces or historical fixtures "
-            "unless the original goal explicitly requires cross-workspace work.\n\n"
+            "unless the original goal explicitly requires cross-workspace work. "
+            "Only inspect files named by this assignment or created during this monitor.\n\n"
             f"Assignment: {assignment}"
         )
         task = await self.agent.start_task(
@@ -978,7 +1048,121 @@ class AutonomousSupervisor:
 
     @staticmethod
     def _requires_approval(assignment: str) -> bool:
-        return any(pattern.search(assignment) for pattern in APPROVAL_PATTERNS)
+        for pattern in APPROVAL_PATTERNS:
+            for match in pattern.finditer(assignment):
+                prefix = assignment[max(0, match.start() - 60) : match.start()]
+                if re.search(
+                    r"(?:\bdo\s+not\b|\bdon['’]?t\b|\bnever\b|\bwithout\b)"
+                    r"(?:\s+\w+){0,4}\s*$",
+                    prefix,
+                    re.IGNORECASE,
+                ):
+                    continue
+                return True
+        return False
+
+    async def _observe_steering_effects(
+        self,
+        monitor: MonitorState,
+        scope: ScopeRecord,
+        task_id: str,
+        records: list[dict[str, Any]],
+    ) -> str | None:
+        """Attribute a post-consumption workspace change to the intended worker."""
+        get_workspace_fingerprint = getattr(self.agent, "get_workspace_fingerprint", None)
+        for record in records:
+            if record.get("effect_status") == "EFFECT_OBSERVED":
+                continue
+            if record.get("effect_status") == "EFFECT_NOT_OBSERVED":
+                return "The intended worker consumed steering but produced no qualifying workspace effect."
+            baseline = record.get("baseline_workspace_snapshot")
+            if not baseline:
+                # Older steering records only have the Git diff fallback. Preserve
+                # their established behavior while all new records use snapshots.
+                if record.get("baseline_diff_fingerprint"):
+                    current_diff = await self.agent.get_diff(
+                        monitor.workspace_id, user_id=monitor.user_id
+                    )
+                    current_fingerprint = hashlib.sha256(
+                        json.dumps(
+                            redact_sensitive(current_diff), sort_keys=True, default=str
+                        ).encode("utf-8")
+                    ).hexdigest()
+                    if current_fingerprint == record["baseline_diff_fingerprint"]:
+                        self._set_steering_effect(
+                            scope,
+                            record["control_message_id"],
+                            status="EFFECT_NOT_OBSERVED",
+                            observed_at=int(time.time() * 1000),
+                        )
+                        return "The intended worker consumed steering but produced no new workspace evidence."
+                continue
+            if record.get("consumed_task_id") != record.get("intended_task_id"):
+                return "Steering was not consumed by the intended worker task."
+            if task_id != record.get("intended_task_id"):
+                self._set_steering_effect(
+                    scope,
+                    record["control_message_id"],
+                    status="EFFECT_NOT_OBSERVED",
+                    observed_at=int(time.time() * 1000),
+                )
+                return "A replacement worker cannot satisfy the same-worker steering effect."
+            if not callable(get_workspace_fingerprint):
+                return "Workspace content evidence is unavailable for steering effect attribution."
+            post = await get_workspace_fingerprint(monitor.workspace_id, user_id=monitor.user_id)
+            post = redact_sensitive(post)
+            observed_at = int(time.time() * 1000)
+            baseline_fingerprint = baseline.get("fingerprint")
+            post_fingerprint = post.get("fingerprint") if isinstance(post, dict) else None
+            if not baseline_fingerprint or not post_fingerprint:
+                self._set_steering_effect(
+                    scope,
+                    record["control_message_id"],
+                    status="EFFECT_NOT_OBSERVED",
+                    post_snapshot=post,
+                    observed_at=observed_at,
+                )
+                return "Steering effect snapshots were incomplete."
+            if baseline_fingerprint == post_fingerprint:
+                self._set_steering_effect(
+                    scope,
+                    record["control_message_id"],
+                    status="EFFECT_NOT_OBSERVED",
+                    post_snapshot=post,
+                    observed_at=observed_at,
+                )
+                return "The intended worker consumed steering but produced no qualifying workspace effect."
+            self._set_steering_effect(
+                scope,
+                record["control_message_id"],
+                status="EFFECT_OBSERVED",
+                post_snapshot=post,
+                observed_at=observed_at,
+                changed=changed_paths(baseline, post),
+            )
+        return None
+
+    @staticmethod
+    def _set_steering_effect(
+        scope: ScopeRecord,
+        control_message_id: str,
+        *,
+        status: str,
+        post_snapshot: dict[str, Any] | None = None,
+        observed_at: int | None = None,
+        changed: list[str] | None = None,
+    ) -> None:
+        for record in scope.steering_requests:
+            if record.get("control_message_id") != control_message_id:
+                continue
+            record["effect_status"] = status
+            record["effect_observed_at"] = observed_at
+            if post_snapshot is not None:
+                record["post_consumption_workspace_snapshot"] = post_snapshot
+                record["post_consumption_workspace_fingerprint"] = post_snapshot.get("fingerprint")
+            if changed is not None:
+                record["effect_changed_paths"] = changed
+            return
 
     async def _append_evidence(
         self, monitor: MonitorState, scope: ScopeRecord | None, kind: str, payload: dict[str, Any]
@@ -1006,12 +1190,15 @@ class AutonomousSupervisor:
             if message is None:
                 records.append({**request, "status": "MISSING"})
             else:
+                status = str(getattr(message, "status", "UNKNOWN")).upper()
+                request["status"] = status
+                request["consumed_task_id"] = getattr(message, "consumed_task_id", None)
+                request["consumed_message_id"] = getattr(message, "consumed_message_id", None)
+                request["consumed_at"] = getattr(message, "consumed_at", None)
                 records.append(
                     {
                         **request,
-                        "status": str(getattr(message, "status", "UNKNOWN")).upper(),
-                        "consumed_task_id": getattr(message, "consumed_task_id", None),
-                        "consumed_message_id": getattr(message, "consumed_message_id", None),
+                        "status": status,
                     }
                 )
         return records

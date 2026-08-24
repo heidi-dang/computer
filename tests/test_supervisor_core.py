@@ -86,6 +86,11 @@ class FailingAgentService(FakeAgentService):
         raise RuntimeError("model unavailable")
 
 
+class NonTerminalFailingAgentService(FakeAgentService):
+    async def start_task(self, **kwargs):
+        raise RuntimeError("transient model unavailable")
+
+
 class AlwaysRejectingVerifier:
     async def verify(self, **kwargs):
         return VerificationResult(
@@ -215,6 +220,84 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(state.status, MonitorStatus.BLOCKED)
         self.assertEqual(state.scopes[0].status, ScopeStatus.BLOCKED)
+
+    async def test_transient_worker_start_failure_releases_lease_for_next_monitor(self):
+        store = InMemorySupervisorStore()
+        supervisor = AutonomousSupervisor(
+            store=store,
+            agent=NonTerminalFailingAgentService(),
+            director=FakeDirector(),
+            max_attempts=3,
+        )
+        first = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="First attempt",
+            acceptance_criteria=["The work is safe"],
+            model_id="model-1",
+        )
+        await supervisor.run_once(first.monitor_id)
+        self.assertEqual((await store.get_monitor(first.monitor_id)).status, MonitorStatus.RUNNING)
+
+        second = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Second attempt",
+            acceptance_criteria=["The work is safe"],
+            model_id="model-1",
+        )
+        state = await supervisor.run_once(second.monitor_id)
+
+        self.assertNotEqual(
+            state.scopes[0].next_action, "Waiting for the workspace writer lease to be released."
+        )
+
+    async def test_terminal_monitor_release_does_not_steal_live_lease(self):
+        store = InMemorySupervisorStore()
+        owner = await AutonomousSupervisor(
+            store=store, agent=FakeAgentService(), director=FakeDirector()
+        ).create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Owner",
+            acceptance_criteria=["Owner work"],
+            model_id="model-1",
+        )
+        contender = await AutonomousSupervisor(
+            store=store, agent=FakeAgentService(), director=FakeDirector()
+        ).create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Contender",
+            acceptance_criteria=["Contender work"],
+            model_id="model-1",
+        )
+        self.assertTrue(await store.claim_workspace("workspace-1", owner.monitor_id))
+        self.assertFalse(await store.claim_workspace("workspace-1", contender.monitor_id))
+
+        owner_state = await store.get_monitor(owner.monitor_id)
+        owner_state.status = MonitorStatus.COMPLETE
+        await store.save_monitor(owner_state)
+
+        self.assertTrue(await store.claim_workspace("workspace-1", contender.monitor_id))
+
+    async def test_scoped_assignment_explicitly_selects_current_workspace_only(self):
+        store = InMemorySupervisorStore()
+        agent = FakeAgentService()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=FakeDirector())
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Inspect the fixture",
+            acceptance_criteria=["The fixture is valid"],
+            model_id="model-1",
+        )
+
+        await supervisor.run_once(monitor.monitor_id)
+
+        prompt = agent.started[0][1]
+        self.assertIn("workspace_scope=current", prompt)
+        self.assertNotIn("workspace_scope=all", prompt)
 
     async def test_cancel_propagates_to_the_active_worker(self):
         store = InMemorySupervisorStore()
@@ -362,6 +445,12 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, MonitorStatus.COMPLETE)
         self.assertEqual(len(agent.started), 2)
         self.assertEqual(director.final_gates, 2)
+
+    def test_approval_classifier_respects_negated_risky_actions(self):
+        self.assertTrue(AutonomousSupervisor._requires_approval("deploy production"))
+        self.assertTrue(AutonomousSupervisor._requires_approval("push to GitHub"))
+        self.assertFalse(AutonomousSupervisor._requires_approval("do not deploy production"))
+        self.assertFalse(AutonomousSupervisor._requires_approval("do not push to GitHub"))
 
 
 if __name__ == "__main__":
