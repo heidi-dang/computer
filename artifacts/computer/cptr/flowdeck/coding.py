@@ -201,9 +201,7 @@ async def _native_run_coding_specialist(
     config = FlowDeckConfig.from_env()
     validate_coding_request(request, config)
     if store is None:
-        from cptr.utils.db import get_session_factory
-
-        store = DurableFlowDeck(get_session_factory())
+        raise CodingPolicyError("native coding execution requires a durable FlowDeck store")
     root = await resolve_authorized_workspace(
         session_factory=store.session_factory,
         user_id=request.user_id,

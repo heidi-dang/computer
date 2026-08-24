@@ -73,6 +73,17 @@ from cptr.flowdeck.execution import (
 )
 from cptr.flowdeck.fdx import FDXConfig, FDXPolicyError, FDXResult, run_fdx, run_optional_fdx
 from cptr.flowdeck.gateway import observe_request
+from cptr.flowdeck.parallel import (
+    BuildNodeStatus,
+    ParallelBuildNode,
+    ParallelBuildPlan,
+    ParallelBuildPlanError,
+    ParallelBuildState,
+    overlapping_parallel_nodes,
+    ready_parallel_nodes,
+    run_parallel_build_batch,
+    validate_parallel_build_plan,
+)
 from cptr.flowdeck.git_readonly import (
     GitInspectionPolicyError,
     GitInspectionRequest,
@@ -102,6 +113,7 @@ __all__ = [
     "BudgetExceeded",
     "BuildAgentPolicyError",
     "BuildAgentRequest",
+    "BuildNodeStatus",
     "AuthenticatedGatewayError",
     "Capability",
     "CodingPolicyError",
@@ -128,6 +140,10 @@ __all__ = [
     "MapperRequest",
     "OperationStatus",
     "PlannedDelegation",
+    "ParallelBuildNode",
+    "ParallelBuildPlan",
+    "ParallelBuildPlanError",
+    "ParallelBuildState",
     "RecoveryGrant",
     "RouteDecision",
     "RouteStrategy",
@@ -148,6 +164,7 @@ __all__ = [
     "observe_request",
     "run_fdx",
     "run_build_agent",
+    "run_parallel_build_batch",
     "run_heidi_coordinator",
     "run_optional_fdx",
     "run_tester",
@@ -155,6 +172,9 @@ __all__ = [
     "SpecialistDispatchRequest",
     "validate_browser_request",
     "validate_build_agent_request",
+    "validate_parallel_build_plan",
+    "ready_parallel_nodes",
+    "overlapping_parallel_nodes",
     "validate_coding_request",
     "validate_mapper_request",
     "validate_registry",

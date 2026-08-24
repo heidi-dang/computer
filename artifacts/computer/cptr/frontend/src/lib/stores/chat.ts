@@ -286,7 +286,7 @@ export interface ChatModel {
 	provider: string;
 display_provider?: string;
 	connection_id: string;
-availability?: 'available' | 'unavailable' | 'unknown' | 'checking' | 'configuration_required';
+	availability?: 'available' | 'unavailable' | 'unknown' | 'unverified' | 'checking' | 'configuration_required';
 availability_reason?: string;
 input_price_per_1m?: number | null;
 output_price_per_1m?: number | null;

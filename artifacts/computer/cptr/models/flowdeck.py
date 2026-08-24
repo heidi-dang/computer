@@ -48,6 +48,28 @@ class FlowDeckStep(Base):
     __table_args__ = (UniqueConstraint("run_id", "sequence", name="uq_flowdeck_step_sequence"),)
 
 
+class FlowDeckBuildNode(Base):
+    """Durable DAG metadata; execution remains owned by native CPTR."""
+
+    __tablename__ = "flowdeck_build_nodes"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    run_id = Column(Text, nullable=False, index=True)
+    node_key = Column(Text, nullable=False)
+    dependencies = Column(JSON, nullable=False, default=list)
+    mutation = Column(Integer, nullable=False, default=0)
+    workspace = Column(Text, nullable=False)
+    worktree = Column(Text, nullable=True)
+    common_base = Column(Text, nullable=True)
+    overlap_paths = Column(JSON, nullable=False, default=list)
+    status = Column(Text, nullable=False, default="PENDING")
+    attempt = Column(Integer, nullable=False, default=0)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (UniqueConstraint("run_id", "node_key", name="uq_flowdeck_build_node_key"),)
+
+
 class FlowDeckLogicalOperation(Base):
     __tablename__ = "flowdeck_logical_operations"
 

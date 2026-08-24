@@ -7,7 +7,6 @@ from typing import Any, Literal, Union
 
 from fastapi import HTTPException
 
-from cptr.models import Config
 from cptr.utils.agents.detection import get_agent_status
 from cptr.utils.agents.models import parse_agent_model_id
 
@@ -83,18 +82,21 @@ async def resolve_model_target(model_id: str, app_state=None) -> ModelTarget:
 
 
 async def first_api_model_target(app_state=None) -> ApiModelTarget:
-    from cptr.routers.chat import _fetch_provider_models
+    from cptr.routers.chat import _get_connection_model_metadata, _get_connections
 
-    connections = await Config.get("chat.connections") or []
+    connections = await _get_connections()
     for conn in connections:
         if not conn.get("enabled", True):
             continue
-        model_ids = conn.get("data", {}).get("models")
-        if not model_ids:
-            model_ids = await _fetch_provider_models(conn)
-        if model_ids:
+        metadata = await _get_connection_model_metadata(conn, app_state)
+        verified = [
+            model_id
+            for model_id, item in metadata.items()
+            if item.get("availability") == "available"
+        ]
+        if verified:
             prefix = (conn.get("prefix_id") or "").strip()
-            runtime_model = model_ids[0]
+            runtime_model = verified[0]
             full = f"{prefix}/{runtime_model}" if prefix else runtime_model
             return ApiModelTarget(
                 kind="api",

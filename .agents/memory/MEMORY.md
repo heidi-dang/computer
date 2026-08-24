@@ -10,3 +10,4 @@
 - [Build Agent evidence](build-agent-evidence.md) — Build completion must trust durable child verifier outcomes, never compatibility return strings or specialist claims.
 - [Live build provider checks](live-build-provider-checks.md) — live /build smoke tests require an explicitly enabled mutation flag and a healthy configured model connection.
 - [Realtime smoke harness](realtime-smoke-harness.md) — use declared HTTP polling to avoid optional Socket.IO transport dependencies.
+- [Provider discovery fail-closed](provider-discovery-fail-closed.md) — HTTP 405 model enumeration means unverified, never available or an excuse for silent model switching.

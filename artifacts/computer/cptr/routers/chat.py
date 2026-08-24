@@ -16,8 +16,7 @@ from sqlalchemy import select
 
 from cptr.models import Chat, ChatMessage, Config, is_internal_chat
 from cptr.env import flowdeck_shadow_enabled
-from cptr.utils.config import check_access, now_ms, _get_jwt_secret
-from cptr.utils.crypto import decrypt_key
+from cptr.utils.config import check_access, now_ms
 from cptr.utils.db import get_db
 from cptr.utils.chat_export import chat_directory
 from cptr.utils.runtime import Runtime, FileError
@@ -312,7 +311,7 @@ async def _get_connection_model_metadata(
 ) -> dict[str, dict]:
     """Return model metadata from the configured source or provider discovery.
 
-    Configured model IDs are deliberately `unknown` until a provider discovery
+    Configured model IDs are deliberately `unverified` until a provider discovery
     response confirms them; configuration alone is not a health check.
     """
     data = conn.get("data") or {}
@@ -333,7 +332,7 @@ async def _get_connection_model_metadata(
             **_normalise_model_metadata(model_id, configured_metadata.get(model_id)),
             "provider": conn.get("provider", ""),
             "connection_id": conn_id,
-            "availability": "unknown",
+            "availability": "unverified",
             "availability_reason": "Provider health has not been confirmed",
         }
         for model_id in stored
@@ -352,7 +351,13 @@ async def _get_connection_model_metadata(
                 "availability_reason": "Confirmed by provider discovery",
             }
     elif result:
-        availability = "configuration_required" if not conn.get("api_key") else "unavailable"
+        from cptr.utils.connection_credentials import connection_api_key
+
+        availability = (
+            "configuration_required"
+            if not connection_api_key(conn)
+            else _availability_for_discovery_failure(failure_reason)
+        )
         reason = (
             "Provider credentials are not configured"
             if availability == "configuration_required"
@@ -792,6 +797,19 @@ async def _fetch_provider_model_records_with_status(
         return None, "Provider discovery failed"
 
     return None, f"Unsupported provider: {provider}"
+
+
+def _availability_for_discovery_failure(reason: str | None) -> str:
+    """Map an unconfirmed provider response to a fail-closed UI state.
+
+    A discovery endpoint refusing GET (notably HTTP 405) does not prove that a
+    configured model is unavailable, but it also cannot prove that it works.
+    Authentication failures are confirmed unavailable; all other failures are
+    deliberately unverified.
+    """
+    if reason and ("HTTP 401" in reason or "HTTP 403" in reason):
+        return "unavailable"
+    return "unverified"
 
 
 async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
@@ -1815,6 +1833,7 @@ async def _resolve_connection(model_id: str, app_state=None) -> tuple[dict, str]
         prefix, runtime_model = model_id.split("/", 1)
         for conn in connections:
             if (conn.get("prefix_id") or "").strip() == prefix:
+                await _require_verified_model(conn, runtime_model, app_state)
                 return conn, runtime_model
 
     # Scan all connections using cache
@@ -1828,6 +1847,26 @@ async def _resolve_connection(model_id: str, app_state=None) -> tuple[dict, str]
         for mid in model_ids:
             prefixed = f"{prefix}/{mid}" if prefix else mid
             if prefixed == model_id or mid == model_id:
+                await _require_verified_model(conn, mid, app_state)
                 return conn, mid
 
     raise HTTPException(400, f"no connection found for model: {model_id}")
+
+
+async def _require_verified_model(conn: dict, runtime_model: str, app_state=None) -> None:
+    """Reject configured models whose provider availability was not verified."""
+    if app_state is None:
+        records, reason = await _fetch_provider_model_records_with_status(conn)
+        if records is None or runtime_model not in {item.get("id") for item in records}:
+            raise HTTPException(
+                400,
+                f"model availability is unverified for {runtime_model}: "
+                f"{reason or 'provider did not confirm this model'}",
+            )
+        return
+
+    metadata = await _get_connection_model_metadata(conn, app_state)
+    model = metadata.get(runtime_model)
+    if not model or model.get("availability") != "available":
+        reason = (model or {}).get("availability_reason") or "provider did not confirm this model"
+        raise HTTPException(400, f"model is not available: {runtime_model} ({reason})")

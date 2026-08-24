@@ -25,6 +25,7 @@ from cptr.flowdeck.evidence import (
 )
 from cptr.models.flowdeck import (
     FlowDeckApproval,
+    FlowDeckBuildNode,
     FlowDeckEvent,
     FlowDeckLogicalOperation,
     FlowDeckPhysicalAttempt,
@@ -274,6 +275,149 @@ class DurableFlowDeck:
 
         return await self._transaction(operation)
 
+    async def create_build_nodes(
+        self,
+        *,
+        run_id: str,
+        workspace: str,
+        nodes: list[dict[str, Any]],
+        now: int | None = None,
+    ) -> list[FlowDeckBuildNode]:
+        """Persist a validated Build DAG before dispatching any child work."""
+        from cptr.flowdeck.parallel import ParallelBuildNode, ParallelBuildPlan, validate_parallel_build_plan
+
+        specs = tuple(
+            ParallelBuildNode(
+                key=str(node["key"]),
+                dependencies=tuple(node.get("dependencies", ())),
+                mutation=bool(node.get("mutation", False)),
+                workspace=workspace,
+                worktree=node.get("worktree"),
+                common_base=node.get("common_base"),
+                overlap_paths=tuple(node.get("overlap_paths", ())),
+            )
+            for node in nodes
+        )
+        validate_parallel_build_plan(ParallelBuildPlan(specs))
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(run.status, {RunStatus.PENDING.value, RunStatus.RUNNING.value})
+            existing = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckBuildNode).where(FlowDeckBuildNode.run_id == run_id)
+                    )
+                ).all()
+            )
+            if existing:
+                by_key = {item.node_key: item for item in existing}
+                if set(by_key) != {spec.key for spec in specs}:
+                    raise DuplicateRequestError("Build DAG already exists with different nodes")
+                return existing
+            rows = [
+                FlowDeckBuildNode(
+                    run_id=run_id,
+                    node_key=spec.key,
+                    dependencies=list(spec.dependencies),
+                    mutation=1 if spec.mutation else 0,
+                    workspace=workspace,
+                    worktree=spec.worktree,
+                    common_base=spec.common_base,
+                    overlap_paths=list(spec.overlap_paths),
+                    status="PENDING",
+                    attempt=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+                for spec in specs
+            ]
+            db.add_all(rows)
+            await self._event(
+                db, run_id, "BUILD_DAG_RECORDED", {"nodes": [spec.key for spec in specs]}, now
+            )
+            return rows
+
+        return await self._transaction(operation)
+
+    async def get_build_nodes(self, run_id: str) -> list[FlowDeckBuildNode]:
+        async with self.session_factory() as db:
+            result = await db.scalars(
+                select(FlowDeckBuildNode)
+                .where(FlowDeckBuildNode.run_id == run_id)
+                .order_by(FlowDeckBuildNode.created_at, FlowDeckBuildNode.node_key)
+            )
+            return list(result.all())
+
+    async def claim_build_node(self, *, run_id: str, node_key: str, now: int | None = None) -> FlowDeckBuildNode:
+        """Atomically claim a ready node; dependency state is checked in the transaction."""
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            node = await db.scalar(
+                select(FlowDeckBuildNode).where(
+                    FlowDeckBuildNode.run_id == run_id,
+                    FlowDeckBuildNode.node_key == node_key,
+                )
+            )
+            if not node:
+                raise LifecycleError("unknown Build node")
+            if node.status != "PENDING":
+                raise LifecycleError("Build node is not pending")
+            dependencies = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckBuildNode).where(
+                            FlowDeckBuildNode.run_id == run_id,
+                            FlowDeckBuildNode.node_key.in_(node.dependencies),
+                        )
+                    )
+                ).all()
+            )
+            if len(dependencies) != len(node.dependencies) or any(
+                dependency.status != "SUCCEEDED" for dependency in dependencies
+            ):
+                raise LifecycleError("Build node dependencies are not complete")
+            node.status = "RUNNING"
+            node.attempt += 1
+            node.updated_at = now
+            await self._event(db, run_id, "BUILD_NODE_CLAIMED", {"node_key": node_key}, now)
+            return node
+
+        return await self._transaction(operation)
+
+    async def finish_build_node(
+        self,
+        *,
+        run_id: str,
+        node_key: str,
+        attempt: int,
+        status: str,
+        now: int | None = None,
+    ) -> FlowDeckBuildNode:
+        if status not in {"SUCCEEDED", "FAILED", "CANCELLED", "CONFLICT"}:
+            raise LifecycleError("invalid Build node terminal status")
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            node = await db.scalar(
+                select(FlowDeckBuildNode).where(
+                    FlowDeckBuildNode.run_id == run_id,
+                    FlowDeckBuildNode.node_key == node_key,
+                )
+            )
+            if not node or node.attempt != attempt or node.status != "RUNNING":
+                raise StaleWriterError("stale Build node completion")
+            node.status = status
+            node.updated_at = now
+            await self._event(
+                db, run_id, "BUILD_NODE_FINISHED", {"node_key": node_key, "status": status}, now
+            )
+            return node
+
+        return await self._transaction(operation)
+
     async def get_run_by_request_key(self, request_key: str) -> FlowDeckRun | None:
         async with self.session_factory() as db:
             return await db.scalar(
@@ -363,6 +507,19 @@ class DurableFlowDeck:
                 if step.status in {StepStatus.PENDING.value, StepStatus.RUNNING.value}:
                     step.status = StepStatus.CANCELLED.value
                     step.updated_at = now
+            nodes = list(
+                (
+                    await db.scalars(
+                        select(FlowDeckBuildNode).where(
+                            FlowDeckBuildNode.run_id == run_id,
+                            FlowDeckBuildNode.status.in_({"PENDING", "RUNNING"}),
+                        )
+                    )
+                ).all()
+            )
+            for node in nodes:
+                node.status = "CANCELLED"
+                node.updated_at = now
             run.status = RunStatus.CANCELLED.value
             run.updated_at = now
             await self._event(db, run_id, "RUN_CANCELLED", {}, now)
