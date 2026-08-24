@@ -53,6 +53,7 @@
 	import SetupWizard from '$lib/components/SetupWizard.svelte';
 
 	let { children } = $props();
+const isVisualRegressionRoute = import.meta.env.DEV && $page.url.pathname === '/__visual-regression';
 	let showSettings = $state(false);
 	let settingsTab = $state('general');
 	let showUpdateToast = $state(false);
@@ -475,6 +476,8 @@
 		token={startupToken}
 		onauth={handleAuth}
 	/>
+{:else if isVisualRegressionRoute}
+{@render children()}
 {:else if $stateLoaded && showSetup}
 	<SetupWizard
 		oncomplete={() => {
