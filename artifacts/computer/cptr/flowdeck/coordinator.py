@@ -13,6 +13,11 @@ from cptr.flowdeck.authenticated_gateway import (
     dispatch_authenticated_specialist,
     resolve_gateway_workspace,
 )
+from cptr.flowdeck.build import (
+    BuildRequest,
+    build_contract_is_satisfied,
+    parse_build_request,
+)
 from cptr.flowdeck.budgets import RunBudget
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import Capability, DelegationRequest, FlowDeckMode
@@ -43,6 +48,7 @@ class CoordinatorRequest:
     connection: dict[str, Any]
     parent_chat_id: str
     parent_message_id: str | None = None
+    build_request: BuildRequest | None = None
 
 
 @dataclass(frozen=True)
@@ -93,6 +99,22 @@ def classify_coordinator_request(
 ) -> tuple[PlannedDelegation, ...]:
     """Produce a deterministic plan; no model or workspace inspection occurs."""
     lowered = (task or "").casefold()
+    parsed_build = parse_build_request(task)
+    if parsed_build:
+        # Phase 1 only uses existing read-only specialists. Mutation remains
+        # separately qualified and cannot be implied by the /build command.
+        return (
+            PlannedDelegation(
+                "mapper",
+                parsed_build.objective,
+                get_agent("mapper").capabilities,
+            ),
+            PlannedDelegation(
+                "architect",
+                parsed_build.objective,
+                get_agent("architect").capabilities,
+            ),
+        )
     selected: list[PlannedDelegation] = []
     # A natural-language request often contains incidental words such as
     # "review", "error", or "browser" while naming one clear objective.
@@ -193,6 +215,7 @@ async def run_heidi_coordinator(
         requested_workspace=request.workspace,
     )
     plan = classify_coordinator_request(request.task, coding_role=config.coding_role)
+    build_request = request.build_request or parse_build_request(request.task)
     run, created = await store.create_run(
         request_key=request.request_key,
         owner=user_id,
@@ -203,6 +226,21 @@ async def run_heidi_coordinator(
         return CoordinatorResult("succeeded", run.id, (), ())
     if run.status == RunStatus.CANCELLED.value:
         return CoordinatorResult("cancelled", run.id, (), ())
+    if build_request and created:
+        await store.record_event(
+            run.id,
+            "BUILD_BRIEF_CREATED",
+            {
+                "build_mode": True,
+                "brief": build_request.brief.as_dict(),
+                "architecture": build_request.architecture.as_dict(),
+            },
+        )
+        await store.record_event(
+            run.id,
+            "BUILD_COMPLETION_CONTRACT_CREATED",
+            {"completion": build_request.completion.as_dict()},
+        )
     if not plan:
         if run.status == RunStatus.PENDING.value:
             await store.start_run(run.id)
@@ -419,6 +457,17 @@ async def run_heidi_coordinator(
     elif len(children) != len(plan) or any(
         item["status"] != "succeeded" for item in children
     ):
+        status = RunStatus.MANUAL_REVIEW_REQUIRED
+    elif build_request and not build_contract_is_satisfied(build_request.completion, None):
+        await store.record_event(
+            run.id,
+            "BUILD_VERIFICATION_REQUIRED",
+            {
+                "required_checks": list(build_request.completion.required_checks),
+                "verified_checks": [],
+                "reason": "Build Agent and application verification are not yet qualified",
+            },
+        )
         status = RunStatus.MANUAL_REVIEW_REQUIRED
     else:
         status = RunStatus.SUCCEEDED

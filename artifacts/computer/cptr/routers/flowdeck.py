@@ -15,6 +15,7 @@ from cptr.flowdeck.authenticated_gateway import (
     AuthenticatedGatewayError,
     resolve_gateway_workspace,
 )
+from cptr.flowdeck.build import BuildContractError, build_initial_message, parse_build_request
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.coordinator import (
     CoordinatorPolicyError,
@@ -142,6 +143,10 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
     ):
         raise HTTPException(404, "controlled orchestration is unavailable")
     request_key = _request_key(request)
+    try:
+        build_request = parse_build_request(body.objective)
+    except BuildContractError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     store = DurableFlowDeck(get_session_factory())
     try:
@@ -195,12 +200,16 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
         assistant_message = await ChatMessage.create(
             chat_id=chat.id,
             role="assistant",
-            content="",
+            content=build_initial_message(build_request) if build_request else "",
             parent_id=user_message.id,
             model=full_model_id,
             done=False,
             output=[],
-            meta={"agent": "heidi", "flowdeck": True},
+            meta={
+                "agent": "heidi",
+                "flowdeck": True,
+                **({"build_mode": True} if build_request else {}),
+            },
             created_at=now_ms(),
         )
         await Chat.update_current_message(chat.id, assistant_message.id, now_ms())
@@ -243,6 +252,7 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                         connection=target.connection,
                         parent_chat_id=chat.id,
                         parent_message_id=assistant_message.id,
+                        build_request=build_request,
                     ),
                     authenticated_request=request,
                     store=store,

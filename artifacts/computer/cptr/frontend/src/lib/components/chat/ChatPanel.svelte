@@ -833,6 +833,9 @@
 	function flowDeckActivityText(event: any): string | null {
 		const kind = String(event?.kind || event?.type || '').toUpperCase();
 		const payload = event?.payload || {};
+		if (kind === 'BUILD_BRIEF_CREATED') return 'Build · product brief created';
+		if (kind === 'BUILD_COMPLETION_CONTRACT_CREATED') return 'Build · completion contract ready for review';
+		if (kind === 'BUILD_VERIFICATION_REQUIRED') return 'Build · verification required before completion';
 		if (kind === 'SPECIALIST_DISPATCHED' || kind.includes('DELEGAT')) {
 			return `Specialist handoff · ${String(payload.specialist_id || payload.child_agent_id || 'qualified specialist')}`;
 		}
