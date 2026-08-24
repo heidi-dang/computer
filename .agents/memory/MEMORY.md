@@ -7,3 +7,4 @@
 - [Native transcript bridge](native-transcript-bridge.md) — FlowDeck must reuse normal CPTR event semantics; durable events are status/recovery, not a parallel transcript renderer.
 - [CodeAct runtime constraints](codeact-runtime.md) — keep worker protocol separate from captured output and use a bounded startup-safe memory ceiling.
 - [Visual regression surface checks](visual-regression-surfaces.md) — use layout/affordance assertions for live xterm and pixel snapshots for deterministic UI surfaces.
+- [Build Agent evidence](build-agent-evidence.md) — Build completion must trust durable child verifier outcomes, never compatibility return strings or specialist claims.

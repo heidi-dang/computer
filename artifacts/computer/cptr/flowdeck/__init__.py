@@ -22,6 +22,12 @@ from cptr.flowdeck.coding import (
     validate_coding_request,
 )
 from cptr.flowdeck.config import FlowDeckConfig
+from cptr.flowdeck.build_agent import (
+    BuildAgentPolicyError,
+    BuildAgentRequest,
+    run_build_agent,
+    validate_build_agent_request,
+)
 from cptr.flowdeck.contracts import (
     AgentDefinition,
     AgentRole,
@@ -94,6 +100,8 @@ __all__ = [
     "ApprovalStatus",
     "AttemptStatus",
     "BudgetExceeded",
+    "BuildAgentPolicyError",
+    "BuildAgentRequest",
     "AuthenticatedGatewayError",
     "Capability",
     "CodingPolicyError",
@@ -139,12 +147,14 @@ __all__ = [
     "mapper_tool_guard",
     "observe_request",
     "run_fdx",
+    "run_build_agent",
     "run_heidi_coordinator",
     "run_optional_fdx",
     "run_tester",
     "resolve_gateway_workspace",
     "SpecialistDispatchRequest",
     "validate_browser_request",
+    "validate_build_agent_request",
     "validate_coding_request",
     "validate_mapper_request",
     "validate_registry",

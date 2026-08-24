@@ -25,6 +25,12 @@ AGENT_REGISTRY: tuple[AgentDefinition, ...] = (
         max_delegation_depth=1,
     ),
     AgentDefinition(
+        "build-agent",
+        AgentRole.SPECIALIST,
+        "Executes one bounded implementation and verification loop under Heidi.",
+        _CODING | frozenset({Capability.EXECUTE_COMMAND}),
+    ),
+    AgentDefinition(
         "planner", AgentRole.SPECIALIST,
         "Produces read-only implementation plans.", _READ_ONLY,
     ),

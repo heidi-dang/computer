@@ -18,6 +18,7 @@ from cptr.flowdeck.build import (
     build_contract_is_satisfied,
     parse_build_request,
 )
+from cptr.flowdeck.build_agent import BuildAgentRequest, run_build_agent
 from cptr.flowdeck.budgets import RunBudget
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import Capability, DelegationRequest, FlowDeckMode
@@ -452,25 +453,73 @@ async def run_heidi_coordinator(
             await store.orphan_run(run.id)
             raise
     await consume_steering()
+    build_result: dict[str, Any] | None = None
+    if build_request and all(item["status"] == "succeeded" for item in children):
+        if not config.mutating_agents or config.coding_role not in {"backend-coder", "frontend-coder"}:
+            await store.record_event(
+                run.id,
+                "BUILD_AGENT_UNAVAILABLE",
+                {
+                    "reason": "mutation is not explicitly qualified",
+                    "execution_mode": "native_cptr",
+                },
+            )
+        else:
+            try:
+                build_result = await run_build_agent(
+                    BuildAgentRequest(
+                        request_key=request.request_key,
+                        task=build_request.objective,
+                        workspace=root,
+                        user_id=user_id,
+                        model=request.model,
+                        connection=request.connection,
+                        parent_chat_id=request.parent_chat_id,
+                        parent_message_id=request.parent_message_id,
+                        parent_flowdeck_run_id=run.id,
+                    ),
+                    build_request=build_request,
+                    authenticated_request=authenticated_request,
+                    store=store,
+                    planning_outputs=tuple(outputs),
+                    steering_checkpoint=consume_steering,
+                )
+            except BaseException:
+                terminal = await cancelled_result()
+                if terminal:
+                    return terminal
+                await store.orphan_run(run.id)
+                raise
+            children.append({"specialist": "build-agent", "status": build_result["status"]})
     if any(item["status"] == "failed" for item in children):
         status = RunStatus.FAILED
-    elif len(children) != len(plan) or any(
-        item["status"] != "succeeded" for item in children
-    ):
-        status = RunStatus.MANUAL_REVIEW_REQUIRED
-    elif build_request and not build_contract_is_satisfied(build_request.completion, None):
-        await store.record_event(
-            run.id,
-            "BUILD_VERIFICATION_REQUIRED",
-            {
-                "required_checks": list(build_request.completion.required_checks),
-                "verified_checks": [],
-                "reason": "Build Agent and application verification are not yet qualified",
-            },
-        )
-        status = RunStatus.MANUAL_REVIEW_REQUIRED
     else:
-        status = RunStatus.SUCCEEDED
+        expected_children = len(plan) + (1 if build_result is not None else 0)
+        children_incomplete = len(children) != expected_children or any(
+            item["status"] != "succeeded" for item in children
+        )
+        if children_incomplete:
+            status = RunStatus.MANUAL_REVIEW_REQUIRED
+        elif build_request and (
+            build_result is None
+            or not build_contract_is_satisfied(
+                build_request.completion, build_result.get("evidence")
+            )
+        ):
+            await store.record_event(
+                run.id,
+                "BUILD_VERIFICATION_REQUIRED",
+                {
+                    "required_checks": list(build_request.completion.required_checks),
+                    "verified_checks": (
+                        list((build_result or {}).get("evidence", {}).keys())
+                    ),
+                    "reason": "Build Agent and application verification are not yet qualified",
+                },
+            )
+            status = RunStatus.MANUAL_REVIEW_REQUIRED
+        else:
+            status = RunStatus.SUCCEEDED
     try:
         await store.finish_step(
             parent_step.id,
