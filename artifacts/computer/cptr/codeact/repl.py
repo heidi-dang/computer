@@ -285,6 +285,9 @@ class CodeActRepl:
             process.stdin.flush()
 
     async def __aenter__(self) -> "CodeActRepl":
+        if not self.config.enabled:
+            self._closed = True
+            raise CodeActSandboxError("CodeAct is disabled by server policy")
         self._start()
         return self
 

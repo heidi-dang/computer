@@ -12,6 +12,7 @@ from cptr.flowdeck.durable import DurableFlowDeck, OperationStatus, RunStatus
 from cptr.flowdeck.execution import (
     MAPPER_CAPABILITIES,
     MAPPER_TOOL_NAMES,
+    ExecutionMode,
     MapperPolicyError,
     MapperRequest,
     _native_run_read_only_specialist,
@@ -71,6 +72,21 @@ class FlowDeckExecutionTests(unittest.IsolatedAsyncioTestCase):
             self.request,
             FlowDeckConfig(enabled=True, mode=FlowDeckMode.CONTROLLED, governance="strict"),
         )
+
+    def test_unknown_execution_mode_fails_closed(self):
+        request = self.request.__class__(
+            **{**self.request.__dict__, "execution_mode": "untrusted-mode"}
+        )
+        with self.assertRaises(MapperPolicyError):
+            validate_mapper_request(
+                request,
+                FlowDeckConfig(
+                    enabled=True,
+                    mode=FlowDeckMode.READ_ONLY,
+                    governance="strict",
+                ),
+            )
+        self.assertEqual(ExecutionMode.TOOL_CALLING.value, "tool_calling")
 
     def test_mapper_scope_guard_rejects_mutation_and_escape(self):
         context = {"workspace": self.workspace.name}

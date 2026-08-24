@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,13 @@ _READ_ONLY_OWNER = "flowdeck-read-only"
 
 class MapperPolicyError(DelegationPolicyError):
     """Raised when a mapper request fails runtime policy checks."""
+
+
+class ExecutionMode(StrEnum):
+    """Server-owned specialist execution strategies."""
+
+    TOOL_CALLING = "tool_calling"
+    CODEACT = "codeact"
 
 
 @dataclass(frozen=True)
@@ -92,6 +100,10 @@ def validate_mapper_request(request: MapperRequest, config: FlowDeckConfig) -> N
         )
     if config.governance != "strict":
         raise MapperPolicyError("mapper execution requires strict governance")
+    try:
+        ExecutionMode(request.execution_mode)
+    except ValueError as exc:
+        raise MapperPolicyError("unknown specialist execution mode") from exc
     _workspace_root(request.workspace)
     validate_delegation(
         DelegationRequest(
@@ -192,7 +204,7 @@ async def _native_run_read_only_specialist(
 
     heartbeat_task = asyncio.create_task(heartbeat())
     try:
-        if request.execution_mode == "codeact":
+        if request.execution_mode == ExecutionMode.CODEACT.value:
             codeact_config = CodeActConfig.from_env()
             if not codeact_config.allows_role(specialist_id):
                 raise MapperPolicyError("CodeAct read-only execution is not enabled for this role")

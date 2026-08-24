@@ -173,6 +173,26 @@ class CodeActReplTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(repl.closed)
         self.assertIsNone(repl._process)
 
+    async def test_disabled_context_does_not_start_worker(self):
+        started = False
+
+        def process_factory(*args, **kwargs):
+            nonlocal started
+            started = True
+            raise AssertionError("disabled CodeAct must not spawn a worker")
+
+        repl = CodeActRepl(
+            identity=self.identity(),
+            sdk=ReadOnlyCapabilitySDK.from_handlers({}),
+            config=CodeActConfig(),
+            process_factory=process_factory,
+        )
+        with self.assertRaises(CodeActSandboxError):
+            async with repl:
+                pass
+        self.assertFalse(started)
+        self.assertTrue(repl.closed)
+
     async def test_sessions_do_not_share_state(self):
         sdk = ReadOnlyCapabilitySDK.from_handlers({})
         first = CodeActRepl(identity=self.identity("one"), sdk=sdk, config=enabled_config())
