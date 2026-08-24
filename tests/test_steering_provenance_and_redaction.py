@@ -55,6 +55,11 @@ class ProvenanceStore(InMemorySupervisorStore):
         return self.control_message
 
 
+class MissingSteeringStore(InMemorySupervisorStore):
+    async def get_message(self, message_id):
+        return None
+
+
 class AcceptingDirector:
     def __init__(self):
         self.evaluations = 0
@@ -74,6 +79,89 @@ class AcceptingDirector:
 
 
 class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_steering_required_criterion_cannot_verify_without_control(self):
+        store = MissingSteeringStore()
+        agent = ProvenanceAgent(None)
+        director = AcceptingDirector()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=director)
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the requested change",
+            acceptance_criteria=[
+                "The intended worker must consume the steering control and produce EFFECT_OBSERVED"
+            ],
+            model_id="model-1",
+        )
+
+        await supervisor.run_once(monitor.monitor_id)
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertNotEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
+        self.assertNotEqual(state.status, "COMPLETE")
+        self.assertEqual(director.evaluations, 0)
+
+    async def test_generic_verification_and_director_cannot_override_missing_steering(self):
+        store = MissingSteeringStore()
+        agent = ProvenanceAgent(None)
+        director = AcceptingDirector()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=director)
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the requested change",
+            acceptance_criteria=[
+                "same worker consumes the autonomous steering control and makes the EFFECT_OBSERVED change"
+            ],
+            model_id="model-1",
+        )
+
+        await supervisor.run_once(monitor.monitor_id)
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertNotEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
+        self.assertNotEqual(state.status, "COMPLETE")
+        self.assertEqual(director.evaluations, 0)
+
+    async def test_consumed_steering_without_workspace_effect_evidence_cannot_verify(self):
+        message = SimpleNamespace(
+            id="control-1",
+            status="CONSUMED",
+            task_id="task_1",
+            consumed_task_id="task_1",
+            consumed_message_id="message-2",
+            consumed_at=20,
+        )
+        store = ProvenanceStore()
+        store.control_message = message
+        director = AcceptingDirector()
+        supervisor = AutonomousSupervisor(
+            store=store, agent=ProvenanceAgent(message), director=director
+        )
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the requested change",
+            acceptance_criteria=[
+                "same worker consumes the steering control and produces EFFECT_OBSERVED"
+            ],
+            model_id="model-1",
+        )
+        await supervisor.run_once(monitor.monitor_id)
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id="control-1",
+            intended_task_id="task_1",
+            intended_generation_id="message-1",
+        )
+
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertNotEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
+        self.assertEqual(director.evaluations, 0)
+
     async def _supervisor(self, message):
         store = ProvenanceStore()
         store.control_message = message

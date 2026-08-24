@@ -48,6 +48,14 @@ class AgentService:
 
         task_id = f"task_{uuid.uuid4().hex[:20]}"
         now = int(time.time() * 1000)
+        assignment_meta: dict[str, Any] = {}
+        if "inspection_scope=assignment" in prompt:
+            from cptr.utils.chat_task import _assignment_paths_from_prompt
+
+            assignment_meta = {
+                "inspection_scope": "assignment",
+                "assignment_paths": _assignment_paths_from_prompt(prompt),
+            }
         chat = await Chat.create(
             user_id=user_id,
             title=prompt[:80] or "Control task",
@@ -56,6 +64,7 @@ class AgentService:
                 "control_task_id": task_id,
                 "internal": True,
                 "control_plane": True,
+                **assignment_meta,
             },
             created_at=now,
         )
@@ -312,7 +321,17 @@ class AgentService:
             await self.store.update_message(control_message.id, chat_message_id=message_id)
         from cptr.utils.chat_task import process_pending_chat_inputs
 
-        from cptr.utils.chat_task import get_active_chat_ids, is_running
+        from cptr.utils.chat_task import get_active_chat_ids, interrupt_for_control, is_running
+
+        if is_running(task.message_id):
+            # A control message must not remain QUEUED behind an unbounded
+            # native/tool call. Interrupt only the owned turn; the durable
+            # pending-input path then starts a continuation and preserves the
+            # same ControlTask identity for provenance and exactly-once checks.
+            await interrupt_for_control(
+                task.message_id,
+                timeout=TASK_CANCELLATION_TIMEOUT_SECONDS,
+            )
 
         if not is_running(task.message_id) and task.chat_id not in get_active_chat_ids():
             from cptr.utils.identity import internal_request_for_user

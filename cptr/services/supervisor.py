@@ -690,6 +690,42 @@ class AutonomousSupervisor:
                 )
                 return
 
+            # Refresh the records after effect observation.  The observation
+            # writes effect status/snapshots onto the durable scope record, so
+            # the copies loaded before that call are intentionally stale.
+            steering_records = await self._steering_provenance_records(scope)
+
+        required_evidence_failure = self._required_steering_evidence_failure(
+            scope, steering_records, task_id
+        )
+        if required_evidence_failure is not None:
+            # Generic terminal-task and Git checks are necessary infrastructure
+            # evidence, not proof of a semantic steering criterion.  Enforce
+            # this gate before invoking the verifier/director so neither a
+            # successful worker summary nor a permissive director decision can
+            # turn missing control provenance into VERIFIED.
+            await self._append_evidence(
+                monitor,
+                scope,
+                "criterion_evidence",
+                {
+                    "status": "UNSATISFIED",
+                    "required": "same_worker_steering",
+                    "message": required_evidence_failure,
+                    "steering_provenance": steering_records,
+                },
+            )
+            await self._repair_or_block(
+                monitor,
+                scope,
+                {
+                    "category": "mandatory_criterion_evidence_missing",
+                    "scope_id": scope.scope_id,
+                    "message": required_evidence_failure,
+                },
+            )
+            return
+
         scope.transition(ScopeStatus.AGENT_COMPLETE)
         scope.transition(ScopeStatus.VERIFYING)
         evidence = {
@@ -976,6 +1012,7 @@ class AutonomousSupervisor:
         scoped_assignment = (
             f"Work only in the CPTR workspace identified by {monitor.workspace_id}. "
             "workspace_scope=current. "
+            "inspection_scope=assignment. "
             "Do not search, read, modify, or verify other workspaces or historical fixtures "
             "unless the original goal explicitly requires cross-workspace work. "
             "Only inspect files named by this assignment or created during this monitor.\n\n"
@@ -1003,6 +1040,43 @@ class AutonomousSupervisor:
     async def _run_final_gate(self, monitor: MonitorState) -> MonitorState:
         if not await self._monitor_is_running(monitor.monitor_id):
             return await self._required_monitor(monitor.monitor_id)
+
+        # This is a second, final invariant check.  It protects the terminal
+        # goal transition even if a future code path or persisted state marks a
+        # scope VERIFIED without passing the criterion gate above.  Director
+        # output is never authoritative for mandatory semantic evidence.
+        for scope in monitor.scopes:
+            records = await self._steering_provenance_records(scope)
+            failure = self._required_steering_evidence_failure(
+                scope,
+                records,
+                scope.worker_task_ids[-1] if scope.worker_task_ids else None,
+            )
+            if failure is None:
+                continue
+            await self._append_evidence(
+                monitor,
+                scope,
+                "criterion_evidence",
+                {
+                    "status": "UNSATISFIED",
+                    "required": "same_worker_steering",
+                    "message": failure,
+                    "steering_provenance": records,
+                },
+            )
+            monitor.status = MonitorStatus.RUNNING
+            scope.transition(ScopeStatus.REPAIR_REQUIRED)
+            await self._repair_or_block(
+                monitor,
+                scope,
+                {
+                    "category": "mandatory_criterion_evidence_missing",
+                    "scope_id": scope.scope_id,
+                    "message": failure,
+                },
+            )
+            return await self._save_and_return(monitor)
         try:
             decision = await self.director.final_gate(
                 monitor=monitor,
@@ -1045,6 +1119,76 @@ class AutonomousSupervisor:
             decision=decision,
         )
         return await self._save_and_return(monitor)
+
+    @staticmethod
+    def _requires_same_worker_steering(scope: ScopeRecord) -> bool:
+        """Return whether the immutable criterion explicitly requires steering proof.
+
+        This deliberately recognizes semantic requirement language rather than
+        relying on worker prose or on the director.  Ordinary repository
+        investigation criteria remain unaffected; a criterion must mention
+        steering/control and a consumption/effect/same-worker requirement.
+        """
+        text = " ".join(scope.acceptance_criteria).lower()
+        has_control = bool(
+            re.search(r"\b(?:steering|steer|control\s+message|autonomous\s+control)\b", text)
+        )
+        has_semantic_requirement = bool(
+            re.search(
+                r"\b(?:same\s+worker|intended\s+worker|consum\w*|effect[_\s-]*observed|post[-\s]?control|after\s+consum)",
+                text,
+            )
+        )
+        return has_control and has_semantic_requirement
+
+    @classmethod
+    def _required_steering_evidence_failure(
+        cls,
+        scope: ScopeRecord,
+        records: list[dict[str, Any]],
+        task_id: str | None,
+    ) -> str | None:
+        """Validate deterministic evidence for a steering-specific criterion."""
+        if not cls._requires_same_worker_steering(scope):
+            return None
+        if not records:
+            return "required steering control was never recorded"
+        for record in records:
+            control_id = record.get("control_message_id")
+            if not control_id:
+                return "required steering control_message_id is missing"
+            if record.get("status") != "CONSUMED":
+                return f"steering control {control_id} did not reach CONSUMED"
+            intended_task_id = record.get("intended_task_id")
+            consumed_task_id = record.get("consumed_task_id")
+            if not intended_task_id or not consumed_task_id:
+                return f"steering control {control_id} is missing task provenance"
+            if intended_task_id != consumed_task_id:
+                return f"steering control {control_id} was consumed by the wrong worker"
+            if task_id is not None and consumed_task_id != task_id:
+                return f"steering control {control_id} was not consumed by the completed worker"
+            if not record.get("consumed_message_id") or record.get("consumed_at") is None:
+                return f"steering control {control_id} is missing consumption evidence"
+            baseline = record.get("baseline_workspace_snapshot")
+            baseline_fingerprint = record.get("baseline_workspace_fingerprint") or (
+                baseline.get("fingerprint") if isinstance(baseline, dict) else None
+            )
+            post_fingerprint = record.get("post_consumption_workspace_fingerprint")
+            if not baseline_fingerprint or not post_fingerprint:
+                return f"steering control {control_id} is missing workspace fingerprints"
+            if record.get("effect_status") != "EFFECT_OBSERVED":
+                return f"steering control {control_id} has no EFFECT_OBSERVED evidence"
+            observed_at = record.get("effect_observed_at")
+            consumed_at = record.get("consumed_at")
+            if not isinstance(observed_at, (int, float)) or not isinstance(
+                consumed_at, (int, float)
+            ):
+                return f"steering control {control_id} is missing effect timing evidence"
+            if observed_at <= consumed_at:
+                return f"steering control {control_id} has no post-consumption effect"
+            if not record.get("effect_changed_paths"):
+                return f"steering control {control_id} has no qualifying workspace change"
+        return None
 
     @staticmethod
     def _requires_approval(assignment: str) -> bool:

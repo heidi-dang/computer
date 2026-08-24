@@ -363,6 +363,7 @@ _tasks: dict[str, asyncio.Task] = {}  # message_id → asyncio.Task
 _task_state: dict[str, dict] = {}  # message_id → {content, output}
 _task_chat: dict[str, str] = {}  # message_id → chat_id
 _cancel_requested: set[str] = set()
+_control_interrupt_requested: set[str] = set()
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
 
 
@@ -432,6 +433,7 @@ async def cancel_task(
     message_id: str, *, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS
 ) -> bool:
     """Cancel one agent turn and wait for owned execution to quiesce."""
+    _control_interrupt_requested.discard(message_id)
     _cancel_requested.add(message_id)
     from cptr.utils.tools import cancel_owned_command_sessions
 
@@ -451,8 +453,42 @@ async def cancel_task(
     return commands_quiescent and task.done()
 
 
+async def interrupt_for_control(
+    message_id: str, *, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS
+) -> bool:
+    """Stop an active turn so a durable control message can continue the same task.
+
+    This is deliberately distinct from ``cancel_task``: the control task remains
+    RUNNING, its queued message is preserved, and the normal pending-input path
+    creates the next assistant generation. Only execution owned by this message
+    is stopped; no unrelated chat/task is touched.
+    """
+    task = _tasks.get(message_id)
+    if task is None or task.done():
+        return False
+    _control_interrupt_requested.add(message_id)
+    from cptr.utils.tools import cancel_owned_command_sessions
+
+    commands_quiescent = await cancel_owned_command_sessions(message_id, timeout=timeout)
+    task = _tasks.get(message_id)
+    if task is None or task.done():
+        return commands_quiescent
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))
+    except asyncio.TimeoutError:
+        return False
+    except asyncio.CancelledError:
+        pass
+    return commands_quiescent and task.done()
+
+
 def is_cancel_requested(message_id: str) -> bool:
     return message_id in _cancel_requested
+
+
+def is_control_interrupt_requested(message_id: str) -> bool:
+    return message_id in _control_interrupt_requested
 
 
 def is_running(message_id: str) -> bool:
@@ -479,6 +515,15 @@ def _plain_message_text(content) -> str:
             if isinstance(block, dict) and block.get("type") == "text"
         )
     return str(content or "")
+
+
+def _assignment_paths_from_prompt(prompt: str) -> list[str]:
+    """Extract explicit relative file paths for narrow assignment tools."""
+    candidates = re.findall(
+        r"(?<![\w/.-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+",
+        prompt,
+    )
+    return sorted({item for item in candidates if not item.startswith("http")})
 
 
 def _memory_recall_inputs(
@@ -1810,17 +1855,27 @@ async def run_chat_task(
             await emit(output=item)
             _sync_state()
 
-        async for event in runner(
-            profile=agent_target.config,
-            model=agent_target.model,
-            workspace=agent_workspace,
-            messages=messages,
-            system_prompt=system,
-            chat_params=chat_params,
-            resume_state=resume_state,
-            attachments=agent_attachments,
-            identity=identity,
-        ):
+        runner_kwargs = {
+            "profile": agent_target.config,
+            "model": agent_target.model,
+            "workspace": agent_workspace,
+            "messages": messages,
+            "system_prompt": system,
+            "chat_params": chat_params,
+            "resume_state": resume_state,
+            "attachments": agent_attachments,
+            "identity": identity,
+        }
+        if agent_target.agent == "opencode":
+            # Persist the OpenCode session as soon as it exists.  A control
+            # interrupt can then abort a long native tool and resume the same
+            # provider session instead of silently creating a replacement.
+            async def persist_opencode_session(resume: dict[str, Any]) -> None:
+                await save_session(agent_target, resume)
+
+            runner_kwargs["session_state_callback"] = persist_opencode_session
+
+        async for event in runner(**runner_kwargs):
             if isinstance(event, AgentTextDelta):
                 await _finish_reasoning_item()
                 content += event.text
@@ -2281,6 +2336,17 @@ async def run_chat_task(
             "message_id": message_id,
             "connection": connection,
             "builtin_tools": builtin_tools,
+            "inspection_scope": (
+                (chat_obj.meta or {}).get("inspection_scope")
+                if isinstance((chat_obj.meta or {}).get("inspection_scope"), str)
+                else ("assignment" if "inspection_scope=assignment" in content else "workspace")
+            ),
+            "assignment_paths": (
+                (chat_obj.meta or {}).get("assignment_paths")
+                if isinstance((chat_obj.meta or {}).get("assignment_paths"), list)
+                else _assignment_paths_from_prompt(content)
+            ),
+            "created_paths": set(),
         }
 
         resumed_calls = await run_queued_tool_calls(tool_ctx)
@@ -2929,9 +2995,24 @@ async def run_chat_task(
     except asyncio.CancelledError:
         _flush_text()
         _scrub_incomplete_items(output_items)
-        await _save_message("cancelled", content=content, output=output_items, done=True)
+        if is_control_interrupt_requested(message_id):
+            # Keep the original assistant turn non-terminal.  The durable
+            # queued control is consumed by process_pending_chat_inputs in the
+            # finally block, which creates the continuation for the same
+            # ControlTask.  Marking this row done here would let get_task race
+            # the repoint and incorrectly finalize the task as COMPLETE.
+            await _save_message(
+                "interrupted for control",
+                content=content,
+                output=output_items,
+                done=False,
+                meta={"interrupted_for_control": True},
+            )
+        else:
+            await _save_message("cancelled", content=content, output=output_items, done=True)
         _task_state.pop(message_id, None)
-        await _emit_done()
+        if not is_control_interrupt_requested(message_id):
+            await _emit_done()
     except Exception as e:
         logger.exception(f"Chat task error for message {message_id}")
         _flush_text()
@@ -3091,3 +3172,4 @@ async def run_chat_task(
             logger.exception(f"Failed to process pending inputs for chat {chat_id}")
         finally:
             _cancel_requested.discard(message_id)
+            _control_interrupt_requested.discard(message_id)

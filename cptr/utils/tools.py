@@ -20,6 +20,7 @@ import stat
 import time
 import uuid
 from pathlib import Path, PureWindowsPath
+from pathlib import PurePosixPath
 from typing import Any, Literal, Optional, get_args, get_origin, get_type_hints
 
 from fastapi import Request
@@ -1633,6 +1634,66 @@ def _resolve_path(path: str, workspace: str) -> Path:
     if not full.is_relative_to(ws):
         raise ValueError(f"Path traversal rejected: {path}")
     return full
+
+
+_ASSIGNMENT_SCOPED_TOOLS = {
+    "read_file",
+    "list_directory",
+    "search_files",
+    "create_file",
+    "write_file",
+    "edit_file",
+    "multi_edit_file",
+    "display_file",
+    "run_command",
+}
+
+
+def _relative_assignment_path(path: str) -> str:
+    """Normalize a user/tool path for assignment-scope comparison."""
+    value = str(path or ".").strip().replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    return str(PurePosixPath(value or "."))
+
+
+def _assignment_scope_violation(name: str, args: dict, context: dict) -> str | None:
+    """Return a bounded denial when a narrow assignment accesses another path."""
+    if context.get("inspection_scope") != "assignment" or name not in _ASSIGNMENT_SCOPED_TOOLS:
+        return None
+    allowed = {
+        _relative_assignment_path(item)
+        for item in (context.get("assignment_paths") or [])
+        if str(item).strip()
+    }
+    created = {
+        _relative_assignment_path(item)
+        for item in (context.get("created_paths") or [])
+        if str(item).strip()
+    }
+    allowed |= created
+    if not allowed:
+        return "Error: assignment scope has no allowed paths"
+
+    candidate = args.get("path") or args.get("cwd") or "."
+    candidate = _relative_assignment_path(str(candidate))
+    if candidate == ".":
+        # A root listing/search is not narrow: it can reveal historical files.
+        if name in {"list_directory", "search_files", "run_command"}:
+            return "Error: inspection scope violation: workspace-wide access is not allowed"
+        return None
+    if candidate in allowed:
+        return None
+    if name in {"list_directory", "search_files"}:
+        # Parent traversal is useful for resolving one named file, but a
+        # directory listing/search would expose every sibling historical
+        # fixture. Require the directory itself to be explicitly assigned.
+        return f"Error: inspection scope violation: directory is not named by this assignment: {candidate}"
+    # Allow only the parent directories needed to reach an explicitly named
+    # file. The operation itself still filters/validates the concrete file.
+    if any(item.startswith(f"{candidate}/") for item in allowed):
+        return None
+    return f"Error: inspection scope violation: path is not named by this assignment: {candidate}"
 
 
 async def create_automation(
@@ -3375,16 +3436,29 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
             return f"Error: tool requires an open workspace: {name}"
         if not is_builtin_tool_enabled(name, __context__.get("builtin_tools")):
             return f"Error: tool disabled: {name}"
+        scope_error = _assignment_scope_violation(name, args, __context__)
+        if scope_error:
+            return scope_error
         fn = info["fn"]
         args = dict(args)
         args.pop("workspace", None)
         try:
             sig = inspect.signature(fn)
             if "__context__" in sig.parameters:
-                return await fn(**args, __context__=__context__)
+                result = await fn(**args, __context__=__context__)
             else:
                 # Legacy tools: inject workspace directly
-                return await fn(**args, workspace=__context__["workspace"])
+                result = await fn(**args, workspace=__context__["workspace"])
+            if (
+                __context__.get("inspection_scope") == "assignment"
+                and name in {"create_file", "write_file", "edit_file", "multi_edit_file"}
+                and not str(result).startswith("Error:")
+            ):
+                created_paths = __context__.setdefault("created_paths", set())
+                path = args.get("path")
+                if path:
+                    created_paths.add(_relative_assignment_path(str(path)))
+            return result
         except Exception as e:
             return f"Error executing {name}: {e}"
 
