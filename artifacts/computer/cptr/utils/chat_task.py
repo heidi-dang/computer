@@ -375,6 +375,43 @@ _task_flowdeck_parent: dict[str, str] = {}  # message_id → parent FlowDeck run
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
 
 
+def _format_task_error(exc: BaseException) -> str:
+    """Return a non-empty, provider-preserving diagnostic for a failed task."""
+    message = str(exc).strip()
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+
+    if response is not None:
+        try:
+            body = response.text or ""
+        except Exception:
+            body = ""
+        if body:
+            try:
+                data = json.loads(body)
+            except (TypeError, ValueError):
+                data = None
+            if isinstance(data, dict):
+                error = data.get("error")
+                candidates = [
+                    error.get("message") if isinstance(error, dict) else error,
+                    data.get("message"),
+                    data.get("detail"),
+                ]
+                for candidate in candidates:
+                    if isinstance(candidate, str) and candidate.strip():
+                        message = candidate.strip()
+                        break
+            elif body.strip():
+                message = body.strip()
+
+    if message:
+        return message
+    if status_code:
+        return f"Provider request failed with HTTP {status_code} ({type(exc).__name__})."
+    return f"Provider request failed ({type(exc).__name__})."
+
+
 def get_pending_input_lock(chat_id: str) -> asyncio.Lock:
     return _pending_input_locks.setdefault(chat_id, asyncio.Lock())
 
@@ -2977,20 +3014,8 @@ async def run_chat_task(
     except Exception as e:
         logger.exception(f"Chat task error for message {message_id}")
         _flush_text()
-        error_msg = str(e)
+        error_msg = _format_task_error(e)
         # Try to extract API error body for more detail
-        if hasattr(e, "response"):
-            try:
-                body = e.response.text or ""
-                if body:
-                    import json as _json
-
-                    err_data = _json.loads(body)
-                    api_msg = err_data.get("error", {}).get("message", "")
-                    if api_msg:
-                        error_msg = api_msg
-            except Exception:
-                pass
         # Append error to content so it's visible in the chat
         error_block = f"\n\n> **Error:** {error_msg}"
         content += error_block
