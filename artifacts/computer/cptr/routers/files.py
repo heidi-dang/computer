@@ -7,7 +7,6 @@ DELETE /api/files/{id}    verify ownership → delete storage + DB
 
 from __future__ import annotations
 
-import hashlib
 import os
 
 from fastapi import APIRouter, Request, UploadFile, File as FastAPIFile, HTTPException
@@ -34,7 +33,6 @@ async def upload(request: Request, file: UploadFile = FastAPIFile(...)):
     user_id = user_id.user_id if user_id else None
 
     content_type = file.content_type or "application/octet-stream"
-    file_hash = hashlib.sha256(data).hexdigest()
     original_name = file.filename or "upload"
     _, ext = os.path.splitext(original_name)
 

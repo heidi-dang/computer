@@ -24,7 +24,6 @@ from cptr.flowdeck.durable import (
 from cptr.flowdeck.evidence import validate_terminal_evidence
 
 TEST_CHECKS = frozenset({"tests", "build", "typecheck", "lint"})
-_TESTER_OWNER = "flowdeck-tester"
 _MAX_TIMEOUT_SECONDS = 300
 _MAX_OUTPUT_BYTES = 128 * 1024
 
@@ -133,6 +132,9 @@ async def run_tester(
         from cptr.utils.db import get_session_factory
 
         store = DurableFlowDeck(get_session_factory())
+    # Lease ownership is per logical verifier attempt. A global tester owner
+    # lets concurrent worktree verifiers fence each other or appear reentrant.
+    tester_owner = f"flowdeck-tester:{request.request_key}"
 
     run, created = await store.create_run(
         request_key=request.request_key,
@@ -160,14 +162,14 @@ async def run_tester(
     lease = await store.acquire_workspace_lease(
         workspace=str(root),
         run_id=run.id,
-        owner=_TESTER_OWNER,
+        owner=tester_owner,
         ttl_ms=int(request.timeout_seconds * 1000) + 30_000,
     )
     if lease is None:
         raise TesterPolicyError("workspace already has an active mutator")
     attempt = await store.prepare_attempt(
         operation_id=operation.id,
-        owner=_TESTER_OWNER,
+        owner=tester_owner,
         fencing_epoch=lease.epoch,
     )
     budget = RunBudget(
@@ -188,7 +190,7 @@ async def run_tester(
             await store.heartbeat_run(run.id)
             if not await store.heartbeat_workspace_lease(
                 workspace=str(root),
-                owner=_TESTER_OWNER,
+                owner=tester_owner,
                 epoch=lease.epoch,
                 ttl_ms=30_000,
             ):
@@ -215,7 +217,7 @@ async def run_tester(
             pass
         await store.release_workspace_lease(
             workspace=str(root),
-            owner=_TESTER_OWNER,
+            owner=tester_owner,
             epoch=lease.epoch,
         )
 
@@ -238,7 +240,7 @@ async def run_tester(
     validate_terminal_evidence(evidence, outcome=outcome, attempt_id=attempt.id)
     await store.finish_attempt(
         attempt.id,
-        owner=_TESTER_OWNER,
+        owner=tester_owner,
         fencing_epoch=lease.epoch,
         outcome=outcome,
         evidence=evidence,

@@ -447,6 +447,20 @@ async def run_parallel_build_mutations(
                 "BUILD_ACTUAL_OVERLAP_DETECTED",
                 {"overlaps": overlaps},
             )
+            await store.record_event(
+                request.parent_flowdeck_run_id,
+                "BUILD_INTEGRATION_BLOCKED",
+                {
+                    "reason": "mutation branches overlap; reconciliation is required",
+                    "overlaps": overlaps,
+                },
+            )
+            return {
+                "status": "manual_review_required",
+                "nodes": state.results,
+                "overlaps": overlaps,
+                "execution_overlaps": execution_overlaps,
+            }
 
         if await canonical_changed_paths(request.workspace, base):
             await store.record_event(

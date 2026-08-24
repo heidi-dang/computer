@@ -6,9 +6,11 @@ import asyncio
 from collections import defaultdict
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
+import hashlib
 import json
 import logging
 from typing import List, Literal, Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -309,11 +311,13 @@ def _normalise_model_metadata(model_id: str, raw: dict | None = None) -> dict:
 async def _get_connection_model_metadata(
     conn: dict, app_state, force_refresh: bool = False
 ) -> dict[str, dict]:
-    """Return model metadata from the configured source or provider discovery.
+    """Return model metadata after exact-model provider verification.
 
-    Configured model IDs are deliberately `unverified` until a provider discovery
-    response confirms them; configuration alone is not a health check.
+    Discovery is only a model-listing hint. A model is executable only after the
+    provider confirms that exact model through its supported capability endpoint.
     """
+    from cptr.utils.connection_credentials import connection_api_key
+
     data = conn.get("data") or {}
     stored = data.get("models") or []
     configured_metadata = data.get("model_metadata") or {}
@@ -323,8 +327,29 @@ async def _get_connection_model_metadata(
         cache = {}
         app_state.MODEL_METADATA = cache
     now = datetime.now(timezone.utc).timestamp()
+    api_key = connection_api_key(conn)
+    fingerprint_payload = {
+        "provider": conn.get("provider"),
+        "base_url": conn.get("base_url"),
+        "api_type": conn.get("api_type"),
+        "managed_env": conn.get("managed_env"),
+        "enabled": conn.get("enabled", True),
+        "data": data,
+        # Hash only; never persist or log the credential itself.
+        "credential_hash": hashlib.sha256(api_key.encode()).hexdigest()
+        if api_key
+        else None,
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, sort_keys=True, default=str).encode()
+    ).hexdigest()
     cached = cache.get(conn_id)
-    if cached and not force_refresh and now - cached["checked_at"] < MODEL_DISCOVERY_TTL_SECONDS:
+    if (
+        cached
+        and cached.get("fingerprint") == fingerprint
+        and not force_refresh
+        and now - cached["checked_at"] < MODEL_DISCOVERY_TTL_SECONDS
+    ):
         return cached["models"]
 
     result = {
@@ -347,27 +372,28 @@ async def _get_connection_model_metadata(
                 **_normalise_model_metadata(model_id, record),
                 "provider": conn.get("provider", ""),
                 "connection_id": conn_id,
-                "availability": "available",
-                "availability_reason": "Confirmed by provider discovery",
+                "availability": "unverified",
+                "availability_reason": "Exact-model verification is pending",
             }
-    elif result:
-        from cptr.utils.connection_credentials import connection_api_key
-
-        availability = (
-            "configuration_required"
-            if not connection_api_key(conn)
-            else _availability_for_discovery_failure(failure_reason)
-        )
-        reason = (
-            "Provider credentials are not configured"
-            if availability == "configuration_required"
-            else failure_reason or "Provider discovery did not confirm availability"
-        )
-        for item in result.values():
+    verification = await asyncio.gather(
+        *(_verify_exact_model(conn, model_id) for model_id in result)
+    )
+    for model_id, (availability, reason) in zip(result, verification):
+        item = result[model_id]
+        if not api_key:
+            item["availability"] = "configuration_required"
+            item["availability_reason"] = "Provider credentials are not configured"
+        else:
             item["availability"] = availability
             item["availability_reason"] = reason
+        if failure_reason and availability == "unverified" and reason == "Provider verification is unsupported":
+            item["availability_reason"] = failure_reason
 
-    cache[conn_id] = {"checked_at": now, "models": result}
+    cache[conn_id] = {
+        "checked_at": now,
+        "fingerprint": fingerprint,
+        "models": result,
+    }
     return result
 
 
@@ -797,6 +823,53 @@ async def _fetch_provider_model_records_with_status(
         return None, "Provider discovery failed"
 
     return None, f"Unsupported provider: {provider}"
+
+
+async def _verify_exact_model(conn: dict, model_id: str) -> tuple[str, str]:
+    """Verify one model through an exact-model provider capability endpoint.
+
+    OpenAI-compatible providers expose GET /models/{id}; this is intentionally
+    separate from collection discovery because some managed gateways reject
+    GET /models while still supporting exact model retrieval. Providers without
+    this documented capability remain unverified.
+    """
+    import httpx
+
+    from cptr.utils.connection_credentials import connection_api_key
+
+    if conn.get("provider") != "openai" or conn.get("api_type") not in {
+        None,
+        "chat_completions",
+        "responses",
+    }:
+        return "unverified", "Provider verification is unsupported"
+    api_key = connection_api_key(conn)
+    if not api_key:
+        return "configuration_required", "Provider credentials are not configured"
+    base_url = (conn.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+    url = f"{base_url}/models/{quote(model_id, safe='')}"
+    try:
+        async with httpx.AsyncClient(timeout=MODEL_DISCOVERY_TIMEOUT_SECONDS) as client:
+            response = await client.get(
+                url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+        if response.status_code in {401, 403}:
+            return "unavailable", f"Provider returned HTTP {response.status_code}"
+        if response.status_code != 200:
+            return "unverified", f"Exact-model verification returned HTTP {response.status_code}"
+        payload = response.json()
+        if not isinstance(payload, dict) or payload.get("id") != model_id:
+            return "unverified", "Exact-model verification returned an ambiguous response"
+        return "available", "Confirmed by exact-model provider verification"
+    except (httpx.TimeoutException, asyncio.TimeoutError):
+        return "unverified", "Exact-model verification timed out"
+    except (ValueError, TypeError, KeyError):
+        return "unverified", "Exact-model verification returned an ambiguous response"
+    except Exception:
+        return "unverified", "Exact-model verification failed"
 
 
 def _availability_for_discovery_failure(reason: str | None) -> str:

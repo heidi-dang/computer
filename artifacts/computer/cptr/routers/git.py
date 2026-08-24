@@ -952,7 +952,7 @@ async def git_pr_create(request: Request, body: PrCreateRequest):
     if body.assignees:
         args.extend(["--assignee", ",".join(a.strip() for a in body.assignees if a.strip())])
     if body.labels:
-        args.extend(["--label", ",".join(l.strip() for l in body.labels if l.strip())])
+        args.extend(["--label", ",".join(label.strip() for label in body.labels if label.strip())])
     if body.milestone and body.milestone.strip():
         args.extend(["--milestone", body.milestone.strip()])
     if body.project and body.project.strip():

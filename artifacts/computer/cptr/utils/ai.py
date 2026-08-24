@@ -246,8 +246,6 @@ async def generate_text(
 ) -> str | None:
     """Generate text; model_id None inherits active/default."""
     from cptr.models import Config
-    from cptr.utils.config import _get_jwt_secret
-    from cptr.utils.crypto import decrypt_key
     from cptr.utils.model_targets import first_api_model_target, resolve_api_model_target
 
     app_state = getattr(getattr(request, "app", None), "state", None)

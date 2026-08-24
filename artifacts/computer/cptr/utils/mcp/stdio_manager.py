@@ -8,7 +8,6 @@ tracks active connections and handles lifecycle management.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from cptr.utils.mcp.client import MCPClient
 

@@ -231,11 +231,12 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run_chat.await_args.kwargs["specialist_role"], "backend-coder")
 
     async def test_workspace_ownership_resolver_fails_closed_for_wrong_stale_and_ambiguous_scope(self):
-        resolver = lambda user, path: resolve_authorized_workspace(
-            session_factory=self.store.session_factory,
-            user_id=user,
-            workspace=path,
-        )
+        async def resolver(user, path):
+            return await resolve_authorized_workspace(
+                session_factory=self.store.session_factory,
+                user_id=user,
+                workspace=path,
+            )
         with self.assertRaises(CodingPolicyError):
             await resolver("other-user", str(self.root))
         with self.assertRaises(CodingPolicyError):
