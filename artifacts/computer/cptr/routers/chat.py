@@ -1687,6 +1687,7 @@ async def _resolve_connection(model_id: str, app_state=None) -> tuple[dict, str]
             model_ids = await _get_connection_models(conn, app_state)
         else:
             model_ids = conn.get("data", {}).get("models") or await _fetch_provider_models(conn)
+        model_ids = model_ids or []
         prefix = (conn.get("prefix_id") or "").strip()
         for mid in model_ids:
             prefixed = f"{prefix}/{mid}" if prefix else mid

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import tempfile
 import unittest
 from pathlib import Path
 
 from cptr.codeact.capabilities import sdk_from_tool_context
 from cptr.codeact.contracts import CodeActConfig, CodeActIdentity, CodeActLimits, CodeActMode
+from cptr.codeact.contracts import QUALIFICATION_OBSERVATIONS, QUALIFICATION_SECURITY_CASES
 from cptr.codeact.repl import CodeActRepl, ReadOnlyCapabilitySDK
 from cptr.codeact.runner import run_read_only_attempt
 from cptr.codeact.benchmark import (
@@ -18,6 +21,13 @@ from cptr.codeact.benchmark import (
 )
 from cptr.codeact.telemetry import ExecutionTelemetry
 from cptr.codeact.sandbox import CodeActSandboxError, validate_program
+from cptr.codeact.qualification import (
+    FIXTURE_FILES,
+    FixtureReadOnlyTools,
+    QUALIFICATION_CASES,
+    _final_value,
+    _program_from_response,
+)
 
 
 def enabled_config(**kwargs):
@@ -33,6 +43,57 @@ class CodeActSandboxTests(unittest.TestCase):
         self.assertFalse(config.enabled)
         self.assertFalse(config.allows_role("security-auditor"))
         self.assertTrue(enabled_config().allows_role("security-auditor"))
+
+    def test_model_requires_complete_passing_qualification_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "qualification.json"
+            config = CodeActConfig(
+                mode=CodeActMode.READ_ONLY,
+                allowed_roles=frozenset({"security-auditor"}),
+                qualification_report_path=str(report_path),
+            )
+            self.assertFalse(config.allows_qualified_model("model-a"))
+            report_path.write_text(json.dumps({
+                "provider_backed": True,
+                "model_id": "model-a",
+                "decision": "keep-disabled",
+                "score": 80.0,
+                "observations": [],
+                "security": [],
+            }))
+            self.assertFalse(config.allows_qualified_model("model-a"))
+            report_path.write_text(json.dumps({
+                "provider_backed": True,
+                "model_id": "model-a",
+                "decision": "enable-read-only",
+                "score": 100.0,
+                "observations": [
+                    {"case": case, "mode": mode, "telemetry": {"correctness": True}}
+                    for case, mode in QUALIFICATION_OBSERVATIONS
+                ],
+                "security": [
+                    {"name": name, "category": category, "blocked": True}
+                    for name, category in QUALIFICATION_SECURITY_CASES
+                ],
+            }))
+            self.assertTrue(config.allows_qualified_model("model-a"))
+            self.assertFalse(config.allows_qualified_model("another-model"))
+
+    def test_model_rejects_partial_or_duplicate_qualification_report(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_path = Path(tmpdir) / "qualification.json"
+            config = CodeActConfig(qualification_report_path=str(report_path))
+            report_path.write_text(json.dumps({
+                "provider_backed": True,
+                "model_id": "model-a",
+                "decision": "enable-read-only",
+                "score": 100.0,
+                "observations": [
+                    {"case": "release-label", "mode": "disabled", "telemetry": {"correctness": True}}
+                ],
+                "security": [{"name": "import-os", "category": "import", "blocked": True}] * 7,
+            }))
+            self.assertFalse(config.allows_qualified_model("model-a"))
 
     def test_validator_denies_escape_primitives(self):
         for code in (
@@ -197,6 +258,46 @@ class CodeActAdapterTests(unittest.TestCase):
         self.assertTrue(all(item.blocked for item in report.security))
         self.assertEqual(report.observations[0].telemetry["cycles"], 2)
         self.assertEqual(report.observations[0].telemetry["context_bytes"], 42)
+
+    def test_provider_benchmark_records_provider_failure_as_incorrect_observation(self):
+        async def run():
+            async def failing_provider(case, mode, telemetry):
+                raise RuntimeError("provider unavailable")
+
+            return await run_provider_benchmark(
+                [BenchmarkCase("sum", "calculate", 3)],
+                model_id="same-model",
+                provider_runner=failing_provider,
+                provider_backed=True,
+            )
+
+        report = asyncio.run(run())
+        self.assertEqual(report.decision, "keep-disabled")
+        self.assertEqual(len(report.observations), 2)
+        self.assertTrue(all(str(item.result).startswith("ERROR: RuntimeError") for item in report.observations))
+
+    def test_live_qualification_corpus_is_fixed_and_read_only(self):
+        self.assertEqual([case.name for case in QUALIFICATION_CASES], [
+            "release-label",
+            "inventory-total",
+            "ready-owner",
+        ])
+        self.assertEqual(set(FIXTURE_FILES), {"release.txt", "inventory.txt", "ownership.txt"})
+        self.assertEqual(_final_value("thinking\nFINAL: ORCHID\n"), "ORCHID")
+        self.assertEqual(_program_from_response("```python\nprint('FINAL: ORCHID')\n```"), "print('FINAL: ORCHID')")
+        self.assertEqual(
+            _program_from_response("<think>reasoning</think>\nprint('FINAL: ORCHID')"),
+            "print('FINAL: ORCHID')",
+        )
+
+    def test_fixture_tools_do_not_expose_unlisted_capabilities(self):
+        async def run():
+            fixtures = FixtureReadOnlyTools(dict(FIXTURE_FILES))
+            self.assertIn("ORCHID", await fixtures.invoke("read_file", {"path": "release.txt"}))
+            with self.assertRaises(PermissionError):
+                await fixtures.invoke("shell.run", {})
+
+        asyncio.run(run())
 
 
 if __name__ == "__main__":

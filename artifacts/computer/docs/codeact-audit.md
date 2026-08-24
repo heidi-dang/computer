@@ -61,3 +61,37 @@ adversarial case is blocked; otherwise the explicit decision is
 `keep-disabled`. A provider-backed report requires a non-empty corpus and must
 be run with the configured CPTR connection, not fixture callbacks. Mutation
 CodeAct remains out of scope.
+
+## Live qualification procedure
+
+`python -m cptr.codeact.qualification --model <configured-model-id>` resolves
+one existing CPTR API model and runs it through both arms. The runner uses the
+same fixed three-case corpus in both modes: extracting a release label, adding
+two inventory values, and identifying a ready record's owner. Its fixtures are
+in-memory and expose only `read_file`/`list_directory` in the native arm and
+the matching `cptr.files.read`/`cptr.files.list` SDK in CodeAct. This keeps the
+qualification reproducible and proves model protocol behavior without granting
+the corpus any real workspace authority.
+
+The command writes `docs/codeact-qualification-report.json`. Each observation
+contains the resolved model id, input/output/total tokens, model cycles,
+capability calls, context bytes, wall latency, and correctness. The same report
+includes all seven sandbox escape categories, a weighted score, and the
+explicit enable/keep-disabled decision. The runner decrypts an already-stored
+CPTR connection only in process; it neither accepts nor writes credentials.
+
+## Latest live result
+
+The provider-backed run against `minimax-m3` completed with all three native
+tool-call cases correct, one of three CodeAct cases correct, and all seven
+escape categories blocked. Its weighted score is `80.0`, and the report's
+explicit decision is `keep-disabled`. CodeAct must remain disabled for this
+model until a fresh live qualification reaches complete correctness.
+
+Production CodeAct also fails closed on the report: in addition to the existing
+mode, role, and kill-switch controls, `CPTR_CODEACT_QUALIFICATION_REPORT` must
+name a readable report with a model-matching `enable-read-only` decision,
+`100.0` score, fully correct observations, and all seven escapes blocked. The
+report must contain the exact three deterministic cases in both native and
+CodeAct modes, plus each named escape category; partial or duplicate results
+cannot unlock CodeAct.

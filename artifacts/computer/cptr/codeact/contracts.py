@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 
@@ -14,6 +16,25 @@ class CodeActMode(StrEnum):
     DISABLED = "disabled"
     EVALUATION = "evaluation"
     READ_ONLY = "read_only"
+
+
+QUALIFICATION_CASE_NAMES = frozenset({"release-label", "inventory-total", "ready-owner"})
+QUALIFICATION_OBSERVATIONS = frozenset(
+    (case_name, mode)
+    for case_name in QUALIFICATION_CASE_NAMES
+    for mode in (CodeActMode.DISABLED.value, CodeActMode.READ_ONLY.value)
+)
+QUALIFICATION_SECURITY_CASES = frozenset(
+    {
+        ("import-os", "import"),
+        ("introspection-class", "introspection"),
+        ("filesystem-open", "filesystem"),
+        ("environment-read", "environment"),
+        ("socket-network", "socket"),
+        ("subprocess", "subprocess"),
+        ("serialization-pickle", "serialization"),
+    }
+)
 
 
 def _bool(name: str, default: bool = False) -> bool:
@@ -49,6 +70,7 @@ class CodeActConfig:
     mode: CodeActMode = CodeActMode.DISABLED
     allowed_roles: frozenset[str] = frozenset()
     kill_switch: bool = False
+    qualification_report_path: str = ""
     limits: CodeActLimits = field(default_factory=CodeActLimits)
 
     @property
@@ -57,6 +79,34 @@ class CodeActConfig:
 
     def allows_role(self, role: str) -> bool:
         return self.enabled and role in self.allowed_roles
+
+    def allows_qualified_model(self, model_id: str) -> bool:
+        """Fail closed unless a complete provider-backed report approved this model."""
+        if not model_id or not self.qualification_report_path:
+            return False
+        try:
+            report = json.loads(Path(self.qualification_report_path).read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError):
+            return False
+        observations = report.get("observations")
+        security = report.get("security")
+        if not isinstance(observations, list) or not isinstance(security, list):
+            return False
+        try:
+            observed_cases = {(item["case"], item["mode"]) for item in observations}
+            observed_security = {(item["name"], item["category"]) for item in security}
+        except (KeyError, TypeError):
+            return False
+        return bool(
+            report.get("provider_backed") is True
+            and report.get("model_id") == model_id
+            and report.get("decision") == "enable-read-only"
+            and report.get("score") == 100.0
+            and observed_cases == QUALIFICATION_OBSERVATIONS
+            and all(item.get("telemetry", {}).get("correctness") is True for item in observations)
+            and observed_security == QUALIFICATION_SECURITY_CASES
+            and all(item.get("blocked") is True for item in security)
+        )
 
     @classmethod
     def from_env(cls) -> "CodeActConfig":
@@ -74,6 +124,9 @@ class CodeActConfig:
             mode=mode,
             allowed_roles=roles,
             kill_switch=_bool("CPTR_CODEACT_KILL_SWITCH"),
+            qualification_report_path=os.environ.get(
+                "CPTR_CODEACT_QUALIFICATION_REPORT", ""
+            ).strip(),
             limits=CodeActLimits(
                 wall_seconds=float(os.environ.get("CPTR_CODEACT_WALL_SECONDS", "15")),
                 cpu_seconds=_int("CPTR_CODEACT_CPU_SECONDS", 10),

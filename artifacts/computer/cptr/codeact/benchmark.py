@@ -163,7 +163,12 @@ async def run_provider_benchmark(
         for mode in (CodeActMode.DISABLED, CodeActMode.READ_ONLY):
             telemetry = ExecutionTelemetry(mode=mode, model_id=model_id)
             telemetry.start()
-            measurement = await provider_runner(case, mode, telemetry)
+            try:
+                measurement = await provider_runner(case, mode, telemetry)
+            except Exception as exc:
+                measurement = ProviderMeasurement(
+                    result=f"ERROR: {type(exc).__name__}: {str(exc)[:200]}",
+                )
             telemetry.input_tokens = measurement.input_tokens
             telemetry.output_tokens = measurement.output_tokens
             telemetry.total_tokens = measurement.total_tokens or (

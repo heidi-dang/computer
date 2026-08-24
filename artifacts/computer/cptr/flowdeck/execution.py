@@ -196,6 +196,8 @@ async def _native_run_read_only_specialist(
             codeact_config = CodeActConfig.from_env()
             if not codeact_config.allows_role(specialist_id):
                 raise MapperPolicyError("CodeAct read-only execution is not enabled for this role")
+            if not codeact_config.allows_qualified_model(request.model):
+                raise MapperPolicyError("CodeAct has no passing qualification report for this model")
             if not request.codeact_program:
                 raise MapperPolicyError("CodeAct requires a server-generated program")
             from cptr.models import ChatMessage

@@ -1,0 +1,167 @@
+{
+  "decision": "keep-disabled",
+  "limitations": [],
+  "model_id": "minimax-m3",
+  "observations": [
+    {
+      "case": "release-label",
+      "mode": "disabled",
+      "result": "ORCHID",
+      "telemetry": {
+        "capability_calls": 1,
+        "context_bytes": 2049,
+        "context_result_bytes": 2049,
+        "correctness": true,
+        "cycles": 2,
+        "input_tokens": 1071,
+        "latency_ms": 5048,
+        "mode": "disabled",
+        "model_id": "minimax-m3",
+        "model_invocations": 2,
+        "output_tokens": 64,
+        "total_tokens": 1135
+      }
+    },
+    {
+      "case": "release-label",
+      "mode": "read_only",
+      "result": "ORCHID",
+      "telemetry": {
+        "capability_calls": 1,
+        "context_bytes": 442,
+        "context_result_bytes": 442,
+        "correctness": true,
+        "cycles": 1,
+        "input_tokens": 237,
+        "latency_ms": 3519,
+        "mode": "read_only",
+        "model_id": "minimax-m3",
+        "model_invocations": 1,
+        "output_tokens": 85,
+        "total_tokens": 322
+      }
+    },
+    {
+      "case": "inventory-total",
+      "mode": "disabled",
+      "result": "18",
+      "telemetry": {
+        "capability_calls": 1,
+        "context_bytes": 2079,
+        "context_result_bytes": 2079,
+        "correctness": true,
+        "cycles": 2,
+        "input_tokens": 1082,
+        "latency_ms": 3237,
+        "mode": "disabled",
+        "model_id": "minimax-m3",
+        "model_invocations": 2,
+        "output_tokens": 57,
+        "total_tokens": 1139
+      }
+    },
+    {
+      "case": "inventory-total",
+      "mode": "read_only",
+      "result": "0",
+      "telemetry": {
+        "capability_calls": 1,
+        "context_bytes": 460,
+        "context_result_bytes": 460,
+        "correctness": false,
+        "cycles": 1,
+        "input_tokens": 241,
+        "latency_ms": 1657,
+        "mode": "read_only",
+        "model_id": "minimax-m3",
+        "model_invocations": 1,
+        "output_tokens": 132,
+        "total_tokens": 373
+      }
+    },
+    {
+      "case": "ready-owner",
+      "mode": "disabled",
+      "result": "Lin",
+      "telemetry": {
+        "capability_calls": 1,
+        "context_bytes": 2123,
+        "context_result_bytes": 2123,
+        "correctness": true,
+        "cycles": 2,
+        "input_tokens": 1050,
+        "latency_ms": 3726,
+        "mode": "disabled",
+        "model_id": "minimax-m3",
+        "model_invocations": 2,
+        "output_tokens": 70,
+        "total_tokens": 1120
+      }
+    },
+    {
+      "case": "ready-owner",
+      "mode": "read_only",
+      "result": "",
+      "telemetry": {
+        "capability_calls": 1,
+        "context_bytes": 471,
+        "context_result_bytes": 471,
+        "correctness": false,
+        "cycles": 1,
+        "input_tokens": 243,
+        "latency_ms": 1561,
+        "mode": "read_only",
+        "model_id": "minimax-m3",
+        "model_invocations": 1,
+        "output_tokens": 45,
+        "total_tokens": 288
+      }
+    }
+  ],
+  "provider_backed": true,
+  "score": 80.0,
+  "security": [
+    {
+      "blocked": true,
+      "category": "import",
+      "error": "import is not allowed: os",
+      "name": "import-os"
+    },
+    {
+      "blocked": true,
+      "category": "introspection",
+      "error": "attribute is not allowed: __class__",
+      "name": "introspection-class"
+    },
+    {
+      "blocked": true,
+      "category": "filesystem",
+      "error": "name is not allowed: open",
+      "name": "filesystem-open"
+    },
+    {
+      "blocked": true,
+      "category": "environment",
+      "error": "name is not allowed: __import__",
+      "name": "environment-read"
+    },
+    {
+      "blocked": true,
+      "category": "socket",
+      "error": "import is not allowed: socket",
+      "name": "socket-network"
+    },
+    {
+      "blocked": true,
+      "category": "subprocess",
+      "error": "import is not allowed: subprocess",
+      "name": "subprocess"
+    },
+    {
+      "blocked": true,
+      "category": "serialization",
+      "error": "import is not allowed: pickle",
+      "name": "serialization-pickle"
+    }
+  ]
+}
