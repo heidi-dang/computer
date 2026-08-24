@@ -3012,6 +3012,10 @@ async def run_chat_task(
         await _save_message("cancelled", content=content, output=output_items, done=True)
         _task_state.pop(message_id, None)
         await _emit_done()
+        # Preserve cancellation for the enclosing FlowDeck child boundary.
+        # A timeout or parent stop must not look like a successful native loop
+        # return to the durable coding lifecycle.
+        raise
     except Exception as e:
         logger.exception(f"Chat task error for message {message_id}")
         _flush_text()

@@ -15,3 +15,4 @@
 - [Structured tester environment](structured-tester-environment.md) — authenticated tester subprocesses need the explicit CPTR data directory, but must not inherit ambient secrets or environment.
 - [Lease-finalization ordering](lease-finalization-ordering.md) — fenced attempt completion must occur before releasing the workspace lease, including coding and tester children.
 - [Parallel branch ownership](parallel-branch-ownership.md) — independent mutation branches need explicit non-overlapping file ownership and shared metadata must stay out of scope.
+- [Native cancellation propagation](native-cancellation-propagation.md) — native child loops must re-raise cancellation after cleanup so parent timeout and durable UNKNOWN handling remain authoritative.

@@ -1,7 +1,9 @@
+import ast
 import httpx
+import inspect
 import unittest
 
-from cptr.utils.chat_task import _format_task_error, tool_call_fingerprint
+from cptr.utils.chat_task import _format_task_error, run_chat_task, tool_call_fingerprint
 
 
 class ChatTaskLoopTests(unittest.IsolatedAsyncioTestCase):
@@ -44,6 +46,26 @@ class ChatTaskLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(
             tool_call_fingerprint("list_directory", {"path": "/tmp"}),
             tool_call_fingerprint("list_directory", {"path": "/workspace"}),
+        )
+
+    def test_native_loop_cancellation_is_re_raised_after_cleanup(self):
+        tree = ast.parse(inspect.getsource(run_chat_task))
+        handlers = [
+            handler
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Try)
+            for handler in node.handlers
+            if isinstance(handler.type, ast.Attribute)
+            and handler.type.attr == "CancelledError"
+        ]
+
+        self.assertEqual(len(handlers), 1)
+        self.assertTrue(
+            any(
+                isinstance(node, ast.Raise) and node.exc is None
+                for node in handlers[0].body
+            ),
+            "native loop cancellation must propagate after durable chat cleanup",
         )
 
     async def test_repeated_list_directory_emits_terminal_event(self):
