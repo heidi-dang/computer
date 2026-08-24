@@ -32,6 +32,7 @@
 	let refreshing = $state(false);
 
 	const selectorMaxHeight = $derived(isSmallViewport ? '7.5rem' : '15rem');
+const selectedModelEntry = $derived($chatModels.find((m) => m.id === selectedModel) ?? null);
 
 	const filtered = $derived(
 		search.trim()
@@ -152,8 +153,8 @@
 		class="model-picker-trigger app-interactive flex min-h-9 min-w-0 max-w-[13rem] items-center gap-1.5 rounded-xl border px-2.5 py-1.5 text-xs text-gray-500 transition-colors duration-100 sm:max-w-[24rem]"
 		title={selectedModel === null || selectedModel === ''
 			? nullLabel
-			: $chatModels.find((m) => m.id === selectedModel)
-				? `${$chatModels.find((m) => m.id === selectedModel)?.display_provider || $chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
+			: selectedModelEntry
+				? `${selectedModelEntry.display_provider || selectedModelEntry.provider} / ${selectedModelEntry.name}${selectedModelEntry.availability === 'unavailable' ? ` — ${selectedModelEntry.availability_reason || 'Unavailable'}` : ''}`
 				: $t('modelSelector.selectModel')}
 		onclick={toggle}
 	>
@@ -162,10 +163,9 @@
 				? nullLabel
 				: $chatModels.length === 0
 					? $t('modelSelector.noModels')
-					: $chatModels.find((m) => m.id === selectedModel)
-							? `${$chatModels.find((m) => m.id === selectedModel)?.display_provider || $chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
-							:
-						$t('modelSelector.selectModel')}</span
+					: selectedModelEntry
+						? `${selectedModelEntry.display_provider || selectedModelEntry.provider} / ${selectedModelEntry.name}${selectedModelEntry.availability === 'unavailable' ? ' · unavailable' : ''}`
+						: $t('modelSelector.selectModel')}</span
 		>
 		{#if $chatModels.length > 0 || nullable}
 			<svg

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -438,14 +440,18 @@ async def _build_model_config(request: Request):
 
     # Build full model list from all enabled connections (same as chat.py
     # get_models but without filtering inactive models).
-    from cptr.routers.chat import _get_connections, _get_connection_models
+    from cptr.routers.chat import _get_connections
 
     connections = [c for c in await _get_connections() if c.get("enabled", True)]
+    from cptr.routers.chat import _get_connection_model_metadata
+
+    connection_metadata = await asyncio.gather(
+        *(_get_connection_model_metadata(conn, request.app.state) for conn in connections)
+    )
     models = []
-    for conn in connections:
-        model_ids = await _get_connection_models(conn, request.app.state)
+    for conn, metadata in zip(connections, connection_metadata):
         prefix = (conn.get("prefix_id") or "").strip()
-        for model_id in model_ids or []:
+        for model_id, model_metadata in metadata.items():
             prefixed_id = f"{prefix}/{model_id}" if prefix else model_id
             models.append(
                 {
@@ -453,6 +459,11 @@ async def _build_model_config(request: Request):
                     "name": model_id,
                     "provider": conn.get("provider", ""),
                     "connection_id": conn["id"],
+                    **{
+                        key: value
+                        for key, value in model_metadata.items()
+                        if key not in {"id", "provider", "connection_id"}
+                    },
                 }
             )
 

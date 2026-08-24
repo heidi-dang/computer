@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chats", tags=["chats"])
 
 COOKIE_NAME = "cptr_session"
+MODEL_DISCOVERY_TIMEOUT_SECONDS = 5
 
 
 def _observe_flowdeck_request(
@@ -306,7 +307,9 @@ def _normalise_model_metadata(model_id: str, raw: dict | None = None) -> dict:
     }
 
 
-async def _get_connection_model_metadata(conn: dict, app_state, force_refresh: bool = False) -> dict[str, dict]:
+async def _get_connection_model_metadata(
+    conn: dict, app_state, force_refresh: bool = False
+) -> dict[str, dict]:
     """Return model metadata from the configured source or provider discovery.
 
     Configured model IDs are deliberately `unknown` until a provider discovery
@@ -336,7 +339,7 @@ async def _get_connection_model_metadata(conn: dict, app_state, force_refresh: b
         for model_id in stored
         if isinstance(model_id, str) and model_id
     }
-    discovered = await _fetch_provider_model_records(conn)
+    discovered, failure_reason = await _fetch_provider_model_records_with_status(conn)
     if discovered is not None:
         for record in discovered:
             model_id = record["id"]
@@ -348,10 +351,16 @@ async def _get_connection_model_metadata(conn: dict, app_state, force_refresh: b
                 "availability": "available",
                 "availability_reason": "Confirmed by provider discovery",
             }
-    elif result and not conn.get("api_key"):
+    elif result:
+        availability = "configuration_required" if not conn.get("api_key") else "unavailable"
+        reason = (
+            "Provider credentials are not configured"
+            if availability == "configuration_required"
+            else failure_reason or "Provider discovery did not confirm availability"
+        )
         for item in result.values():
-            item["availability"] = "configuration_required"
-            item["availability_reason"] = "Provider credentials are not configured"
+            item["availability"] = availability
+            item["availability_reason"] = reason
 
     cache[conn_id] = {"checked_at": now, "models": result}
     return result
@@ -389,10 +398,11 @@ async def get_models(request: Request, refresh: bool = Query(False)):
     _get_user(request)
     connections = [c for c in await _get_connections() if c.get("enabled", True)]
     models = []
+    connection_metadata = await asyncio.gather(
+        *(_get_connection_model_metadata(conn, request.app.state, refresh) for conn in connections)
+    )
 
-    for conn in connections:
-        model_metadata = await _get_connection_model_metadata(conn, request.app.state, refresh)
-
+    for conn, model_metadata in zip(connections, connection_metadata):
         prefix = (conn.get("prefix_id") or "").strip()
 
         for model_id, metadata in model_metadata.items():
@@ -404,7 +414,11 @@ async def get_models(request: Request, refresh: bool = Query(False)):
                     "provider": conn.get("provider", ""),
                     "display_provider": conn.get("display_name") or conn.get("provider", ""),
                     "connection_id": conn["id"],
-                    **{key: value for key, value in metadata.items() if key not in {"id", "provider", "connection_id"}},
+                    **{
+                        key: value
+                        for key, value in metadata.items()
+                        if key not in {"id", "provider", "connection_id"}
+                    },
                 }
             )
 
@@ -675,7 +689,9 @@ async def get_usage(request: Request, days: int | None = Query(None, ge=7, le=73
     }
 
 
-async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
+async def _fetch_provider_model_records_with_status(
+    conn: dict,
+) -> tuple[list[dict] | None, str | None]:
     """Discover provider model records without inventing metadata."""
     import httpx
 
@@ -690,7 +706,7 @@ async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
 
         if provider == "anthropic":
             url = (base_url or "https://api.anthropic.com/v1") + "/models"
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=MODEL_DISCOVERY_TIMEOUT_SECONDS) as client:
                 r = await client.get(
                     url,
                     headers={
@@ -701,19 +717,28 @@ async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
                 )
                 if r.status_code == 200:
                     data = r.json()
-                    records = [m for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
-                    log.info("Auto-discovered %d models from %s", len(records), url)
-                    return records
+                    records = [
+                        m for m in data.get("data", []) if isinstance(m, dict) and m.get("id")
+                    ]
+                    log.info(
+                        "Auto-discovered %d models from connection %s (%s)",
+                        len(records),
+                        conn.get("id", "?"),
+                        conn.get("name", "unnamed"),
+                    )
+                    return records, None
                 else:
                     log.warning(
-                        "Model auto-discovery failed for %s: HTTP %d",
-                        url,
+                        "Model auto-discovery failed for connection %s (%s): HTTP %d",
+                        conn.get("id", "?"),
+                        conn.get("name", "unnamed"),
                         r.status_code,
                     )
+                    return None, f"Provider returned HTTP {r.status_code}"
 
         elif provider == "openai":
             url = (base_url or "https://api.openai.com/v1") + "/models"
-            async with httpx.AsyncClient(timeout=10) as client:
+            async with httpx.AsyncClient(timeout=MODEL_DISCOVERY_TIMEOUT_SECONDS) as client:
                 r = await client.get(
                     url,
                     headers={
@@ -723,23 +748,56 @@ async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
                 )
                 if r.status_code == 200:
                     data = r.json()
-                    records = [m for m in data.get("data", []) if isinstance(m, dict) and m.get("id")]
-                    log.info("Auto-discovered %d models from %s", len(records), url)
-                    return records
+                    records = [
+                        m for m in data.get("data", []) if isinstance(m, dict) and m.get("id")
+                    ]
+                    log.info(
+                        "Auto-discovered %d models from connection %s (%s)",
+                        len(records),
+                        conn.get("id", "?"),
+                        conn.get("name", "unnamed"),
+                    )
+                    return records, None
                 else:
                     log.warning(
-                        "Model auto-discovery failed for %s: HTTP %d",
-                        url,
+                        "Model auto-discovery failed for connection %s (%s): HTTP %d",
+                        conn.get("id", "?"),
+                        conn.get("name", "unnamed"),
                         r.status_code,
                     )
+                    return None, f"Provider returned HTTP {r.status_code}"
 
         else:
-            log.warning("Unknown provider '%s', skipping model auto-discovery", provider)
+            log.warning(
+                "Unknown provider '%s' for connection %s (%s), skipping model auto-discovery",
+                provider,
+                conn.get("id", "?"),
+                conn.get("name", "unnamed"),
+            )
 
-    except Exception:
-        log.exception("Model auto-discovery error for connection %s", conn.get("id", "?"))
+    except (httpx.TimeoutException, asyncio.TimeoutError):
+        log.warning(
+            "Model auto-discovery timed out for connection %s (%s)",
+            conn.get("id", "?"),
+            conn.get("name", "unnamed"),
+        )
+        return None, "Provider discovery timed out"
+    except Exception as exc:
+        log.warning(
+            "Model auto-discovery error for connection %s (%s): %s",
+            conn.get("id", "?"),
+            conn.get("name", "unnamed"),
+            type(exc).__name__,
+        )
+        return None, "Provider discovery failed"
 
-    return None
+    return None, f"Unsupported provider: {provider}"
+
+
+async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
+    """Backward-compatible model discovery helper."""
+    records, _ = await _fetch_provider_model_records_with_status(conn)
+    return records
 
 
 async def _fetch_provider_models(conn: dict) -> list[str] | None:
