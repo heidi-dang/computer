@@ -31,3 +31,15 @@ CPTR_FLOWDECK_ENABLED = "true"
 CPTR_FLOWDECK_GOVERNANCE = "strict"
 CPTR_FLOWDECK_MODE = "controlled"
 CPTR_FLOWDECK_MUTATING_AGENTS = "true"
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 80
+
+[[ports]]
+localPort = 21823
+externalPort = 3000
