@@ -29,6 +29,7 @@ from cptr.env import (
     STREAM_WRITE_TIMEOUT_SECONDS,
 )
 from cptr.utils.logger import log_upstream_request
+from cptr.utils.connection_credentials import connection_api_key
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +289,7 @@ async def generate_text(
             chat_completion(
                 provider=provider,
                 base_url=base_url,
-                api_key=decrypt_key(connection.get("api_key", ""), _get_jwt_secret()),
+                api_key=connection_api_key(connection),
                 model=runtime_model,
                 messages=messages,
                 system=system,

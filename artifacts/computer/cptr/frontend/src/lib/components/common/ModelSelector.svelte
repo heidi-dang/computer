@@ -36,7 +36,7 @@
 	const filtered = $derived(
 		search.trim()
 			? $chatModels.filter((m) =>
-					`${m.provider} ${m.name}`.toLowerCase().includes(search.toLowerCase())
+					`${m.display_provider || m.provider} ${m.name}`.toLowerCase().includes(search.toLowerCase())
 				)
 			: $chatModels
 	);
@@ -58,8 +58,8 @@
 					]
 				: []),
 			...filtered.map((m) => ({
-				label: `${m.provider} / ${m.name}${m.availability !== 'available' ? ` · ${m.availability || 'unknown'}` : ''}`,
-				tooltip: `${m.provider} / ${m.name} — ${m.availability_reason || 'Availability confirmed'}`,
+				label: `${m.display_provider || m.provider} / ${m.name}${m.availability !== 'available' ? ` · ${m.availability || 'unknown'}` : ''}`,
+				tooltip: `${m.display_provider || m.provider} / ${m.name} — ${m.availability_reason || 'Availability confirmed'}`,
 				active: m.id === selectedModel,
 				check: true,
 				disabled: m.availability !== 'available',
@@ -153,7 +153,7 @@
 		title={selectedModel === null || selectedModel === ''
 			? nullLabel
 			: $chatModels.find((m) => m.id === selectedModel)
-				? `${$chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
+				? `${$chatModels.find((m) => m.id === selectedModel)?.display_provider || $chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
 				: $t('modelSelector.selectModel')}
 		onclick={toggle}
 	>
@@ -163,7 +163,7 @@
 				: $chatModels.length === 0
 					? $t('modelSelector.noModels')
 					: $chatModels.find((m) => m.id === selectedModel)
-							? `${$chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
+							? `${$chatModels.find((m) => m.id === selectedModel)?.display_provider || $chatModels.find((m) => m.id === selectedModel)?.provider} / ${$chatModels.find((m) => m.id === selectedModel)?.name}`
 							:
 						$t('modelSelector.selectModel')}</span
 		>

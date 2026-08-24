@@ -284,6 +284,7 @@ export interface ChatModel {
 	id: string;
 	name: string;
 	provider: string;
+display_provider?: string;
 	connection_id: string;
 availability?: 'available' | 'unavailable' | 'unknown' | 'checking' | 'configuration_required';
 availability_reason?: string;

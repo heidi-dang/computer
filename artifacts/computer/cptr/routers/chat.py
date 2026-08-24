@@ -266,7 +266,13 @@ async def list_chats(
 
 
 async def _get_connections() -> list[dict]:
-    return await Config.get("chat.connections") or []
+    connections = list(await Config.get("chat.connections") or [])
+    from cptr.utils.connection_credentials import managed_openai_connection
+
+    managed = managed_openai_connection()
+    if managed and not any(c.get("managed_env") == managed["managed_env"] for c in connections):
+        connections.append(managed)
+    return connections
 
 
 # ── Model cache (app.state) ─────────────────────────────────
@@ -676,7 +682,9 @@ async def _fetch_provider_model_records(conn: dict) -> list[dict] | None:
 
     try:
         secret = _get_jwt_secret()
-        api_key = decrypt_key(conn.get("api_key", ""), secret) if conn.get("api_key") else None
+        from cptr.utils.connection_credentials import connection_api_key
+
+        api_key = connection_api_key(conn) or None
         provider = conn.get("provider", "")
         base_url = conn.get("base_url")
 

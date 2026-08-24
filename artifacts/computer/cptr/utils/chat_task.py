@@ -2080,7 +2080,9 @@ async def run_chat_task(
         connection = target.connection
         model = target.runtime_model
         provider = connection["provider"]
-        api_key = decrypt_key(connection.get("api_key", ""), _get_jwt_secret())
+        from cptr.utils.connection_credentials import connection_api_key
+
+        api_key = connection_api_key(connection)
         base_url = connection.get("base_url") or _default_base_url(provider)
         api_type = connection.get("api_type", "chat_completions")
 
