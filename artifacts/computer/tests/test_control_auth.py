@@ -19,6 +19,10 @@ class ControlAuthTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cptr.services.control_auth._hash_key", return_value="hash"),
             patch("cptr.services.control_auth._get_api_keys", new=AsyncMock(return_value=[key])),
+            patch(
+                "cptr.services.control_auth.Auth.get_by_user_id",
+                new=AsyncMock(return_value=SimpleNamespace(username="user-one")),
+            ),
         ):
             user_id = await authenticate_control_request(request, "workspace:read")
 
