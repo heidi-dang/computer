@@ -13,3 +13,5 @@
 - [Provider discovery fail-closed](provider-discovery-fail-closed.md) — HTTP 405 model enumeration means unverified, never available or an excuse for silent model switching.
 - [FlowDeck child completion](flowdeck-child-completion.md) — child native done events must not terminalize the parent transcript; only the parent run owns native completion.
 - [Structured tester environment](structured-tester-environment.md) — authenticated tester subprocesses need the explicit CPTR data directory, but must not inherit ambient secrets or environment.
+- [Lease-finalization ordering](lease-finalization-ordering.md) — fenced attempt completion must occur before releasing the workspace lease, including coding and tester children.
+- [Parallel branch ownership](parallel-branch-ownership.md) — independent mutation branches need explicit non-overlapping file ownership and shared metadata must stay out of scope.

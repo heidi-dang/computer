@@ -287,11 +287,26 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                 )
                 await export_chat_to_file(request, chat.id)
             except asyncio.CancelledError:
+                logger.warning(
+                    "FlowDeck background orchestration task cancelled: %s",
+                    request_key,
+                )
                 raise
             except Exception:
                 logger.exception("FlowDeck background orchestration failed")
 
-        asyncio.create_task(run_in_background())
+        # Keep a strong reference while the coordinator is running. The event
+        # loop only weakly tracks Tasks; without ownership, a background
+        # coordinator can be garbage-collected while a child tester/model call
+        # is awaiting, leaving durable attempts prepared and the parent in an
+        # UNKNOWN/manual-review state.
+        flowdeck_tasks = getattr(request.app.state, "flowdeck_tasks", None)
+        if flowdeck_tasks is None:
+            flowdeck_tasks = set()
+            request.app.state.flowdeck_tasks = flowdeck_tasks
+        background_task = asyncio.create_task(run_in_background())
+        flowdeck_tasks.add(background_task)
+        background_task.add_done_callback(flowdeck_tasks.discard)
         # Let the task reach its first database checkpoint before returning.
         # This keeps the durable run and native child registration observable
         # to an immediate status, reconnect, or cancellation request.

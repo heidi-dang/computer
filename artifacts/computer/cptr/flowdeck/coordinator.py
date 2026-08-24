@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 from sqlalchemy.exc import OperationalError
@@ -34,6 +35,8 @@ from cptr.flowdeck.errors import DelegationPolicyError, UnknownAgentError
 from cptr.flowdeck.registry import get_agent
 from cptr.models import ChatMessage
 from cptr.utils.config import now_ms
+
+logger = logging.getLogger(__name__)
 
 
 class CoordinatorPolicyError(RuntimeError):
@@ -451,7 +454,12 @@ async def run_heidi_coordinator(
                 if terminal:
                     return terminal
                 raise
-        except BaseException:
+        except BaseException as exc:
+            logger.warning(
+                "Coordinator child interrupted: %s (%s)",
+                item.specialist_id,
+                type(exc).__name__,
+            )
             terminal = await cancelled_result()
             if terminal:
                 return terminal

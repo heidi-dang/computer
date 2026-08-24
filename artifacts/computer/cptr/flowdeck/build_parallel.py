@@ -97,14 +97,27 @@ async def _child_is_authoritative(store: DurableFlowDeck, request_key: str) -> t
 
 
 def _node_task(task: str, build_request: Any, planning_context: str, focus: str) -> str:
+    if focus.startswith("data model"):
+        scope = (
+            "Own only backend/server data-model, API, persistence, and server-side "
+            "behavior. Do not modify frontend files, shared package manifests or "
+            "lockfiles, tests, documentation, .gitignore, or generated/cache files."
+        )
+    else:
+        scope = (
+            "Own only frontend screens, interaction, responsive layout, and client "
+            "behavior. Do not modify backend/server files, shared package manifests "
+            "or lockfiles, tests, documentation, .gitignore, or generated/cache files."
+        )
     return (
         f"{task}\n\nBuild brief:\n{build_request.brief.as_dict()}\n"
         f"Architecture:\n{build_request.architecture.as_dict()}\n"
         f"Read-only planning observations:\n{planning_context}\n\n"
-        f"Parallel branch focus ({focus}): implement only this branch in the "
-        "isolated worktree. Keep changes within the branch scope, use structured "
-        "file mutation tools, preserve project conventions, and do not use shell, "
-        "Git, browser mutation, network, secrets, package installation, or delegation."
+        f"Parallel branch focus ({focus}): {scope} Implement only this branch in "
+        "the isolated worktree. Keep changes within the branch scope, use "
+        "structured file mutation tools, preserve project conventions, and do not "
+        "use shell, Git, browser mutation, network, secrets, package installation, "
+        "or delegation."
     )
 
 

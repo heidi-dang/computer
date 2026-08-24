@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import signal
 import sys
@@ -26,6 +27,7 @@ from cptr.flowdeck.evidence import validate_terminal_evidence
 TEST_CHECKS = frozenset({"tests", "build", "typecheck", "lint"})
 _MAX_TIMEOUT_SECONDS = 300
 _MAX_OUTPUT_BYTES = 128 * 1024
+logger = logging.getLogger(__name__)
 
 
 class TesterPolicyError(RuntimeError):
@@ -210,10 +212,20 @@ async def run_tester(
             timeout_seconds=request.timeout_seconds,
         )
         budget.validate_wall_time(time.monotonic() - started)
-    except BaseException:
+    except BaseException as exc:
+        logger.warning(
+            "Structured tester interrupted: %s (%s)",
+            request.request_key,
+            type(exc).__name__,
+        )
         await store.mark_attempt_unknown(attempt.id, error="tester interrupted")
         await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
         await store.orphan_run(run.id)
+        await store.release_workspace_lease(
+            workspace=str(root),
+            owner=tester_owner,
+            epoch=lease.epoch,
+        )
         raise
     finally:
         heartbeat_task.cancel()
@@ -221,11 +233,6 @@ async def run_tester(
             await heartbeat_task
         except asyncio.CancelledError:
             pass
-        await store.release_workspace_lease(
-            workspace=str(root),
-            owner=tester_owner,
-            epoch=lease.epoch,
-        )
 
     outcome = "succeeded" if exit_code == 0 else "failed"
     evidence = {
@@ -243,22 +250,29 @@ async def run_tester(
         "repository_identity": request.repository_identity,
         "specialist_claim": None,
     }
-    validate_terminal_evidence(evidence, outcome=outcome, attempt_id=attempt.id)
-    await store.finish_attempt(
-        attempt.id,
-        owner=tester_owner,
-        fencing_epoch=lease.epoch,
-        outcome=outcome,
-        evidence=evidence,
-    )
-    await store.finish_step(
-        step.id,
-        status=StepStatus.SUCCEEDED if exit_code == 0 else StepStatus.FAILED,
-    )
-    await store.complete_run(
-        run.id,
-        status=RunStatus.SUCCEEDED if exit_code == 0 else RunStatus.FAILED,
-    )
+    try:
+        validate_terminal_evidence(evidence, outcome=outcome, attempt_id=attempt.id)
+        await store.finish_attempt(
+            attempt.id,
+            owner=tester_owner,
+            fencing_epoch=lease.epoch,
+            outcome=outcome,
+            evidence=evidence,
+        )
+        await store.finish_step(
+            step.id,
+            status=StepStatus.SUCCEEDED if exit_code == 0 else StepStatus.FAILED,
+        )
+        await store.complete_run(
+            run.id,
+            status=RunStatus.SUCCEEDED if exit_code == 0 else RunStatus.FAILED,
+        )
+    finally:
+        await store.release_workspace_lease(
+            workspace=str(root),
+            owner=tester_owner,
+            epoch=lease.epoch,
+        )
     return {
         "status": outcome,
         "exit_code": exit_code,

@@ -425,53 +425,60 @@ async def _native_run_coding_specialist(
         await store.mark_attempt_unknown(root_attempt.id, error="coding session interrupted")
         await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
         await store.orphan_run(run.id)
-        raise
-    finally:
-        heartbeat_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await heartbeat_task
         await store.release_workspace_lease(
             workspace=str(root),
             owner=request.user_id,
             epoch=lease.epoch,
         )
+        raise
+    finally:
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
 
-    if mutations:
-        for record in mutations.values():
-            await store.mark_attempt_unknown(
-                record["attempt"].id,
-                error="coding loop returned before mutation verification",
-            )
-        mutation_unknown = True
-    if mutation_unknown:
-        await store.mark_attempt_unknown(root_attempt.id, error="mutation verification unknown")
-        await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
-        await store.orphan_run(run.id)
-        raise CodingPolicyError("coding mutation requires manual review")
-    root_outcome = "failed" if mutation_failures else "succeeded"
-    await store.finish_attempt(
-        root_attempt.id,
-        owner=request.user_id,
-        fencing_epoch=lease.epoch,
-        outcome=root_outcome,
-        evidence={
-            "source": "runtime",
-            "authoritative": True,
-            "observation": "native_loop_return",
-            "observed_outcome": root_outcome,
-            "attempt_id": root_attempt.id,
-            "chat_id": chat.id,
-            "specialist_claim": None,
-        },
-    )
-    await store.finish_step(
-        step.id,
-        status=StepStatus.FAILED if mutation_failures else StepStatus.SUCCEEDED,
-    )
-    await store.complete_run(
-        run.id,
-        status=RunStatus.FAILED if mutation_failures else RunStatus.SUCCEEDED,
-    )
+    try:
+        if mutations:
+            for record in mutations.values():
+                await store.mark_attempt_unknown(
+                    record["attempt"].id,
+                    error="coding loop returned before mutation verification",
+                )
+            mutation_unknown = True
+        if mutation_unknown:
+            await store.mark_attempt_unknown(root_attempt.id, error="mutation verification unknown")
+            await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
+            await store.orphan_run(run.id)
+            raise CodingPolicyError("coding mutation requires manual review")
+        root_outcome = "failed" if mutation_failures else "succeeded"
+        await store.finish_attempt(
+            root_attempt.id,
+            owner=request.user_id,
+            fencing_epoch=lease.epoch,
+            outcome=root_outcome,
+            evidence={
+                "source": "runtime",
+                "authoritative": True,
+                "observation": "native_loop_return",
+                "observed_outcome": root_outcome,
+                "attempt_id": root_attempt.id,
+                "chat_id": chat.id,
+                "specialist_claim": None,
+            },
+        )
+        await store.finish_step(
+            step.id,
+            status=StepStatus.FAILED if mutation_failures else StepStatus.SUCCEEDED,
+        )
+        await store.complete_run(
+            run.id,
+            status=RunStatus.FAILED if mutation_failures else RunStatus.SUCCEEDED,
+        )
+    finally:
+        await store.release_workspace_lease(
+            workspace=str(root),
+            owner=request.user_id,
+            epoch=lease.epoch,
+        )
     return result
 
 

@@ -95,6 +95,40 @@ class TesterTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(created)
         self.assertEqual(run.status, RunStatus.SUCCEEDED.value)
 
+    async def test_tester_finishes_attempt_before_releasing_workspace_lease(self):
+        ordering = []
+        finish_attempt = self.store.finish_attempt
+        release_lease = self.store.release_workspace_lease
+
+        async def record_finish(*args, **kwargs):
+            ordering.append("finish_attempt")
+            return await finish_attempt(*args, **kwargs)
+
+        async def record_release(*args, **kwargs):
+            ordering.append("release_lease")
+            return await release_lease(*args, **kwargs)
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CPTR_FLOWDECK_ENABLED": "true",
+                    "CPTR_FLOWDECK_MODE": "controlled",
+                    "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                },
+                clear=False,
+            ),
+            patch(
+                "cptr.flowdeck.tester._run_check",
+                new=AsyncMock(return_value=(0, b"ok", b"")),
+            ),
+            patch.object(self.store, "finish_attempt", new=record_finish),
+            patch.object(self.store, "release_workspace_lease", new=record_release),
+        ):
+            await run_tester(self.request, store=self.store)
+
+        self.assertLess(ordering.index("finish_attempt"), ordering.index("release_lease"))
+
     async def test_tester_nonzero_exit_is_authoritative_failure(self):
         request = self.request.__class__(
             **{**self.request.__dict__, "request_key": "tester-failed"}
