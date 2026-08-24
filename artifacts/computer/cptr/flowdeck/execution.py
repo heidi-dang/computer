@@ -220,6 +220,10 @@ async def _native_run_read_only_specialist(
             from cptr.socket.main import emit_to_user
 
             async def emit_codeact(event: dict[str, Any]) -> None:
+                # A restarted/cancelled physical attempt may still deliver a
+                # late worker message. Never let that message reach the
+                # native transcript renderer.
+                await store.assert_attempt_active(attempt.id)
                 event_kind = str(event.get("type", "codeact_activity"))
                 payload = dict(event)
                 payload.pop("type", None)
@@ -280,6 +284,7 @@ async def _native_run_read_only_specialist(
                 emit=emit_codeact,
             )
             result_text = result.output
+            await store.assert_attempt_active(attempt.id)
             await ChatMessage.update(
                 assistant.id,
                 content=result_text,

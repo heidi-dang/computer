@@ -648,6 +648,24 @@ class DurableFlowDeck:
 
         await self._transaction(operation)
 
+    async def assert_attempt_active(self, attempt_id: str) -> None:
+        """Reject output from an attempt that was cancelled or superseded."""
+
+        async def operation(db: AsyncSession):
+            attempt = await db.get(FlowDeckPhysicalAttempt, attempt_id)
+            if not attempt:
+                raise LifecycleError("unknown attempt")
+            if attempt.status not in {
+                AttemptStatus.PREPARED.value,
+                AttemptStatus.RUNNING.value,
+            }:
+                raise StaleWriterError("physical attempt is no longer active")
+            op = await self._operation(db, attempt.operation_id)
+            if op.status != OperationStatus.RUNNING.value:
+                raise StaleWriterError("logical operation is no longer running")
+
+        await self._transaction(operation)
+
     async def finish_attempt(
         self,
         attempt_id: str,

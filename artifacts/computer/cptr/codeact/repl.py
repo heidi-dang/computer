@@ -116,6 +116,7 @@ class CodeActRepl:
         self._sequence = 0
         self._closed = False
         self._started_at = 0.0
+        self._execute_lock = asyncio.Lock()
 
     @property
     def closed(self) -> bool:
@@ -166,6 +167,12 @@ class CodeActRepl:
 
     async def execute(self, code: str) -> CodeActResult:
         """Execute a block while retaining namespace state across calls."""
+        # The worker protocol is request/response based; concurrent blocks on
+        # one attempt must not interleave their responses.
+        async with self._execute_lock:
+            return await self._execute(code)
+
+    async def _execute(self, code: str) -> CodeActResult:
         if not self.config.enabled:
             raise CodeActSandboxError("CodeAct is disabled by server policy")
         validate_program(code, max_chars=self.config.limits.max_code_chars)
@@ -189,8 +196,13 @@ class CodeActRepl:
                 await self.close(force=True)
                 raise TimeoutError("CodeAct execution exceeded wall-clock limit")
             if not line:
+                await self.close(force=True)
                 raise RuntimeError("CodeAct worker exited unexpectedly")
-            message = json.loads(line)
+            try:
+                message = json.loads(line)
+            except (TypeError, json.JSONDecodeError) as exc:
+                await self.close(force=True)
+                raise CodeActSandboxError("CodeAct worker returned invalid protocol data") from exc
             if message.get("type") == "capability_call":
                 self._sequence += 1
                 call = CapabilityCall(
@@ -207,7 +219,11 @@ class CodeActRepl:
                     await self.close(force=True)
                     raise
                 except Exception as exc:
-                    self._write({"ok": False, "error": str(exc)[:500]})
+                    try:
+                        self._write({"ok": False, "error": str(exc)[:500]})
+                    except (BrokenPipeError, OSError, RuntimeError):
+                        await self.close(force=True)
+                        raise
             elif message.get("type") == "result":
                 output = str(message.get("output", ""))
                 truncated = bool(message.get("truncated"))
@@ -219,6 +235,7 @@ class CodeActRepl:
                     output_truncated=truncated,
                 )
             elif message.get("type") == "error":
+                await self.close(force=True)
                 raise CodeActSandboxError(str(message.get("error", "CodeAct execution failed")))
 
     def _write(self, message: dict[str, Any]) -> None:
