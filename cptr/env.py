@@ -28,6 +28,11 @@ DATA_DIR = Path(os.environ.get("CPTR_DATA_DIR", str(Path.home() / ".cptr")))
 CONFIG_FILE = DATA_DIR / "config.toml"
 DB_FILE = DATA_DIR / "app.db"
 
+# Task-owned transient runtime state. Keep provider caches, staged
+# attachments, command logs, and browser state together instead of allowing
+# subprocesses to scatter directories through the user's home or project.
+TASK_ROOT = Path(os.environ.get("CPTR_TASK_ROOT", str(DATA_DIR / "runs")))
+
 # ── Logging ─────────────────────────────────────────────────
 LOG_LEVEL = os.environ.get("CPTR_LOG_LEVEL", "INFO").upper()
 LOG_FORMAT = os.environ.get("CPTR_LOG_FORMAT", "text").lower()

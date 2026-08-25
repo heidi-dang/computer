@@ -11,6 +11,7 @@ from typing import Any
 from fastapi import Request
 from cptr.utils.runtime import Runtime
 from cptr.utils.storage import get_storage
+from cptr.utils.task_runtime import ensure_task_runtime
 
 
 @dataclass
@@ -47,17 +48,26 @@ async def prepare_agent_attachments(
     chat_id: str,
     message_id: str,
     files: list[dict[str, Any]] | None,
+    runtime_root: str | Path | None = None,
+    runtime_id: str | None = None,
 ) -> PreparedAgentAttachments:
     if not files:
         return PreparedAgentAttachments(images=[], files=[], prompt_suffix="")
 
-    root = (
-        Path(workspace)
-        / ".cptr"
-        / "attachments"
-        / _safe_segment(chat_id)
-        / _safe_segment(message_id)
-    )
+    if runtime_root is None:
+        root = (
+            Path(workspace)
+            / ".cptr"
+            / "attachments"
+            / _safe_segment(chat_id)
+            / _safe_segment(message_id)
+        )
+    else:
+        root = (
+            ensure_task_runtime(runtime_id or message_id, root=runtime_root)
+            / "attachments"
+            / _safe_segment(chat_id)
+        )
 
     images: list[AgentAttachment] = []
     staged_files: list[AgentAttachment] = []
@@ -97,5 +107,5 @@ async def prepare_agent_attachments(
     suffix = ""
     if staged_files:
         lines = "\n".join(f"- {item.path}" for item in staged_files)
-        suffix = f"\n\nAttached files staged in the workspace:\n{lines}"
+        suffix = f"\n\nAttached files staged for this task:\n{lines}"
     return PreparedAgentAttachments(images=images, files=staged_files, prompt_suffix=suffix)

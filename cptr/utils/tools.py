@@ -30,6 +30,7 @@ from cptr.env import (
     CHAT_TOOL_COMMAND_MAX_CHARS,
     CHAT_TOOL_MAX_CHARS,
     EXECUTE_TIMEOUT,
+    TASK_ROOT,
     TASK_CANCELLATION_TIMEOUT_SECONDS,
 )
 from cptr.utils.gitignore import is_gitignored, load_gitignore
@@ -41,6 +42,7 @@ from cptr.utils.identity import (
     preexec_for,
 )
 from cptr.utils.runtime import Runtime, FileError
+from cptr.utils.task_runtime import ensure_task_runtime
 
 try:
     import fcntl
@@ -1422,7 +1424,12 @@ async def run_command(
         return f"Error: {e}"
 
     command_session_id = uuid.uuid4().hex[:8]
-    log_path = Path(workspace) / ".cptr" / "task_logs" / f"{command_session_id}.jsonl"
+    runtime_id = str(__context__.get("task_runtime_id") or f"command_{command_session_id}")
+    log_path = (
+        ensure_task_runtime(runtime_id, root=TASK_ROOT)
+        / "command-output"
+        / f"{command_session_id}.jsonl"
+    )
     try:
         if request is None:
             return "Error: request context unavailable"

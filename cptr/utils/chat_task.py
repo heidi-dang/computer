@@ -76,6 +76,8 @@ from cptr.utils.agents.events import (
     AgentToolUpdate,
 )
 from cptr.utils.agents.attachments import prepare_agent_attachments
+from cptr.env import TASK_ROOT
+from cptr.utils.task_runtime import ensure_task_runtime
 from cptr.utils.model_targets import AgentModelTarget, ApiModelTarget, ModelTarget
 from cptr.utils.identity import identity_for_context
 
@@ -1659,6 +1661,7 @@ async def run_chat_task(
             )
 
     control_task_id: str | None = None
+    runtime_task_id = message_id
     active_tool_names: dict[str, str] = {}
     try:
         chat_for_live = await Chat.get_by_id(chat_id)
@@ -1667,6 +1670,7 @@ async def run_chat_task(
             candidate = chat_meta.get("control_task_id")
             if candidate:
                 control_task_id = str(candidate)
+                runtime_task_id = control_task_id
     except Exception:
         logger.debug("[task %s] live task identity lookup failed", message_id[:8], exc_info=True)
 
@@ -1988,6 +1992,8 @@ async def run_chat_task(
         agent_attachments = await prepare_agent_attachments(
             request,
             workspace=agent_workspace,
+            runtime_root=TASK_ROOT,
+            runtime_id=runtime_task_id,
             user_id=user_id,
             chat_id=chat_id,
             message_id=(msg.parent_id if msg and msg.parent_id else message_id),
@@ -2052,7 +2058,10 @@ async def run_chat_task(
             "attachments": agent_attachments,
             "identity": identity,
         }
+        ensure_task_runtime(runtime_task_id)
         if agent_target.agent == "opencode":
+            runner_kwargs["runtime_id"] = runtime_task_id
+
             # Persist the OpenCode session as soon as it exists.  A control
             # interrupt can then abort a long native tool and resume the same
             # provider session instead of silently creating a replacement.
@@ -2521,6 +2530,7 @@ async def run_chat_task(
             or model,
             "chat_id": chat_id,
             "message_id": message_id,
+            "task_runtime_id": runtime_task_id,
             "connection": connection,
             "builtin_tools": builtin_tools,
             "inspection_scope": (

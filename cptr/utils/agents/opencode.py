@@ -26,6 +26,7 @@ from cptr.utils.agents.events import (
 from cptr.utils.agents.prompts import turn_prompt_text
 from cptr.utils.identity import env_for, preexec_for
 from cptr.utils.processes import terminate_process_group
+from cptr.utils.task_runtime import task_runtime_environment
 
 
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -73,7 +74,9 @@ async def _server_url_from_stdout(proc: asyncio.subprocess.Process, port: int) -
 
 
 @asynccontextmanager
-async def _opencode_server(profile: dict[str, Any], workspace: str, identity=None):
+async def _opencode_server(
+    profile: dict[str, Any], workspace: str, identity=None, runtime_id: str | None = None
+):
     server_url = str(profile.get("server_url") or "").strip()
     if server_url:
         yield server_url, None
@@ -86,6 +89,8 @@ async def _opencode_server(profile: dict[str, Any], workspace: str, identity=Non
     )
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
+    if runtime_id:
+        env = task_runtime_environment(runtime_id, base=env)
     port = _free_port()
     proc = await asyncio.create_subprocess_exec(
         str(profile["command"]),
@@ -334,10 +339,14 @@ async def run_opencode_agent(
     attachments: PreparedAgentAttachments,
     identity=None,
     session_state_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    runtime_id: str | None = None,
 ) -> AsyncIterator[AgentEvent]:
     del chat_params
     try:
-        async with _opencode_server(profile, workspace, identity) as (server_url, _proc):
+        async with _opencode_server(profile, workspace, identity, runtime_id=runtime_id) as (
+            server_url,
+            _proc,
+        ):
             headers = _headers(profile)
             urls = opencode_server_url_candidates(server_url)
             last_connect_error: Exception | None = None
