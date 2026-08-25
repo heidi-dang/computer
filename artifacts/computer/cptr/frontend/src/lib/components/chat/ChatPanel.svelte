@@ -759,6 +759,9 @@ transcriptRunId &&
 data?.flowdeck_parent_run_id ||
 data?.run_id ||
 data?.kind ||
+data?.delta ||
+data?.output ||
+data?.done ||
 data?.message_id === flowdeckMessageId)
 ) {
 mergeFlowDeckEvent(data, transcriptRunId, trustedFlowDeckEvent);

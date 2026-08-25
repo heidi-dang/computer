@@ -45,6 +45,8 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
             self.source,
         )
         self.assertIn("data?.message_id === flowdeckMessageId", self.source)
+        self.assertIn("data?.output", self.source)
+        self.assertIn("data?.delta", self.source)
         self.assertIn("isActiveNativeTranscriptEvent", self.source)
         self.assertIn("reconcileFlowDeckEventOwner", self.source)
         self.assertIn("trustedFlowDeckEvent = false", self.source)
