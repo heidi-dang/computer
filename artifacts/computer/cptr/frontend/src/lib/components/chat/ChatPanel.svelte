@@ -187,6 +187,7 @@ import LiveTerminal from './LiveTerminal.svelte';
 	let flowdeckPoller: ReturnType<typeof setInterval> | null = null;
 	let flowdeckEvents = $state<any[]>([]);
 let flowdeckEventBuffer: any[] = [];
+let flowdeckEvidenceSummary = $state<any>(null);
 	let flowdeckClarification = $state('');
 	let flowdeckMessageId = $state<string | null>(null);
 	const FLOWDECK_EVENT_LIMIT = 200;
@@ -1064,6 +1065,7 @@ applyNativeTranscriptEvent(event, message, true);
 		flowdeckIsAudit = false;
 		flowdeckEventBuffer = [];
 		flowdeckEvents = [];
+flowdeckEvidenceSummary = null;
 		flowdeckClarification = '';
 		flowdeckMessageId = null;
 	}
@@ -1503,6 +1505,7 @@ if (Array.isArray(state.events)) {
 	flowdeckEventBuffer = state.events.slice(-FLOWDECK_EVENT_LIMIT);
 	flowdeckEvents = flowdeckEventBuffer;
 }
+flowdeckEvidenceSummary = state.evidence_summary || null;
 				for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
 				if (isFlowDeckTerminal(flowdeckStatus)) {
 					if (flowdeckMessageId) {
@@ -1657,6 +1660,7 @@ reconcileFlowDeckEventOwner(previousFlowDeckOwner, flowdeckRunId);
 				mergeFlowDeckEvents(result.events, flowdeckRunId);
 				for (const event of result.events) applyFlowDeckEventToMessage(event);
 			}
+flowdeckEvidenceSummary = result.evidence_summary || null;
 			flowdeckStatus = String(result.status || 'active').toLowerCase();
 			flowdeckClarification = result.outcome === 'clarification' ? result.message || '' : '';
 			if (flowdeckClarification && flowdeckMessageId) {
@@ -2440,6 +2444,7 @@ if (flowdeckRunId) {
 						{sending}
 						isAudit={flowdeckIsAudit}
 						events={flowdeckEvents}
+evidenceSummary={flowdeckEvidenceSummary}
 						telemetry={flowdeckTelemetry}
 						oncancel={handleCancel}
 onreconnect={handleReconnect}
@@ -2586,6 +2591,7 @@ class="shrink-0 px-4 py-3 {selectedAgent === 'heidi' ? 'heidi-lower-interaction'
 						{sending}
 						isAudit={flowdeckIsAudit}
 						events={flowdeckEvents}
+evidenceSummary={flowdeckEvidenceSummary}
 						telemetry={flowdeckTelemetry}
 						oncancel={handleCancel}
 onreconnect={handleReconnect}

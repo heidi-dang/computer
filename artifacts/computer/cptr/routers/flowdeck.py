@@ -26,6 +26,7 @@ from cptr.flowdeck.coordinator import (
     run_heidi_coordinator,
 )
 from cptr.flowdeck.durable import (
+    build_audit_summary,
     DurableFlowDeck,
     DuplicateRequestError,
     LifecycleError,
@@ -1168,6 +1169,11 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
         for frame in terminal_frames
     )
     response["events"].sort(key=lambda event: (event["sequence"], event["created_at"]))
+    response["evidence_summary"] = build_audit_summary(
+        response["events"],
+        run_id=run.id,
+        owner=run.owner,
+    )
     return response
 
 

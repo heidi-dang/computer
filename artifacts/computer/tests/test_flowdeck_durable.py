@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.flowdeck.durable import (
     ApprovalStatus,
+    build_audit_summary,
     DurableFlowDeck,
     LifecycleError,
     OperationStatus,
@@ -52,6 +53,56 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(created)
         return run, operation
+
+    def test_audit_summary_is_bounded_identity_bound_and_redacted(self):
+        events = [
+            {
+                "id": "event-1",
+                "run_id": "run-a",
+                "sequence": 1,
+                "kind": "RUN_CREATED",
+                "payload": {"request_key": "private-request", "reason": "private reasoning"},
+                "created_at": 1,
+            },
+            {
+                "id": "event-2",
+                "run_id": "run-a",
+                "sequence": 2,
+                "kind": "VERIFY",
+                "payload": {
+                    "authoritative": True,
+                    "source": "verifier",
+                    "outcome": "succeeded",
+                    "secret": "credential-value",
+                },
+                "created_at": 2,
+            },
+            {
+                "id": "event-3",
+                "run_id": "run-a",
+                "sequence": 3,
+                "kind": "VERIFY",
+                "payload": {
+                    "authoritative": True,
+                    "source": "verifier",
+                    "outcome": "succeeded",
+                    "secret": "another-credential",
+                },
+                "created_at": 3,
+            },
+            {"id": "wrong-run", "run_id": "run-b", "sequence": 4, "kind": "LEAK", "payload": {}},
+        ]
+        summary = build_audit_summary(events, run_id="run-a", owner="user-a", limit=1)
+        self.assertEqual(summary["run_id"], "run-a")
+        self.assertEqual(summary["owner"], "user-a")
+        self.assertTrue(summary["truncated"])
+        self.assertEqual(len(summary["entries"]), 1)
+        entry = summary["entries"][0]
+        self.assertEqual(entry["authority"], "authoritative")
+        self.assertEqual(entry["run_id"], "run-a")
+        self.assertEqual(entry["owner"], "user-a")
+        self.assertNotIn("secret", entry["payload"])
+        self.assertNotIn("reason", entry["payload"])
 
     async def test_duplicate_request_and_intent_reuse_stable_ids(self):
         run, operation = await self._run_and_intent()

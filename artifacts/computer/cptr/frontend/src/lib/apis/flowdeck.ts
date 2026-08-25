@@ -15,6 +15,23 @@ export interface FlowDeckOrchestration {
 	finished_at?: string;
 	monitor_id?: string;
 	audit?: boolean;
+evidence_summary?: {
+run_id: string;
+owner: string;
+entries: Array<{
+id: string;
+run_id: string;
+owner: string;
+sequence: number;
+kind: string;
+authority: 'authoritative' | 'advisory';
+source: string;
+payload: Record<string, string | number | boolean>;
+created_at: number;
+}>;
+total: number;
+truncated: boolean;
+};
 	[key: string]: unknown;
 }
 

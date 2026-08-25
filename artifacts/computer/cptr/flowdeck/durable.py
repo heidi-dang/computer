@@ -7,6 +7,8 @@ the sole owner of model/tool execution; no method here invokes an adapter.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 import uuid
 from collections.abc import Callable
@@ -119,6 +121,112 @@ def _now_ms() -> int:
 
 def _id() -> str:
     return str(uuid.uuid4())
+
+
+AUDIT_SUMMARY_LIMIT = 100
+_AUDIT_SAFE_PAYLOAD_KEYS = frozenset(
+    {
+        "status",
+        "outcome",
+        "observed_outcome",
+        "operation",
+        "capability",
+        "specialist_id",
+        "child_agent_id",
+        "step",
+        "step_name",
+        "node_key",
+        "attempt_id",
+        "source",
+        "authoritative",
+    }
+)
+
+
+def build_audit_summary(
+    events: list[Any],
+    *,
+    run_id: str,
+    owner: str,
+    limit: int = AUDIT_SUMMARY_LIMIT,
+) -> dict[str, Any]:
+    """Return a bounded, display-safe view of durable FlowDeck evidence.
+
+    The caller supplies events already loaded for the server-owned run. Every
+    row is rebound to that run and owner; payloads are reduced to a small
+    allowlist so model prose, credentials, and verifier configuration cannot
+    become audit UI content.
+    """
+    bounded_limit = max(1, min(limit, AUDIT_SUMMARY_LIMIT))
+    entries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    ordered = sorted(
+        events,
+        key=lambda event: (
+            int(event.get("sequence", 0)) if isinstance(event, dict) else int(getattr(event, "sequence", 0)),
+            int(event.get("created_at", 0)) if isinstance(event, dict) else int(getattr(event, "created_at", 0)),
+        ),
+    )
+    for event in ordered:
+        if isinstance(event, dict):
+            event_id = str(event.get("id", ""))
+            event_run_id = str(event.get("run_id", run_id))
+            sequence = int(event.get("sequence", 0))
+            kind = str(event.get("kind", ""))
+            payload = event.get("payload") or {}
+            created_at = int(event.get("created_at", 0))
+        else:
+            event_id = str(event.id)
+            event_run_id = str(event.run_id)
+            sequence = int(event.sequence)
+            kind = str(event.kind)
+            payload = event.payload or {}
+            created_at = int(event.created_at)
+        if event_run_id != run_id or not kind or not isinstance(payload, dict):
+            continue
+        # Retain only simple JSON scalars and never expose arbitrary payloads.
+        safe_payload = {
+            key: value
+            for key, value in payload.items()
+            if key in _AUDIT_SAFE_PAYLOAD_KEYS
+            and isinstance(value, (str, int, float, bool))
+        }
+        authoritative = payload.get("authoritative") is True and payload.get("source") in {
+            "runtime",
+            "verifier",
+        }
+        source = "authoritative" if authoritative else "advisory"
+        dedupe_key = hashlib.sha256(
+            json.dumps(
+                {"kind": kind, "source": source, "payload": safe_payload},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        entries.append(
+            {
+                "id": event_id or f"{run_id}:{sequence}",
+                "run_id": run_id,
+                "owner": owner,
+                "sequence": sequence,
+                "kind": kind,
+                "authority": "authoritative" if authoritative else "advisory",
+                "source": payload.get("source") if authoritative else "lifecycle",
+                "payload": safe_payload,
+                "created_at": created_at,
+            }
+        )
+    total = len(entries)
+    return {
+        "run_id": run_id,
+        "owner": owner,
+        "entries": entries[-bounded_limit:],
+        "total": total,
+        "truncated": total > bounded_limit,
+    }
 
 
 class DurableFlowDeck:

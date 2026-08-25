@@ -8,6 +8,12 @@
 		sending?: boolean;
 		isAudit?: boolean;
 		events?: any[];
+evidenceSummary?: {
+run_id?: string;
+entries?: any[];
+total?: number;
+truncated?: boolean;
+} | null;
 		oncancel?: () => void;
 		onreconnect?: () => void;
 		onaction?: (action: DesignerAction) => void;
@@ -26,6 +32,7 @@
 		sending = false,
 		isAudit = false,
 		events = [],
+evidenceSummary = null,
 		oncancel,
 		onreconnect,
 		onaction,
@@ -77,6 +84,7 @@
 	);
 	let reportOpen = $state(false);
 	let evidenceOpen = $state<Record<string, boolean>>({});
+let auditTrailOpen = $state(false);
 
 	const label = $derived.by(() => {
 		switch (status.toLowerCase()) {
@@ -212,6 +220,38 @@
 			{/if}
 		</section>
 	{/if}
+{#if evidenceSummary?.entries?.length}
+<section class="flowdeck-audit-trail" aria-label="FlowDeck evidence summary">
+<button
+type="button"
+class="flowdeck-report-toggle"
+aria-expanded={auditTrailOpen}
+onclick={() => (auditTrailOpen = !auditTrailOpen)}
+>
+<span>
+<strong>Evidence trail</strong>
+<span class="flowdeck-report-subtitle">
+{evidenceSummary.total || evidenceSummary.entries.length} deduplicated entries
+{evidenceSummary.truncated ? ' · showing the latest 100' : ''}
+</span>
+</span>
+<span aria-hidden="true">{auditTrailOpen ? '−' : '+'}</span>
+</button>
+{#if auditTrailOpen}
+<ol class="flowdeck-audit-list">
+{#each evidenceSummary.entries as entry (entry.id)}
+<li class="flowdeck-audit-entry">
+<span class:authoritative={entry.authority === 'authoritative'} class="flowdeck-audit-badge">
+{entry.authority === 'authoritative' ? 'Authoritative' : 'Advisory'}
+</span>
+<span class="flowdeck-audit-kind">{entry.kind}</span>
+<span class="flowdeck-audit-sequence">#{entry.sequence}</span>
+</li>
+{/each}
+</ol>
+{/if}
+</section>
+{/if}
 	<DesignerResults
 		{events}
 		{status}
@@ -291,6 +331,49 @@
 		border-radius: 0.75rem;
 		background: color-mix(in oklab, var(--app-surface) 95%, #312e81);
 	}
+.flowdeck-audit-trail {
+margin: 0.35rem 0 0.65rem 1.1rem;
+max-width: 42rem;
+border: 1px solid color-mix(in oklab, var(--app-fg) 16%, transparent);
+border-radius: 0.75rem;
+background: color-mix(in oklab, var(--app-surface) 96%, transparent);
+}
+.flowdeck-audit-list {
+display: grid;
+gap: 0.35rem;
+border-top: 1px solid color-mix(in oklab, var(--app-fg) 10%, transparent);
+padding: 0.6rem 0.7rem 0.65rem 1.8rem;
+font-size: 0.62rem;
+}
+.flowdeck-audit-entry {
+display: flex;
+align-items: center;
+gap: 0.4rem;
+min-width: 0;
+}
+.flowdeck-audit-badge {
+flex: 0 0 auto;
+border-radius: 0.25rem;
+padding: 0.12rem 0.28rem;
+background: color-mix(in oklab, #f59e0b 18%, transparent);
+color: color-mix(in oklab, #f59e0b 80%, var(--app-fg));
+font-size: 0.55rem;
+}
+.flowdeck-audit-badge.authoritative {
+background: color-mix(in oklab, #34d399 18%, transparent);
+color: color-mix(in oklab, #34d399 80%, var(--app-fg));
+}
+.flowdeck-audit-kind {
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+color: color-mix(in oklab, var(--app-fg) 70%, transparent);
+}
+.flowdeck-audit-sequence {
+margin-left: auto;
+color: color-mix(in oklab, var(--app-fg) 42%, transparent);
+font-family: ui-monospace, SFMono-Regular, monospace;
+}
 	.flowdeck-report-toggle {
 		display: flex;
 		align-items: center;
