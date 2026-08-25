@@ -437,6 +437,7 @@ class AutonomousSupervisor:
         intended_generation_id: str | None,
         baseline_diff_fingerprint: str | None = None,
         baseline_workspace_snapshot: dict[str, Any] | None = None,
+        setup_readiness_status: str | None = None,
     ) -> MonitorState:
         """Bind autonomous control to the worker generation it targeted."""
         monitor = await self._required_monitor(monitor_id)
@@ -451,6 +452,13 @@ class AutonomousSupervisor:
             "baseline_workspace_snapshot": baseline_workspace_snapshot,
             "baseline_workspace_fingerprint": (baseline_workspace_snapshot or {}).get(
                 "fingerprint"
+            ),
+            "setup_readiness_status": setup_readiness_status
+            or (
+                "READY"
+                if isinstance(baseline_workspace_snapshot, dict)
+                and baseline_workspace_snapshot.get("fingerprint")
+                else "NOT_READY"
             ),
             "post_consumption_workspace_fingerprint": None,
             "effect_observed_at": None,
@@ -640,33 +648,66 @@ class AutonomousSupervisor:
             return
         task_status = str(task.get("status") or "").upper()
         await self._append_evidence(monitor, scope, "worker_state", task)
+        steering_records = await self._steering_provenance_records(scope)
         if task_status not in TERMINAL_TASK_STATUSES:
             scope.transition(ScopeStatus.WORKING)
             return
         if task_status in {"FAILED", "ERROR", "CANCELLED"}:
+            failed_steering = next(
+                (
+                    item
+                    for item in steering_records
+                    if item.get("intended_task_id") == task_id
+                    and item.get("effect_status") != "EFFECT_OBSERVED"
+                ),
+                None,
+            )
+            if failed_steering is not None:
+                await self._block_steering_delivery(
+                    monitor,
+                    scope,
+                    failed_steering,
+                    "The intended worker failed before steering readiness, consumption, and effect proof completed.",
+                )
+                return
             await self._repair_or_block(
                 monitor, scope, {"category": "worker_failure", "message": task.get("error")}
             )
             return
 
-        steering_records = await self._steering_provenance_records(scope)
         if steering_records:
-            invalid_steering = next(
+            pending_steering = next(
                 (
                     item
                     for item in steering_records
                     if item.get("status") != "CONSUMED"
-                    or item.get("consumed_task_id") != item.get("intended_task_id")
                 ),
                 None,
             )
-            if invalid_steering is not None:
+            if pending_steering is not None:
                 scope.next_action = "Wait for the intended worker to consume the steering control."
                 await self._append_evidence(
                     monitor,
                     scope,
                     "steering_provenance",
                     {"requests": steering_records, "status": "NOT_VERIFIED"},
+                )
+                return
+            invalid_steering = next(
+                (
+                    item
+                    for item in steering_records
+                    if self._steering_delivery_failure_reason(item, task_id) is not None
+                ),
+                None,
+            )
+            if invalid_steering is not None:
+                await self._block_steering_delivery(
+                    monitor,
+                    scope,
+                    invalid_steering,
+                    self._steering_delivery_failure_reason(invalid_steering, task_id)
+                    or "Steering delivery failed.",
                 )
                 return
 
@@ -930,6 +971,43 @@ class AutonomousSupervisor:
         scope.transition(ScopeStatus.REPAIR_REQUIRED)
         await self._try_delegate(monitor, scope, scope.next_action)
 
+    async def _block_steering_delivery(
+        self,
+        monitor: MonitorState,
+        scope: ScopeRecord,
+        record: dict[str, Any],
+        message: str,
+    ) -> None:
+        self._set_steering_effect(
+            scope,
+            record["control_message_id"],
+            status="DELIVERY_FAILED",
+            observed_at=int(time.time() * 1000),
+        )
+        failure = {
+            "category": "steering_delivery_failed",
+            "scope_id": scope.scope_id,
+            "control_message_id": record.get("control_message_id"),
+            "intended_task_id": record.get("intended_task_id"),
+            "intended_generation_id": record.get("intended_generation_id"),
+            "consumed_task_id": record.get("consumed_task_id"),
+            "consumed_message_id": record.get("consumed_message_id"),
+            "message": message,
+            "signature": normalize_failure_signature(
+                {
+                    "category": "steering_delivery_failed",
+                    "scope_id": scope.scope_id,
+                    "message": message,
+                }
+            ),
+        }
+        scope.failure_evidence.append(failure)
+        scope.next_action = message
+        scope.transition(ScopeStatus.BLOCKED)
+        monitor.status = MonitorStatus.BLOCKED
+        await self._append_evidence(monitor, scope, "failure", failure)
+        await self.store.release_workspace(monitor.workspace_id, monitor.monitor_id)
+
     async def _try_delegate(
         self, monitor: MonitorState, scope: ScopeRecord, assignment: str
     ) -> None:
@@ -1160,6 +1238,8 @@ class AutonomousSupervisor:
                 return "required steering control_message_id is missing"
             if record.get("status") != "CONSUMED":
                 return f"steering control {control_id} did not reach CONSUMED"
+            if record.get("setup_readiness_status") != "READY":
+                return f"steering control {control_id} setup readiness was not established"
             intended_task_id = record.get("intended_task_id")
             consumed_task_id = record.get("consumed_task_id")
             if not intended_task_id or not consumed_task_id:
@@ -1168,8 +1248,14 @@ class AutonomousSupervisor:
                 return f"steering control {control_id} was consumed by the wrong worker"
             if task_id is not None and consumed_task_id != task_id:
                 return f"steering control {control_id} was not consumed by the completed worker"
-            if not record.get("consumed_message_id") or record.get("consumed_at") is None:
+            intended_generation_id = record.get("intended_generation_id")
+            consumed_message_id = record.get("consumed_message_id")
+            if not intended_generation_id:
+                return f"steering control {control_id} is missing intended generation provenance"
+            if not consumed_message_id or record.get("consumed_at") is None:
                 return f"steering control {control_id} is missing consumption evidence"
+            if consumed_message_id != intended_generation_id:
+                return f"steering control {control_id} was consumed by the wrong worker generation"
             baseline = record.get("baseline_workspace_snapshot")
             baseline_fingerprint = record.get("baseline_workspace_fingerprint") or (
                 baseline.get("fingerprint") if isinstance(baseline, dict) else None
@@ -1251,6 +1337,14 @@ class AutonomousSupervisor:
                 continue
             if record.get("consumed_task_id") != record.get("intended_task_id"):
                 return "Steering was not consumed by the intended worker task."
+            if record.get("consumed_message_id") != record.get("intended_generation_id"):
+                self._set_steering_effect(
+                    scope,
+                    record["control_message_id"],
+                    status="DELIVERY_FAILED",
+                    observed_at=int(time.time() * 1000),
+                )
+                return "Steering was consumed by a replacement worker generation."
             if task_id != record.get("intended_task_id"):
                 self._set_steering_effect(
                     scope,
@@ -1295,6 +1389,21 @@ class AutonomousSupervisor:
         return None
 
     @staticmethod
+    def _steering_delivery_failure_reason(
+        record: dict[str, Any], task_id: str | None
+    ) -> str | None:
+        control_id = record.get("control_message_id")
+        if record.get("consumed_task_id") != record.get("intended_task_id"):
+            return f"steering control {control_id} was consumed by the wrong worker"
+        if task_id is not None and record.get("consumed_task_id") != task_id:
+            return f"steering control {control_id} was not consumed by the completed worker"
+        intended_generation_id = record.get("intended_generation_id")
+        consumed_message_id = record.get("consumed_message_id")
+        if intended_generation_id and consumed_message_id != intended_generation_id:
+            return f"steering control {control_id} was consumed by the wrong worker generation"
+        return None
+
+    @staticmethod
     def _set_steering_effect(
         scope: ScopeRecord,
         control_message_id: str,
@@ -1325,6 +1434,21 @@ class AutonomousSupervisor:
             kind,
             payload,
         )
+        from cptr.services.live_events import safe_publish_monitor_event
+
+        summary = {
+            "kind": kind,
+            "scope_id": scope.scope_id if scope else None,
+        }
+        for key in ("status", "passed", "category", "operation"):
+            if key in payload:
+                summary[key] = payload[key]
+        await safe_publish_monitor_event(
+            user_id=monitor.user_id,
+            monitor_id=monitor.monitor_id,
+            event_type="evidence.recorded",
+            payload=summary,
+        )
 
     async def _steering_provenance(self, scope: ScopeRecord) -> dict[str, Any] | None:
         records = await self._steering_provenance_records(scope)
@@ -1344,6 +1468,18 @@ class AutonomousSupervisor:
             else:
                 status = str(getattr(message, "status", "UNKNOWN")).upper()
                 request["status"] = status
+                request["target_generation_id"] = getattr(message, "target_message_id", None)
+                if request.get("intended_generation_id") is None:
+                    request["intended_generation_id"] = getattr(
+                        message, "target_message_id", None
+                    )
+                if getattr(message, "setup_readiness_status", None):
+                    request["setup_readiness_status"] = getattr(
+                        message, "setup_readiness_status"
+                    )
+                request["control_intended_generation_id"] = getattr(
+                    message, "intended_message_id", None
+                )
                 request["consumed_task_id"] = getattr(message, "consumed_task_id", None)
                 request["consumed_message_id"] = getattr(message, "consumed_message_id", None)
                 request["consumed_at"] = getattr(message, "consumed_at", None)

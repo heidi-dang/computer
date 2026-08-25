@@ -10,9 +10,10 @@ from cptr.routers.browser import router as browser_router
 from cptr.routers.chat import router as chat_router
 from cptr.routers.coding import router as coding_router
 from cptr.routers.control import router as control_router
-from cptr.routers.gateway import router as gateway_router
+from cptr.routers.control_stream import router as control_stream_router
 from cptr.routers.events import router as events_router
 from cptr.routers.files import router as files_router
+from cptr.routers.gateway import router as gateway_router
 from cptr.routers.git import router as git_router
 from cptr.routers.images import router as images_router
 from cptr.routers.memory import router as memory_router
@@ -30,10 +31,10 @@ __all__ = [
     "automations_router",
     "bridge_router",
     "browser_router",
-    "webhook_router",
     "chat_router",
     "coding_router",
     "control_router",
+    "control_stream_router",
     "events_router",
     "files_router",
     "gateway_router",
@@ -45,5 +46,6 @@ __all__ = [
     "skills_router",
     "state_router",
     "terminal_router",
+    "webhook_router",
     "workspace_router",
 ]

@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from cptr.services.agent_service import AgentService
 
@@ -71,6 +71,121 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(result["output"], "finished output")
         update.assert_awaited_once()
+
+    async def test_get_task_exposes_bounded_control_delivery_records_without_content(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do work",
+            model_id="model-1",
+            output="visible output",
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        message = SimpleNamespace(
+            id="message-1",
+            chat_id="chat-1",
+            done=False,
+            content="visible output",
+            output=[],
+            meta=None,
+        )
+        control_rows = [
+            SimpleNamespace(
+                id=f"control-{index}",
+                status="CONSUMED",
+                chat_message_id=f"queued-{index}",
+                target_message_id="message-1",
+                monitor_id="monitor-1",
+                scope_id="scope-1",
+                intended_message_id="message-1",
+                consumed_task_id="task-1",
+                consumed_message_id=f"worker-{index}",
+                created_at=index,
+                updated_at=index,
+                delivered_at=index + 100,
+                consumed_at=index + 200,
+                content="/home/shacker/secret TOKEN",
+                dedupe_key="secret-dedupe",
+            )
+            for index in range(25)
+        ]
+
+        class FakeResult:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return control_rows[:21]
+
+        class FakeDb:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def execute(self, statement):
+                return FakeResult()
+
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
+            patch("cptr.utils.chat_task.is_running", return_value=True),
+            patch.object(service.store, "update", new=AsyncMock()),
+            patch("cptr.services.agent_service.get_db", new=AsyncMock(return_value=FakeDb())),
+        ):
+            result = await service.get_task("task-1", user_id="user-1")
+
+        self.assertEqual(len(result["control_messages"]), 20)
+        self.assertTrue(result["control_messages_truncated"])
+        first = result["control_messages"][0]
+        self.assertEqual(first["id"], "control-0")
+        self.assertEqual(first["status"], "CONSUMED")
+        self.assertEqual(first["intended_message_id"], "message-1")
+        self.assertEqual(first["consumed_task_id"], "task-1")
+        self.assertEqual(first["consumed_message_id"], "worker-0")
+        self.assertEqual(first["delivered_at"], 100)
+        self.assertEqual(first["consumed_at"], 200)
+        self.assertNotIn("content", first)
+        self.assertNotIn("dedupe_key", first)
+        self.assertNotIn("secret", str(result["control_messages"]).lower())
+
+    async def test_get_output_includes_control_delivery_records(self):
+        service = AgentService()
+        with patch.object(
+            service,
+            "get_task",
+            new=AsyncMock(
+                return_value={
+                    "id": "task-1",
+                    "status": "RUNNING",
+                    "output": "visible",
+                    "raw_output": [],
+                    "control_messages": [
+                        {
+                            "id": "control-1",
+                            "status": "DELIVERED",
+                            "consumed_task_id": None,
+                            "consumed_message_id": None,
+                            "consumed_at": None,
+                        }
+                    ],
+                    "control_messages_truncated": False,
+                }
+            ),
+        ):
+            result = await service.get_output("task-1", user_id="user-1")
+
+        self.assertEqual(result["control_messages"][0]["id"], "control-1")
+        self.assertEqual(result["control_messages"][0]["status"], "DELIVERED")
+        self.assertFalse(result["control_messages_truncated"])
 
     async def test_cancel_marks_task_cancelled_when_worker_exists(self):
         service = AgentService()
@@ -162,6 +277,111 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "QUEUED")
         self.assertEqual(result["delivery_status"], "QUEUED")
         process.assert_not_awaited()
+
+    async def test_send_message_does_not_interrupt_before_execution_setup_is_ready(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-setup-fence",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do setup then wait",
+            model_id="model-1",
+            output=None,
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        queued = SimpleNamespace(
+            id="control-message-setup-fence",
+            chat_message_id="message-2",
+            status="QUEUED",
+            target_message_id=None,
+            intended_message_id=None,
+        )
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch.object(service.store, "enqueue_message", new=AsyncMock(return_value=queued)),
+            patch("cptr.utils.chat_task.is_running", return_value=True),
+            patch("cptr.utils.chat_task.control_setup_ready", return_value=False, create=True),
+            patch(
+                "cptr.utils.chat_task.schedule_control_interrupt_after_setup",
+                create=True,
+            ) as schedule,
+            patch("cptr.utils.chat_task.interrupt_for_control", new=AsyncMock()) as interrupt,
+            patch("cptr.utils.chat_task.process_pending_chat_inputs", new=AsyncMock()) as process,
+        ):
+            result = await service.send_message(
+                "task-setup-fence",
+                user_id="user-1",
+                content="STEERING_AFTER_SETUP",
+                idempotency_key="setup-fence-1",
+            )
+
+        self.assertEqual(result["delivery_status"], "QUEUED")
+        self.assertEqual(result["setup_readiness_status"], "NOT_READY")
+        schedule.assert_called_once_with(
+            "message-1",
+            control_message_id="control-message-setup-fence",
+            timeout=ANY,
+        )
+        interrupt.assert_not_awaited()
+        process.assert_not_awaited()
+
+    async def test_send_message_persists_task_model_on_queued_control(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do work",
+            model_id="heidi-antigravity",
+            output=None,
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        control = SimpleNamespace(
+            id="control-message-1",
+            chat_message_id=None,
+            status="QUEUED",
+        )
+        queued_message = SimpleNamespace(id="message-2")
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch.object(service.store, "enqueue_message", new=AsyncMock(return_value=control)),
+            patch.object(service.store, "update_message", new=AsyncMock()),
+            patch.object(service.store, "get_message", new=AsyncMock(return_value=control)),
+            patch("cptr.models.ChatMessage.get_all_by_chat", new=AsyncMock(return_value=[])),
+            patch(
+                "cptr.models.ChatMessage.create",
+                new=AsyncMock(return_value=queued_message),
+            ) as create_message,
+            patch("cptr.utils.chat_task.is_running", return_value=False),
+            patch("cptr.utils.chat_task.get_active_chat_ids", return_value=set()),
+            patch("cptr.utils.chat_task.process_pending_chat_inputs", new=AsyncMock()),
+            patch(
+                "cptr.utils.identity.internal_request_for_user",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "cptr.models.Chat.get_by_id",
+                new=AsyncMock(return_value=SimpleNamespace(meta={"workspace": "/disposable"})),
+            ),
+        ):
+            await service.send_message(
+                "task-1",
+                user_id="user-1",
+                content="STEERING_MARKER_1",
+                idempotency_key="steer-1",
+            )
+
+        self.assertEqual(create_message.await_args.kwargs["model"], "heidi-antigravity")
 
     async def test_cancel_reports_when_completion_wins_terminal_race(self):
         service = AgentService()

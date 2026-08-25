@@ -663,6 +663,22 @@ class ControlTaskStore:
             result = await db.execute(select(ControlMessage.id).where(and_(*conditions)).limit(1))
             return result.scalar_one_or_none() is not None
 
+    async def mark_setup_ready_for_message(self, message_id: str, *, now: int) -> int:
+        """Record that the owning worker crossed its first completed tool boundary."""
+        async with await get_db() as db:
+            task_ids = select(ControlTask.id).where(ControlTask.message_id == message_id)
+            result = await db.execute(
+                update(ControlMessage)
+                .where(
+                    ControlMessage.task_id.in_(task_ids),
+                    ControlMessage.status.in_({"QUEUED", "DELIVERED"}),
+                    ControlMessage.setup_readiness_status.is_(None),
+                )
+                .values(setup_readiness_status="READY", updated_at=now)
+            )
+            await db.commit()
+            return int(result.rowcount or 0)
+
     async def enqueue_message(
         self,
         *,
@@ -753,6 +769,10 @@ class ControlTaskStore:
                     ControlMessage.id == message_id,
                     ControlMessage.status == "DELIVERED",
                     ControlMessage.task_id == task_id,
+                    or_(
+                        ControlMessage.target_message_id.is_(None),
+                        ControlMessage.target_message_id == message_id_for_run,
+                    ),
                 )
                 .values(
                     status="CONSUMED",
