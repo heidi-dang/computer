@@ -1,0 +1,205 @@
+Task — Heidi Live Terminal final realtime qualification
+
+Do not redesign or replace the existing Live Terminal implementation.
+
+The current implementation already fixed:
+
+- delta-bearing FlowDeck events being rejected
+- parent/child FlowDeck identity mapping
+- reuse of the native authenticated Socket.IO/transcript stream
+- event sequence ordering
+- deduplication
+- safe terminal rendering
+
+The remaining job is to prove that this works in a real authenticated Heidi run.
+
+FIRST:
+Investigate why the disposable authenticated browser harness could not locate the Heidi selector/composer.
+
+Do not immediately modify production UI.
+
+Determine whether the first incorrect state is:
+
+1. stale browser test selector
+2. changed DOM structure
+3. authentication/navigation timing
+4. composer not yet mounted
+5. Heidi agent selector changed
+6. real UI regression
+
+Fix only the actual root cause.
+
+Then reconstruct the isolated authenticated browser qualification and execute a real Heidi task.
+
+Required live sequence:
+
+User sends task
+→ Heidi validation starts
+→ validation passes
+→ planning begins
+→ specialist/child starts
+→ tools execute
+→ file/read/search activity streams
+→ output streams
+→ verification streams
+→ terminal parent state
+
+While that happens, prove the Live Terminal updates incrementally in real time.
+
+The terminal MUST NOT remain:
+
+$ waiting for authenticated FlowDeck activity…
+
+after the native Heidi transcript has begun receiving eligible events.
+
+Capture evidence that the same event appears through:
+
+native Heidi transcript
+AND
+Live Terminal
+
+without introducing another event transport.
+
+Required live terminal evidence:
+
+- HEIDI_VALIDATION_STARTED
+- HEIDI_VALIDATION_PASSED
+- planning activity
+- specialist identity
+- child/parent identity
+- tool activity
+- file/read/search activity
+- shell command if the task legitimately executes one
+- stdout/stderr or tool output when available
+- verification activity
+- attempt/step/run identity
+- terminal success/failure/cancel state
+
+Parent/child requirement:
+
+A child event containing:
+
+flowdeck_parent_run_id = parent
+flowdeck_run_id = child
+
+must render in the active parent Heidi Live Terminal while preserving the child identity in its metadata.
+
+Do not flatten or destroy child identity.
+
+REALTIME REQUIREMENT
+
+Prove incremental arrival.
+
+Do not accept a terminal that populates only after polling/reload or after task completion.
+
+Record timestamps/sequence:
+
+event emitted
+→ Socket.IO received
+→ native transcript applied
+→ Live Terminal rendered
+
+The terminal should update while the model is still working.
+
+RECONNECT
+
+During an active task:
+
+disconnect/reload
+→ reconnect
+→ durable reconciliation
+→ existing terminal history restored
+→ new events continue streaming
+→ no duplicates
+
+PAUSE
+
+Pause must stop autoscroll only.
+
+It must NOT:
+- stop event ingestion
+- stop Heidi
+- cancel children
+- lose events
+
+Resume must show all events accumulated while paused.
+
+COLLAPSE
+
+Collapse must hide presentation only.
+
+Events must continue accumulating.
+
+Reopen must show the correct stream.
+
+TERMINAL STATES
+
+On:
+
+SUCCEEDED
+FAILED
+CANCELLED
+MANUAL_REVIEW_REQUIRED
+UNKNOWN
+
+the LIVE animation must stop immediately and display the truthful state.
+
+No fake running status.
+
+SECURITY
+
+Never render:
+
+- chain-of-thought
+- hidden reasoning
+- credentials
+- authorization headers
+- cookies
+- secrets
+- raw private environment values
+
+Safe summaries only.
+
+NO ARCHITECTURAL WORKAROUNDS
+
+Do not add:
+
+- second Socket.IO connection
+- second SSE path
+- special terminal polling loop
+- duplicate backend event emitter
+- second transcript store
+- model-specific integration
+- provider fallback
+
+The terminal remains a presentation consumer of the existing authenticated CPTR/FlowDeck event stream.
+
+REGRESSION
+
+Run:
+
+- native transcript tests
+- Live Terminal tests
+- FlowDeck parent/child event tests
+- reconnect/dedup tests
+- svelte-check
+- production frontend build
+- backend regression relevant to realtime/FlowDeck
+- desktop browser qualification
+- narrow/mobile browser qualification
+
+Acceptance requires a captured real authenticated run where:
+
+native Heidi transcript is actively streaming
+AND
+Live Terminal is simultaneously streaming the corresponding safe events.
+
+If the transcript is active but Live Terminal displays the waiting placeholder, FAIL.
+
+If Live Terminal only updates after completion/reload, FAIL.
+
+If child events disappear because their run ID differs from the parent, FAIL.
+
+If all pass, record this as Phase 11 authenticated Live Terminal evidence and continue the remaining Phase 11 master-plan closure work.
+
+Do not claim Phase 11 complete solely from this feature.
