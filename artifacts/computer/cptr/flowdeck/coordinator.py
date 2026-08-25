@@ -115,6 +115,28 @@ _CHECK_HINTS = ("test", "build", "typecheck", "lint")
 _MUTATION_HINTS = ("write", "edit", "modify", "change", "create", "update", "delete")
 
 
+def is_material_steering(instructions: list[str]) -> bool:
+    """Identify steering that changes the validated task scope."""
+    terms = (
+        "change scope",
+        "instead",
+        "also",
+        "remove",
+        "add",
+        "switch",
+        "focus",
+        "write",
+        "edit",
+        "modify",
+        "delete",
+    )
+    return any(
+        term in instruction.casefold()
+        for instruction in instructions
+        for term in terms
+    )
+
+
 def _designer_contract(task: str) -> tuple[str, dict[str, Any]]:
     """Map natural-language design intent to a bounded Designer contract."""
     lowered = (task or "").casefold()
@@ -276,6 +298,19 @@ async def run_heidi_coordinator(
         return CoordinatorResult("succeeded", run.id, (), ())
     if run.status == RunStatus.CANCELLED.value:
         return CoordinatorResult("cancelled", run.id, (), ())
+    if not created and run.status in {
+        RunStatus.FAILED.value,
+        RunStatus.MANUAL_REVIEW_REQUIRED.value,
+        RunStatus.ORPHANED.value,
+    }:
+        return CoordinatorResult(
+            run.status.lower(),
+            run.id,
+            (),
+            (),
+            outcome="recovery_required",
+            message="This validation or execution run is terminal and cannot authorize a replay.",
+        )
     if request.audit_contract:
         from cptr.flowdeck.audit_repository import collect_repository_facts
 
@@ -365,6 +400,44 @@ async def run_heidi_coordinator(
             message=f"Heidi validation stopped before execution: {validation.reason}",
         )
     await store.record_event(run.id, "HEIDI_VALIDATION_PASSED", validation_payload)
+    current_config = FlowDeckConfig.from_env()
+    current_validation = await validate_pre_execution(
+        task=request.task,
+        workspace=root,
+        model=request.model,
+        plan=plan,
+        config=current_config,
+        build_request=build_request,
+        audit_contract=request.audit_contract,
+    )
+    if (
+        current_validation.outcome != "passed"
+        or current_validation.fingerprint != validation.fingerprint
+    ):
+        await store.record_event(
+            run.id,
+            "HEIDI_VALIDATION_STALE",
+            {
+                "outcome": current_validation.outcome,
+                "reason": (
+                    "repository or policy state changed after validation"
+                    if current_validation.fingerprint != validation.fingerprint
+                    else current_validation.reason
+                ),
+                "facts": current_validation.facts,
+                "fingerprint": current_validation.fingerprint,
+            },
+        )
+        await store.finish_step(parent_step.id, status=StepStatus.FAILED)
+        await store.complete_run(run.id, status=RunStatus.FAILED)
+        return CoordinatorResult(
+            "failed",
+            run.id,
+            (),
+            (),
+            outcome="validation_stale",
+            message="Heidi validation became stale before execution; no work was dispatched.",
+        )
     if not plan:
         raise CoordinatorPolicyError("validation did not classify the task")
     _validate_plan(plan, config)
@@ -413,6 +486,22 @@ async def run_heidi_coordinator(
             )
         return instructions
 
+    def material_steering(instructions: list[str]) -> bool:
+        terms = (
+            "change scope",
+            "instead",
+            "also",
+            "remove",
+            "add",
+            "switch",
+            "focus",
+            "write",
+            "edit",
+            "modify",
+            "delete",
+        )
+        return any(term in instruction.casefold() for instruction in instructions for term in terms)
+
     async def cancelled_result() -> CoordinatorResult | None:
         current = await store.get_run_by_request_key(request.request_key)
         if current and current.status == RunStatus.CANCELLED.value:
@@ -431,6 +520,43 @@ async def run_heidi_coordinator(
             objective = f"{objective}\n\nHeidi steering instructions:\n" + "\n".join(
                 f"- {instruction}" for instruction in steering
             )
+            if is_material_steering(steering):
+                steered_plan = classify_coordinator_request(
+                    objective, coding_role=config.coding_role
+                )
+                revalidation = await validate_pre_execution(
+                    task=objective,
+                    workspace=root,
+                    model=request.model,
+                    plan=steered_plan,
+                    config=config,
+                    build_request=build_request,
+                    audit_contract=request.audit_contract,
+                )
+                revalidation_payload = {
+                    "outcome": revalidation.outcome,
+                    "reason": revalidation.reason,
+                    "facts": revalidation.facts,
+                    "fingerprint": revalidation.fingerprint,
+                    "trigger": "material_steering",
+                }
+                if revalidation.outcome != "passed":
+                    await store.record_event(
+                        run.id, "HEIDI_REVALIDATION_FAILED", revalidation_payload
+                    )
+                    await store.finish_step(parent_step.id, status=StepStatus.FAILED)
+                    await store.complete_run(run.id, status=RunStatus.FAILED)
+                    return CoordinatorResult(
+                        "failed",
+                        run.id,
+                        tuple(children),
+                        tuple(outputs),
+                        outcome="validation_rejected",
+                        message=f"Heidi revalidation stopped execution: {revalidation.reason}",
+                    )
+                await store.record_event(
+                    run.id, "HEIDI_REVALIDATION_PASSED", revalidation_payload
+                )
         budget.consume_step()
         budget.consume_delegation()
         child_key = f"{request.request_key}:child:{index}:{item.specialist_id}"

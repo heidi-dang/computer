@@ -1,6 +1,5 @@
 import asyncio
 import hashlib
-import json
 import subprocess
 import tempfile
 import unittest

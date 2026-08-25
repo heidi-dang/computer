@@ -55,7 +55,6 @@ from cptr.flowdeck.generated_auth import (
 )
 from cptr.flowdeck.checkpoints import CheckpointError, CheckpointService
 from cptr.flowdeck.adaptive import adaptive_route
-from cptr.models.flowdeck import FlowDeckCheckpoint
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
 from cptr.utils.config import now_ms

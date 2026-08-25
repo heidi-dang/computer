@@ -2,11 +2,11 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import FlowDeckMode
-from cptr.flowdeck.coordinator import PlannedDelegation
+from cptr.flowdeck.coordinator import PlannedDelegation, is_material_steering
 from cptr.flowdeck.validation import validate_pre_execution
 
 
@@ -122,6 +122,14 @@ class PreExecutionValidationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.outcome, "rejected")
         self.assertIn("mutation", result.reason)
+
+    def test_trivial_steering_does_not_trigger_full_revalidation(self):
+        self.assertFalse(is_material_steering(["please keep the explanation concise"]))
+        self.assertFalse(is_material_steering(["continue with the current review"]))
+
+    def test_scope_steering_triggers_revalidation(self):
+        self.assertTrue(is_material_steering(["also inspect authentication boundaries"]))
+        self.assertTrue(is_material_steering(["instead edit the backend implementation"]))
 
 
 if __name__ == "__main__":

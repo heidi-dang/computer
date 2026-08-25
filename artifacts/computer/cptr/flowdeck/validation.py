@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import inspect
 from pathlib import Path
 import re
 from typing import Any, Sequence
 
 from cptr.flowdeck.config import FlowDeckConfig
+from cptr.flowdeck.git import GitInspectionError, GitInspectionRequest, inspect_git
 class PreExecutionValidationError(RuntimeError):
     """A validation failure that must stop execution before child dispatch."""
 
@@ -58,6 +60,23 @@ def _workspace_facts(workspace: str) -> dict[str, Any]:
     }
 
 
+async def _repository_facts(workspace: str, facts: dict[str, Any]) -> dict[str, Any]:
+    if not facts["workspace_exists"] or not facts["git_available"]:
+        return {"repository_state_verified": not facts["git_available"]}
+    try:
+        snapshot = await inspect_git(
+            GitInspectionRequest(workspace=workspace, operation="status", limit=1),
+            authorized_workspace=workspace,
+        )
+    except GitInspectionError:
+        return {"repository_state_verified": False}
+    status = "\n".join(snapshot.get("lines", []))
+    return {
+        "repository_state_verified": True,
+        "git_status_digest": hashlib.sha256(status.encode("utf-8")).hexdigest(),
+    }
+
+
 async def validate_pre_execution(
     *,
     task: str,
@@ -77,6 +96,9 @@ async def validate_pre_execution(
     text = (task or "").strip()
     lowered = text.casefold()
     facts = _workspace_facts(workspace)
+    if inspect.isawaitable(facts):
+        facts = await facts
+    facts.update(await _repository_facts(workspace, facts))
     facts.update(
         {
             "model_present": bool(model.strip()),
@@ -98,6 +120,8 @@ async def validate_pre_execution(
         return _result("clarification", "the task is not specific enough to select a qualified path", facts)
     if not facts["workspace_exists"]:
         return _result("rejected", "the authorized workspace does not exist", facts)
+    if not facts["repository_state_verified"]:
+        return _result("rejected", "the repository state could not be verified", facts)
     if not model.strip():
         return _result("rejected", "no server-authorized CPTR model is available", facts)
     if not config.enabled or not config.coordinator_enabled:
