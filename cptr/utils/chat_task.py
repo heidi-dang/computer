@@ -363,7 +363,12 @@ _tasks: dict[str, asyncio.Task] = {}  # message_id → asyncio.Task
 _task_state: dict[str, dict] = {}  # message_id → {content, output}
 _task_chat: dict[str, str] = {}  # message_id → chat_id
 _cancel_requested: set[str] = set()
+_control_interrupt_requested: set[str] = set()
+_interruption_reasons: dict[str, str] = {}
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
+
+CONTROL_INTERRUPT = "CONTROL_INTERRUPT"
+USER_CANCEL = "USER_CANCEL"
 
 
 def get_pending_input_lock(chat_id: str) -> asyncio.Lock:
@@ -432,6 +437,8 @@ async def cancel_task(
     message_id: str, *, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS
 ) -> bool:
     """Cancel one agent turn and wait for owned execution to quiesce."""
+    _control_interrupt_requested.discard(message_id)
+    _interruption_reasons[message_id] = USER_CANCEL
     _cancel_requested.add(message_id)
     from cptr.utils.tools import cancel_owned_command_sessions
 
@@ -440,6 +447,40 @@ async def cancel_task(
     if not task:
         if commands_quiescent:
             _cancel_requested.discard(message_id)
+            _interruption_reasons.pop(message_id, None)
+        return commands_quiescent
+    task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=max(0.1, timeout))
+    except asyncio.TimeoutError:
+        return False
+    except asyncio.CancelledError:
+        pass
+    return commands_quiescent and task.done()
+
+
+async def interrupt_for_control(
+    message_id: str, *, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS
+) -> bool:
+    """Stop an active turn so a durable control message can continue the same task.
+
+    This is deliberately distinct from ``cancel_task``: the control task remains
+    RUNNING, its queued message is preserved, and the normal pending-input path
+    creates the next assistant generation. Only execution owned by this message
+    is stopped; no unrelated chat/task is touched.
+    """
+    task = _tasks.get(message_id)
+    if task is None or task.done():
+        return False
+    if message_id in _cancel_requested:
+        return False
+    _interruption_reasons[message_id] = CONTROL_INTERRUPT
+    _control_interrupt_requested.add(message_id)
+    from cptr.utils.tools import cancel_owned_command_sessions
+
+    commands_quiescent = await cancel_owned_command_sessions(message_id, timeout=timeout)
+    task = _tasks.get(message_id)
+    if task is None or task.done():
         return commands_quiescent
     task.cancel()
     try:
@@ -453,6 +494,15 @@ async def cancel_task(
 
 def is_cancel_requested(message_id: str) -> bool:
     return message_id in _cancel_requested
+
+
+def is_control_interrupt_requested(message_id: str) -> bool:
+    return _interruption_reasons.get(message_id) == CONTROL_INTERRUPT
+
+
+def interruption_reason(message_id: str) -> str | None:
+    """Return the active execution interruption reason, if any."""
+    return _interruption_reasons.get(message_id)
 
 
 def is_running(message_id: str) -> bool:
@@ -479,6 +529,15 @@ def _plain_message_text(content) -> str:
             if isinstance(block, dict) and block.get("type") == "text"
         )
     return str(content or "")
+
+
+def _assignment_paths_from_prompt(prompt: str) -> list[str]:
+    """Extract explicit relative file paths for narrow assignment tools."""
+    candidates = re.findall(
+        r"(?<![\w/.-])(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+",
+        prompt,
+    )
+    return sorted({item for item in candidates if not item.startswith("http")})
 
 
 def _memory_recall_inputs(
@@ -1526,21 +1585,27 @@ async def run_chat_task(
 
     async def emit(**data):
         """Stream an output delta to the user."""
+        from cptr.utils.redaction import redact_sensitive
+
+        safe_data = redact_sensitive(data)
         try:
-            await emit_to_user(user_id, {"chat_id": chat_id, "message_id": message_id, **data})
+            await emit_to_user(
+                user_id,
+                {"chat_id": chat_id, "message_id": message_id, **safe_data},
+            )
         except Exception:
             # Socket failure must not prevent the queue push below,
             # otherwise the gateway SSE stream hangs forever.
             logger.debug("[task %s] emit_to_user failed", message_id[:8], exc_info=True)
         # Push to gateway queue if present
         if output_queue is not None:
-            if "delta" in data:
-                await output_queue.put({"type": "delta", "content": data["delta"]})
-            elif "output" in data:
-                await output_queue.put({"type": "output", "item": data["output"]})
-            elif data.get("done"):
-                if "error" in data:
-                    await output_queue.put({"type": "error", "message": data["error"]})
+            if "delta" in safe_data:
+                await output_queue.put({"type": "delta", "content": safe_data["delta"]})
+            elif "output" in safe_data:
+                await output_queue.put({"type": "output", "item": safe_data["output"]})
+            elif safe_data.get("done"):
+                if "error" in safe_data:
+                    await output_queue.put({"type": "error", "message": safe_data["error"]})
                 else:
                     await output_queue.put({"type": "done", "finish_reason": "stop"})
 
@@ -1583,12 +1648,22 @@ async def run_chat_task(
                 control_store = ControlTaskStore()
                 consumed_at = now_ms()
                 for control_message_id in control_message_ids:
-                    await control_store.update_message(
-                        str(control_message_id),
-                        status="CONSUMED",
-                        consumed_at=consumed_at,
-                        updated_at=consumed_at,
-                    )
+                    control_message = await control_store.get_message(str(control_message_id))
+                    consume = getattr(control_store, "consume_message", None)
+                    if control_message is not None and callable(consume):
+                        await consume(
+                            str(control_message_id),
+                            task_id=control_message.task_id,
+                            message_id_for_run=message_id,
+                            now=consumed_at,
+                        )
+                    else:
+                        await control_store.update_message(
+                            str(control_message_id),
+                            status="CONSUMED",
+                            consumed_at=consumed_at,
+                            updated_at=consumed_at,
+                        )
     content = (msg.content or "") if msg else ""
     output_items: list[dict] = list(msg.output or []) if msg else []
     text_buffer = ""  # Accumulates text between tool calls
@@ -1639,6 +1714,8 @@ async def run_chat_task(
 
     async def _save_message(save_reason: str, **kwargs) -> bool:
         """Persist a message update and log enough detail to debug skipped saves."""
+        from cptr.utils.redaction import redact_sensitive, redact_text
+
         if kwargs.get("done") is True:
             from cptr.utils.tools import wait_for_owned_command_sessions
 
@@ -1650,6 +1727,12 @@ async def run_chat_task(
                 kwargs = {**kwargs, "done": False, "meta": meta}
         saved_output = kwargs.get("output", output_items)
         saved_content = kwargs.get("content", content)
+        kwargs["output"] = redact_sensitive(saved_output)
+        kwargs["content"] = redact_text(saved_content or "")
+        if "meta" in kwargs:
+            kwargs["meta"] = redact_sensitive(kwargs.get("meta"))
+        saved_output = kwargs["output"]
+        saved_content = kwargs["content"]
         counts, reasoning_count, reasoning_chars = _output_debug_stats(saved_output)
         logger.info(
             "[task %s] db save (%s) begin: done=%s content=%d chars output=%d items reasoning=%d items/%d chars types=%s",
@@ -1786,17 +1869,27 @@ async def run_chat_task(
             await emit(output=item)
             _sync_state()
 
-        async for event in runner(
-            profile=agent_target.config,
-            model=agent_target.model,
-            workspace=agent_workspace,
-            messages=messages,
-            system_prompt=system,
-            chat_params=chat_params,
-            resume_state=resume_state,
-            attachments=agent_attachments,
-            identity=identity,
-        ):
+        runner_kwargs = {
+            "profile": agent_target.config,
+            "model": agent_target.model,
+            "workspace": agent_workspace,
+            "messages": messages,
+            "system_prompt": system,
+            "chat_params": chat_params,
+            "resume_state": resume_state,
+            "attachments": agent_attachments,
+            "identity": identity,
+        }
+        if agent_target.agent == "opencode":
+            # Persist the OpenCode session as soon as it exists.  A control
+            # interrupt can then abort a long native tool and resume the same
+            # provider session instead of silently creating a replacement.
+            async def persist_opencode_session(resume: dict[str, Any]) -> None:
+                await save_session(agent_target, resume)
+
+            runner_kwargs["session_state_callback"] = persist_opencode_session
+
+        async for event in runner(**runner_kwargs):
             if isinstance(event, AgentTextDelta):
                 await _finish_reasoning_item()
                 content += event.text
@@ -2257,6 +2350,17 @@ async def run_chat_task(
             "message_id": message_id,
             "connection": connection,
             "builtin_tools": builtin_tools,
+            "inspection_scope": (
+                (chat_obj.meta or {}).get("inspection_scope")
+                if isinstance((chat_obj.meta or {}).get("inspection_scope"), str)
+                else ("assignment" if "inspection_scope=assignment" in content else "workspace")
+            ),
+            "assignment_paths": (
+                (chat_obj.meta or {}).get("assignment_paths")
+                if isinstance((chat_obj.meta or {}).get("assignment_paths"), list)
+                else _assignment_paths_from_prompt(content)
+            ),
+            "created_paths": set(),
         }
 
         resumed_calls = await run_queued_tool_calls(tool_ctx)
@@ -2905,9 +3009,27 @@ async def run_chat_task(
     except asyncio.CancelledError:
         _flush_text()
         _scrub_incomplete_items(output_items)
-        await _save_message("cancelled", content=content, output=output_items, done=True)
+        if is_control_interrupt_requested(message_id):
+            # Keep the original assistant turn non-terminal.  The durable
+            # queued control is consumed by process_pending_chat_inputs in the
+            # finally block, which creates the continuation for the same
+            # ControlTask.  Marking this row done here would let get_task race
+            # the repoint and incorrectly finalize the task as COMPLETE.
+            await _save_message(
+                "interrupted for control",
+                content=content,
+                output=output_items,
+                done=False,
+                meta={
+                    "interrupted_for_control": True,
+                    "interruption_reason": CONTROL_INTERRUPT,
+                },
+            )
+        else:
+            await _save_message("cancelled", content=content, output=output_items, done=True)
         _task_state.pop(message_id, None)
-        await _emit_done()
+        if not is_control_interrupt_requested(message_id):
+            await _emit_done()
     except Exception as e:
         logger.exception(f"Chat task error for message {message_id}")
         _flush_text()
@@ -3067,3 +3189,5 @@ async def run_chat_task(
             logger.exception(f"Failed to process pending inputs for chat {chat_id}")
         finally:
             _cancel_requested.discard(message_id)
+            _control_interrupt_requested.discard(message_id)
+            _interruption_reasons.pop(message_id, None)

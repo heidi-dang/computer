@@ -55,8 +55,10 @@ async def main():
     )
     assert first.id == second.id
     assert second.chat_message_id == "chat-message-1"
+    assert await store.has_pending_control("task_delivery")
     await store.update_message(first.id, status="DELIVERED", target_message_id="worker-message", delivered_at=4, updated_at=4)
     await store.update_message(first.id, status="CONSUMED", consumed_at=5, updated_at=5)
+    assert not await store.has_pending_control("task_delivery")
     current = await store.get_message(first.id)
     assert current.status == "CONSUMED"
     print(first.id)

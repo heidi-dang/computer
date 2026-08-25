@@ -11,6 +11,12 @@ from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.models import Chat, ChatMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import get_db
+from cptr.utils.redaction import (
+    redact_external,
+    redact_external_text,
+    redact_sensitive,
+    redact_text,
+)
 
 
 class AgentService:
@@ -47,6 +53,14 @@ class AgentService:
 
         task_id = f"task_{uuid.uuid4().hex[:20]}"
         now = int(time.time() * 1000)
+        assignment_meta: dict[str, Any] = {}
+        if "inspection_scope=assignment" in prompt:
+            from cptr.utils.chat_task import _assignment_paths_from_prompt
+
+            assignment_meta = {
+                "inspection_scope": "assignment",
+                "assignment_paths": _assignment_paths_from_prompt(prompt),
+            }
         chat = await Chat.create(
             user_id=user_id,
             title=prompt[:80] or "Control task",
@@ -55,6 +69,7 @@ class AgentService:
                 "control_task_id": task_id,
                 "internal": True,
                 "control_plane": True,
+                **assignment_meta,
             },
             created_at=now,
         )
@@ -158,6 +173,7 @@ class AgentService:
             raise KeyError("task output not found")
         status = task.status
         error = (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
+        error = redact_text(error) if error else None
         if message.done:
             desired_status = (
                 status
@@ -190,35 +206,51 @@ class AgentService:
             elif is_running(message.id):
                 status = "RUNNING"
             elif status in {"RUNNING", "PENDING"}:
-                status = "FAILED"
-                restart_error = error or "interrupted by CPTR restart"
-                await ChatMessage.update(
-                    message.id,
-                    done=True,
-                    meta={"error": restart_error},
+                has_pending_control = getattr(self.store, "has_pending_control", None)
+                pending_control = (
+                    await has_pending_control(task.id) if callable(has_pending_control) else False
                 )
-                error = restart_error
-                transition = getattr(self.store, "transition_terminal", None)
-                if callable(transition) and task.__class__ is ControlTask:
-                    await transition(
-                        task.id,
-                        status=status,
-                        error="interrupted by CPTR restart",
-                        updated_at=int(time.time() * 1000),
-                    )
+                if pending_control:
+                    # CONTROL_INTERRUPT intentionally leaves a short durable
+                    # gap between the old generation stopping and the
+                    # continuation being installed.  It is not a restart
+                    # failure and must remain eligible for delivery.
+                    status = "RUNNING"
+                    if isinstance(message.meta, dict) and message.meta.get(
+                        "interrupted_for_control"
+                    ):
+                        error = None
                 else:
-                    await self.store.update(
-                        task.id,
-                        status=status,
-                        error="interrupted by CPTR restart",
-                        updated_at=int(time.time() * 1000),
+                    status = "FAILED"
+                    restart_error = error or "interrupted by CPTR restart"
+                    await ChatMessage.update(
+                        message.id,
+                        done=True,
+                        meta={"error": restart_error},
                     )
+                    error = restart_error
+                    transition = getattr(self.store, "transition_terminal", None)
+                    if callable(transition) and task.__class__ is ControlTask:
+                        await transition(
+                            task.id,
+                            status=status,
+                            error="interrupted by CPTR restart",
+                            updated_at=int(time.time() * 1000),
+                        )
+                    else:
+                        await self.store.update(
+                            task.id,
+                            status=status,
+                            error="interrupted by CPTR restart",
+                            updated_at=int(time.time() * 1000),
+                        )
         output = message.content or ""
+        safe_output = redact_external_text(output)
         if status != task.status or task.output != output:
             await self.store.update(
                 task.id,
                 status=status,
-                output={"content": output},
+                output={"content": safe_output},
                 updated_at=int(time.time() * 1000),
             )
         return {
@@ -227,11 +259,11 @@ class AgentService:
             "chat_id": task.chat_id,
             "message_id": task.message_id,
             "status": status,
-            "prompt": task.prompt,
+            "prompt": redact_external(task.prompt),
             "model_id": task.model_id,
-            "output": output,
-            "raw_output": message.output or [],
-            "error": error,
+            "output": safe_output,
+            "raw_output": redact_external(message.output or []),
+            "error": redact_text(error) if error else None,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
         }
@@ -241,8 +273,8 @@ class AgentService:
         return {
             "task_id": task["id"],
             "status": task["status"],
-            "content": task["output"],
-            "raw_output": task["raw_output"],
+            "content": redact_text(task["output"]),
+            "raw_output": redact_sensitive(task["raw_output"]),
         }
 
     async def send_message(
@@ -252,6 +284,7 @@ class AgentService:
         user_id: str,
         content: str,
         idempotency_key: str | None = None,
+        provenance: dict[str, str | None] | None = None,
     ) -> dict[str, Any]:
         task = await self.store.get(task_id)
         if task is None or task.user_id != user_id:
@@ -271,6 +304,9 @@ class AgentService:
             dedupe_key=dedupe_key,
             chat_message_id=None,
             now=now,
+            monitor_id=(provenance or {}).get("monitor_id"),
+            scope_id=(provenance or {}).get("scope_id"),
+            intended_message_id=(provenance or {}).get("intended_message_id"),
         )
         message_id = control_message.chat_message_id
         if not message_id:
@@ -305,7 +341,17 @@ class AgentService:
             await self.store.update_message(control_message.id, chat_message_id=message_id)
         from cptr.utils.chat_task import process_pending_chat_inputs
 
-        from cptr.utils.chat_task import get_active_chat_ids, is_running
+        from cptr.utils.chat_task import get_active_chat_ids, interrupt_for_control, is_running
+
+        if is_running(task.message_id):
+            # A control message must not remain QUEUED behind an unbounded
+            # native/tool call. Interrupt only the owned turn; the durable
+            # pending-input path then starts a continuation and preserves the
+            # same ControlTask identity for provenance and exactly-once checks.
+            await interrupt_for_control(
+                task.message_id,
+                timeout=TASK_CANCELLATION_TIMEOUT_SECONDS,
+            )
 
         if not is_running(task.message_id) and task.chat_id not in get_active_chat_ids():
             from cptr.utils.identity import internal_request_for_user
@@ -402,6 +448,18 @@ class AgentService:
         result = await diff(workspace.path, None, False, True, False, identity)
         result["is_repo"] = True
         return result
+
+    async def get_workspace_fingerprint(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
+        """Return bounded content evidence for steering-effect attribution."""
+        async with await get_db() as db:
+            workspace = await db.get(Workspace, workspace_id)
+            if workspace is None or workspace.user_id != user_id:
+                raise KeyError("workspace not found")
+        from cptr.utils.identity import identity_for_user_id
+        from cptr.utils.workspace_fingerprint import snapshot_workspace
+
+        identity = await identity_for_user_id(user_id)
+        return await snapshot_workspace(workspace.path, identity)
 
     async def get_verification_evidence(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
         async with await get_db() as db:

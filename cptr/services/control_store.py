@@ -6,7 +6,7 @@ import secrets
 import time
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from cptr.models import (
@@ -29,6 +29,7 @@ from cptr.services.supervisor import (
     ScopeStatus,
 )
 from cptr.utils.db import get_db
+from cptr.utils.redaction import redact_sensitive
 
 
 def _now_ms() -> int:
@@ -104,6 +105,7 @@ class SqlSupervisorStore:
                 MonitorStatus.FAILED.value,
                 MonitorStatus.CANCEL_REQUESTED.value,
             }
+            releasable_terminal = terminal - {MonitorStatus.CANCEL_REQUESTED.value}
             if row.status in terminal and row.status != monitor.status.value:
                 await db.rollback()
                 return
@@ -124,6 +126,7 @@ class SqlSupervisorStore:
                 target.status = scope.status.value
                 target.attempt_count = scope.attempt_count
                 target.worker_task_ids = list(scope.worker_task_ids)
+                target.steering_requests = list(scope.steering_requests)
                 target.verification_evidence = list(scope.verification_evidence)
                 target.failure_evidence = list(scope.failure_evidence)
                 target.failure_signature_counts = dict(scope.failure_signature_counts)
@@ -131,6 +134,12 @@ class SqlSupervisorStore:
                 target.next_action = scope.next_action
                 target.history = [item.value for item in scope.history]
                 target.updated_at = scope.updated_at
+            if monitor.status in releasable_terminal:
+                await db.execute(
+                    delete(AutonomousWorkspaceLease).where(
+                        AutonomousWorkspaceLease.monitor_id == monitor.monitor_id
+                    )
+                )
             await db.commit()
 
     async def request_cancel_monitor(self, monitor_id: str) -> bool:
@@ -165,18 +174,25 @@ class SqlSupervisorStore:
                 .values(status=MonitorStatus.CANCELLED.value, updated_at=_now_ms())
             )
             if result.rowcount == 1:
+                scope_result = await db.execute(
+                    select(AutonomousScope).where(AutonomousScope.monitor_id == monitor_id)
+                )
+                for scope in scope_result.scalars().all():
+                    if scope.status in {
+                        ScopeStatus.VERIFIED.value,
+                        ScopeStatus.CANCELLED.value,
+                    }:
+                        continue
+                    history = list(scope.history or [])
+                    if not history or history[-1] != ScopeStatus.CANCELLED.value:
+                        history.append(ScopeStatus.CANCELLED.value)
+                    scope.status = ScopeStatus.CANCELLED.value
+                    scope.history = history
+                    scope.next_action = None
+                    scope.updated_at = _now_ms()
                 await db.execute(
-                    update(AutonomousScope)
-                    .where(
-                        AutonomousScope.monitor_id == monitor_id,
-                        AutonomousScope.status.not_in(
-                            [ScopeStatus.VERIFIED.value, ScopeStatus.CANCELLED.value]
-                        ),
-                    )
-                    .values(
-                        status=ScopeStatus.CANCELLED.value,
-                        next_action=None,
-                        updated_at=_now_ms(),
+                    delete(AutonomousWorkspaceLease).where(
+                        AutonomousWorkspaceLease.monitor_id == monitor_id
                     )
                 )
             await db.commit()
@@ -193,20 +209,24 @@ class SqlSupervisorStore:
                 .values(status=MonitorStatus.BLOCKED.value, updated_at=_now_ms())
             )
             if result.rowcount == 1:
-                await db.execute(
-                    update(AutonomousScope)
-                    .where(
-                        AutonomousScope.monitor_id == monitor_id,
-                        AutonomousScope.status.not_in(
-                            [ScopeStatus.VERIFIED.value, ScopeStatus.CANCELLED.value]
-                        ),
-                    )
-                    .values(
-                        status=ScopeStatus.BLOCKED.value,
-                        next_action="Owned execution did not quiesce within the cancellation bound.",
-                        updated_at=_now_ms(),
-                    )
+                scope_result = await db.execute(
+                    select(AutonomousScope).where(AutonomousScope.monitor_id == monitor_id)
                 )
+                for scope in scope_result.scalars().all():
+                    if scope.status in {
+                        ScopeStatus.VERIFIED.value,
+                        ScopeStatus.CANCELLED.value,
+                    }:
+                        continue
+                    history = list(scope.history or [])
+                    if not history or history[-1] != ScopeStatus.BLOCKED.value:
+                        history.append(ScopeStatus.BLOCKED.value)
+                    scope.status = ScopeStatus.BLOCKED.value
+                    scope.history = history
+                    scope.next_action = (
+                        "Owned execution did not quiesce within the cancellation bound."
+                    )
+                    scope.updated_at = _now_ms()
             await db.commit()
             return result.rowcount == 1
 
@@ -249,7 +269,7 @@ class SqlSupervisorStore:
             monitor_id=monitor_id,
             scope_id=scope_id,
             kind=kind,
-            payload=dict(payload),
+            payload=redact_sensitive(payload),
             created_at=_now_ms(),
         )
         async with await get_db() as db:
@@ -261,7 +281,7 @@ class SqlSupervisorStore:
             monitor_id=row.monitor_id,
             scope_id=row.scope_id,
             kind=row.kind,
-            payload=dict(row.payload or {}),
+            payload=redact_sensitive(row.payload or {}),
             created_at=row.created_at,
         )
 
@@ -278,11 +298,16 @@ class SqlSupervisorStore:
                     monitor_id=item.monitor_id,
                     scope_id=item.scope_id,
                     kind=item.kind,
-                    payload=dict(item.payload or {}),
+                    payload=redact_sensitive(item.payload or {}),
                     created_at=item.created_at,
                 )
                 for item in result.scalars().all()
             ]
+
+    async def get_message(self, message_id: str) -> ControlMessage | None:
+        """Read a durable control message for autonomous provenance checks."""
+        async with await get_db() as db:
+            return await db.get(ControlMessage, message_id)
 
     async def create_approval(self, monitor_id: str, operation: str, reason: str) -> ApprovalRecord:
         now = _now_ms()
@@ -348,6 +373,19 @@ class SqlSupervisorStore:
         now = _now_ms()
         token = secrets.token_urlsafe(18)
         async with await get_db() as db:
+            existing = await db.get(AutonomousWorkspaceLease, workspace_id)
+            if existing is not None and existing.monitor_id != monitor_id:
+                owner = await db.get(AutonomousMonitor, existing.monitor_id)
+                terminal_owner = owner is None or owner.status in {
+                    MonitorStatus.COMPLETE.value,
+                    MonitorStatus.CANCELLED.value,
+                    MonitorStatus.BLOCKED.value,
+                    MonitorStatus.FAILED.value,
+                }
+                if not terminal_owner:
+                    return False
+                await db.delete(existing)
+                await db.flush()
             updated = await db.execute(
                 update(AutonomousWorkspaceLease)
                 .where(
@@ -454,6 +492,7 @@ class SqlSupervisorStore:
             status=scope.status.value,
             attempt_count=scope.attempt_count,
             worker_task_ids=list(scope.worker_task_ids),
+            steering_requests=list(scope.steering_requests),
             verification_evidence=list(scope.verification_evidence),
             failure_evidence=list(scope.failure_evidence),
             failure_signature_counts=dict(scope.failure_signature_counts),
@@ -474,6 +513,7 @@ class SqlSupervisorStore:
             status=ScopeStatus(row.status),
             attempt_count=row.attempt_count,
             worker_task_ids=list(row.worker_task_ids or []),
+            steering_requests=list(getattr(row, "steering_requests", None) or []),
             verification_evidence=list(row.verification_evidence or []),
             failure_evidence=list(row.failure_evidence or []),
             failure_signature_counts=dict(row.failure_signature_counts or {}),
@@ -605,6 +645,24 @@ class ControlTaskStore:
             await db.commit()
             return len(messages)
 
+    async def has_pending_control(self, task_id: str, *, user_id: str | None = None) -> bool:
+        """Return whether a task still owns an undelivered control message.
+
+        A control interruption briefly has no in-memory worker while the next
+        generation is being installed.  This durable check prevents restart
+        reconciliation from turning that intentional gap into a terminal
+        failure.
+        """
+        async with await get_db() as db:
+            conditions = [
+                ControlMessage.task_id == task_id,
+                ControlMessage.status.in_(("QUEUED", "DELIVERED")),
+            ]
+            if user_id is not None:
+                conditions.append(ControlMessage.user_id == user_id)
+            result = await db.execute(select(ControlMessage.id).where(and_(*conditions)).limit(1))
+            return result.scalar_one_or_none() is not None
+
     async def enqueue_message(
         self,
         *,
@@ -615,6 +673,9 @@ class ControlTaskStore:
         dedupe_key: str,
         chat_message_id: str | None,
         now: int,
+        monitor_id: str | None = None,
+        scope_id: str | None = None,
+        intended_message_id: str | None = None,
     ) -> ControlMessage:
         """Create or return one durable follow-up message by its retry key."""
         async with await get_db() as db:
@@ -636,6 +697,9 @@ class ControlTaskStore:
                 content=content,
                 dedupe_key=dedupe_key,
                 status="QUEUED",
+                monitor_id=monitor_id,
+                scope_id=scope_id,
+                intended_message_id=intended_message_id,
                 created_at=now,
                 updated_at=now,
             )
@@ -662,8 +726,41 @@ class ControlTaskStore:
         if not values:
             return False
         async with await get_db() as db:
+            statement = update(ControlMessage).where(ControlMessage.id == message_id)
+            if values.get("status") not in {None, "CANCELLED"}:
+                statement = statement.where(ControlMessage.status != "CANCELLED")
+            if values.get("status") == "DELIVERED":
+                statement = statement.where(ControlMessage.status == "QUEUED")
+            elif values.get("status") == "CONSUMED":
+                statement = statement.where(ControlMessage.status == "DELIVERED")
+            result = await db.execute(statement.values(**values))
+            await db.commit()
+            return result.rowcount == 1
+
+    async def consume_message(
+        self,
+        message_id: str,
+        *,
+        task_id: str,
+        message_id_for_run: str,
+        now: int,
+    ) -> bool:
+        """Atomically record one consumption and preserve cancellation races."""
+        async with await get_db() as db:
             result = await db.execute(
-                update(ControlMessage).where(ControlMessage.id == message_id).values(**values)
+                update(ControlMessage)
+                .where(
+                    ControlMessage.id == message_id,
+                    ControlMessage.status == "DELIVERED",
+                    ControlMessage.task_id == task_id,
+                )
+                .values(
+                    status="CONSUMED",
+                    consumed_at=now,
+                    consumed_task_id=task_id,
+                    consumed_message_id=message_id_for_run,
+                    updated_at=now,
+                )
             )
             await db.commit()
             return result.rowcount == 1

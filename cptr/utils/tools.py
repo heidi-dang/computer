@@ -16,10 +16,13 @@ import inspect
 import json
 import mimetypes
 import os
+import re
+import shlex
 import stat
 import time
 import uuid
 from pathlib import Path, PureWindowsPath
+from pathlib import PurePosixPath
 from typing import Any, Literal, Optional, get_args, get_origin, get_type_hints
 
 from fastapi import Request
@@ -1633,6 +1636,118 @@ def _resolve_path(path: str, workspace: str) -> Path:
     if not full.is_relative_to(ws):
         raise ValueError(f"Path traversal rejected: {path}")
     return full
+
+
+_ASSIGNMENT_SCOPED_TOOLS = {
+    "read_file",
+    "list_directory",
+    "search_files",
+    "create_file",
+    "write_file",
+    "edit_file",
+    "multi_edit_file",
+    "display_file",
+    "run_command",
+}
+
+
+def _relative_assignment_path(path: str) -> str:
+    """Normalize a user/tool path for assignment-scope comparison."""
+    value = str(path or ".").strip().replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    return str(PurePosixPath(value or "."))
+
+
+_ASSIGNMENT_PATHLESS_COMMANDS = {"true", "printf", "echo"}
+_ASSIGNMENT_COMMAND_META_RE = re.compile(r"(?<!\\)[;|&<>$`()\n\r]")
+
+
+def _assignment_command_scope_violation(args: dict, allowed: set[str]) -> str | None:
+    """Authorize only commands whose workspace access is statically bounded.
+
+    ``run_command`` remains a shell-backed tool, so unknown syntax fails
+    closed.  Process-control and literal-output commands are safe without a
+    workspace path; file-reading commands must name an assigned path.
+    """
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return "Error: inspection scope violation: command is empty"
+    if _ASSIGNMENT_COMMAND_META_RE.search(command):
+        return "Error: inspection scope violation: command cannot be proven assignment-scoped"
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return "Error: inspection scope violation: command cannot be parsed safely"
+    if not tokens:
+        return "Error: inspection scope violation: command is empty"
+
+    executable = PurePosixPath(tokens[0]).name
+    if executable == "sleep":
+        if len(tokens) != 2 or not re.fullmatch(r"(?:0|[1-9]\d{0,2})(?:\.\d+)?", tokens[1]):
+            return "Error: inspection scope violation: sleep must use one bounded duration"
+        return None
+    if executable == "true" and len(tokens) == 1:
+        return None
+    if executable in _ASSIGNMENT_PATHLESS_COMMANDS:
+        # Literal output only: no option can redirect or read a file.
+        if any("/" in token or token in {".", ".."} for token in tokens[1:]):
+            return "Error: inspection scope violation: output command references a path"
+        return None
+    if executable in {"cat", "head", "tail"}:
+        paths = [token for token in tokens[1:] if not token.startswith("-")]
+        if not paths:
+            return "Error: inspection scope violation: file command needs an assigned path"
+        for path in paths:
+            candidate = _relative_assignment_path(path)
+            if candidate not in allowed:
+                return f"Error: inspection scope violation: path is not named by this assignment: {candidate}"
+        return None
+    return "Error: inspection scope violation: command cannot be proven assignment-scoped"
+
+
+def _assignment_scope_violation(name: str, args: dict, context: dict) -> str | None:
+    """Return a bounded denial when a narrow assignment accesses another path."""
+    if context.get("inspection_scope") != "assignment" or name not in _ASSIGNMENT_SCOPED_TOOLS:
+        return None
+    allowed = {
+        _relative_assignment_path(item)
+        for item in (context.get("assignment_paths") or [])
+        if str(item).strip()
+    }
+    created = {
+        _relative_assignment_path(item)
+        for item in (context.get("created_paths") or [])
+        if str(item).strip()
+    }
+    allowed |= created
+    if not allowed:
+        return "Error: assignment scope has no allowed paths"
+
+    if name == "run_command":
+        command_violation = _assignment_command_scope_violation(args, allowed)
+        if command_violation:
+            return command_violation
+
+    candidate = args.get("path") or args.get("cwd") or "."
+    candidate = _relative_assignment_path(str(candidate))
+    if candidate == ".":
+        # A root listing/search is not narrow: it can reveal historical files.
+        if name in {"list_directory", "search_files"}:
+            return "Error: inspection scope violation: workspace-wide access is not allowed"
+        return None
+    if candidate in allowed:
+        return None
+    if name in {"list_directory", "search_files"}:
+        # Parent traversal is useful for resolving one named file, but a
+        # directory listing/search would expose every sibling historical
+        # fixture. Require the directory itself to be explicitly assigned.
+        return f"Error: inspection scope violation: directory is not named by this assignment: {candidate}"
+    # Allow only the parent directories needed to reach an explicitly named
+    # file. The operation itself still filters/validates the concrete file.
+    if any(item.startswith(f"{candidate}/") for item in allowed):
+        return None
+    return f"Error: inspection scope violation: path is not named by this assignment: {candidate}"
 
 
 async def create_automation(
@@ -3375,16 +3490,29 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
             return f"Error: tool requires an open workspace: {name}"
         if not is_builtin_tool_enabled(name, __context__.get("builtin_tools")):
             return f"Error: tool disabled: {name}"
+        scope_error = _assignment_scope_violation(name, args, __context__)
+        if scope_error:
+            return scope_error
         fn = info["fn"]
         args = dict(args)
         args.pop("workspace", None)
         try:
             sig = inspect.signature(fn)
             if "__context__" in sig.parameters:
-                return await fn(**args, __context__=__context__)
+                result = await fn(**args, __context__=__context__)
             else:
                 # Legacy tools: inject workspace directly
-                return await fn(**args, workspace=__context__["workspace"])
+                result = await fn(**args, workspace=__context__["workspace"])
+            if (
+                __context__.get("inspection_scope") == "assignment"
+                and name in {"create_file", "write_file", "edit_file", "multi_edit_file"}
+                and not str(result).startswith("Error:")
+            ):
+                created_paths = __context__.setdefault("created_paths", set())
+                path = args.get("path")
+                if path:
+                    created_paths.add(_relative_assignment_path(str(path)))
+            return result
         except Exception as e:
             return f"Error executing {name}: {e}"
 

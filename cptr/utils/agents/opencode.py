@@ -10,7 +10,7 @@ import re
 import socket
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -333,6 +333,7 @@ async def run_opencode_agent(
     resume_state: dict[str, Any] | None,
     attachments: PreparedAgentAttachments,
     identity=None,
+    session_state_callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
 ) -> AsyncIterator[AgentEvent]:
     del chat_params
     try:
@@ -350,6 +351,16 @@ async def run_opencode_agent(
                         resumed = bool(session_id)
                         if session_id is None:
                             session_id = await _create_opencode_session(client, headers)
+
+                        if session_state_callback is not None:
+                            await session_state_callback(
+                                {
+                                    "profile_id": profile["id"],
+                                    "session_id": session_id,
+                                    "workspace": workspace,
+                                    "model": model,
+                                }
+                            )
 
                         parsed_model = _parse_model(model)
                         while True:

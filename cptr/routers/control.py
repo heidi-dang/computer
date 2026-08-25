@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 from typing import Any
 
@@ -16,6 +18,7 @@ from cptr.services.control_store import SqlSupervisorStore
 from cptr.services.supervisor import AutonomousSupervisor, MonitorState, MonitorStatus
 from cptr.services.supervisor_director import LocalSupervisorDirector, OpenAISupervisorDirector
 from cptr.utils.db import get_db
+from cptr.utils.redaction import redact_external, redact_sensitive
 
 router = APIRouter(prefix="/api/control/v1", tags=["control"])
 
@@ -181,8 +184,7 @@ async def list_workspaces(request: Request):
     workspaces = await Workspace.get_by_user(user_id)
     return {
         "workspaces": [
-            {"workspace_id": workspace.id, "name": workspace.name, "path": workspace.path}
-            for workspace in workspaces
+            {"workspace_id": workspace.id, "name": workspace.name} for workspace in workspaces
         ]
     }
 
@@ -191,7 +193,7 @@ async def list_workspaces(request: Request):
 async def get_workspace(request: Request, workspace_id: str):
     user_id = await _user(request, "workspace:read")
     workspace = await _ensure_workspace(user_id, workspace_id)
-    return {"workspace_id": workspace.id, "name": workspace.name, "path": workspace.path}
+    return {"workspace_id": workspace.id, "name": workspace.name}
 
 
 @router.post("/tasks")
@@ -343,6 +345,13 @@ async def get_autonomous_events(request: Request, monitor_id: str):
         events.extend(
             {"scope_id": scope.scope_id, "status": status.value} for status in scope.history
         )
+    if monitor.status in {
+        MonitorStatus.COMPLETE,
+        MonitorStatus.BLOCKED,
+        MonitorStatus.FAILED,
+        MonitorStatus.CANCELLED,
+    }:
+        events.append({"monitor_id": monitor.monitor_id, "status": monitor.status.value})
     return {"monitor_id": monitor_id, "events": events}
 
 
@@ -361,7 +370,7 @@ async def get_autonomous_evidence(request: Request, monitor_id: str):
                 "evidence_id": item.evidence_id,
                 "scope_id": item.scope_id,
                 "kind": item.kind,
-                "payload": item.payload,
+                "payload": redact_external(item.payload),
                 "created_at": item.created_at,
             }
             for item in evidence
@@ -373,24 +382,67 @@ async def get_autonomous_evidence(request: Request, monitor_id: str):
 async def send_autonomous_message(request: Request, monitor_id: str, body: MessageRequest):
     user_id = await _user(request, "autonomous:run")
     agent, supervisor = _services(request)
-    monitor = await supervisor.store.get_monitor(monitor_id)
-    if monitor is None or monitor.user_id != user_id:
-        raise HTTPException(status_code=404, detail="monitor not found")
-    scope = next(
-        (item for item in monitor.scopes if item.scope_id == monitor.current_scope_id), None
-    )
-    task_id = scope.worker_task_ids[-1] if scope and scope.worker_task_ids else None
-    if not task_id:
-        raise HTTPException(status_code=409, detail="monitor has no active worker task")
+    if not await supervisor.store.claim_monitor(monitor_id):
+        raise HTTPException(status_code=409, detail="monitor is busy; retry steering")
     try:
-        return await agent.send_message(
+        monitor = await supervisor.store.get_monitor(monitor_id)
+        if monitor is None or monitor.user_id != user_id:
+            raise HTTPException(status_code=404, detail="monitor not found")
+        scope = next(
+            (item for item in monitor.scopes if item.scope_id == monitor.current_scope_id), None
+        )
+        if monitor.status != MonitorStatus.RUNNING or scope is None:
+            raise HTTPException(status_code=409, detail="monitor has no steerable active worker")
+        task_id = scope.worker_task_ids[-1] if scope.worker_task_ids else None
+        if not task_id:
+            raise HTTPException(status_code=409, detail="monitor has no active worker task")
+        worker_task = await agent.store.get(task_id)
+        if worker_task is None or worker_task.user_id != user_id:
+            raise HTTPException(status_code=404, detail="worker task not found")
+        if str(worker_task.status).upper() in {"COMPLETE", "FAILED", "CANCELLED", "ERROR"}:
+            raise HTTPException(status_code=409, detail="monitor worker is no longer steerable")
+        from cptr.utils.chat_task import is_running
+
+        if not is_running(worker_task.message_id):
+            raise HTTPException(status_code=409, detail="monitor worker is not actively running")
+        get_workspace_fingerprint = getattr(agent, "get_workspace_fingerprint", None)
+        baseline_workspace_snapshot = (
+            await get_workspace_fingerprint(monitor.workspace_id, user_id=user_id)
+            if callable(get_workspace_fingerprint)
+            else None
+        )
+        baseline_workspace_snapshot = redact_sensitive(baseline_workspace_snapshot)
+        baseline_diff = await agent.get_diff(monitor.workspace_id, user_id=user_id)
+        baseline_diff_fingerprint = hashlib.sha256(
+            json.dumps(redact_sensitive(baseline_diff), sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        response = await agent.send_message(
             task_id,
             user_id=user_id,
             content=body.content,
             idempotency_key=body.idempotency_key,
+            provenance={
+                "monitor_id": monitor.monitor_id,
+                "scope_id": scope.scope_id,
+                "intended_message_id": worker_task.message_id,
+            },
         )
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id=response["control_message_id"],
+            intended_task_id=task_id,
+            intended_generation_id=worker_task.message_id,
+            baseline_diff_fingerprint=baseline_diff_fingerprint,
+            baseline_workspace_snapshot=baseline_workspace_snapshot,
+        )
+        return response
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="worker task not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    finally:
+        await supervisor.store.release_monitor(monitor_id)
 
 
 @router.post("/autonomous/{monitor_id}/cancel")

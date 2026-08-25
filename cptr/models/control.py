@@ -52,6 +52,11 @@ class ControlMessage(Base):
     dedupe_key = Column(Text, nullable=False)
     status = Column(Text, nullable=False, default="QUEUED")
     target_message_id = Column(Text, nullable=True)
+    monitor_id = Column(Text, nullable=True)
+    scope_id = Column(Text, nullable=True)
+    intended_message_id = Column(Text, nullable=True)
+    consumed_task_id = Column(Text, nullable=True)
+    consumed_message_id = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
     delivered_at = Column(BigInteger, nullable=True)
@@ -60,6 +65,7 @@ class ControlMessage(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "task_id", "dedupe_key", name="uq_control_message_dedupe"),
         Index("ix_control_message_chat_status", "chat_id", "status"),
+        Index("ix_control_message_monitor_scope", "monitor_id", "scope_id", "status"),
     )
 
 
@@ -100,6 +106,7 @@ class AutonomousScope(Base):
     status = Column(Text, nullable=False, default="PENDING")
     attempt_count = Column(BigInteger, nullable=False, default=0)
     worker_task_ids = Column(JSON, nullable=False, default=list)
+    steering_requests = Column(JSON, nullable=False, default=list)
     verification_evidence = Column(JSON, nullable=False, default=list)
     failure_evidence = Column(JSON, nullable=False, default=list)
     failure_signature_counts = Column(JSON, nullable=False, default=dict)
