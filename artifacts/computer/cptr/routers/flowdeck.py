@@ -11,8 +11,8 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cptr.flowdeck.authenticated_gateway import (
     AuthenticatedGatewayError,
@@ -149,6 +149,14 @@ class GeneratedAuthCallback(GeneratedAuthRequest):
     state: str = Field(min_length=1, max_length=512)
     nonce: str = Field(min_length=1, max_length=512)
     code_verifier: str = Field(min_length=43, max_length=128)
+
+async def _parse_generated_auth_callback(request: Request) -> GeneratedAuthCallback:
+    """Validate callback input without exposing rejected credential-shaped values."""
+    try:
+        payload = await request.json()
+        return GeneratedAuthCallback.model_validate(payload)
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise HTTPException(422, "invalid callback payload") from exc
 
 
 class CheckpointRequest(BaseModel):
@@ -1256,7 +1264,10 @@ async def generated_auth_signout(request: Request, body: GeneratedAuthRequest, r
 
 
 @router.post("/generated-auth/callback/verify")
-async def generated_auth_callback(request: Request, body: GeneratedAuthCallback):
+async def generated_auth_callback(
+    request: Request,
+    body: GeneratedAuthCallback = Depends(_parse_generated_auth_callback),
+):
     _same_origin(request)
     result, reused, run_id = await _generated_auth_operation(
         request, workspace=body.workspace, capability="callback.verify",

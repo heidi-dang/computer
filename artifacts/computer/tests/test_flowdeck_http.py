@@ -1195,6 +1195,46 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         for setting in verifier_settings.values():
             self.assertNotIn(setting, serialized_records)
 
+    async def test_malformed_external_auth_callback_does_not_echo_sensitive_inputs(self):
+        sensitive_values = {
+            "issuer": "https://issuer.example/with-sensitive-issuer-value",
+            "redirect_uri": "https://app.example/callback?secret-sensitive-redirect-value",
+            "state": "sensitive-state-value",
+            "nonce": "sensitive-nonce-value",
+            "code_verifier": "sensitive-code-verifier-value",
+        }
+        valid_payload = {
+            "workspace": str(self.root_a),
+            "issuer": sensitive_values["issuer"],
+            "audience": "generated-app",
+            "redirect_uri": sensitive_values["redirect_uri"],
+            "state": sensitive_values["state"],
+            "nonce": sensitive_values["nonce"],
+            "code_verifier": sensitive_values["code_verifier"],
+        }
+
+        for field, value in sensitive_values.items():
+            payload = {**valid_payload, field: value}
+            if field == "issuer":
+                payload[field] = value * 100
+            elif field == "redirect_uri":
+                payload[field] = value * 100
+            elif field in {"state", "nonce"}:
+                payload[field] = value * 30
+            else:
+                payload[field] = value[:10]
+
+            response = await self.client.post(
+                "/v1/flowdeck/generated-auth/callback/verify",
+                headers=self.headers(),
+                json=payload,
+            )
+            self.assertEqual(response.status_code, 422, field)
+            self.assertEqual(response.json(), {"detail": "invalid callback payload"})
+            response_text = response.text
+            for sensitive_value in sensitive_values.values():
+                self.assertNotIn(sensitive_value, response_text)
+
     async def test_rejected_external_auth_callback_durable_records_exclude_verifier_details(self):
         verifier_settings = {
             "issuer": "https://issuer.example",
