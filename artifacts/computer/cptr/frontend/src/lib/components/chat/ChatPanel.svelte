@@ -25,6 +25,7 @@
 	} from '$lib/apis/chat';
 	import {
 		cancelFlowDeckOrchestration,
+		createAudit,
 		createFlowDeckOrchestration,
 		getFlowDeckOrchestration,
 		steerFlowDeckOrchestration
@@ -146,8 +147,14 @@
 	let sending = $state(false);
 	let flowdeckStatus = $state('');
 	let flowdeckRunId = $state('');
+	let flowdeckIsAudit = $state(false);
 	const flowdeckTelemetry = $derived.by(() => {
-		const totals = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: null as number | null };
+		const totals = {
+			input_tokens: 0,
+			output_tokens: 0,
+			total_tokens: 0,
+			cost: null as number | null
+		};
 		const seen = new Set<string>();
 		const model = $chatModels.find((item) => item.id === selectedModel);
 		const inputPrice = model?.input_price_per_1m;
@@ -160,7 +167,12 @@
 			totals.input_tokens += Number(usage.input_tokens || 0);
 			totals.output_tokens += Number(usage.output_tokens || 0);
 			totals.total_tokens += Number(usage.total_tokens || 0);
-			if (inputPrice !== null && inputPrice !== undefined && outputPrice !== null && outputPrice !== undefined) {
+			if (
+				inputPrice !== null &&
+				inputPrice !== undefined &&
+				outputPrice !== null &&
+				outputPrice !== undefined
+			) {
 				totals.cost =
 					(totals.cost || 0) +
 					(Number(usage.input_tokens || 0) * inputPrice +
@@ -479,6 +491,7 @@
 			loadChatSettings(data.chat.meta);
 			const flowdeckMeta = data.chat.meta as Record<string, any> | null;
 			const persistedFlowDeckRunId = String(flowdeckMeta?.flowdeck_run_id || '');
+			flowdeckIsAudit = flowdeckMeta?.audit === true;
 			const persistedFlowDeckStatus = String(flowdeckMeta?.flowdeck_status || '').toLowerCase();
 			const activeFlowDeckAssistant = [...data.messages]
 				.reverse()
@@ -845,13 +858,9 @@
 		const parentRunId =
 			event?.flowdeck_parent_run_id ||
 			event?.run_id ||
-			(event?.flowdeck_run_id && !event?.output && !event?.delta
-				? event.flowdeck_run_id
-				: null);
+			(event?.flowdeck_run_id && !event?.output && !event?.delta ? event.flowdeck_run_id : null);
 		if (!parentRunId || parentRunId !== flowdeckRunId) return;
-		const normalized = event?.run_id
-			? { ...event, flowdeck_parent_run_id: event.run_id }
-			: event;
+		const normalized = event?.run_id ? { ...event, flowdeck_parent_run_id: event.run_id } : event;
 		const next = [...flowdeckEvents];
 		const key = flowDeckEventKey(normalized);
 		const index = next.findIndex((item) => flowDeckEventKey(item) === key);
@@ -869,8 +878,10 @@
 		const kind = String(event?.kind || event?.type || '').toUpperCase();
 		const payload = event?.payload || {};
 		if (kind === 'BUILD_BRIEF_CREATED') return 'Build · product brief created';
-		if (kind === 'BUILD_COMPLETION_CONTRACT_CREATED') return 'Build · completion contract ready for review';
-		if (kind === 'BUILD_VERIFICATION_REQUIRED') return 'Build · verification required before completion';
+		if (kind === 'BUILD_COMPLETION_CONTRACT_CREATED')
+			return 'Build · completion contract ready for review';
+		if (kind === 'BUILD_VERIFICATION_REQUIRED')
+			return 'Build · verification required before completion';
 		if (kind === 'SPECIALIST_DISPATCHED' || kind.includes('DELEGAT')) {
 			return `Specialist handoff · ${String(payload.specialist_id || payload.child_agent_id || 'qualified specialist')}`;
 		}
@@ -888,9 +899,11 @@
 		const reported = String(event?.status || event?.payload?.status || '').toLowerCase();
 		if (isFlowDeckTerminal(reported)) return reported;
 		if (reported && ['active', 'planning', 'verifying'].includes(reported)) return reported;
-		if (kind.includes('VERIF') || kind.includes('OUTCOME') || kind.includes('REVIEW')) return 'verifying';
+		if (kind.includes('VERIF') || kind.includes('OUTCOME') || kind.includes('REVIEW'))
+			return 'verifying';
 		if (kind.includes('STEP_STARTED') || kind.includes('PLAN')) return 'planning';
-		if (kind.includes('RUN_STARTED') || kind.includes('DISPATCH') || kind.includes('DELEGAT')) return 'active';
+		if (kind.includes('RUN_STARTED') || kind.includes('DISPATCH') || kind.includes('DELEGAT'))
+			return 'active';
 		return null;
 	}
 
@@ -958,6 +971,7 @@
 		selectedAgent = 'computer';
 		flowdeckStatus = '';
 		flowdeckRunId = '';
+		flowdeckIsAudit = false;
 		flowdeckEvents = [];
 		flowdeckClarification = '';
 		flowdeckMessageId = null;
@@ -1370,7 +1384,9 @@
 				];
 			}
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : 'Heidi could not queue that instruction.');
+			toast.error(
+				error instanceof Error ? error.message : 'Heidi could not queue that instruction.'
+			);
 		} finally {
 			sending = false;
 			chatInputEl?.focus();
@@ -1389,10 +1405,8 @@
 				const state = await getFlowDeckOrchestration(runId, workspace);
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
 				if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events);
-			for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
-				if (
-			isFlowDeckTerminal(flowdeckStatus)
-				) {
+				for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
+				if (isFlowDeckTerminal(flowdeckStatus)) {
 					if (flowdeckMessageId) {
 						const message = allMessages.find((item) => item.id === flowdeckMessageId);
 						if (message) {
@@ -1418,6 +1432,7 @@
 		// Show truthful feedback while the immediate durable-run POST is in flight.
 		flowdeckStatus = 'preparing';
 		flowdeckRunId = '';
+		flowdeckIsAudit = /\baudit\b/i.test(text);
 		flowdeckEvents = [];
 		flowdeckClarification = '';
 		autoScroll = true;
@@ -1455,14 +1470,44 @@
 		];
 		currentMessageId = assistantId;
 		try {
-			const result = await createFlowDeckOrchestration(
-				{
-					workspace,
-					objective: text,
-					metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
-				},
-				`chat-flowdeck-${crypto.randomUUID()}`
-			);
+			const result = flowdeckIsAudit
+				? await createAudit(
+						{
+							workspace,
+							objective: text,
+							scope: {
+								categories: [
+									'architecture',
+									'module_boundaries',
+									'dependencies',
+									'configuration',
+									'migrations',
+									'tests',
+									'runtime_entry_points',
+									'data_flows',
+									'authentication_authorization',
+									'state_ownership',
+									'provider_boundaries',
+									'recent_changes'
+								]
+							},
+							completion_contract: [
+								'evidence_bound_findings',
+								'unknowns_preserved',
+								'authoritative_readiness'
+							],
+							metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
+						},
+						`chat-flowdeck-audit-${crypto.randomUUID()}`
+					)
+				: await createFlowDeckOrchestration(
+						{
+							workspace,
+							objective: text,
+							metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
+						},
+						`chat-flowdeck-${crypto.randomUUID()}`
+					);
 			// Heidi messages are real CPTR rows. Replace the optimistic pair
 			// immediately so polling, reconnects, and loadChat all converge on
 			// the same durable IDs instead of losing the turn.
@@ -1486,6 +1531,7 @@
 				}
 			}
 			flowdeckRunId = result.run_id || '';
+			flowdeckIsAudit = result.audit === true || flowdeckIsAudit;
 			if (Array.isArray(result.events)) {
 				mergeFlowDeckEvents(result.events);
 				for (const event of result.events) applyFlowDeckEventToMessage(event);
@@ -1500,10 +1546,7 @@
 					allMessages = [...allMessages];
 				}
 			}
-			if (
-				flowdeckRunId &&
-				!isFlowDeckTerminal(flowdeckStatus)
-			) {
+			if (flowdeckRunId && !isFlowDeckTerminal(flowdeckStatus)) {
 				startFlowDeckPolling(flowdeckRunId);
 			} else if (flowdeckStatus !== 'clarification' && flowdeckMessageId) {
 				const message = allMessages.find((item) => item.id === flowdeckMessageId);
@@ -1520,9 +1563,7 @@
 		} catch (error) {
 			flowdeckStatus = 'failed';
 			toast.error(
-				error instanceof Error
-					? error.message
-					: 'Heidi could not start FlowDeck orchestration.'
+				error instanceof Error ? error.message : 'Heidi could not start FlowDeck orchestration.'
 			);
 		} finally {
 			inputText = '';
@@ -2274,8 +2315,11 @@
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
-						sending={sending}
-telemetry={flowdeckTelemetry}
+						{sending}
+						isAudit={flowdeckIsAudit}
+						events={flowdeckEvents}
+						telemetry={flowdeckTelemetry}
+						oncancel={handleCancel}
 					/>
 				{/if}
 				<ChatInput
@@ -2413,8 +2457,11 @@ telemetry={flowdeckTelemetry}
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
-						sending={sending}
-telemetry={flowdeckTelemetry}
+						{sending}
+						isAudit={flowdeckIsAudit}
+						events={flowdeckEvents}
+						telemetry={flowdeckTelemetry}
+						oncancel={handleCancel}
 					/>
 				{/if}
 				<ChatInput

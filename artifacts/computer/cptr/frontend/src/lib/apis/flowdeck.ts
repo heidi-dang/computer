@@ -14,6 +14,7 @@ export interface FlowDeckOrchestration {
 	started_at?: string;
 	finished_at?: string;
 	monitor_id?: string;
+	audit?: boolean;
 	[key: string]: unknown;
 }
 
@@ -98,7 +99,14 @@ export async function steerFlowDeckOrchestration(
 	chatId: string,
 	instruction: string,
 	idempotencyKey: string
-): Promise<FlowDeckOrchestration & { accepted?: boolean; queued?: boolean; duplicate?: boolean; message?: string }> {
+): Promise<
+	FlowDeckOrchestration & {
+		accepted?: boolean;
+		queued?: boolean;
+		duplicate?: boolean;
+		message?: string;
+	}
+> {
 	return fetchJSON(`/v1/flowdeck/orchestrations/${encodeURIComponent(runId)}/steer`, {
 		...jsonBody({ chat_id: chatId, instruction }),
 		headers: {
