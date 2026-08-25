@@ -1,7 +1,7 @@
 # Durable Direct Operations Architecture
 
-**Status:** Proposed replacement design for the current direct-coding PRs  
-**Audience:** CPTR and ChatGPT MCP maintainers  
+**Status:** Proposed replacement design for the current direct-coding PRs
+**Audience:** CPTR and ChatGPT MCP maintainers
 **Decision:** Replace the current raw-shell direct-coding endpoint with a durable, policy-enforced operation subsystem. The official ChatGPT model remains the planner and tool caller; CPTR’s agent loop is not involved.
 
 ![Durable direct-operation architecture](assets/durable-direct-operations-overview.png)
