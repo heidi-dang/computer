@@ -34,7 +34,7 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
             self.source.count("applyNativeTranscriptEvent(data, msg)"), 1
         )
         self.assertGreaterEqual(
-            self.source.count("applyNativeTranscriptEvent(event, message)"), 1
+            self.source.count("applyNativeTranscriptEvent(event, message, true)"), 1
         )
         self.assertIn("if (data.error) toast.error(data.error", self.source)
         self.assertIn("if (!data.done) return;", self.source)
@@ -47,8 +47,17 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
         self.assertIn("data?.message_id === flowdeckMessageId", self.source)
         self.assertIn("isActiveNativeTranscriptEvent", self.source)
         self.assertIn("reconcileFlowDeckEventOwner", self.source)
-        self.assertIn("mergeFlowDeckEvent(data, transcriptRunId);", self.source)
-        self.assertIn("function mergeFlowDeckEvent(event: any, ownerRunId = flowdeckRunId)", self.source)
+        self.assertIn("trustedFlowDeckEvent = false", self.source)
+        self.assertIn("applyNativeTranscriptEvent(event, message, true);", self.source)
+        self.assertIn("mergeFlowDeckEvent(data, transcriptRunId, trustedFlowDeckEvent);", self.source)
+        self.assertIn(
+            "function mergeFlowDeckEvent(\n"
+            "event: any,\n"
+            "ownerRunId = flowdeckRunId,\n"
+            "trustedFlowDeckEvent = false\n"
+            ")",
+            self.source,
+        )
         self.assertIn("parentRunId !== ownerRunId", self.source)
 
     def test_native_completion_clears_streaming_without_claiming_durable_success(self):

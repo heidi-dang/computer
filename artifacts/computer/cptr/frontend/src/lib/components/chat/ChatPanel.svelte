@@ -745,7 +745,7 @@ import LiveTerminal from './LiveTerminal.svelte';
 		applyNativeTranscriptEvent(data, msg);
 	}
 
-	function applyNativeTranscriptEvent(data: any, msg: any) {
+function applyNativeTranscriptEvent(data: any, msg: any, trustedFlowDeckEvent = false) {
 // Native transcript events and FlowDeck activity are the same authenticated
 // socket event. Register the event at the transcript boundary as well as the
 // outer routing boundary so a parent/child identity transition cannot render
@@ -761,7 +761,7 @@ data?.run_id ||
 data?.kind ||
 data?.message_id === flowdeckMessageId)
 ) {
-mergeFlowDeckEvent(data, transcriptRunId);
+mergeFlowDeckEvent(data, transcriptRunId, trustedFlowDeckEvent);
 }
 		if (data.delta) {
 			msg.content += data.delta;
@@ -882,7 +882,11 @@ return { ...event, flowdeck_parent_run_id: nextOwner, flowdeck_run_id: nextOwner
 });
 }
 
-function mergeFlowDeckEvent(event: any, ownerRunId = flowdeckRunId) {
+function mergeFlowDeckEvent(
+event: any,
+ownerRunId = flowdeckRunId,
+trustedFlowDeckEvent = false
+) {
 const parentRunId =
 event?.flowdeck_parent_run_id ||
 event?.run_id ||
@@ -893,13 +897,20 @@ const isActiveNativeTranscriptEvent =
 ownerRunId === flowdeckMessageId &&
 Boolean(event?.message_id && event.message_id === flowdeckMessageId) &&
 Boolean(event?.delta || event?.output || event?.done);
-if ((!parentRunId && !isActiveNativeTranscriptEvent) || (parentRunId && parentRunId !== ownerRunId))
+if (
+(!parentRunId && !isActiveNativeTranscriptEvent && !trustedFlowDeckEvent) ||
+(parentRunId && parentRunId !== ownerRunId && !trustedFlowDeckEvent)
+)
 return;
 const normalized =
 event?.flowdeck_parent_run_id || !event?.run_id
 ? parentRunId
 ? event
-: { ...event, flowdeck_parent_run_id: ownerRunId, flowdeck_run_id: ownerRunId }
+ : trustedFlowDeckEvent
+ ? { ...event, flowdeck_parent_run_id: ownerRunId }
+ : { ...event, flowdeck_parent_run_id: ownerRunId, flowdeck_run_id: ownerRunId }
+: trustedFlowDeckEvent
+? { ...event, flowdeck_parent_run_id: ownerRunId }
 : { ...event, flowdeck_parent_run_id: event.run_id };
 		const next = [...flowdeckEvents];
 		const key = flowDeckEventKey(normalized);
@@ -962,7 +973,7 @@ if (kind.includes('VALIDATION')) return 'validating';
 		if (reportedStatus) flowdeckStatus = reportedStatus;
 		const message = allMessages.find((item) => item.id === flowdeckMessageId);
 		if (!message) return;
-		applyNativeTranscriptEvent(event, message);
+applyNativeTranscriptEvent(event, message, true);
 		const activity = flowDeckActivityText(event);
 		if (
 			activity &&
