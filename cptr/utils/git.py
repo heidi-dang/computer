@@ -9,9 +9,14 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import PurePosixPath
 from typing import Any
 
 from cptr.utils.identity import ExecutionIdentity, env_for, preexec_for
+
+DIFF_MAX_FILES = 100
+DIFF_MAX_LINES = 4_000
+DIFF_MAX_LINE_CHARS = 2_000
 
 
 async def _run(
@@ -316,13 +321,12 @@ async def diff(
 ) -> dict[str, Any]:
     """Get diff output as structured data."""
     if untracked and file:
+        if not _safe_repo_relative_path(file):
+            return {"files": [], "diagnostic": "unsafe path"}
+        if not await _is_untracked_non_ignored(root, file, identity):
+            return {"files": []}
         # Untracked files: use --no-index to diff against empty
-        null_device = "NUL" if sys.platform == "win32" else "/dev/null"
-        args = ["diff", "--no-index", "--unified=3"]
-        if ignore_whitespace:
-            args.append("--ignore-all-space")
-        args.extend(["--", null_device, file])
-        _, out, _ = await _run(*args, cwd=root, check=False, identity=identity)
+        out = await _untracked_diff_raw(root, file, ignore_whitespace, identity)
         return _parse_diff(out)
 
     args = ["diff", "--unified=3"]
@@ -334,7 +338,74 @@ async def diff(
         args.extend(["--", file])
 
     _, out, _ = await _run(*args, cwd=root, identity=identity)
+    if untracked and not staged and not file:
+        untracked_paths = await _untracked_non_ignored_paths(root, identity)
+        for path in untracked_paths[: DIFF_MAX_FILES + 1]:
+            if not _safe_repo_relative_path(path):
+                continue
+            out += await _untracked_diff_raw(root, path, ignore_whitespace, identity)
     return _parse_diff(out)
+
+
+async def _untracked_non_ignored_paths(
+    root: str,
+    identity: ExecutionIdentity | None = None,
+) -> list[str]:
+    code, out, _ = await _run(
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        cwd=root,
+        check=False,
+        identity=identity,
+    )
+    if code != 0:
+        return []
+    return [item for item in out.split("\0") if item]
+
+
+async def _is_untracked_non_ignored(
+    root: str,
+    path: str,
+    identity: ExecutionIdentity | None = None,
+) -> bool:
+    code, out, _ = await _run(
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        path,
+        cwd=root,
+        check=False,
+        identity=identity,
+    )
+    if code != 0:
+        return False
+    return path in {item for item in out.split("\0") if item}
+
+
+async def _untracked_diff_raw(
+    root: str,
+    path: str,
+    ignore_whitespace: bool,
+    identity: ExecutionIdentity | None = None,
+) -> str:
+    null_device = "NUL" if sys.platform == "win32" else "/dev/null"
+    args = ["diff", "--no-index", "--unified=3"]
+    if ignore_whitespace:
+        args.append("--ignore-all-space")
+    args.extend(["--", null_device, path])
+    _, out, _ = await _run(*args, cwd=root, check=False, identity=identity)
+    return out
+
+
+def _safe_repo_relative_path(path: str) -> bool:
+    if not path or os.path.isabs(path):
+        return False
+    parts = PurePosixPath(path.replace(os.sep, "/")).parts
+    return ".." not in parts and "." not in parts
 
 
 async def compare_diff(
@@ -366,6 +437,8 @@ def _parse_diff(raw: str) -> dict[str, Any]:
     files: list[dict] = []
     current_file: dict | None = None
     current_hunk: dict | None = None
+    line_count = 0
+    truncated = False
 
     for line in raw.splitlines():
         if line.startswith("diff --git"):
@@ -373,6 +446,11 @@ def _parse_diff(raw: str) -> dict[str, Any]:
                 current_file["hunks"].append(current_hunk)
             if current_file:
                 files.append(current_file)
+                if len(files) >= DIFF_MAX_FILES:
+                    truncated = True
+                    current_file = None
+                    current_hunk = None
+                    break
             # Extract path from "diff --git a/foo b/foo"
             parts = line.split(" b/", 1)
             path = parts[1] if len(parts) > 1 else ""
@@ -383,12 +461,24 @@ def _parse_diff(raw: str) -> dict[str, Any]:
                 current_file["hunks"].append(current_hunk)
             current_hunk = {"header": line, "lines": []}
         elif current_hunk is not None:
+            if line_count >= DIFF_MAX_LINES:
+                truncated = True
+                continue
             if line.startswith("+"):
-                current_hunk["lines"].append({"type": "added", "content": line[1:]})
+                content, line_truncated = _bounded_diff_line(line[1:])
+                current_hunk["lines"].append({"type": "added", "content": content})
+                truncated = truncated or line_truncated
+                line_count += 1
             elif line.startswith("-"):
-                current_hunk["lines"].append({"type": "removed", "content": line[1:]})
+                content, line_truncated = _bounded_diff_line(line[1:])
+                current_hunk["lines"].append({"type": "removed", "content": content})
+                truncated = truncated or line_truncated
+                line_count += 1
             elif line.startswith(" "):
-                current_hunk["lines"].append({"type": "context", "content": line[1:]})
+                content, line_truncated = _bounded_diff_line(line[1:])
+                current_hunk["lines"].append({"type": "context", "content": content})
+                truncated = truncated or line_truncated
+                line_count += 1
             elif line.startswith("\\"):
                 # "\ No newline at end of file"
                 pass
@@ -398,12 +488,19 @@ def _parse_diff(raw: str) -> dict[str, Any]:
     if current_file:
         files.append(current_file)
 
-    return {"files": files}
+    result: dict[str, Any] = {"files": files}
+    if truncated:
+        result["truncated"] = True
+    return result
 
 
-async def stage(
-    root: str, files: list[str], identity: ExecutionIdentity | None = None
-) -> None:
+def _bounded_diff_line(content: str) -> tuple[str, bool]:
+    if len(content) <= DIFF_MAX_LINE_CHARS:
+        return content, False
+    return content[:DIFF_MAX_LINE_CHARS], True
+
+
+async def stage(root: str, files: list[str], identity: ExecutionIdentity | None = None) -> None:
     """Stage files for commit."""
     if not files:
         return

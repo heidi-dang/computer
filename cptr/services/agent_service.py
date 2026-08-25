@@ -7,8 +7,10 @@ import uuid
 import hashlib
 from typing import Any
 
+from sqlalchemy import select
+
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
-from cptr.models import Chat, ChatMessage, ControlTask, Workspace
+from cptr.models import Chat, ChatMessage, ControlMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import get_db
 from cptr.utils.redaction import (
@@ -17,6 +19,8 @@ from cptr.utils.redaction import (
     redact_sensitive,
     redact_text,
 )
+
+CONTROL_MESSAGE_OUTPUT_LIMIT = 20
 
 
 class AgentService:
@@ -136,7 +140,23 @@ class AgentService:
                 error="worker failed to start",
                 updated_at=int(time.time() * 1000),
             )
+            from cptr.services.live_events import safe_publish_task_event
+
+            await safe_publish_task_event(
+                user_id=user_id,
+                task_id=task_id,
+                event_type="task.failed",
+                payload={"status": "FAILED", "message": "worker failed to start"},
+            )
             raise
+        from cptr.services.live_events import safe_publish_task_event
+
+        await safe_publish_task_event(
+            user_id=user_id,
+            task_id=task_id,
+            event_type="task.started",
+            payload={"status": "RUNNING", "workspace_id": workspace_id},
+        )
         return await self.get_task(task_id, user_id=user_id)
 
     async def start_existing_task(
@@ -253,6 +273,7 @@ class AgentService:
                 output={"content": safe_output},
                 updated_at=int(time.time() * 1000),
             )
+        control_messages, control_messages_truncated = await self._control_delivery_records(task.id)
         return {
             "id": task.id,
             "workspace_id": task.workspace_id,
@@ -264,6 +285,8 @@ class AgentService:
             "output": safe_output,
             "raw_output": redact_external(message.output or []),
             "error": redact_text(error) if error else None,
+            "control_messages": control_messages,
+            "control_messages_truncated": control_messages_truncated,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
         }
@@ -275,6 +298,41 @@ class AgentService:
             "status": task["status"],
             "content": redact_text(task["output"]),
             "raw_output": redact_sensitive(task["raw_output"]),
+            "control_messages": task.get("control_messages", []),
+            "control_messages_truncated": bool(task.get("control_messages_truncated", False)),
+        }
+
+    async def _control_delivery_records(self, task_id: str) -> tuple[list[dict[str, Any]], bool]:
+        async with await get_db() as db:
+            result = await db.execute(
+                select(ControlMessage)
+                .where(ControlMessage.task_id == task_id)
+                .order_by(ControlMessage.created_at, ControlMessage.id)
+                .limit(CONTROL_MESSAGE_OUTPUT_LIMIT + 1)
+            )
+            rows = list(result.scalars().all())
+        truncated = len(rows) > CONTROL_MESSAGE_OUTPUT_LIMIT
+        return [
+            self._control_delivery_record(row) for row in rows[:CONTROL_MESSAGE_OUTPUT_LIMIT]
+        ], truncated
+
+    @staticmethod
+    def _control_delivery_record(row: ControlMessage) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "status": row.status,
+            "setup_readiness_status": getattr(row, "setup_readiness_status", None),
+            "chat_message_id": row.chat_message_id,
+            "target_message_id": row.target_message_id,
+            "monitor_id": row.monitor_id,
+            "scope_id": row.scope_id,
+            "intended_message_id": row.intended_message_id,
+            "consumed_task_id": row.consumed_task_id,
+            "consumed_message_id": row.consumed_message_id,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+            "delivered_at": row.delivered_at,
+            "consumed_at": row.consumed_at,
         }
 
     async def send_message(
@@ -329,6 +387,7 @@ class AgentService:
                 chat_id=task.chat_id,
                 role="user",
                 content=content,
+                model=task.model_id,
                 meta={
                     "queued": True,
                     "delivery_status": "QUEUED",
@@ -339,17 +398,34 @@ class AgentService:
             )
             message_id = message.id
             await self.store.update_message(control_message.id, chat_message_id=message_id)
-        from cptr.utils.chat_task import process_pending_chat_inputs
+        from cptr.utils.chat_task import (
+            control_setup_ready,
+            get_active_chat_ids,
+            interrupt_for_control,
+            is_running,
+            process_pending_chat_inputs,
+            schedule_control_interrupt_after_setup,
+        )
 
-        from cptr.utils.chat_task import get_active_chat_ids, interrupt_for_control, is_running
-
-        if is_running(task.message_id):
+        setup_ready = control_setup_ready(task.message_id)
+        if is_running(task.message_id) and setup_ready:
             # A control message must not remain QUEUED behind an unbounded
             # native/tool call. Interrupt only the owned turn; the durable
             # pending-input path then starts a continuation and preserves the
             # same ControlTask identity for provenance and exactly-once checks.
+            # During initial setup, the outer condition is false, leaving the
+            # control durably queued until the first completed tool boundary.
             await interrupt_for_control(
                 task.message_id,
+                timeout=TASK_CANCELLATION_TIMEOUT_SECONDS,
+            )
+        elif is_running(task.message_id):
+            # The initial worker setup is not interruptible yet. Keep the
+            # durable control queued, then interrupt this same active worker
+            # as soon as it crosses its first completed tool boundary.
+            schedule_control_interrupt_after_setup(
+                task.message_id,
+                control_message_id=control_message.id,
                 timeout=TASK_CANCELLATION_TIMEOUT_SECONDS,
             )
 
@@ -363,12 +439,28 @@ class AgentService:
             refreshed = await self.store.get_message(control_message.id)
             if refreshed is not None:
                 control_message = refreshed
+        from cptr.services.live_events import safe_publish_task_event
+
+        await safe_publish_task_event(
+            user_id=user_id,
+            task_id=task.id,
+            event_type="control.queued",
+            payload={
+                "status": control_message.status,
+                "control_message_id": control_message.id,
+                "message_id": message_id,
+                "delivery_status": control_message.status,
+            },
+        )
         return {
             "task_id": task.id,
             "message_id": message_id,
             "control_message_id": control_message.id,
             "status": "QUEUED",
             "delivery_status": control_message.status,
+            "setup_readiness_status": "READY" if setup_ready else "NOT_READY",
+            "target_message_id": getattr(control_message, "target_message_id", None),
+            "intended_message_id": getattr(control_message, "intended_message_id", None),
         }
 
     async def cancel_task(self, task_id: str, *, user_id: str) -> dict[str, Any]:
@@ -432,6 +524,14 @@ class AgentService:
             )
         result = await self.get_task(task.id, user_id=user_id)
         result["cancelled"] = True
+        from cptr.services.live_events import safe_publish_task_event
+
+        await safe_publish_task_event(
+            user_id=user_id,
+            task_id=task.id,
+            event_type="task.cancelled",
+            payload={"status": result.get("status", "CANCELLED"), "cancelled": True},
+        )
         return result
 
     async def get_diff(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:

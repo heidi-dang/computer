@@ -51,6 +51,7 @@ class ControlMessage(Base):
     content = Column(Text, nullable=False)
     dedupe_key = Column(Text, nullable=False)
     status = Column(Text, nullable=False, default="QUEUED")
+    setup_readiness_status = Column(Text, nullable=True)
     target_message_id = Column(Text, nullable=True)
     monitor_id = Column(Text, nullable=True)
     scope_id = Column(Text, nullable=True)
@@ -171,3 +172,25 @@ class ControlIdempotency(Base):
     created_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (UniqueConstraint("user_id", "key", name="uq_control_idempotency_user_key"),)
+
+
+class ControlLiveEvent(Base):
+    """Sanitized, replayable event for one task or autonomous monitor stream."""
+
+    __tablename__ = "control_live_events"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    user_id = Column(Text, ForeignKey("users.id"), nullable=False)
+    target_key = Column(Text, nullable=False)
+    sequence = Column(BigInteger, nullable=False)
+    task_id = Column(Text, nullable=True)
+    monitor_id = Column(Text, nullable=True)
+    worker_task_id = Column(Text, nullable=True)
+    event_type = Column(Text, nullable=False)
+    payload = Column(JSON, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("target_key", "sequence", name="uq_control_live_event_target_sequence"),
+        Index("ix_control_live_event_target_created", "target_key", "created_at"),
+    )

@@ -366,6 +366,7 @@ _cancel_requested: set[str] = set()
 _control_interrupt_requested: set[str] = set()
 _interruption_reasons: dict[str, str] = {}
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
+_control_readiness_watchers: dict[str, asyncio.Task] = {}
 
 CONTROL_INTERRUPT = "CONTROL_INTERRUPT"
 USER_CANCEL = "USER_CANCEL"
@@ -514,6 +515,77 @@ def is_running(message_id: str) -> bool:
 def get_live_state(message_id: str) -> dict | None:
     """Get live in-memory state for a running task."""
     return _task_state.get(message_id)
+
+
+def control_setup_ready(message_id: str) -> bool:
+    """Return whether the active turn completed at least one tool boundary.
+
+    Steering may interrupt a long native/tool operation, but it must not
+    interrupt the initial setup phase before any tool has returned.  A
+    completed function call is the durable execution boundary available to
+    the live task registry; the caller records the resulting readiness in
+    the control provenance ledger.
+    """
+    state = _task_state.get(message_id) or {}
+    output = state.get("output") or []
+    completed_calls = {
+        str(item.get("call_id"))
+        for item in output
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and str(item.get("status") or "").lower() in {"completed", "complete", "done"}
+        and item.get("call_id")
+    }
+    return any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and str(item.get("call_id")) in completed_calls
+        for item in output
+    )
+
+
+def schedule_control_interrupt_after_setup(
+    message_id: str,
+    *,
+    control_message_id: str,
+    timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS,
+) -> None:
+    """Interrupt one active worker after setup, preserving its task identity.
+
+    A control arriving before the first completed tool boundary must remain
+    queued, but it must not wait for the worker to finish and accidentally
+    become a replacement-generation control. The watcher belongs to the
+    active task and exits when that task, or the durable control, is terminal.
+    """
+    existing = _control_readiness_watchers.get(message_id)
+    if existing is not None and not existing.done():
+        return
+
+    async def watch() -> None:
+        from cptr.services.control_store import ControlTaskStore
+
+        store = ControlTaskStore()
+        try:
+            while is_running(message_id):
+                control = await store.get_message(control_message_id)
+                if control is None or control.status not in {"QUEUED", "DELIVERED"}:
+                    return
+                if control_setup_ready(message_id):
+                    await store.mark_setup_ready_for_message(
+                        message_id,
+                        now=now_ms(),
+                    )
+                    if is_running(message_id) and not is_cancel_requested(message_id):
+                        await interrupt_for_control(message_id, timeout=timeout)
+                    return
+                await asyncio.sleep(0.05)
+        finally:
+            if _control_readiness_watchers.get(message_id) is asyncio.current_task():
+                _control_readiness_watchers.pop(message_id, None)
+
+    _control_readiness_watchers[message_id] = asyncio.create_task(
+        watch(), name=f"cptr-control-readiness-{message_id[:8]}"
+    )
 
 
 def get_active_chat_ids() -> set[str]:
@@ -703,9 +775,12 @@ async def process_pending_chat_inputs(request, chat_id: str, user_id: str, works
             # Resolve model from the queued input, then the chat's last used model.
             model_id = input_batch[0].model or (chat.meta or {}).get("last_model", "")
             if not model_id:
-                # Fall back to the model from the last assistant message
-                done_assistants = [m for m in all_msgs if m.role == "assistant" and m.done]
-                last_asst = done_assistants[-1] if done_assistants else None
+                # A control interruption deliberately leaves the original
+                # assistant row non-terminal.  Its model is still the
+                # authoritative continuation target; requiring a completed
+                # assistant here strands the durable control in QUEUED.
+                assistants = [m for m in all_msgs if m.role == "assistant"]
+                last_asst = assistants[-1] if assistants else None
                 model_id = (last_asst.model if last_asst else "") or ""
             if not model_id:
                 logger.error(
@@ -1583,6 +1658,43 @@ async def run_chat_task(
                 "[task %s] internal request creation failed", message_id[:8], exc_info=True
             )
 
+    control_task_id: str | None = None
+    active_tool_names: dict[str, str] = {}
+    try:
+        chat_for_live = await Chat.get_by_id(chat_id)
+        chat_meta = chat_for_live.meta if chat_for_live else {}
+        if isinstance(chat_meta, dict):
+            candidate = chat_meta.get("control_task_id")
+            if candidate:
+                control_task_id = str(candidate)
+    except Exception:
+        logger.debug("[task %s] live task identity lookup failed", message_id[:8], exc_info=True)
+
+    async def _finalize_control_terminal(status: str, error: str | None = None) -> None:
+        if not control_task_id:
+            return
+        from cptr.services.control_store import ControlTaskStore
+        from cptr.services.live_events import safe_publish_task_event
+
+        store = ControlTaskStore()
+        transition = await store.transition_terminal(
+            control_task_id,
+            status=status,
+            error=error,
+            updated_at=now_ms(),
+        )
+        current = await store.get(control_task_id)
+        if transition or (current is not None and current.status == status):
+            await safe_publish_task_event(
+                user_id=user_id,
+                task_id=control_task_id,
+                event_type="task.terminal",
+                payload={
+                    "status": current.status if current is not None else status,
+                    "error": error,
+                },
+            )
+
     async def emit(**data):
         """Stream an output delta to the user."""
         from cptr.utils.redaction import redact_sensitive
@@ -1609,7 +1721,53 @@ async def run_chat_task(
                 else:
                     await output_queue.put({"type": "done", "finish_reason": "stop"})
 
-    async def _emit_done():
+        if control_task_id:
+            from cptr.services.live_events import safe_publish_task_event
+
+            if "delta" in safe_data:
+                await safe_publish_task_event(
+                    user_id=user_id,
+                    task_id=control_task_id,
+                    event_type="agent.output",
+                    payload={"text": str(safe_data["delta"])[:2000]},
+                )
+            item = safe_data.get("output")
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "function_call":
+                    call_id = str(item.get("call_id") or item.get("id") or "")
+                    if call_id:
+                        active_tool_names[call_id] = str(item.get("name") or "tool")
+                    await safe_publish_task_event(
+                        user_id=user_id,
+                        task_id=control_task_id,
+                        event_type="tool.started",
+                        payload={
+                            "name": str(item.get("name") or "tool"),
+                            "status": item.get("status", "in_progress"),
+                        },
+                    )
+                elif item_type == "function_call_output":
+                    raw_output = item.get("output")
+                    call_id = str(item.get("call_id") or "")
+                    tool_name = active_tool_names.get(call_id, "tool")
+                    event_type = (
+                        "shell.stdout"
+                        if tool_name in {"run_command", "terminal"}
+                        else "tool.output"
+                    )
+                    await safe_publish_task_event(
+                        user_id=user_id,
+                        task_id=control_task_id,
+                        event_type=event_type,
+                        payload={
+                            "status": "completed",
+                            "tool": tool_name,
+                            "output": str(raw_output)[:4000],
+                        },
+                    )
+
+    async def _emit_done(*, terminal_status: str | None = None):
         """Emit done=True enriched with chat title and content preview."""
         try:
             chat_obj = await Chat.get_by_id(chat_id)
@@ -1624,6 +1782,7 @@ async def run_chat_task(
             logger.debug("[task %s] clear_active_tasks failed", message_id[:8], exc_info=True)
         await emit(
             done=True,
+            terminal_status=terminal_status,
             title=title,
             content=preview,
             workspace=workspace,
@@ -1651,12 +1810,25 @@ async def run_chat_task(
                     control_message = await control_store.get_message(str(control_message_id))
                     consume = getattr(control_store, "consume_message", None)
                     if control_message is not None and callable(consume):
-                        await consume(
+                        consumed = await consume(
                             str(control_message_id),
                             task_id=control_message.task_id,
                             message_id_for_run=message_id,
                             now=consumed_at,
                         )
+                        if consumed:
+                            from cptr.services.live_events import safe_publish_task_event
+
+                            await safe_publish_task_event(
+                                user_id=user_id,
+                                task_id=control_message.task_id,
+                                event_type="control.consumed",
+                                payload={
+                                    "status": "CONSUMED",
+                                    "control_message_id": str(control_message_id),
+                                    "message_id": message_id,
+                                },
+                            )
                     else:
                         await control_store.update_message(
                             str(control_message_id),
@@ -2054,6 +2226,7 @@ async def run_chat_task(
                     usage=event.usage,
                     done=True,
                 )
+                await _finalize_control_terminal("COMPLETE")
                 _task_state.pop(message_id, None)
                 await _emit_done()
                 preview = content[:300] if content else ""
@@ -2994,6 +3167,7 @@ async def run_chat_task(
             done=True,
             meta={"error": "max iterations reached"},
         )
+        await _finalize_control_terminal("FAILED", "max iterations reached")
         _task_state.pop(message_id, None)
         await _emit_done()
         await publish_event(
@@ -3029,7 +3203,7 @@ async def run_chat_task(
             await _save_message("cancelled", content=content, output=output_items, done=True)
         _task_state.pop(message_id, None)
         if not is_control_interrupt_requested(message_id):
-            await _emit_done()
+            await _emit_done(terminal_status="CANCELLED")
     except Exception as e:
         logger.exception(f"Chat task error for message {message_id}")
         _flush_text()
@@ -3062,6 +3236,7 @@ async def run_chat_task(
             done=True,
             meta={"error": error_msg},
         )
+        await _finalize_control_terminal("FAILED", error_msg)
         _task_state.pop(message_id, None)
         await emit(done=True, error=error_msg)
         await publish_event(

@@ -36,6 +36,14 @@ POST /tasks/{task_id}/messages
 POST /tasks/{task_id}/cancel
 GET  /workspaces/{workspace_id}/git/status
 GET  /workspaces/{workspace_id}/git/diff
+POST /workspaces/{workspace_id}/coding/list
+POST /workspaces/{workspace_id}/coding/read
+POST /workspaces/{workspace_id}/coding/search
+POST /workspaces/{workspace_id}/coding/write
+POST /workspaces/{workspace_id}/coding/edit
+POST /workspaces/{workspace_id}/coding/commands
+GET  /workspaces/{workspace_id}/coding/commands/{command_id}
+POST /workspaces/{workspace_id}/coding/commands/{command_id}/cancel
 POST /autonomous
 GET  /autonomous/{monitor_id}
 GET  /autonomous/{monitor_id}/events
@@ -57,9 +65,21 @@ task:read
 task:write
 autonomous:run
 git:read
+coding:read
+coding:write
+command:execute
+command:external (optional; not issued by default)
 ```
 
-`git:write` and `deploy:write` are reserved. The MCP adapter is not trusted merely because a request originated in ChatGPT. CPTR checks the token, required scope, user ownership, and resource identity.
+The direct-coding API is designed for an official ChatGPT MCP connector. It performs no CPTR model selection and does not invoke the CPTR agent loop: ChatGPT itself chooses and sequences scoped file and command tools. `coding:read` is required for list/read/search; `coding:write` is required for file writes and exact edits; `command:execute` is required for managed workspace commands; `command:external` is additionally required for explicitly approved commands that may contact external services. `git:write` and `deploy:write` remain reserved. The MCP adapter is not trusted merely because a request originated in ChatGPT. CPTR checks the token, required scope, user ownership, and resource identity.
+
+New keys issued through `POST /v1/keys` receive the default direct-coding scopes. An authenticated administrator may send an explicit `scopes` array to issue a least-privilege custom key; CPTR accepts only the documented scopes and rejects unknown values. `command:external` is optional and must be explicitly included when an operator intends to permit approved external commands.
+
+## Direct-coding safety boundary
+
+Direct-coding requests are bound to an owned workspace ID and accept only paths relative to that workspace. CPTR rejects absolute paths, traversal attempts, and environment-file paths. Reads reject binary files and files over 500 KB; writes and edits are capped at 1 MB. Exact edits require one unambiguous matching target. Command sessions are bounded, owned by the authenticated user, and support status, incremental output, and cancellation. CPTR rejects destructive command patterns and requires both an explicit `allow_network` flag and the separate `command:external` scope for commands that may contact external services.
+
+The direct-coding tools are deliberately distinct from the broader internal CPTR agent-tool registry. ChatGPT can autonomously chain the exposed coding primitives but is not given direct access to credentials, arbitrary host paths, CPTR browser sessions, deployment controls, or unconstrained internal tools.
 
 ## Autonomous state machine
 
