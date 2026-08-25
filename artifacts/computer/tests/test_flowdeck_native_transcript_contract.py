@@ -39,6 +39,15 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
         self.assertIn("if (data.error) toast.error(data.error", self.source)
         self.assertIn("if (!data.done) return;", self.source)
 
+    def test_native_flowdeck_events_feed_the_live_terminal_collection(self):
+        self.assertIn(
+            "const transcriptRunId = String(msg?.meta?.flowdeck_run_id || flowdeckRunId || '')",
+            self.source,
+        )
+        self.assertIn("mergeFlowDeckEvent(data, transcriptRunId);", self.source)
+        self.assertIn("function mergeFlowDeckEvent(event: any, ownerRunId = flowdeckRunId)", self.source)
+        self.assertIn("parentRunId !== ownerRunId", self.source)
+
     def test_native_completion_clears_streaming_without_claiming_durable_success(self):
         self.assertIn("msg.done = true;", self.source)
         self.assertIn("flowdeckStatus = data.error ? 'failed' : 'verifying';", self.source)

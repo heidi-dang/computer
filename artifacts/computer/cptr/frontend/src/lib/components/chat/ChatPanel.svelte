@@ -746,6 +746,17 @@ import LiveTerminal from './LiveTerminal.svelte';
 	}
 
 	function applyNativeTranscriptEvent(data: any, msg: any) {
+// Native transcript events and FlowDeck activity are the same authenticated
+// socket event. Register the event at the transcript boundary as well as the
+// outer routing boundary so a parent/child identity transition cannot render
+// the transcript while dropping the event before LiveTerminal sees it.
+const transcriptRunId = String(msg?.meta?.flowdeck_run_id || flowdeckRunId || '');
+if (
+transcriptRunId &&
+(data?.flowdeck_run_id || data?.flowdeck_parent_run_id || data?.run_id || data?.kind)
+) {
+mergeFlowDeckEvent(data, transcriptRunId);
+}
 		if (data.delta) {
 			msg.content += data.delta;
 			allMessages = [...allMessages];
@@ -856,13 +867,13 @@ import LiveTerminal from './LiveTerminal.svelte';
 		for (const event of events) mergeFlowDeckEvent(event);
 	}
 
-	function mergeFlowDeckEvent(event: any) {
+function mergeFlowDeckEvent(event: any, ownerRunId = flowdeckRunId) {
 const parentRunId =
 event?.flowdeck_parent_run_id ||
 event?.run_id ||
 event?.flowdeck_run_id ||
 null;
-		if (!parentRunId || parentRunId !== flowdeckRunId) return;
+if (!parentRunId || parentRunId !== ownerRunId) return;
 const normalized =
 event?.flowdeck_parent_run_id || !event?.run_id
 ? event
