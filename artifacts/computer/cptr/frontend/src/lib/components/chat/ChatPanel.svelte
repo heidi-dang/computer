@@ -186,6 +186,7 @@ import LiveTerminal from './LiveTerminal.svelte';
 	});
 	let flowdeckPoller: ReturnType<typeof setInterval> | null = null;
 	let flowdeckEvents = $state<any[]>([]);
+let flowdeckEventBuffer: any[] = [];
 	let flowdeckClarification = $state('');
 	let flowdeckMessageId = $state<string | null>(null);
 	const FLOWDECK_EVENT_LIMIT = 200;
@@ -860,17 +861,28 @@ mergeFlowDeckEvent(data, transcriptRunId, trustedFlowDeckEvent);
 		);
 		if (event?.id || event?.event_id) return `${run}:id:${event.id || event.event_id}`;
 		const output = event?.output || {};
-		const payload = event?.payload || {};
+		const frame =
+			event?.payload?.kind === 'terminal_frame'
+				? event.payload
+				: event?.terminal_frame === true
+					? event
+					: null;
+		const payload = frame?.payload || event?.payload || {};
+		const sequence = event?.sequence ?? frame?.sequence ?? '';
+		const kind = frame?.frame_kind || event?.kind || event?.type || '';
+		const frameContent =
+			payload.text ?? payload.stdout ?? payload.stderr ?? payload.output ?? payload.result ?? '';
 		return [
 			run,
-			event?.sequence ?? '',
+			sequence,
 			event?.message_id ?? '',
-			event?.kind || event?.type || '',
+			kind,
+			frame?.terminal_run_id || event?.terminal_run_id || '',
 			output.type || '',
 			output.call_id || output.id || '',
 			output.status || '',
 			payload.step_id || payload.specialist_id || '',
-			event?.delta || ''
+			event?.delta || frameContent
 		].join('|');
 	}
 
@@ -880,11 +892,12 @@ for (const event of events) mergeFlowDeckEvent(event, ownerRunId);
 
 function reconcileFlowDeckEventOwner(previousOwner: string, nextOwner: string) {
 if (!previousOwner || !nextOwner || previousOwner === nextOwner) return;
-flowdeckEvents = flowdeckEvents.map((event) => {
+flowdeckEventBuffer = flowdeckEventBuffer.map((event) => {
 const eventRunId = event?.flowdeck_parent_run_id || event?.flowdeck_run_id || event?.run_id;
 if (eventRunId !== previousOwner) return event;
 return { ...event, flowdeck_parent_run_id: nextOwner, flowdeck_run_id: nextOwner };
 });
+flowdeckEvents = flowdeckEventBuffer;
 }
 
 function mergeFlowDeckEvent(
@@ -906,7 +919,9 @@ if (
 (!parentRunId && !isActiveNativeTranscriptEvent && !trustedFlowDeckEvent) ||
 (parentRunId && parentRunId !== ownerRunId && !trustedFlowDeckEvent)
 )
+	{
 return;
+	}
 const normalized =
 event?.flowdeck_parent_run_id || !event?.run_id
 ? parentRunId
@@ -917,7 +932,7 @@ event?.flowdeck_parent_run_id || !event?.run_id
 : trustedFlowDeckEvent
 ? { ...event, flowdeck_parent_run_id: ownerRunId }
 : { ...event, flowdeck_parent_run_id: event.run_id };
-		const next = [...flowdeckEvents];
+		const next = [...flowdeckEventBuffer];
 		const key = flowDeckEventKey(normalized);
 		const index = next.findIndex((item) => flowDeckEventKey(item) === key);
 		if (index >= 0) next[index] = { ...next[index], ...normalized };
@@ -927,7 +942,8 @@ event?.flowdeck_parent_run_id || !event?.run_id
 		if (next.every((item) => Number.isFinite(Number(item?.sequence)))) {
 			next.sort((a, b) => Number(a.sequence) - Number(b.sequence));
 		}
-		flowdeckEvents = next.slice(-FLOWDECK_EVENT_LIMIT);
+		flowdeckEventBuffer = next.slice(-FLOWDECK_EVENT_LIMIT);
+		flowdeckEvents = flowdeckEventBuffer;
 	}
 
 	function flowDeckActivityText(event: any): string | null {
@@ -1042,6 +1058,7 @@ applyNativeTranscriptEvent(event, message, true);
 		flowdeckStatus = '';
 		flowdeckRunId = '';
 		flowdeckIsAudit = false;
+		flowdeckEventBuffer = [];
 		flowdeckEvents = [];
 		flowdeckClarification = '';
 		flowdeckMessageId = null;
@@ -1474,7 +1491,14 @@ const poll = async () => {
 			try {
 				const state = await getFlowDeckOrchestration(runId, workspace);
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
-if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events, runId);
+if (Array.isArray(state.events)) {
+	mergeFlowDeckEvents(state.events, runId);
+	// Replay responses are authoritative snapshots. Publish the complete
+	// bounded snapshot atomically so rapid polling cannot observe a stale
+	// reactive array between individual event merges.
+	flowdeckEventBuffer = state.events.slice(-FLOWDECK_EVENT_LIMIT);
+	flowdeckEvents = flowdeckEventBuffer;
+}
 				for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
 				if (isFlowDeckTerminal(flowdeckStatus)) {
 					if (flowdeckMessageId) {
@@ -1505,6 +1529,7 @@ flowdeckPoller = setInterval(poll, 2500);
 		flowdeckStatus = 'preparing';
 		flowdeckRunId = '';
 		flowdeckIsAudit = /\baudit\b/i.test(text);
+		flowdeckEventBuffer = [];
 		flowdeckEvents = [];
 		flowdeckClarification = '';
 		autoScroll = true;
@@ -1513,7 +1538,7 @@ flowdeckPoller = setInterval(poll, 2500);
 		const userId = `heidi-user-${Date.now()}`;
 		const assistantId = `heidi-assistant-${Date.now()}`;
 		flowdeckMessageId = assistantId;
-		flowdeckEvents = [
+		flowdeckEventBuffer = [
 			{
 				kind: 'terminal_frame',
 				terminal_frame: true,
@@ -1530,6 +1555,7 @@ flowdeckPoller = setInterval(poll, 2500);
 				message_id: assistantId
 			}
 		];
+		flowdeckEvents = flowdeckEventBuffer;
 		allMessages = [
 			...allMessages,
 			{
@@ -1624,7 +1650,7 @@ flowdeckRunId = result.run_id || '';
 reconcileFlowDeckEventOwner(previousFlowDeckOwner, flowdeckRunId);
 			flowdeckIsAudit = result.audit === true || flowdeckIsAudit;
 			if (Array.isArray(result.events)) {
-				mergeFlowDeckEvents(result.events);
+				mergeFlowDeckEvents(result.events, flowdeckRunId);
 				for (const event of result.events) applyFlowDeckEventToMessage(event);
 			}
 			flowdeckStatus = String(result.status || 'active').toLowerCase();
