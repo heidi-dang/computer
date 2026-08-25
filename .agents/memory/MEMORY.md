@@ -26,3 +26,4 @@
 - [Storage key containment](storage-key-containment.md) — attachment IDs are untrusted; resolved blob paths must stay inside the upload root.
 - [Live terminal proxy boundary](live-terminal-proxy-boundary.md) — same-origin FlowDeck mutations need the browser-facing host preserved through the frontend proxy.
 - [Terminal execution observer](terminal-execution-observer.md) — Live Terminal should observe safe CPTR execution frames directly, not use transcript output as its primary data source.
+- [Disposable qualification runtime](disposable-qualification-runtime.md) — isolated CPTR runs must own data/config, reject ambient provider credentials, and retain the generated SPA build.
