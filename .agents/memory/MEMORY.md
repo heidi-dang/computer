@@ -17,3 +17,4 @@
 - [Parallel branch ownership](parallel-branch-ownership.md) — independent mutation branches need explicit non-overlapping file ownership and shared metadata must stay out of scope.
 - [Worktree metadata side effects](worktree-metadata-side-effects.md) — CPTR metadata helpers must not edit branch `.gitignore` files during parallel execution.
 - [Native cancellation propagation](native-cancellation-propagation.md) — native child loops must re-raise cancellation after cleanup so parent timeout and durable UNKNOWN handling remain authoritative.
+- [Native cancellation finalization](native-cancel-finalization.md) — cancellation must durably finalize messages even when it wins before the native coroutine starts.

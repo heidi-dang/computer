@@ -1,8 +1,10 @@
 import ast
+import asyncio
 import httpx
 import inspect
 import unittest
 
+from cptr.utils import chat_task
 from cptr.utils.chat_task import _format_task_error, run_chat_task, tool_call_fingerprint
 
 
@@ -67,6 +69,20 @@ class ChatTaskLoopTests(unittest.IsolatedAsyncioTestCase):
             ),
             "native loop cancellation must propagate after durable chat cleanup",
         )
+
+    async def test_cancel_task_awaits_a_task_cancelled_before_first_turn(self):
+        async def never_started():
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(never_started())
+        message_id = "cancel-before-first-turn"
+        chat_task._tasks[message_id] = task
+        try:
+            self.assertTrue(await chat_task.cancel_task(message_id))
+            self.assertTrue(task.done())
+            self.assertTrue(task.cancelled())
+        finally:
+            chat_task._tasks.pop(message_id, None)
 
     async def test_repeated_list_directory_emits_terminal_event(self):
         """The terminal event contract remains usable by socket and gateway clients."""

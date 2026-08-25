@@ -1697,18 +1697,19 @@ async def cancel_task_endpoint(request: Request, chat_id: str, message_id: str):
 
     from cptr.utils.chat_task import cancel_task
 
-    found = await cancel_task(message_id)
+    await cancel_task(message_id)
 
-    if not found:
-        # Task already exited (e.g., waiting for tool approval) but message
-        # may still be marked done=False, force-finalize it.
-        msg = await ChatMessage.get_by_id(message_id)
-        if msg and not msg.done:
-            output = msg.output or []
-            for item in output:
-                if item.get("type") == "function_call" and item.get("status") == "pending":
-                    item["status"] = "rejected"
-            await ChatMessage.update(message_id, output=output, done=True)
+    # A task cancelled before its first scheduling turn never enters the
+    # native loop's cleanup handler.  The same is true for a task that already
+    # exited while waiting for tool approval.  In either case, make the
+    # durable assistant message terminal before returning to the caller.
+    msg = await ChatMessage.get_by_id(message_id)
+    if msg and not msg.done:
+        output = msg.output or []
+        for item in output:
+            if item.get("type") == "function_call" and item.get("status") == "pending":
+                item["status"] = "rejected"
+        await ChatMessage.update(message_id, output=output, done=True)
 
     # Process pending inputs since this chat may now be idle.
     from cptr.utils.chat_task import process_pending_chat_inputs

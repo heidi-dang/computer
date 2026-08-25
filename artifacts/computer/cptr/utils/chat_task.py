@@ -476,6 +476,13 @@ async def cancel_task(message_id: str) -> bool:
     task = _tasks.get(message_id)
     if task:
         task.cancel()
+        # A task can be cancelled before its coroutine gets its first
+        # scheduling turn.  Await it so callers do not return while the
+        # native loop's durable cleanup is still pending (or skipped).
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
         return True
     return False
 

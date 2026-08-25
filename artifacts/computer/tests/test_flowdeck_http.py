@@ -23,6 +23,7 @@ from cptr.models.flowdeck import (
     FlowDeckStep,
 )
 from cptr.utils import db as db_module
+from cptr.utils.config import create_token
 
 
 class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
@@ -596,6 +597,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cancelled.json()["status"], "cancelled")
         self.assertEqual(repeated.status_code, 200)
         self.assertEqual(repeated.json()["status"], "cancelled")
+
         self.assertEqual(
             (await active["store"].get_run_operations(active["run"].id))[0].status,
             OperationStatus.OUTCOME_UNKNOWN.value,
@@ -614,6 +616,48 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                     "attempt_id": active["attempt"].id,
                 },
             )
+
+    async def test_immediate_native_chat_cancellation_terminalizes_message(self):
+        from cptr.models import ChatMessage
+
+        message = await ChatMessage.create(
+            chat_id="missing-chat",
+            role="assistant",
+            content="",
+            model="test-model",
+            done=False,
+            created_at=1,
+        )
+        fake_task = asyncio.create_task(asyncio.sleep(60))
+        from cptr.utils import chat_task
+
+        chat_task._tasks[message.id] = fake_task
+        try:
+            with (
+                patch(
+                    "cptr.routers.chat._get_user",
+                    return_value="user-a",
+                ),
+                patch(
+                    "cptr.routers.chat.Chat.get_by_id",
+                    new=AsyncMock(
+                        return_value=SimpleNamespace(
+                            id="missing-chat",
+                            user_id="user-a",
+                            meta={"workspace": str(self.root_a)},
+                        )
+                    ),
+                ),
+            ):
+                response = await self.client.post(
+                    f"/api/chats/missing-chat/messages/{message.id}/cancel",
+                    cookies={"cptr_session": create_token("user-a", "a", "user")},
+                )
+            self.assertEqual(response.status_code, 200)
+            stored = await ChatMessage.get_by_id(message.id)
+            self.assertTrue(stored.done)
+        finally:
+            chat_task._tasks.pop(message.id, None)
 
     async def test_same_workspace_http_mutators_obey_existing_lease(self):
         async def submit(request, *, authenticated_request, store):
