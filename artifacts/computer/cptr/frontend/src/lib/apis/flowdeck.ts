@@ -23,6 +23,27 @@ export interface CreateOrchestrationInput {
 	metadata?: Record<string, unknown>;
 }
 
+export interface CreateAuditInput {
+	workspace: string;
+	objective: string;
+	scope: Record<string, unknown>;
+	completion_contract: string[];
+	metadata?: Record<string, unknown>;
+}
+
+export async function createAudit(
+	input: CreateAuditInput,
+	idempotencyKey: string
+): Promise<FlowDeckOrchestration> {
+	return fetchJSON<FlowDeckOrchestration>('/v1/flowdeck/audits', {
+		...jsonBody(input),
+		headers: {
+			'Content-Type': 'application/json',
+			'Idempotency-Key': idempotencyKey
+		}
+	});
+}
+
 export async function createFlowDeckOrchestration(
 	input: CreateOrchestrationInput,
 	idempotencyKey: string
@@ -43,6 +64,13 @@ export async function getFlowDeckOrchestration(
 	const query = new URLSearchParams({ workspace });
 	return fetchJSON<FlowDeckOrchestration>(
 		`/v1/flowdeck/orchestrations/${encodeURIComponent(runId)}?${query.toString()}`
+	);
+}
+
+export async function getAudit(runId: string, workspace: string): Promise<FlowDeckOrchestration> {
+	const query = new URLSearchParams({ workspace });
+	return fetchJSON<FlowDeckOrchestration>(
+		`/v1/flowdeck/audits/${encodeURIComponent(runId)}?${query.toString()}`
 	);
 }
 

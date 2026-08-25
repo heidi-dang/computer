@@ -13,8 +13,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.app import app
 from cptr.flowdeck.coordinator import CoordinatorResult
-from cptr.flowdeck.durable import LifecycleError, OperationStatus
-from cptr.models import Auth, Base, Config, User, Workspace
+from cptr.flowdeck.durable import LifecycleError, OperationStatus, RunStatus
+from cptr.models import Auth, Base, ChatMessage, Config, User, Workspace
 from cptr.models.flowdeck import (
     FlowDeckEvent,
     FlowDeckLogicalOperation,
@@ -322,6 +322,137 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
 
             runs = (await session.execute(select(FlowDeckRun))).scalars().all()
             self.assertEqual(len(runs), 1)
+
+    async def test_audit_creates_one_durable_run_with_contract_and_reconnects(self):
+        async def submit(request, *, authenticated_request, store):
+            run, _ = await store.create_run(
+                request_key=request.request_key,
+                owner=authenticated_request.state.auth.user_id,
+                workspace=request.workspace,
+            )
+            return CoordinatorResult("pending", run.id, (), ())
+
+        body = {
+            "workspace": str(self.root_a),
+            "objective": "audit this repository",
+            "scope": {"areas": ["architecture", "security"], "recent_changes": True},
+            "completion_contract": ["evidence_backed_findings", "unknowns_preserved"],
+        }
+        headers = {**self.headers(), "Idempotency-Key": "audit-contract-123"}
+        with (
+            patch.dict(os.environ, self.enabled_environment(), clear=False),
+            patch(
+                "cptr.routers.flowdeck._resolve_model",
+                new=AsyncMock(
+                    return_value=(
+                        SimpleNamespace(
+                            kind="api",
+                            runtime_model="selected-audit-model",
+                            full_model_id="provider/selected-audit-model",
+                            connection={"provider": "verified"},
+                        ),
+                        "provider/selected-audit-model",
+                    )
+                ),
+            ),
+            patch("cptr.routers.flowdeck.run_heidi_coordinator", new=submit),
+        ):
+            first = await self.client.post("/v1/flowdeck/audits", headers=headers, json=body)
+            replay = await self.client.post("/v1/flowdeck/audits", headers=headers, json=body)
+            conflict = await self.client.post(
+                "/v1/flowdeck/audits",
+                headers=headers,
+                json={**body, "scope": {"areas": ["migrations"]}},
+            )
+
+            payload = first.json()
+            status_response = await self.client.get(
+                f"/v1/flowdeck/audits/{payload['run_id']}",
+                params={"workspace": str(self.root_a)},
+                headers=self.headers(),
+            )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertTrue(payload["audit"])
+        self.assertFalse(payload["reused"])
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertTrue(replay.json()["reused"])
+        self.assertEqual(replay.json()["run_id"], payload["run_id"])
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(status_response.status_code, 200, status_response.text)
+        kinds = [event["kind"] for event in status_response.json()["events"]]
+        self.assertIn("AUDIT_SCOPE_CREATED", kinds)
+        self.assertIn("AUDIT_COMPLETION_CONTRACT_CREATED", kinds)
+        self.assertEqual((await self.flowdeck_counts())["flowdeck_runs"], 1)
+
+        messages = await ChatMessage.get_all_by_chat(payload["chat_id"])
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0].model, "provider/selected-audit-model")
+        self.assertTrue((messages[1].meta or {}).get("audit"))
+
+    async def test_audit_control_aliases_use_shared_steering_and_cancellation(self):
+        async def submit(request, *, authenticated_request, store):
+            run, _ = await store.create_run(
+                request_key=request.request_key,
+                owner=authenticated_request.state.auth.user_id,
+                workspace=request.workspace,
+            )
+            return CoordinatorResult("pending", run.id, (), ())
+
+        with (
+            patch.dict(os.environ, self.enabled_environment(), clear=False),
+            patch(
+                "cptr.routers.flowdeck._resolve_model",
+                new=AsyncMock(
+                    return_value=(
+                        SimpleNamespace(kind="api", runtime_model="test-model", connection={}),
+                        "test-model",
+                    )
+                ),
+            ),
+            patch("cptr.routers.flowdeck.run_heidi_coordinator", new=submit),
+        ):
+            created = await self.client.post(
+                "/v1/flowdeck/audits",
+                headers={**self.headers(), "Idempotency-Key": "audit-control-123"},
+                json={
+                    "workspace": str(self.root_a),
+                    "objective": "audit the repository",
+                    "scope": {"all": True},
+                    "completion_contract": ["report"],
+                },
+            )
+            payload = created.json()
+            await ChatMessage.update(
+                payload["assistant_message"]["id"],
+                done=False,
+                meta={
+                    "agent": "heidi",
+                    "flowdeck": True,
+                    "audit": True,
+                    "flowdeck_run_id": payload["run_id"],
+                },
+            )
+            async with self.session_factory() as session:
+                run = await session.get(FlowDeckRun, payload["run_id"])
+                run.status = RunStatus.RUNNING.value
+                await session.commit()
+            steer = await self.client.post(
+                f"/v1/flowdeck/audits/{payload['run_id']}/steer",
+                headers={**self.headers(), "Idempotency-Key": "audit-steer-123"},
+                json={"chat_id": payload["chat_id"], "instruction": "include migrations"},
+            )
+            cancel = await self.client.post(
+                f"/v1/flowdeck/audits/{payload['run_id']}/cancel",
+                params={"workspace": str(self.root_a)},
+                headers=self.headers(),
+            )
+
+        self.assertEqual(created.status_code, 200, created.text)
+        self.assertEqual(steer.status_code, 200, steer.text)
+        self.assertTrue(steer.json()["accepted"])
+        self.assertEqual(cancel.status_code, 200, cancel.text)
+        self.assertEqual(cancel.json()["status"], "cancelled")
 
     async def test_disabled_route_has_no_durable_side_effect(self):
         with (

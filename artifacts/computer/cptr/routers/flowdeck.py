@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 import re
 from typing import Any
@@ -43,6 +44,16 @@ class OrchestrationRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class AuditRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(min_length=1, max_length=4096)
+    objective: str = Field(min_length=1, max_length=20_000)
+    scope: dict[str, Any] = Field(default_factory=dict)
+    completion_contract: list[str] = Field(min_length=1, max_length=100)
+    metadata: dict[str, Any] | None = None
+
+
 class SteeringRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -70,6 +81,27 @@ def _request_key(request: Request) -> str:
     if not _KEY_PATTERN.fullmatch(value):
         raise HTTPException(400, "a valid Idempotency-Key header is required")
     return value
+
+
+def _audit_fingerprint(
+    *,
+    objective: str,
+    scope: dict[str, Any],
+    completion_contract: list[str],
+    model: str,
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "objective": objective,
+                "scope": scope,
+                "completion_contract": completion_contract,
+                "model": model,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 async def _authenticate_flowdeck(request: Request) -> str:
@@ -126,8 +158,12 @@ async def _owned_run(request: Request, run_id: str, workspace: str):
     return user_id, canonical, run
 
 
-@router.post("/orchestrations", status_code=status.HTTP_200_OK)
-async def create_orchestration(request: Request, body: OrchestrationRequest):
+async def _create_orchestration(
+    request: Request,
+    body: OrchestrationRequest,
+    *,
+    audit_contract: dict[str, Any] | None = None,
+):
     """Run one controlled Heidi orchestration using server-owned policy."""
     user_id = await _authenticate_flowdeck(request)
     try:
@@ -176,6 +212,39 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             or requested_model
         )
         metadata = body.metadata or {}
+        audit_run = None
+        if audit_contract is not None:
+            # Reserve the audit run before creating transcript messages. This
+            # makes the idempotency key cover the complete audit request, not
+            # only the coordinator's later child dispatch.
+            audit_run, audit_created = await store.create_run(
+                request_key=request_key,
+                owner=user_id,
+                workspace=workspace,
+                step_name="heidi-audit",
+            )
+            if not audit_created:
+                events = await store.list_events(audit_run.id)
+                scope_event = next(
+                    (event for event in events if event.kind == "AUDIT_SCOPE_CREATED"),
+                    None,
+                )
+                expected_fingerprint = _audit_fingerprint(
+                    objective=body.objective,
+                    scope=audit_contract["scope"],
+                    completion_contract=audit_contract["completion_contract"],
+                    model=full_model_id,
+                )
+                if not scope_event or scope_event.payload.get("fingerprint") != expected_fingerprint:
+                    raise HTTPException(
+                        409,
+                        "Idempotency-Key is already used for a different audit request",
+                    )
+                return {
+                    **_safe_run(audit_run, reused=True),
+                    "audit": True,
+                    "reused": True,
+                }
         chat_id = str(metadata.get("chat_id") or "").strip()
         parent_id = str(metadata.get("parent_id") or "").strip() or None
         chat = await Chat.get_by_id(chat_id) if chat_id else None
@@ -185,7 +254,19 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             chat = await Chat.create(
                 user_id=user_id,
                 title=body.objective[:50].strip() or "New Chat",
-                meta={"workspace": workspace, "model_id": full_model_id},
+                meta={
+                    "workspace": workspace,
+                    "model_id": full_model_id,
+                    **(
+                        {
+                            "audit": True,
+                            "audit_scope": audit_contract["scope"],
+                            "audit_completion_contract": audit_contract["completion_contract"],
+                        }
+                        if audit_contract
+                        else {}
+                    ),
+                },
                 created_at=now_ms(),
             )
         user_message = await ChatMessage.create(
@@ -194,13 +275,27 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
             content=body.objective,
             parent_id=parent_id,
             model=full_model_id,
-            meta={"agent": "heidi", "flowdeck": True},
+            meta={
+                "agent": "heidi",
+                "flowdeck": True,
+                **({"audit": True} if audit_contract else {}),
+            },
             created_at=now_ms(),
         )
         assistant_message = await ChatMessage.create(
             chat_id=chat.id,
             role="assistant",
-            content=build_initial_message(build_request) if build_request else "",
+            content=(
+                build_initial_message(build_request)
+                if build_request
+                else (
+                    "Heidi audit started. I will inspect the selected repository "
+                    "using qualified read-only capabilities and report only "
+                    "evidence-backed results."
+                    if audit_contract
+                    else ""
+                )
+            ),
             parent_id=user_message.id,
             model=full_model_id,
             done=False,
@@ -209,6 +304,15 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                 "agent": "heidi",
                 "flowdeck": True,
                 **({"build_mode": True} if build_request else {}),
+                **(
+                    {
+                        "audit": True,
+                        "audit_scope": audit_contract["scope"],
+                        "audit_completion_contract": audit_contract["completion_contract"],
+                    }
+                    if audit_contract
+                    else {}
+                ),
             },
             created_at=now_ms(),
         )
@@ -218,12 +322,38 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
         # Reserve the durable run before returning. The coordinator continues
         # independently so the UI can render the persisted messages and begin
         # receiving native CPTR events immediately.
-        run, _ = await store.create_run(
-            request_key=request_key,
-            owner=user_id,
-            workspace=workspace,
-            step_name="heidi-coordinator",
-        )
+        run = audit_run
+        if run is None:
+            run, _ = await store.create_run(
+                request_key=request_key,
+                owner=user_id,
+                workspace=workspace,
+                step_name="heidi-coordinator",
+            )
+        if audit_contract:
+            await store.record_event(
+                run.id,
+                "AUDIT_SCOPE_CREATED",
+                {
+                    "scope": audit_contract["scope"],
+                    "completion_contract": audit_contract["completion_contract"],
+                    "model": full_model_id,
+                    "fingerprint": _audit_fingerprint(
+                        objective=body.objective,
+                        scope=audit_contract["scope"],
+                        completion_contract=audit_contract["completion_contract"],
+                        model=full_model_id,
+                    ),
+                },
+            )
+            await store.record_event(
+                run.id,
+                "AUDIT_COMPLETION_CONTRACT_CREATED",
+                {
+                    "checks": audit_contract["completion_contract"],
+                    "unknown_is_not_pass": True,
+                },
+            )
         chat_meta = dict(chat.meta or {})
         chat_meta.update(
             {
@@ -238,6 +368,7 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                 "agent": "heidi",
                 "flowdeck": True,
                 "flowdeck_run_id": run.id,
+                **({"audit": True} if audit_contract else {}),
             },
         )
 
@@ -274,16 +405,20 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
                     chat_meta["flowdeck_run_id"] = result.run_id
                     chat_meta["flowdeck_status"] = result.status
                     await Chat.update_meta(chat.id, chat_meta, now_ms())
-                await ChatMessage.update(
-                    assistant_message.id,
-                    **({"content": content, "done": True} if terminal_result else {}),
-                    meta={
+                message_meta = dict(assistant_message.meta or {})
+                message_meta.update(
+                    {
                         "agent": "heidi",
                         "flowdeck": True,
                         "flowdeck_run_id": result.run_id,
                         "outcome": result.outcome,
                         **({"flowdeck_status": result.status} if terminal_result else {}),
-                    },
+                    }
+                )
+                await ChatMessage.update(
+                    assistant_message.id,
+                    **({"content": content, "done": True} if terminal_result else {}),
+                    meta=message_meta,
                 )
                 await export_chat_to_file(request, chat.id)
             except asyncio.CancelledError:
@@ -316,6 +451,8 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
         # cannot race an unstarted task.
         for _ in range(16):
             await asyncio.sleep(0)
+    except HTTPException:
+        raise
     except (AuthenticatedGatewayError, CoordinatorPolicyError) as exc:
         raise HTTPException(403, str(exc)) from exc
     except Exception as exc:
@@ -327,7 +464,36 @@ async def create_orchestration(request: Request, body: OrchestrationRequest):
         "chat_id": chat.id,
         "user_message": _message_dict(user_message),
         "assistant_message": _message_dict(assistant_message),
+        **({"audit": True, "reused": False} if audit_contract else {}),
     }
+
+
+@router.post("/orchestrations", status_code=status.HTTP_200_OK)
+async def create_orchestration(request: Request, body: OrchestrationRequest):
+    """Run one controlled Heidi orchestration using server-owned policy."""
+    return await _create_orchestration(request, body)
+
+
+@router.post("/audits", status_code=status.HTTP_200_OK)
+async def create_audit(request: Request, body: AuditRequest):
+    """Start one durable, evidence-bound Heidi repository audit."""
+    if not body.scope:
+        raise HTTPException(422, "audit scope must not be empty")
+    contract = {
+        "scope": body.scope,
+        "completion_contract": list(body.completion_contract),
+    }
+    metadata = dict(body.metadata or {})
+    metadata["audit_contract"] = contract
+    return await _create_orchestration(
+        request,
+        OrchestrationRequest(
+            workspace=body.workspace,
+            objective=body.objective,
+            metadata=metadata,
+        ),
+        audit_contract=contract,
+    )
 
 
 @router.post("/orchestrations/{run_id}/steer")
@@ -467,6 +633,12 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
     return response
 
 
+@router.get("/audits/{run_id}")
+async def get_audit(request: Request, run_id: str, workspace: str):
+    """Reconnect to a durable audit through the shared FlowDeck status path."""
+    return await get_orchestration(request, run_id, workspace)
+
+
 @router.post("/orchestrations/{run_id}/cancel")
 async def cancel_orchestration(request: Request, run_id: str, workspace: str):
     user_id, canonical, run = await _owned_run(request, run_id, workspace)
@@ -486,3 +658,15 @@ async def cancel_orchestration(request: Request, run_id: str, workspace: str):
 
     await cancel_flowdeck_tasks(run.id)
     return _safe_run(cancelled)
+
+
+@router.post("/audits/{run_id}/cancel")
+async def cancel_audit(request: Request, run_id: str, workspace: str):
+    """Cancel an audit using the authoritative FlowDeck cancellation path."""
+    return await cancel_orchestration(request, run_id, workspace)
+
+
+@router.post("/audits/{run_id}/steer")
+async def steer_audit(request: Request, run_id: str, body: SteeringRequest):
+    """Steer an active audit without creating a second run."""
+    return await steer_orchestration(request, run_id, body)
