@@ -137,17 +137,22 @@ async def _monitor_loop(app: Any, monitor_id: str) -> None:
             await safe_publish_monitor_event(
                 user_id=monitor.user_id,
                 monitor_id=monitor.monitor_id,
-                event_type="monitor.terminal" if status in {
+                event_type="monitor.terminal"
+                if status
+                in {
                     MonitorStatus.COMPLETE.value,
                     MonitorStatus.BLOCKED.value,
                     MonitorStatus.FAILED.value,
                     MonitorStatus.CANCELLED.value,
-                } else "monitor.status",
+                }
+                else "monitor.status",
                 payload={
                     "status": status,
                     "current_scope": monitor.current_scope_id,
                     "scope_count": len(monitor.scopes),
-                    "verified_count": sum(item.status.value == "VERIFIED" for item in monitor.scopes),
+                    "verified_count": sum(
+                        item.status.value == "VERIFIED" for item in monitor.scopes
+                    ),
                 },
             )
             if monitor.status != MonitorStatus.RUNNING:
@@ -459,7 +464,7 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
             scope_id=scope.scope_id,
             control_message_id=response["control_message_id"],
             intended_task_id=task_id,
-            intended_generation_id=response.get("target_message_id"),
+            intended_generation_id=response.get("target_message_id") or worker_task.message_id,
             baseline_diff_fingerprint=baseline_diff_fingerprint,
             baseline_workspace_snapshot=baseline_workspace_snapshot,
             setup_readiness_status=response.get("setup_readiness_status"),
@@ -499,11 +504,14 @@ async def cancel_autonomous(request: Request, monitor_id: str):
     await safe_publish_monitor_event(
         user_id=user_id,
         monitor_id=monitor_id,
-        event_type="monitor.terminal" if result.status in {
+        event_type="monitor.terminal"
+        if result.status
+        in {
             MonitorStatus.CANCELLED,
             MonitorStatus.BLOCKED,
             MonitorStatus.FAILED,
-        } else "monitor.status",
+        }
+        else "monitor.status",
         payload={"status": result.status.value},
     )
     return _monitor_summary(result)
