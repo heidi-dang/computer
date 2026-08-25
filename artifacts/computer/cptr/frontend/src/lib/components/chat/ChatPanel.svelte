@@ -504,10 +504,14 @@ let flowdeckEventBuffer: any[] = [];
 						(message.meta as any)?.flowdeck_run_id === persistedFlowDeckRunId
 				);
 			if (persistedFlowDeckRunId) {
+				selectedAgent = 'heidi';
 				flowdeckRunId = persistedFlowDeckRunId;
 				flowdeckStatus = persistedFlowDeckStatus || 'active';
 				flowdeckMessageId = activeFlowDeckAssistant?.id || flowdeckMessageId;
-				if (!isFlowDeckTerminal(flowdeckStatus)) startFlowDeckPolling(flowdeckRunId);
+				// Fetch one authoritative replay snapshot on every reload. The
+				// poller stops immediately when the persisted run is terminal,
+				// preserving completed terminal evidence without reopening it.
+				startFlowDeckPolling(flowdeckRunId);
 			}
 			currentMessageId = data.chat.current_message_id;
 			contextUsage = data.context_usage ?? null;
