@@ -12,7 +12,6 @@ import re
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-
 REDACTED = "[REDACTED]"
 MAX_STRING_LENGTH = 10_000
 
@@ -63,6 +62,7 @@ _KNOWN_TOKEN_RE = re.compile(
 )
 _EXTERNAL_PATH_RE = re.compile(
     r"(?<![\w:])/(?:home|Users|tmp|var|opt|srv|private|workspace)(?:/[^\s\"'`<>]+)+"
+    r"|(?<![\w:])[A-Za-z]:\\(?:[^\\\s\"'`<>]+\\)*[^\\\s\"'`<>]+"
 )
 
 

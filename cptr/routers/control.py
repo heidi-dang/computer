@@ -131,6 +131,25 @@ async def _monitor_loop(app: Any, monitor_id: str) -> None:
     try:
         while True:
             monitor = await supervisor.run_once(monitor_id)
+            from cptr.services.live_events import safe_publish_monitor_event
+
+            status = monitor.status.value
+            await safe_publish_monitor_event(
+                user_id=monitor.user_id,
+                monitor_id=monitor.monitor_id,
+                event_type="monitor.terminal" if status in {
+                    MonitorStatus.COMPLETE.value,
+                    MonitorStatus.BLOCKED.value,
+                    MonitorStatus.FAILED.value,
+                    MonitorStatus.CANCELLED.value,
+                } else "monitor.status",
+                payload={
+                    "status": status,
+                    "current_scope": monitor.current_scope_id,
+                    "scope_count": len(monitor.scopes),
+                    "verified_count": sum(item.status.value == "VERIFIED" for item in monitor.scopes),
+                },
+            )
             if monitor.status != MonitorStatus.RUNNING:
                 return
             await asyncio.sleep(interval)
@@ -306,6 +325,14 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     _schedule_monitor(request.app, monitor.monitor_id)
+    from cptr.services.live_events import safe_publish_monitor_event
+
+    await safe_publish_monitor_event(
+        user_id=user_id,
+        monitor_id=monitor.monitor_id,
+        event_type="monitor.started",
+        payload={"status": monitor.status.value, "scope_count": len(monitor.scopes)},
+    )
     return _monitor_summary(monitor)
 
 
@@ -436,6 +463,19 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
             baseline_diff_fingerprint=baseline_diff_fingerprint,
             baseline_workspace_snapshot=baseline_workspace_snapshot,
         )
+        from cptr.services.live_events import safe_publish_monitor_event
+
+        await safe_publish_monitor_event(
+            user_id=user_id,
+            monitor_id=monitor.monitor_id,
+            event_type="control.queued",
+            task_id=task_id,
+            payload={
+                "status": response.get("delivery_status", response.get("status", "QUEUED")),
+                "control_message_id": response.get("control_message_id"),
+                "task_id": task_id,
+            },
+        )
         return response
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="worker task not found") from exc
@@ -452,7 +492,20 @@ async def cancel_autonomous(request: Request, monitor_id: str):
     monitor = await supervisor.store.get_monitor(monitor_id)
     if monitor is None or monitor.user_id != user_id:
         raise HTTPException(status_code=404, detail="monitor not found")
-    return _monitor_summary(await supervisor.cancel(monitor_id))
+    result = await supervisor.cancel(monitor_id)
+    from cptr.services.live_events import safe_publish_monitor_event
+
+    await safe_publish_monitor_event(
+        user_id=user_id,
+        monitor_id=monitor_id,
+        event_type="monitor.terminal" if result.status in {
+            MonitorStatus.CANCELLED,
+            MonitorStatus.BLOCKED,
+            MonitorStatus.FAILED,
+        } else "monitor.status",
+        payload={"status": result.status.value},
+    )
+    return _monitor_summary(result)
 
 
 @router.post("/autonomous/{monitor_id}/approve")
@@ -468,6 +521,14 @@ async def approve_autonomous(request: Request, monitor_id: str, body: ApprovalRe
         )
         if monitor.status == MonitorStatus.RUNNING:
             _schedule_monitor(request.app, monitor.monitor_id)
+        from cptr.services.live_events import safe_publish_monitor_event
+
+        await safe_publish_monitor_event(
+            user_id=user_id,
+            monitor_id=monitor.monitor_id,
+            event_type="monitor.approval",
+            payload={"status": monitor.status.value, "approved": body.approved},
+        )
         return _monitor_summary(monitor)
     except (KeyError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

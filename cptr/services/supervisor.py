@@ -1325,6 +1325,21 @@ class AutonomousSupervisor:
             kind,
             payload,
         )
+        from cptr.services.live_events import safe_publish_monitor_event
+
+        summary = {
+            "kind": kind,
+            "scope_id": scope.scope_id if scope else None,
+        }
+        for key in ("status", "passed", "category", "operation"):
+            if key in payload:
+                summary[key] = payload[key]
+        await safe_publish_monitor_event(
+            user_id=monitor.user_id,
+            monitor_id=monitor.monitor_id,
+            event_type="evidence.recorded",
+            payload=summary,
+        )
 
     async def _steering_provenance(self, scope: ScopeRecord) -> dict[str, Any] | None:
         records = await self._steering_provenance_records(scope)

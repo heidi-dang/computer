@@ -136,7 +136,23 @@ class AgentService:
                 error="worker failed to start",
                 updated_at=int(time.time() * 1000),
             )
+            from cptr.services.live_events import safe_publish_task_event
+
+            await safe_publish_task_event(
+                user_id=user_id,
+                task_id=task_id,
+                event_type="task.failed",
+                payload={"status": "FAILED", "message": "worker failed to start"},
+            )
             raise
+        from cptr.services.live_events import safe_publish_task_event
+
+        await safe_publish_task_event(
+            user_id=user_id,
+            task_id=task_id,
+            event_type="task.started",
+            payload={"status": "RUNNING", "workspace_id": workspace_id},
+        )
         return await self.get_task(task_id, user_id=user_id)
 
     async def start_existing_task(
@@ -363,6 +379,19 @@ class AgentService:
             refreshed = await self.store.get_message(control_message.id)
             if refreshed is not None:
                 control_message = refreshed
+        from cptr.services.live_events import safe_publish_task_event
+
+        await safe_publish_task_event(
+            user_id=user_id,
+            task_id=task.id,
+            event_type="control.queued",
+            payload={
+                "status": control_message.status,
+                "control_message_id": control_message.id,
+                "message_id": message_id,
+                "delivery_status": control_message.status,
+            },
+        )
         return {
             "task_id": task.id,
             "message_id": message_id,
@@ -432,6 +461,14 @@ class AgentService:
             )
         result = await self.get_task(task.id, user_id=user_id)
         result["cancelled"] = True
+        from cptr.services.live_events import safe_publish_task_event
+
+        await safe_publish_task_event(
+            user_id=user_id,
+            task_id=task.id,
+            event_type="task.cancelled",
+            payload={"status": result.get("status", "CANCELLED"), "cancelled": True},
+        )
         return result
 
     async def get_diff(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
