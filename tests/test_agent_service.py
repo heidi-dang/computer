@@ -163,6 +163,59 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["delivery_status"], "QUEUED")
         process.assert_not_awaited()
 
+    async def test_send_message_persists_task_model_on_queued_control(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do work",
+            model_id="heidi-antigravity",
+            output=None,
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        control = SimpleNamespace(
+            id="control-message-1",
+            chat_message_id=None,
+            status="QUEUED",
+        )
+        queued_message = SimpleNamespace(id="message-2")
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch.object(service.store, "enqueue_message", new=AsyncMock(return_value=control)),
+            patch.object(service.store, "update_message", new=AsyncMock()),
+            patch.object(service.store, "get_message", new=AsyncMock(return_value=control)),
+            patch("cptr.models.ChatMessage.get_all_by_chat", new=AsyncMock(return_value=[])),
+            patch(
+                "cptr.models.ChatMessage.create",
+                new=AsyncMock(return_value=queued_message),
+            ) as create_message,
+            patch("cptr.utils.chat_task.is_running", return_value=False),
+            patch("cptr.utils.chat_task.get_active_chat_ids", return_value=set()),
+            patch("cptr.utils.chat_task.process_pending_chat_inputs", new=AsyncMock()),
+            patch(
+                "cptr.utils.identity.internal_request_for_user",
+                new=AsyncMock(return_value=object()),
+            ),
+            patch(
+                "cptr.models.Chat.get_by_id",
+                new=AsyncMock(return_value=SimpleNamespace(meta={"workspace": "/disposable"})),
+            ),
+        ):
+            await service.send_message(
+                "task-1",
+                user_id="user-1",
+                content="STEERING_MARKER_1",
+                idempotency_key="steer-1",
+            )
+
+        self.assertEqual(create_message.await_args.kwargs["model"], "heidi-antigravity")
+
     async def test_cancel_reports_when_completion_wins_terminal_race(self):
         service = AgentService()
         running = SimpleNamespace(

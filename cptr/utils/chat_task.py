@@ -703,9 +703,12 @@ async def process_pending_chat_inputs(request, chat_id: str, user_id: str, works
             # Resolve model from the queued input, then the chat's last used model.
             model_id = input_batch[0].model or (chat.meta or {}).get("last_model", "")
             if not model_id:
-                # Fall back to the model from the last assistant message
-                done_assistants = [m for m in all_msgs if m.role == "assistant" and m.done]
-                last_asst = done_assistants[-1] if done_assistants else None
+                # A control interruption deliberately leaves the original
+                # assistant row non-terminal.  Its model is still the
+                # authoritative continuation target; requiring a completed
+                # assistant here strands the durable control in QUEUED.
+                assistants = [m for m in all_msgs if m.role == "assistant"]
+                last_asst = assistants[-1] if assistants else None
                 model_id = (last_asst.model if last_asst else "") or ""
             if not model_id:
                 logger.error(
@@ -1614,7 +1617,10 @@ async def run_chat_task(
                 user_id=user_id,
                 task_id=control_task_id,
                 event_type="task.terminal",
-                payload={"status": current.status if current is not None else status, "error": error},
+                payload={
+                    "status": current.status if current is not None else status,
+                    "error": error,
+                },
             )
 
     async def emit(**data):
@@ -1664,18 +1670,29 @@ async def run_chat_task(
                         user_id=user_id,
                         task_id=control_task_id,
                         event_type="tool.started",
-                        payload={"name": str(item.get("name") or "tool"), "status": item.get("status", "in_progress")},
+                        payload={
+                            "name": str(item.get("name") or "tool"),
+                            "status": item.get("status", "in_progress"),
+                        },
                     )
                 elif item_type == "function_call_output":
                     raw_output = item.get("output")
                     call_id = str(item.get("call_id") or "")
                     tool_name = active_tool_names.get(call_id, "tool")
-                    event_type = "shell.stdout" if tool_name in {"run_command", "terminal"} else "tool.output"
+                    event_type = (
+                        "shell.stdout"
+                        if tool_name in {"run_command", "terminal"}
+                        else "tool.output"
+                    )
                     await safe_publish_task_event(
                         user_id=user_id,
                         task_id=control_task_id,
                         event_type=event_type,
-                        payload={"status": "completed", "tool": tool_name, "output": str(raw_output)[:4000]},
+                        payload={
+                            "status": "completed",
+                            "tool": tool_name,
+                            "output": str(raw_output)[:4000],
+                        },
                     )
 
     async def _emit_done(*, terminal_status: str | None = None):

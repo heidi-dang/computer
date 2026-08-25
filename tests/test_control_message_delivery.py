@@ -7,7 +7,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-
 SEED_SCRIPT = r"""
 import asyncio
 import os
@@ -144,6 +143,69 @@ class ControlMessageDeliveryTests(unittest.TestCase):
             self.assertEqual(delivered_meta["delivery_status"], "DELIVERED")
             control_store.update_message.assert_awaited_once()
             self.assertEqual(control_store.update_message.await_args.kwargs["status"], "DELIVERED")
+
+        asyncio.run(exercise())
+
+    def test_control_continuation_uses_active_assistant_model_when_original_is_not_done(self):
+        import asyncio
+
+        from cptr.utils.chat_task import process_pending_chat_inputs
+
+        async def exercise():
+            original_assistant = SimpleNamespace(
+                id="assistant-original",
+                parent_id="user-original",
+                role="assistant",
+                content="baseline created",
+                model="heidi-antigravity",
+                done=False,
+                meta={"interrupted_for_control": True},
+            )
+            queued = SimpleNamespace(
+                id="chat-message-control",
+                parent_id=None,
+                role="user",
+                content="append the steering marker",
+                model=None,
+                meta={
+                    "queued": True,
+                    "control_message_id": "control-message-1",
+                    "control_task_id": "task-1",
+                },
+            )
+            chat = SimpleNamespace(id="chat-1", user_id="user-1", meta={})
+            combined = SimpleNamespace(id="combined-1")
+            continuation = SimpleNamespace(id="assistant-continuation")
+            control_store = SimpleNamespace(
+                update_message=AsyncMock(),
+                repoint_task_message=AsyncMock(),
+            )
+            with (
+                patch("cptr.utils.chat_task.get_active_chat_ids", return_value=set()),
+                patch(
+                    "cptr.models.ChatMessage.get_all_by_chat",
+                    new=AsyncMock(return_value=[original_assistant, queued]),
+                ),
+                patch(
+                    "cptr.models.ChatMessage.create",
+                    new=AsyncMock(side_effect=[combined, continuation]),
+                ),
+                patch("cptr.models.ChatMessage.update", new=AsyncMock()),
+                patch("cptr.models.Chat.get_by_id", new=AsyncMock(return_value=chat)),
+                patch("cptr.models.Chat.update_current_message", new=AsyncMock()),
+                patch(
+                    "cptr.utils.model_targets.resolve_model_target",
+                    new=AsyncMock(return_value="target"),
+                ) as resolve_target,
+                patch("cptr.utils.chat_task.emit_to_user", new=AsyncMock()),
+                patch("cptr.utils.chat_task.start_task") as start_task,
+                patch("cptr.services.control_store.ControlTaskStore", return_value=control_store),
+            ):
+                await process_pending_chat_inputs(object(), "chat-1", "user-1", "/disposable")
+
+            resolve_target.assert_awaited_once_with("heidi-antigravity")
+            start_task.assert_called_once()
+            self.assertEqual(start_task.call_args.kwargs["message_id"], "assistant-continuation")
 
         asyncio.run(exercise())
 

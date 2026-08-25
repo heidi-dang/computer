@@ -345,6 +345,7 @@ class AgentService:
                 chat_id=task.chat_id,
                 role="user",
                 content=content,
+                model=task.model_id,
                 meta={
                     "queued": True,
                     "delivery_status": "QUEUED",
