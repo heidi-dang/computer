@@ -86,6 +86,8 @@
 				return 'FlowDeck activity';
 			case 'planning':
 				return 'Planning';
+			case 'validating':
+				return 'Validating task against the implementation and platform boundaries';
 			case 'verifying':
 				return 'Verifying';
 			case 'succeeded':

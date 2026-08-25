@@ -881,6 +881,14 @@
 		if (kind === 'BUILD_BRIEF_CREATED') return 'Build · product brief created';
 		if (kind === 'BUILD_COMPLETION_CONTRACT_CREATED')
 			return 'Build · completion contract ready for review';
+if (kind === 'HEIDI_VALIDATION_STARTED')
+return 'Heidi · validating the task against the implementation and platform boundaries';
+if (kind === 'HEIDI_VALIDATION_PASSED')
+return 'Heidi · validation passed; proceeding with the qualified CPTR path';
+if (kind === 'HEIDI_VALIDATION_FAILED')
+return `Heidi · execution stopped: ${String(payload.reason || 'request is outside the current boundaries')}`;
+if (kind === 'HEIDI_VALIDATION_CLARIFICATION')
+return 'Heidi · clarification required before execution';
 		if (kind === 'BUILD_VERIFICATION_REQUIRED')
 			return 'Build · verification required before completion';
 		if (kind === 'SPECIALIST_DISPATCHED' || kind.includes('DELEGAT')) {
@@ -899,7 +907,8 @@
 		const kind = String(event?.kind || event?.type || '').toUpperCase();
 		const reported = String(event?.status || event?.payload?.status || '').toLowerCase();
 		if (isFlowDeckTerminal(reported)) return reported;
-		if (reported && ['active', 'planning', 'verifying'].includes(reported)) return reported;
+if (reported && ['active', 'planning', 'validating', 'verifying'].includes(reported)) return reported;
+if (kind.includes('VALIDATION')) return 'validating';
 		if (kind.includes('VERIF') || kind.includes('OUTCOME') || kind.includes('REVIEW'))
 			return 'verifying';
 		if (kind.includes('STEP_STARTED') || kind.includes('PLAN')) return 'planning';

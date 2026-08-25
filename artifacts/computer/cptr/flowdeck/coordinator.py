@@ -35,6 +35,7 @@ from cptr.flowdeck.durable import (
 )
 from cptr.flowdeck.errors import DelegationPolicyError, UnknownAgentError
 from cptr.flowdeck.registry import get_agent
+from cptr.flowdeck.validation import validate_pre_execution
 from cptr.models import ChatMessage
 from cptr.utils.config import now_ms
 
@@ -313,29 +314,60 @@ async def run_heidi_coordinator(
             "BUILD_COMPLETION_CONTRACT_CREATED",
             {"completion": build_request.completion.as_dict()},
         )
-    if not plan:
-        if run.status == RunStatus.PENDING.value:
-            await store.start_run(run.id)
-        parent_step = await store.get_step(run.id)
-        if parent_step.status == StepStatus.PENDING.value:
-            await store.start_step(parent_step.id)
-        await store.record_clarification(run.id, message=CLARIFICATION_MESSAGE)
-        await store.finish_step(parent_step.id, status=StepStatus.SUCCEEDED)
-        await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
-        return CoordinatorResult(
-            "succeeded",
-            run.id,
-            (),
-            (),
-            outcome="clarification",
-            message=CLARIFICATION_MESSAGE,
-        )
-    _validate_plan(plan, config)
     if run.status == RunStatus.PENDING.value:
         await store.start_run(run.id)
     parent_step = await store.get_step(run.id)
     if parent_step.status == StepStatus.PENDING.value:
         await store.start_step(parent_step.id)
+
+    await store.record_event(
+        run.id,
+        "HEIDI_VALIDATION_STARTED",
+        {
+            "scope": "repository_platform_policy",
+            "execution": "native_cptr_only",
+            "raw_request_persisted": False,
+        },
+    )
+    validation = await validate_pre_execution(
+        task=request.task,
+        workspace=root,
+        model=request.model,
+        plan=plan,
+        config=config,
+        build_request=build_request,
+        audit_contract=request.audit_contract,
+    )
+    validation_payload = {
+        "outcome": validation.outcome,
+        "reason": validation.reason,
+        "facts": validation.facts,
+        "fingerprint": validation.fingerprint,
+    }
+    if validation.outcome == "clarification":
+        await store.record_event(run.id, "HEIDI_VALIDATION_CLARIFICATION", validation_payload)
+        await store.record_clarification(run.id, message=CLARIFICATION_MESSAGE)
+        await store.finish_step(parent_step.id, status=StepStatus.SUCCEEDED)
+        await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
+        return CoordinatorResult(
+            "succeeded", run.id, (), (), outcome="clarification", message=CLARIFICATION_MESSAGE
+        )
+    if validation.outcome != "passed":
+        await store.record_event(run.id, "HEIDI_VALIDATION_FAILED", validation_payload)
+        await store.finish_step(parent_step.id, status=StepStatus.FAILED)
+        await store.complete_run(run.id, status=RunStatus.FAILED)
+        return CoordinatorResult(
+            "failed",
+            run.id,
+            (),
+            (),
+            outcome="validation_rejected",
+            message=f"Heidi validation stopped before execution: {validation.reason}",
+        )
+    await store.record_event(run.id, "HEIDI_VALIDATION_PASSED", validation_payload)
+    if not plan:
+        raise CoordinatorPolicyError("validation did not classify the task")
+    _validate_plan(plan, config)
     budget = RunBudget(
         max_steps=config.max_steps,
         max_attempts=config.max_attempts,
