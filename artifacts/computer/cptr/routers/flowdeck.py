@@ -54,6 +54,7 @@ from cptr.flowdeck.generated_auth import (
     GeneratedAuthService,
 )
 from cptr.flowdeck.checkpoints import CheckpointError, CheckpointService
+from cptr.flowdeck.adaptive import adaptive_route
 from cptr.models.flowdeck import FlowDeckCheckpoint
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
@@ -326,6 +327,17 @@ async def _checkpoint_operation(
         await store.start_run(run.id)
         step = await store.get_step(run.id)
         await store.start_step(step.id)
+        lease = await store.acquire_workspace_lease(
+            workspace=canonical,
+            run_id=run.id,
+            owner=owner,
+            ttl_ms=120_000,
+        )
+        if lease is None:
+            await store.require_manual_review(
+                run.id, reason="checkpoint workspace is already fenced by another run"
+            )
+            raise HTTPException(409, "checkpoint workspace is busy")
         operation, _ = await store.record_intent(
             run_id=run.id,
             step_id=step.id,
@@ -354,7 +366,11 @@ async def _checkpoint_operation(
                 "result": result,
             }
             await store.finish_attempt(
-                attempt.id, owner=owner, outcome="succeeded", evidence=evidence
+                attempt.id,
+                owner=owner,
+                fencing_epoch=lease.epoch,
+                outcome="succeeded",
+                evidence=evidence,
             )
             await store.finish_step(step.id, status=StepStatus.SUCCEEDED)
             await store.record_event(
@@ -363,11 +379,17 @@ async def _checkpoint_operation(
                 {"operation": capability, "source": "verifier"},
             )
             await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
+            await store.release_workspace_lease(
+                workspace=canonical, owner=owner, epoch=lease.epoch
+            )
             return result, False, run.id
         except asyncio.CancelledError:
             await store.mark_attempt_unknown(attempt.id, error="cancelled")
             await store.require_manual_review(
                 run.id, reason="checkpoint operation cancelled before verification"
+            )
+            await store.release_workspace_lease(
+                workspace=canonical, owner=owner, epoch=lease.epoch
             )
             raise
         except CheckpointError as exc:
@@ -375,6 +397,9 @@ async def _checkpoint_operation(
             if outcome == "unknown":
                 await store.mark_attempt_unknown(attempt.id, error=exc.code)
                 await store.require_manual_review(run.id, reason=exc.code)
+                await store.release_workspace_lease(
+                    workspace=canonical, owner=owner, epoch=lease.epoch
+                )
                 raise HTTPException(409, "checkpoint restore requires manual review") from exc
             evidence = {
                 "authoritative": True,
@@ -387,14 +412,24 @@ async def _checkpoint_operation(
                 "error_status": 422,
             }
             await store.finish_attempt(
-                attempt.id, owner=owner, outcome="failed", evidence=evidence
+                attempt.id,
+                owner=owner,
+                fencing_epoch=lease.epoch,
+                outcome="failed",
+                evidence=evidence,
             )
             await store.finish_step(step.id, status=StepStatus.FAILED)
             await store.complete_run(run.id, status=RunStatus.FAILED)
+            await store.release_workspace_lease(
+                workspace=canonical, owner=owner, epoch=lease.epoch
+            )
             raise HTTPException(422, str(exc)) from exc
         except Exception as exc:
             await store.mark_attempt_unknown(attempt.id, error="checkpoint interrupted")
             await store.require_manual_review(run.id, reason="checkpoint interrupted")
+            await store.release_workspace_lease(
+                workspace=canonical, owner=owner, epoch=lease.epoch
+            )
             raise HTTPException(503, "checkpoint operation requires manual review") from exc
     except (DuplicateRequestError, LifecycleError, StaleWriterError) as exc:
         raise HTTPException(409, str(exc)) from exc
@@ -591,6 +626,7 @@ async def _create_orchestration(
             or getattr(target, "runtime_model", None)
             or requested_model
         )
+        adaptive = adaptive_route(body.objective, full_model_id)
         metadata = body.metadata or {}
         audit_run = None
         if audit_contract is not None:
@@ -710,6 +746,17 @@ async def _create_orchestration(
                 workspace=workspace,
                 step_name="heidi-coordinator",
             )
+        await store.record_event(
+            run.id,
+            "ADAPTIVE_ROUTE_SELECTED",
+            {
+                "path": adaptive.path,
+                "rationale": adaptive.rationale,
+                "specialist_ids": list(adaptive.specialist_ids),
+                "execution": "native_cptr",
+                "model": full_model_id,
+            },
+        )
         if audit_contract:
             await store.record_event(
                 run.id,
@@ -739,6 +786,7 @@ async def _create_orchestration(
             {
                 "flowdeck_run_id": run.id,
                 "flowdeck_status": run.status.lower(),
+                "flowdeck_route": adaptive.path,
             }
         )
         await Chat.update_meta(chat.id, chat_meta, now_ms())
@@ -748,6 +796,7 @@ async def _create_orchestration(
                 "agent": "heidi",
                 "flowdeck": True,
                 "flowdeck_run_id": run.id,
+                "flowdeck_route": adaptive.path,
                 **({"audit": True} if audit_contract else {}),
             },
         )
