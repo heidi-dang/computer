@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
-import shlex
 import signal
 import socket
 import time
@@ -37,6 +37,7 @@ class RuntimeRequest:
 class ManagedProcess:
     run_id: str
     workspace: str
+    owner: str
     command: tuple[str, ...]
     port: int
     process: asyncio.subprocess.Process
@@ -72,10 +73,9 @@ def discover_start_command(root: Path) -> tuple[str, ...]:
                     return tuple(["npm", "run", name])
         except (OSError, UnicodeError, json.JSONDecodeError):
             raise RuntimeContractError("package manifest is unreadable")
-    if (root / "pyproject.toml").is_file() or (root / "requirements.txt").is_file():
-        for entry in ("main.py", "app.py", "server.py"):
-            if (root / entry).is_file():
-                return ("python", entry)
+    for entry in ("main.py", "app.py", "server.py"):
+        if (root / entry).is_file():
+            return ("python", entry)
     if (root / "index.html").is_file():
         return ("python", "-m", "http.server")
     raise RuntimeContractError("no supported project start command was discovered")
@@ -128,7 +128,7 @@ class ManagedRuntimeService:
                 await store.record_event(run.id, "RUNTIME_FAILED", {"reason": str(exc), "authoritative": True})
                 await store.complete_run(run.id, status=RunStatus.FAILED)
                 raise RuntimeContractError("managed runtime failed to start") from exc
-            managed = ManagedProcess(run.id, str(root), command, port, process)
+            managed = ManagedProcess(run.id, str(root), request.owner, command, port, process)
             self._processes[run.id] = managed
             managed.task = asyncio.create_task(self._monitor(managed, store))
             await store.record_event(
@@ -139,6 +139,8 @@ class ManagedRuntimeService:
             return await self.status(run.id, store=store, current=managed)
 
     async def _monitor(self, managed: ManagedProcess, store: DurableFlowDeck) -> None:
+        import httpx
+
         deadline = time.monotonic() + START_TIMEOUT
         if managed.process.stdout:
             asyncio.create_task(self._read_logs(managed))
@@ -149,9 +151,18 @@ class ManagedRuntimeService:
                 await store.complete_run(managed.run_id, status=RunStatus.FAILED)
                 return
             if not _port_available(managed.port):
-                managed.state, managed.health = "running", "healthy"
-                await store.record_event(managed.run_id, "RUNTIME_HEALTHY", {"port": managed.port, "authoritative": True})
-                return
+                try:
+                    async with httpx.AsyncClient() as client:
+                        response = await client.get(
+                            f"http://127.0.0.1:{managed.port}/",
+                            timeout=HEALTH_TIMEOUT,
+                        )
+                    if response.status_code < 500:
+                        managed.state, managed.health = "running", "healthy"
+                        await store.record_event(managed.run_id, "RUNTIME_HEALTHY", {"port": managed.port, "status_code": response.status_code, "authoritative": True})
+                        return
+                except httpx.HTTPError:
+                    pass
             await asyncio.sleep(0.15)
         managed.state, managed.health = "unknown", "unknown"
         await store.record_event(managed.run_id, "RUNTIME_UNKNOWN", {"reason": "health timeout", "authoritative": True})
@@ -186,6 +197,10 @@ class ManagedRuntimeService:
         managed = self._processes.get(run_id)
         if not managed:
             return await self.status(run_id, store=store)
+        if managed.task and not managed.task.done():
+            managed.task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await managed.task
         if managed.process.returncode is None:
             try:
                 os.killpg(managed.process.pid, signal.SIGTERM)
@@ -195,10 +210,11 @@ class ManagedRuntimeService:
                     os.killpg(managed.process.pid, signal.SIGKILL)
         managed.state, managed.health = "stopped", "stopped"
         await store.record_event(run_id, "RUNTIME_STOPPED", {"authoritative": True, "source": "runtime"})
-        await store.complete_run(run_id, status=RunStatus.CANCELLED)
+        await store.cancel_run(
+            run_id=run_id,
+            owner=managed.owner,
+            workspace=managed.workspace,
+        )
         return await self.status(run_id, store=store, current=managed)
-
-
-import contextlib
 
 managed_runtime = ManagedRuntimeService()

@@ -8,6 +8,7 @@
 		type FlowDeckOrchestration
 	} from '$lib/apis/flowdeck';
 	import Icon from '$lib/components/Icon.svelte';
+import ManagedRuntimePanel from '$lib/components/ManagedRuntimePanel.svelte';
 	import { currentWorkspace, workspaceList } from '$lib/stores';
 	import { chatModels, defaultModel } from '$lib/stores/chat';
 
@@ -667,6 +668,7 @@
 				</aside>
 			</section>
 		{/if}
+<ManagedRuntimePanel workspace={workspace || $currentWorkspace?.path || ''} />
 	</main>
 </div>
 

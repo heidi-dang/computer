@@ -146,7 +146,21 @@ class CodingContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             browser_tool_guard("browser_navigate", {"url": "https://example.com"}, context)
         )
-        self.assertFalse(browser_tool_guard("browser_click", {"ref": "x"}, context))
+        self.assertTrue(browser_tool_guard("browser_click", {"ref": "x"}, context))
+        self.assertTrue(
+            browser_tool_guard(
+                "browser_evaluate",
+                {"javascript": "document.querySelectorAll('button').length"},
+                context,
+            )
+        )
+        self.assertFalse(
+            browser_tool_guard(
+                "browser_evaluate",
+                {"javascript": "fetch('/secret')"},
+                context,
+            )
+        )
 
     async def test_native_mutation_stays_gated_until_per_write_hooks_exist(self):
         with self.assertRaises(CodingPolicyError):
@@ -542,6 +556,9 @@ class CodingExecutionTests(unittest.IsolatedAsyncioTestCase):
                     "browser_navigate",
                     "browser_snapshot",
                     "browser_screenshot",
+                    "browser_click",
+                    "browser_type",
+                    "browser_evaluate",
                 }
             ),
         )

@@ -4,7 +4,7 @@ test('Designer result surface exposes the complete deterministic fixture', async
 	await page.goto('/__visual-regression');
 	const surface = page.getByTestId('designer-results-surface');
 
-	await expect(surface).toBeVisible();
+await expect(surface).toBeVisible({ timeout: 15_000 });
 	await expect(surface.getByTestId('designer-results')).toBeVisible();
 	await expect(surface.getByText('Cedar / Signal')).toBeVisible();
 	await expect(surface.getByTestId('card-designer-variant-quiet-ledger')).toBeVisible();

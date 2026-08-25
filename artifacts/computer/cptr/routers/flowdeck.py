@@ -9,7 +9,7 @@ import logging
 import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from cptr.flowdeck.authenticated_gateway import (
@@ -739,6 +739,26 @@ async def stop_runtime(request: Request, run_id: str, workspace: str):
         return await managed_runtime.stop(run.id, store=DurableFlowDeck(get_session_factory()))
     except RuntimeContractError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@router.get("/runtime/{run_id}/preview")
+async def runtime_preview(request: Request, run_id: str, workspace: str):
+    import httpx
+
+    _, _, run = await _owned_run(request, run_id, workspace)
+    status_data = await managed_runtime.status(run.id, store=DurableFlowDeck(get_session_factory()))
+    if status_data.get("state") != "running":
+        raise HTTPException(409, "managed runtime is not healthy")
+    try:
+        async with httpx.AsyncClient() as client:
+            upstream = await client.get(f"http://127.0.0.1:{status_data['port']}/", timeout=10)
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "managed preview is temporarily unavailable") from exc
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type", "text/html"),
+    )
 
 
 @router.get("/audits/{run_id}")
