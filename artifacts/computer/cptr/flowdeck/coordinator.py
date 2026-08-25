@@ -83,6 +83,11 @@ class CoordinatorResult:
 
 
 _HINTS: tuple[tuple[str, str], ...] = (
+    ("screenshot", "designer"),
+    ("design system", "designer"),
+    ("responsive", "designer"),
+    ("render variant", "designer"),
+    ("ui reconstruction", "designer"),
     ("security", "security-auditor"),
     ("vulnerability", "security-auditor"),
     ("audit", "security-auditor"),

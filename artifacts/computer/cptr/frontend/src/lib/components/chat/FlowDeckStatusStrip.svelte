@@ -1,11 +1,16 @@
 <script lang="ts">
+	import DesignerResults, { type DesignerAction } from './DesignerResults.svelte';
+
 	interface Props {
 		status?: string;
 		runId?: string;
+		nativeMessageId?: string | null;
 		sending?: boolean;
 		isAudit?: boolean;
 		events?: any[];
 		oncancel?: () => void;
+		onreconnect?: () => void;
+		onaction?: (action: DesignerAction) => void;
 		telemetry?: {
 			input_tokens: number;
 			output_tokens: number;
@@ -17,10 +22,13 @@
 	let {
 		status = '',
 		runId = '',
+		nativeMessageId = '',
 		sending = false,
 		isAudit = false,
 		events = [],
 		oncancel,
+		onreconnect,
+		onaction,
 		telemetry = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: null }
 	}: Props = $props();
 
@@ -196,6 +204,15 @@
 			{/if}
 		</section>
 	{/if}
+	<DesignerResults
+		{events}
+		{status}
+		{runId}
+		{nativeMessageId}
+		{oncancel}
+		{onreconnect}
+		{onaction}
+	/>
 {/if}
 
 <style>

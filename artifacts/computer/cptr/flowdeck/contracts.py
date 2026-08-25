@@ -40,6 +40,7 @@ class Capability(str, Enum):
     MUTATE_GIT = "mutate_git"
     USE_MCP = "use_mcp"
     NETWORK_ACCESS = "network_access"
+    DESIGN_INSPECTION = "design_inspection"
 
 
 class GovernanceVerdict(str, Enum):

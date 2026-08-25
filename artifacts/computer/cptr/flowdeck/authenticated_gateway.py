@@ -49,6 +49,8 @@ class SpecialistDispatchRequest:
     codeact_program: str | None = None
     execution_workspace: str | None = None
     branch_scope: str | None = None
+    designer_operation: str | None = None
+    designer_input: dict[str, Any] | None = None
 
 
 def _auth_user_id(request: Any) -> str:
@@ -201,4 +203,19 @@ async def dispatch_authenticated_specialist(
                 store=store,
             )
         )
+    if dispatch.role == "designer":
+        import json
+        from cptr.flowdeck.designer import DesignerRequest, run_designer
+
+        return json.dumps(await run_designer(
+            DesignerRequest(
+                request_key=dispatch.request_key,
+                operation=dispatch.designer_operation or "extract",
+                workspace=workspace,
+                user_id=user_id,
+                input=dispatch.designer_input or {},
+                parent_chat_id=dispatch.parent_chat_id,
+            ),
+            store=store,
+        ))
     raise AuthenticatedGatewayError("specialist is not enabled")

@@ -24,6 +24,7 @@ from cptr.flowdeck.coordinator import (
     run_heidi_coordinator,
 )
 from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
+from cptr.flowdeck.designer import DesignerContractError, DesignerRequest, run_designer
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
 from cptr.utils.config import now_ms
@@ -59,6 +60,15 @@ class SteeringRequest(BaseModel):
 
     chat_id: str = Field(min_length=1, max_length=200)
     instruction: str = Field(min_length=1, max_length=20_000)
+
+
+class DesignerRequestBody(BaseModel):
+    """Deterministic Designer request; authority fields are server-owned."""
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(min_length=1, max_length=4096)
+    operation: str = Field(min_length=1, max_length=64)
+    input: dict[str, Any] = Field(default_factory=dict)
 
 
 def _message_dict(message: ChatMessage) -> dict[str, Any]:
@@ -473,6 +483,53 @@ async def _create_orchestration(
 async def create_orchestration(request: Request, body: OrchestrationRequest):
     """Run one controlled Heidi orchestration using server-owned policy."""
     return await _create_orchestration(request, body)
+
+
+@router.post("/design", status_code=status.HTTP_200_OK)
+async def create_design(request: Request, body: DesignerRequestBody):
+    """Run one authenticated, bounded, read-only Designer operation.
+
+    This route produces durable DESIGN_RESULT_CREATED evidence and never
+    invokes a model or writes workspace files.
+    """
+    user_id = await _authenticate_flowdeck(request)
+    try:
+        config = FlowDeckConfig.from_env()
+        if not (
+            config.enabled
+            and config.mode.value in {"read_only", "controlled"}
+            and config.governance == "strict"
+            and not config.global_kill_switch
+        ):
+            raise HTTPException(404, "designer is unavailable")
+        workspace = await resolve_gateway_workspace(
+            session_factory=get_session_factory(),
+            user_id=user_id,
+            requested_workspace=body.workspace,
+        )
+        result = await run_designer(
+            DesignerRequest(
+                request_key=_request_key(request),
+                operation=body.operation,
+                workspace=workspace,
+                user_id=user_id,
+                input=body.input,
+            ),
+            store=DurableFlowDeck(get_session_factory()),
+        )
+        return result
+    except HTTPException:
+        raise
+    except AuthenticatedGatewayError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except DesignerContractError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/design/{run_id}")
+async def get_design(request: Request, run_id: str, workspace: str):
+    """Reconnect to Designer evidence using the shared authenticated status path."""
+    return await get_orchestration(request, run_id, workspace)
 
 
 @router.post("/audits", status_code=status.HTTP_200_OK)

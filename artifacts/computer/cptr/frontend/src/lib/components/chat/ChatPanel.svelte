@@ -65,6 +65,7 @@
 
 	import ChatInput from './ChatInput.svelte';
 	import FlowDeckStatusStrip from './FlowDeckStatusStrip.svelte';
+	import type { DesignerAction } from './DesignerResults.svelte';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
 	import ChatHistory from './ChatHistory.svelte';
@@ -957,6 +958,11 @@
 
 	function handleReconnect() {
 		if (chatId) loadChat(chatId);
+	}
+
+	function handleDesignerAction(action: DesignerAction) {
+		const variantText = action.variantIds?.length ? ` (${action.variantIds.join(', ')})` : '';
+		void steerActiveFlowDeck(`${action.label}${variantText}. Keep the native transcript linked and report the resulting evidence.`);
 	}
 
 	function resetChatSettings() {
@@ -2320,6 +2326,9 @@
 						events={flowdeckEvents}
 						telemetry={flowdeckTelemetry}
 						oncancel={handleCancel}
+onreconnect={handleReconnect}
+onaction={handleDesignerAction}
+nativeMessageId={flowdeckMessageId}
 					/>
 				{/if}
 				<ChatInput
@@ -2462,6 +2471,9 @@
 						events={flowdeckEvents}
 						telemetry={flowdeckTelemetry}
 						oncancel={handleCancel}
+onreconnect={handleReconnect}
+onaction={handleDesignerAction}
+nativeMessageId={flowdeckMessageId}
 					/>
 				{/if}
 				<ChatInput

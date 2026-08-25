@@ -3,6 +3,8 @@
 	import ToolServers from '$lib/components/Admin/ToolServers.svelte';
 	import Terminal from '$lib/components/Terminal.svelte';
 	import ToolCallCollapsible from '$lib/components/chat/ToolCallCollapsible.svelte';
+	import DesignerResults from '$lib/components/chat/DesignerResults.svelte';
+	import { designerVisualFixture } from '$lib/components/chat/designer-fixtures';
 
 	const toolCall = {
 		name: 'run_command',
@@ -67,6 +69,21 @@
 				messageId="visual-message"
 				toolLabel={(name) => name}
 				onapprove={() => {}}
+			/>
+		</section>
+
+		<section
+			data-testid="designer-results-surface"
+			class="min-w-0 rounded-2xl border border-gray-200/70 p-3 dark:border-white/7"
+		>
+			<DesignerResults
+				events={designerVisualFixture}
+				status="verifying"
+				runId="designer-visual-fixture"
+				nativeMessageId="visual-assistant-message"
+				onaction={() => {}}
+				onreconnect={() => {}}
+				oncancel={() => {}}
 			/>
 		</section>
 	</div>

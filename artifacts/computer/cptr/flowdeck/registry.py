@@ -78,6 +78,12 @@ AGENT_REGISTRY: tuple[AgentDefinition, ...] = (
         "Analyzes failures using read-only evidence.",
         _READ_ONLY,
     ),
+    AgentDefinition(
+        "designer",
+        AgentRole.SPECIALIST,
+        "Extracts and compares UI design evidence without changing the workspace.",
+        _READ_ONLY | frozenset({Capability.DESIGN_INSPECTION}),
+    ),
 )
 
 
