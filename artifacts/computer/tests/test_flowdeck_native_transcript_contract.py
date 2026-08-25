@@ -41,9 +41,12 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
 
     def test_native_flowdeck_events_feed_the_live_terminal_collection(self):
         self.assertIn(
-            "const transcriptRunId = String(msg?.meta?.flowdeck_run_id || flowdeckRunId || '')",
+            "msg?.meta?.flowdeck_run_id || flowdeckRunId || flowdeckMessageId || ''",
             self.source,
         )
+        self.assertIn("data?.message_id === flowdeckMessageId", self.source)
+        self.assertIn("isActiveNativeTranscriptEvent", self.source)
+        self.assertIn("reconcileFlowDeckEventOwner", self.source)
         self.assertIn("mergeFlowDeckEvent(data, transcriptRunId);", self.source)
         self.assertIn("function mergeFlowDeckEvent(event: any, ownerRunId = flowdeckRunId)", self.source)
         self.assertIn("parentRunId !== ownerRunId", self.source)

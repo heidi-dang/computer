@@ -104,6 +104,7 @@ const identity = identities.join(' · ');
 let title = tool ? `tool · ${tool}` : path ? `file · ${path}` : kind;
 if (command) title = `shell · ${command}`;
 if (output) title = `output · ${tool || 'tool result'}`;
+if (event?.delta) title = 'agent update · native transcript activity';
 if (item?.type === 'reasoning') title = `agent activity · ${safeOutputSummary || 'safe summary'}`;
 if (item?.type === 'message') title = `agent update · ${safeOutputSummary || 'native transcript activity'}`;
 if (kind.includes('validation')) title = `validation · ${safeSummary || kind}`;
@@ -183,7 +184,9 @@ aria-expanded={open}
 <div class="terminal-output" role="log" aria-live="polite" bind:this={outputEl} onscroll={() => {
 if (outputEl && outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight > 24) follow = false;
 }}>
-{#if !lines.length}
+{#if !lines.length && normalizedStatus === 'preparing'}
+<div class="terminal-empty"><span class="prompt-mark">$</span> starting Heidi run…</div>
+{:else if !lines.length}
 <div class="terminal-empty"><span class="prompt-mark">$</span> waiting for authenticated FlowDeck activity…</div>
 {:else}
 {#each lines as line (line.key)}

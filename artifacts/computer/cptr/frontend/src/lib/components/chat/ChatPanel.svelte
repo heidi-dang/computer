@@ -750,10 +750,16 @@ import LiveTerminal from './LiveTerminal.svelte';
 // socket event. Register the event at the transcript boundary as well as the
 // outer routing boundary so a parent/child identity transition cannot render
 // the transcript while dropping the event before LiveTerminal sees it.
-const transcriptRunId = String(msg?.meta?.flowdeck_run_id || flowdeckRunId || '');
+const transcriptRunId = String(
+msg?.meta?.flowdeck_run_id || flowdeckRunId || flowdeckMessageId || ''
+);
 if (
 transcriptRunId &&
-(data?.flowdeck_run_id || data?.flowdeck_parent_run_id || data?.run_id || data?.kind)
+(data?.flowdeck_run_id ||
+data?.flowdeck_parent_run_id ||
+data?.run_id ||
+data?.kind ||
+data?.message_id === flowdeckMessageId)
 ) {
 mergeFlowDeckEvent(data, transcriptRunId);
 }
@@ -867,16 +873,33 @@ mergeFlowDeckEvent(data, transcriptRunId);
 		for (const event of events) mergeFlowDeckEvent(event);
 	}
 
+function reconcileFlowDeckEventOwner(previousOwner: string, nextOwner: string) {
+if (!previousOwner || !nextOwner || previousOwner === nextOwner) return;
+flowdeckEvents = flowdeckEvents.map((event) => {
+const eventRunId = event?.flowdeck_parent_run_id || event?.flowdeck_run_id || event?.run_id;
+if (eventRunId !== previousOwner) return event;
+return { ...event, flowdeck_parent_run_id: nextOwner, flowdeck_run_id: nextOwner };
+});
+}
+
 function mergeFlowDeckEvent(event: any, ownerRunId = flowdeckRunId) {
 const parentRunId =
 event?.flowdeck_parent_run_id ||
 event?.run_id ||
 event?.flowdeck_run_id ||
 null;
-if (!parentRunId || parentRunId !== ownerRunId) return;
+const isActiveNativeTranscriptEvent =
+!parentRunId &&
+ownerRunId === flowdeckMessageId &&
+Boolean(event?.message_id && event.message_id === flowdeckMessageId) &&
+Boolean(event?.delta || event?.output || event?.done);
+if ((!parentRunId && !isActiveNativeTranscriptEvent) || (parentRunId && parentRunId !== ownerRunId))
+return;
 const normalized =
 event?.flowdeck_parent_run_id || !event?.run_id
+? parentRunId
 ? event
+: { ...event, flowdeck_parent_run_id: ownerRunId, flowdeck_run_id: ownerRunId }
 : { ...event, flowdeck_parent_run_id: event.run_id };
 		const next = [...flowdeckEvents];
 		const key = flowDeckEventKey(normalized);
@@ -1561,7 +1584,9 @@ if (kind.includes('VALIDATION')) return 'validating';
 					updateTab(tabId, chatId, text.slice(0, 40) || $t('chat.fallbackTitle'));
 				}
 			}
-			flowdeckRunId = result.run_id || '';
+const previousFlowDeckOwner = flowdeckMessageId;
+flowdeckRunId = result.run_id || '';
+reconcileFlowDeckEventOwner(previousFlowDeckOwner, flowdeckRunId);
 			flowdeckIsAudit = result.audit === true || flowdeckIsAudit;
 			if (Array.isArray(result.events)) {
 				mergeFlowDeckEvents(result.events);
