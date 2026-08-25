@@ -21,3 +21,4 @@
 - [Frontend session expiry](frontend-session-expiry.md) — protected 401s should render login in place instead of triggering a reload loop.
 - [Project database boundary](project-database-boundary.md) — project PostgreSQL access requires a separate explicit server binding, never CPTR's internal database URL.
 - [PostgreSQL cancellation reconciliation](postgres-cancellation-reconciliation.md) — native driver interruption is subordinate to durable FlowDeck terminal state and replay fencing.
+- [Generated-auth durable operations](generated-auth-durable-operations.md) — auth side effects share FlowDeck lifecycle/evidence while secrets stay out of durable results.

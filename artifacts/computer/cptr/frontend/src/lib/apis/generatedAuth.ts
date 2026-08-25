@@ -1,5 +1,9 @@
 import { fetchHandler, fetchJSON, jsonBody } from '$lib/apis';
 
+function operationHeaders() {
+return { 'Idempotency-Key': `generated-auth-${crypto.randomUUID()}` };
+}
+
 export type GeneratedAuthConfig = {
 	provider: string;
 	supported: boolean;
@@ -33,7 +37,7 @@ export async function signInGeneratedAuth(
 	csrf: string
 ) {
 	return fetchJSON(`/v1/flowdeck/generated-auth/signin`, {
-		...jsonBody({ workspace, email, password, csrf })
+...jsonBody({ workspace, email, password, csrf }), headers: operationHeaders()
 	});
 }
 
@@ -44,14 +48,14 @@ export async function signUpGeneratedAuth(
 	csrf: string
 ) {
 	return fetchJSON(`/v1/flowdeck/generated-auth/signup`, {
-		...jsonBody({ workspace, email, password, csrf })
+...jsonBody({ workspace, email, password, csrf }), headers: operationHeaders()
 	});
 }
 
 export async function signOutGeneratedAuth(workspace: string) {
 	const response = await fetchHandler(
 		'/v1/flowdeck/generated-auth/signout',
-		jsonBody({ workspace })
+ { ...jsonBody({ workspace }), headers: operationHeaders() }
 	);
 	if (!response.ok) throw new Error((await response.text()) || 'Sign out failed');
 	return response.json();

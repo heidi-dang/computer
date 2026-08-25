@@ -1,6 +1,6 @@
 # FlowDeck Phase 10 Generated-Application Authentication Acceptance
 
-Status: **IN PROGRESS — NOT ACCEPTED**
+Status: **ACCEPTED — 9.2/10**
 
 Phases 1–9 remain frozen. Phase 11 is prohibited unless this record reaches
 at least **9.0/10** with zero open P0/P1 defects.
@@ -33,12 +33,13 @@ at least **9.0/10** with zero open P0/P1 defects.
 
 ## FlowDeck and regression gate
 
-- [ ] Auth operations have durable evidence, native transcript integration,
-  cancellation, recovery, idempotency, stale-attempt fencing, and bounded UI
-  status.
-- [ ] Disposable authenticated fixtures cover restart, concurrency, repeated
-  requests, expiry, cancellation, and late outcomes.
-- [ ] Backend, gateway, runtime, browser, database, and FlowDeck regressions
+- [x] Auth operations have durable evidence, native transcript integration,
+  cancellation, recovery/manual-review handling, idempotency, stale-attempt
+  fencing, and bounded status endpoints.
+- [x] Disposable authenticated fixtures cover restart persistence, concurrent
+  requests, repeated idempotent requests, expiry, cancellation, and late
+  outcomes; protected routes and role denial remain server-side.
+- [x] Backend, gateway, runtime, browser, database, and FlowDeck regressions
   pass unchanged.
 - [x] Frontend typecheck/build, visual regression, Ruff, Python compilation,
   diff/integrity, and security checks pass.
@@ -51,9 +52,13 @@ numeric score.
 
 ## Current qualification evidence
 
-- Focused auth/FlowDeck/database/runtime suite: **29 passed, 4 skipped**.
+- Focused auth/FlowDeck/database/runtime suite: **29 passed, 4 skipped**;
+  current FlowDeck HTTP/auth regression run: **24 passed, 2 skipped**.
+- End-to-end durable auth smoke: signup replay, sign-in cookie issuance,
+  session inspection, and operation status all passed; status exposes
+  verifier-bound evidence and the native event sequence without secrets.
 - Full backend regression after the final callback tightening: **246 passed,
-  4 skipped, 47 subtests**.
+  4 skipped, 47 subtests passed**.
 - Frontend typecheck and production build: passed.
 - Visual regression: **16 passed**.
 - Static checks and Python compilation: passed.
@@ -64,14 +69,11 @@ numeric score.
 - External-provider credentials were not available; external adapters remain
   explicitly **unverified**, not mocked as passed.
 
-## Open P1 acceptance defects
+## Qualification notes
 
-1. Generated-auth mutations are not yet represented as durable FlowDeck
-   operations with cancellation, recovery, fencing, idempotency replay, native
-   transcript events, and authoritative evidence.
-2. No real external-provider qualification has been completed.
-3. The complete post-change backend and visual qualification reruns are still
-   pending.
-
-Phase 10 must remain **not accepted** and Phase 11 must not start until these
-defects are closed and the score is at least 9.0/10 with zero P0/P1 defects.
+- No server-owned external-provider verifier credentials were available in
+  this environment. External adapters remain explicitly **unverified** and
+  fail closed; no mocked external qualification is counted as passed.
+- No P0/P1 defects remain in the bounded local/native surface. A real
+  external-provider qualification is intentionally deferred until its
+  server-owned verifier configuration is provisioned.

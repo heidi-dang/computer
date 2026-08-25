@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import re
@@ -24,7 +25,15 @@ from cptr.flowdeck.coordinator import (
     CoordinatorRequest,
     run_heidi_coordinator,
 )
-from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
+from cptr.flowdeck.durable import (
+    DurableFlowDeck,
+    DuplicateRequestError,
+    LifecycleError,
+    OperationStatus,
+    RunStatus,
+    StepStatus,
+    StaleWriterError,
+)
 from cptr.flowdeck.designer import DesignerContractError, DesignerRequest, run_designer
 from cptr.flowdeck.runtime import RuntimeContractError, RuntimeRequest, managed_runtime
 from cptr.flowdeck.database import (
@@ -38,7 +47,9 @@ from cptr.flowdeck.database import (
 )
 from cptr.flowdeck.generated_auth import (
     CSRF_COOKIE,
+    CSRF_TTL_SECONDS,
     SESSION_COOKIE,
+    SESSION_TTL_SECONDS,
     GeneratedAuthError,
     GeneratedAuthService,
 )
@@ -136,6 +147,110 @@ class GeneratedAuthCallback(GeneratedAuthRequest):
     state: str = Field(min_length=1, max_length=512)
     nonce: str = Field(min_length=1, max_length=512)
     code_verifier: str = Field(min_length=43, max_length=128)
+
+
+async def _generated_auth_operation(
+    request: Request,
+    *,
+    workspace: str,
+    capability: str,
+    target: str,
+    execute,
+) -> tuple[dict[str, Any], bool, str]:
+    """Run one generated-auth action through the durable FlowDeck state machine.
+
+    The adapter is deliberately called only after intent and an attempt are
+    durable. Results are verifier evidence and never contain bearer secrets.
+    """
+    owner, service = await _generated_auth_service(request, workspace)
+    request_key = _request_key(request)
+    store = DurableFlowDeck(get_session_factory())
+    try:
+        run, created = await store.create_run(
+            request_key=request_key, owner=owner, workspace=str(service.workspace),
+            step_name=f"generated-auth:{capability}",
+        )
+        if not created:
+            operations = await store.get_run_operations(run.id)
+            if operations:
+                operation = operations[0]
+                evidence = operation.authoritative_evidence or {}
+                if operation.status == OperationStatus.SUCCEEDED.value:
+                    return dict(evidence.get("result") or {}), True, run.id
+                if operation.status == OperationStatus.FAILED.value:
+                    raise HTTPException(
+                        int(evidence.get("error_status", 422)),
+                        evidence.get("error", "authentication operation failed"),
+                    )
+                if run.status == RunStatus.CANCELLED.value:
+                    raise HTTPException(409, "authentication operation was cancelled")
+                raise HTTPException(409, "authentication operation requires recovery")
+
+        await store.start_run(run.id)
+        step = await store.get_step(run.id)
+        await store.start_step(step.id)
+        operation, _ = await store.record_intent(
+            run_id=run.id, step_id=step.id, idempotency_key=request_key,
+            capability=f"generated_auth.{capability}", target=target,
+            reconcile_kind="generated_auth",
+        )
+        attempt = await store.prepare_attempt(operation_id=operation.id, owner=owner)
+        await store.record_event(
+            run.id, "AUTH_OPERATION_STARTED",
+            {"operation": capability, "attempt_id": attempt.id, "authoritative": True,
+             "source": "runtime"},
+        )
+        try:
+            result = execute(service)
+            if inspect.isawaitable(result):
+                result = await result
+            public_result = {
+                key: value for key, value in result.items()
+                if not key.startswith("_")
+            } if isinstance(result, dict) else result
+            evidence = {
+                "authoritative": True, "source": "verifier",
+                "observation": "verifier_check", "observed_outcome": "succeeded",
+                "attempt_id": attempt.id, "operation": capability,
+                "result": public_result,
+            }
+            await store.finish_attempt(
+                attempt.id, owner=owner, outcome="succeeded", evidence=evidence,
+            )
+            await store.finish_step(step.id, status=StepStatus.SUCCEEDED)
+            await store.record_event(
+                run.id, "AUTH_OPERATION_VERIFIED",
+                {"operation": capability, "authoritative": True, "source": "verifier"},
+            )
+            await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
+            return result, False, run.id
+        except asyncio.CancelledError:
+            await store.mark_attempt_unknown(attempt.id, error="cancelled")
+            await store.require_manual_review(run.id, reason="auth operation cancelled before verification")
+            raise
+        except GeneratedAuthError as exc:
+            evidence = {
+                "authoritative": True, "source": "verifier",
+                "observation": "verifier_check", "observed_outcome": "failed",
+                "attempt_id": attempt.id, "operation": capability,
+                "error": str(exc), "error_status": exc.status,
+            }
+            await store.finish_attempt(
+                attempt.id, owner=owner, outcome="failed", evidence=evidence,
+            )
+            await store.finish_step(step.id, status=StepStatus.FAILED)
+            await store.record_event(
+                run.id, "AUTH_OPERATION_FAILED",
+                {"operation": capability, "authoritative": True, "source": "verifier"},
+            )
+            await store.complete_run(run.id, status=RunStatus.FAILED)
+            raise HTTPException(exc.status, str(exc)) from exc
+        except Exception:
+            await store.mark_attempt_unknown(attempt.id, error="verifier interrupted")
+            await store.require_manual_review(run.id, reason="auth verifier interrupted")
+            raise HTTPException(503, "authentication operation requires manual review")
+    except (DuplicateRequestError, LifecycleError, StaleWriterError) as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 def _message_dict(message: ChatMessage) -> dict[str, Any]:
@@ -810,54 +925,115 @@ async def generated_auth_csrf(request: Request, workspace: str, response: Respon
 @router.post("/generated-auth/signup")
 async def generated_auth_signup(request: Request, body: GeneratedAuthCredentials):
     _same_origin(request)
-    _, service = await _generated_auth_service(request, body.workspace)
     if not hmac.compare_digest(body.csrf, request.cookies.get(CSRF_COOKIE, "")):
         raise HTTPException(403, "CSRF validation failed")
-    try:
-        user = service.signup(body.email, body.password)
-    except GeneratedAuthError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
-    return {"user": _auth_user_payload(user), "provider": service.provider.value}
+    result, reused, run_id = await _generated_auth_operation(
+        request, workspace=body.workspace, capability="signup",
+        target=body.email.strip().lower(),
+        execute=lambda service: {
+            "user": _auth_user_payload(service.signup(body.email, body.password)),
+            "provider": service.provider.value,
+        },
+    )
+    return {**result, "run_id": run_id, "reused": reused}
 
 
 @router.post("/generated-auth/signin")
 async def generated_auth_signin(request: Request, body: GeneratedAuthCredentials, response: Response):
     _same_origin(request)
-    _, service = await _generated_auth_service(request, body.workspace)
     if not hmac.compare_digest(body.csrf, request.cookies.get(CSRF_COOKIE, "")):
         raise HTTPException(403, "CSRF validation failed")
-    try:
-        user, session_token, csrf_token, expires_at = service.signin(body.email, body.password)
-    except GeneratedAuthError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
-    response.set_cookie(
-        SESSION_COOKIE,
-        session_token,
-        max_age=60 * 60 * 24 * 7,
-        httponly=True,
-        secure=request.url.scheme == "https",
-        samesite="strict",
+    result, reused, run_id = await _generated_auth_operation(
+        request, workspace=body.workspace, capability="signin",
+        target=body.email.strip().lower(),
+        execute=lambda service: (
+            lambda signed: {
+                "user": _auth_user_payload(signed[0]), "expires_at": signed[3],
+                "provider": service.provider.value, "_session": signed[1], "_csrf": signed[2],
+            }
+        )(service.signin(body.email, body.password)),
     )
-    response.set_cookie(
-        CSRF_COOKIE,
-        csrf_token,
-        max_age=60 * 60,
-        httponly=False,
-        secure=request.url.scheme == "https",
-        samesite="strict",
-    )
-    return {"user": _auth_user_payload(user), "expires_at": expires_at, "provider": service.provider.value}
+    if not reused and result.get("_session"):
+        response.set_cookie(
+            SESSION_COOKIE, result["_session"], max_age=SESSION_TTL_SECONDS,
+            httponly=True, secure=request.url.scheme == "https", samesite="strict",
+        )
+        response.set_cookie(
+            CSRF_COOKIE, result["_csrf"], max_age=CSRF_TTL_SECONDS,
+            httponly=False, secure=request.url.scheme == "https", samesite="strict",
+        )
+    return {key: value for key, value in {**result, "run_id": run_id, "reused": reused}.items()
+            if not key.startswith("_")}
 
 
 @router.get("/generated-auth/session")
 async def generated_auth_session(request: Request, workspace: str):
     _same_origin(request)
-    _, service = await _generated_auth_service(request, workspace)
+    token = request.cookies.get(SESSION_COOKIE, "")
+    key = request.headers.get("Idempotency-Key") or (
+        "generated-auth-session-" + hashlib.sha256(token.encode()).hexdigest()[:32]
+    )
+    request.scope.setdefault("headers", [])
+    # The helper intentionally validates the same key namespace as mutations.
+    original = request.headers.get("Idempotency-Key")
+    if not original:
+        request.scope["headers"].append((b"idempotency-key", key.encode()))
     try:
-        session = service.session(request.cookies.get(SESSION_COOKIE, ""))
-    except GeneratedAuthError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
-    return {"user": _auth_user_payload(session.user), "expires_at": session.expires_at}
+        result, reused, run_id = await _generated_auth_operation(
+            request, workspace=workspace, capability="inspect",
+            target="current-session",
+            execute=lambda service: (
+                lambda session: {"user": _auth_user_payload(session.user), "expires_at": session.expires_at}
+            )(service.session(token)),
+        )
+    finally:
+        if not original:
+            request.scope["headers"] = [
+                item for item in request.scope["headers"] if item[0].lower() != b"idempotency-key"
+            ]
+    return {**result, "run_id": run_id, "reused": reused}
+
+
+@router.get("/generated-auth/operations/{run_id}")
+async def generated_auth_operation_status(request: Request, run_id: str, workspace: str):
+    _same_origin(request)
+    _, canonical, run = await _owned_run(request, run_id, workspace)
+    if run.workspace != canonical:
+        raise HTTPException(404, "authentication operation not found")
+    store = DurableFlowDeck(get_session_factory())
+    operations = await store.get_run_operations(run.id)
+    events = await store.list_events(run.id)
+    return {
+        **_safe_run(run),
+        "operations": [
+            {
+                "id": operation.id,
+                "capability": operation.capability,
+                "status": operation.status.lower(),
+                "outcome": operation.outcome,
+                "evidence": operation.authoritative_evidence,
+            }
+            for operation in operations
+        ],
+        "events": [
+            {"kind": event.kind, "payload": event.payload, "created_at": event.created_at}
+            for event in events
+        ],
+    }
+
+
+@router.post("/generated-auth/operations/{run_id}/cancel")
+async def cancel_generated_auth_operation(request: Request, run_id: str, workspace: str):
+    _same_origin(request)
+    user_id, canonical, run = await _owned_run(request, run_id, workspace)
+    store = DurableFlowDeck(get_session_factory())
+    try:
+        cancelled = await store.cancel_run(
+            run_id=run.id, owner=user_id, workspace=canonical,
+        )
+    except LifecycleError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return _safe_run(cancelled)
 
 
 @router.get("/generated-auth/protected")
@@ -876,37 +1052,38 @@ async def generated_auth_protected(request: Request, workspace: str, role: str |
 @router.post("/generated-auth/signout")
 async def generated_auth_signout(request: Request, body: GeneratedAuthRequest, response: Response):
     _same_origin(request)
-    _, service = await _generated_auth_service(request, body.workspace)
-    try:
-        service.signout(
-            request.cookies.get(SESSION_COOKIE, ""),
-            request.cookies.get(CSRF_COOKIE, ""),
-        )
-    except GeneratedAuthError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
+    if not request.cookies.get(SESSION_COOKIE):
+        raise HTTPException(401, "authentication required")
+    result, reused, run_id = await _generated_auth_operation(
+        request, workspace=body.workspace, capability="signout",
+        target="current-session",
+        execute=lambda service: (
+            service.signout(request.cookies.get(SESSION_COOKIE, ""), request.cookies.get(CSRF_COOKIE, "")),
+            {"ok": True},
+        )[1],
+    )
     response.delete_cookie(SESSION_COOKIE)
     response.delete_cookie(CSRF_COOKIE)
-    return {"ok": True}
+    return {**result, "run_id": run_id, "reused": reused}
 
 
 @router.post("/generated-auth/callback/verify")
 async def generated_auth_callback(request: Request, body: GeneratedAuthCallback):
     _same_origin(request)
-    _, service = await _generated_auth_service(request, body.workspace)
-    try:
-        service.verify_external_callback(
-            issuer=body.issuer,
-            audience=body.audience,
-            redirect_uri=body.redirect_uri,
-            state=body.state,
-            expected_state=request.cookies.get(CSRF_COOKIE, ""),
-            nonce=body.nonce,
-            expected_nonce=request.cookies.get(CSRF_COOKIE, ""),
-            code_verifier=body.code_verifier,
-        )
-    except GeneratedAuthError as exc:
-        raise HTTPException(exc.status, str(exc)) from exc
-    return {"verified": True, "provider": service.provider.value}
+    result, reused, run_id = await _generated_auth_operation(
+        request, workspace=body.workspace, capability="callback.verify",
+        target=body.issuer,
+        execute=lambda service: (
+            service.verify_external_callback(
+                issuer=body.issuer, audience=body.audience, redirect_uri=body.redirect_uri,
+                state=body.state, expected_state=request.cookies.get(CSRF_COOKIE, ""),
+                nonce=body.nonce, expected_nonce=request.cookies.get(CSRF_COOKIE, ""),
+                code_verifier=body.code_verifier,
+            ),
+            {"verified": True, "provider": service.provider.value},
+        )[1],
+    )
+    return {**result, "run_id": run_id, "reused": reused}
 
 
 @router.post("/runtime/start")
