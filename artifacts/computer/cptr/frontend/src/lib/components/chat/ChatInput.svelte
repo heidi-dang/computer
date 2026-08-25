@@ -1774,9 +1774,13 @@ min-width: 1.9rem;
 min-height: 1.9rem;
 }
 
-.heidi-composer .chat-input-toolbar :global(.agent-selector),
-.heidi-composer .chat-input-toolbar :global(.model-selector) {
-max-width: 5.9rem;
+.heidi-composer .chat-input-toolbar :global(.agent-picker-trigger) {
+max-width: 7.1rem;
+}
+
+.heidi-composer .chat-input-toolbar :global(.model-picker-trigger) {
+max-width: 10.5rem;
+flex: 1 1 8rem;
 }
 }
 
