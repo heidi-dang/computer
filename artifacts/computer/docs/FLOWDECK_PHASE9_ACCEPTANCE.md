@@ -1,7 +1,7 @@
 # FlowDeck Phase 9 User-Project Database Acceptance
 
-Status: **NOT ACCEPTED — external qualification blocker**
-Score: **8.4/10**
+Status: **NOT ACCEPTED — internal lifecycle blockers remain**
+Score: **8.8/10**
 
 Phases 1–8 remain frozen. Phase 10 has not started.
 
@@ -20,7 +20,7 @@ Phases 1–8 remain frozen. Phase 10 has not started.
 - Schema-drift basis through deterministic schema fingerprints.
 - Destructive migration denial and unsafe direct `NOT NULL` addition denial.
 - Snapshot-before-migration with restoration on failure.
-- PostgreSQL adapter path using `psycopg[binary]`, but only through the
+- PostgreSQL adapter path using `psycopg[binary]`, exercised through the
   separately configured server-side `CPTR_PROJECT_DATABASE_URL`.
 - CPTR’s internal `DATABASE_URL` is explicitly excluded; request bodies cannot
   provide DSNs, credentials, or unrelated database targets.
@@ -32,8 +32,14 @@ Phases 1–8 remain frozen. Phase 10 has not started.
 - Real SQLite fixtures: schema, rows, relationships, indexes, integrity,
   migration, snapshot/restore, destructive denial, nullable-risk denial,
   concurrent reads, and workspace-boundary denial.
-- Focused database/HTTP/coding suite: **35 passed**.
-- Full backend regression: **241 passed**, 43 subtests.
+- Disposable real PostgreSQL fixture: authenticated FlowDeck inspection,
+  parameterized reads, relationships, indexes, constraints, concurrent reads,
+  transactional migration success, transactional rollback on failure,
+  destructive/unsafe denial, idempotent replay, and cleanup passed.
+- Focused database/HTTP/FlowDeck PostgreSQL suite: **7 passed**; combined
+  database/HTTP/coding fixture run: **19 passed**.
+- Full backend regression with the disposable PostgreSQL binding:
+  **243 passed**, 43 subtests.
 - Ruff: passed.
 - Python compilation: passed.
 - Diff/integrity checks: passed.
@@ -42,15 +48,25 @@ Phases 1–8 remain frozen. Phase 10 has not started.
 - Existing visual regression: **16 passed** at desktop and narrow/mobile widths.
 - API, web, and component-preview workflows restarted and running.
 
-## Acceptance blocker
+## Acceptance blockers
 
-The current workspace has no dedicated `CPTR_PROJECT_DATABASE_URL`, and no
-isolated PostgreSQL fixture/database is available. The installed PostgreSQL
-adapter therefore correctly fails closed before connecting. PostgreSQL success,
-rollback, concurrent access, cancellation, restart/recovery, and adversarial
-fixture qualification cannot be claimed without that explicitly provisioned
-project database.
+The disposable project binding and fixture now exist only for the qualification
+run and were removed afterward. The remaining blockers are internal:
 
-Accordingly this record is intentionally not a Phase 9 acceptance record that
-passes the requested 9/10 gate. No credentials were exposed or invented, no
-unrelated database was accessed, and no Phase 10 work was started.
+1. Database operations do not yet expose a durable cancellable operation handle
+   that can interrupt an in-flight PostgreSQL query/migration and reconcile its
+   FlowDeck run after cancellation. Existing FlowDeck cancellation/recovery
+   guarantees are covered for native operations, but cannot be attributed to
+   this database adapter yet.
+2. PostgreSQL migration history/checkpoints are returned as verified
+   transactional evidence, but are not yet durably persisted and reconciled
+   across a service restart in the same way as SQLite migration history.
+
+PostgreSQL's verified checkpoint semantics are intentionally transactional:
+the migration runs in one server transaction and a failure rolls back the
+entire transaction. This is not represented as a filesystem snapshot or as a
+fabricated `pg_dump` restore.
+
+Accordingly this record remains below the requested 9/10 acceptance gate.
+No credentials were exposed or invented, no unrelated database was accessed,
+and no Phase 10 work was started.

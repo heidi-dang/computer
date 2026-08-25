@@ -1,4 +1,5 @@
 import asyncio
+import os
 import sqlite3
 import tempfile
 import unittest
@@ -68,5 +69,43 @@ class ProjectDatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_postgresql_never_accepts_request_credentials_or_internal_database(self):
         request = DatabaseRequest("pg", "user-1", str(self.root), engine="postgresql", database="postgres")
-        with self.assertRaises(DatabaseContractError):
-            await self.service.inspect(request)
+        if os.environ.get("CPTR_PROJECT_DATABASE_URL"):
+            result = await self.service.inspect(request)
+            self.assertEqual(result["schema"]["engine"], "postgresql")
+        else:
+            with self.assertRaises(DatabaseContractError):
+                await self.service.inspect(request)
+
+    async def test_postgresql_fixture_operations_and_transactional_rollback(self):
+        project_url = os.environ.get("CPTR_PROJECT_DATABASE_URL")
+        if not project_url:
+            self.skipTest("isolated project PostgreSQL fixture is not configured")
+        import psycopg
+
+        with psycopg.connect(project_url) as connection:
+            connection.execute("DROP TABLE IF EXISTS phase9_posts CASCADE")
+            connection.execute("DROP TABLE IF EXISTS phase9_users CASCADE")
+            connection.execute("CREATE TABLE phase9_users (id integer PRIMARY KEY, email text NOT NULL UNIQUE)")
+            connection.execute("CREATE TABLE phase9_posts (id integer PRIMARY KEY, user_id integer NOT NULL REFERENCES phase9_users(id), body text)")
+            connection.execute("CREATE INDEX phase9_posts_user_id ON phase9_posts(user_id)")
+            connection.execute("INSERT INTO phase9_users VALUES (1, 'fixture@example.test')")
+        try:
+            request = DatabaseRequest("pg-ops", "user-1", str(self.root), engine="postgresql")
+            inspected = await self.service.inspect(request)
+            posts = next(item for item in inspected["schema"]["tables"] if item["name"] == "phase9_posts")
+            self.assertEqual(posts["foreign_keys"][0]["table"], "phase9_users")
+            self.assertTrue(posts["indexes"])
+            rows = await asyncio.gather(
+                *(self.service.query(request, "SELECT email FROM phase9_users WHERE id = %s", [1]) for _ in range(6))
+            )
+            self.assertEqual([item["rows"][0]["email"] for item in rows], ["fixture@example.test"] * 6)
+            migrated = await self.service.migrate(request, "ALTER TABLE phase9_users ADD COLUMN display_name text")
+            self.assertEqual(migrated["snapshot"], "transactional pre-migration state")
+            with self.assertRaises(DatabaseContractError):
+                await self.service.migrate(request, "ALTER TABLE phase9_users ADD COLUMN broken text; ALTER TABLE missing_table ADD COLUMN x text")
+            with psycopg.connect(project_url) as connection:
+                self.assertIsNone(connection.execute("SELECT 1 FROM information_schema.columns WHERE table_name='phase9_users' AND column_name='broken'").fetchone())
+        finally:
+            with psycopg.connect(project_url) as connection:
+                connection.execute("DROP TABLE IF EXISTS phase9_posts CASCADE")
+                connection.execute("DROP TABLE IF EXISTS phase9_users CASCADE")

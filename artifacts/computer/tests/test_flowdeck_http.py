@@ -98,6 +98,49 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
     def headers(self, user_id="user-a"):
         return {"Authorization": f"Bearer {self.tokens[user_id]}"}
 
+    async def test_authenticated_project_postgresql_inspection_path(self):
+        project_url = os.environ.get("CPTR_PROJECT_DATABASE_URL")
+        if not project_url:
+            self.skipTest("isolated project PostgreSQL fixture is not configured")
+        import psycopg
+
+        with psycopg.connect(project_url) as connection:
+            connection.execute("DROP TABLE IF EXISTS phase9_http_child CASCADE")
+            connection.execute("DROP TABLE IF EXISTS phase9_http_parent CASCADE")
+            connection.execute("CREATE TABLE phase9_http_parent (id integer PRIMARY KEY)")
+            connection.execute(
+                "CREATE TABLE phase9_http_child (id integer PRIMARY KEY, parent_id integer NOT NULL REFERENCES phase9_http_parent(id))"
+            )
+            connection.execute("CREATE INDEX phase9_http_child_parent ON phase9_http_child(parent_id)")
+            connection.execute("INSERT INTO phase9_http_parent VALUES (1)")
+            connection.execute("INSERT INTO phase9_http_child VALUES (1, 1)")
+        try:
+            response = await self.client.post(
+                "/v1/flowdeck/database/inspect",
+                headers={**self.headers(), "Idempotency-Key": "pg-http-inspect-123"},
+                json={
+                    "workspace": str(self.root_a),
+                    "engine": "postgresql",
+                    "database": "ignored-client-label",
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            payload = response.json()
+            self.assertEqual(payload["schema"]["engine"], "postgresql")
+            self.assertIn("phase9_http_parent", {item["name"] for item in payload["schema"]["tables"]})
+            self.assertTrue(payload["evidence"]["authoritative"])
+            replay = await self.client.post(
+                "/v1/flowdeck/database/inspect",
+                headers={**self.headers(), "Idempotency-Key": "pg-http-inspect-123"},
+                json={"workspace": str(self.root_a), "engine": "postgresql"},
+            )
+            self.assertEqual(replay.status_code, 200)
+            self.assertEqual(replay.json()["run_id"], payload["run_id"])
+        finally:
+            with psycopg.connect(project_url) as connection:
+                connection.execute("DROP TABLE IF EXISTS phase9_http_child CASCADE")
+                connection.execute("DROP TABLE IF EXISTS phase9_http_parent CASCADE")
+
     async def request_run(
         self,
         user_id="user-a",

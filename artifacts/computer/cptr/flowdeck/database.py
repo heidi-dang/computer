@@ -126,7 +126,27 @@ def _schema_postgres(connection) -> dict[str, Any]:
                 (schema_name, table_name),
             ).fetchall()
         ]
-        tables.append({"schema": schema_name, "name": table_name, "columns": columns, "foreign_keys": [], "indexes": []})
+        foreign_keys = [
+            {"table": row[0], "column": row[1], "references": row[2], "references_column": row[3]}
+            for row in connection.execute(
+                "SELECT ccu.table_name, kcu.column_name, ccu2.table_name, ccu2.column_name "
+                "FROM information_schema.table_constraints tc "
+                "JOIN information_schema.key_column_usage kcu ON kcu.constraint_name=tc.constraint_name AND kcu.table_schema=tc.table_schema "
+                "JOIN information_schema.constraint_column_usage ccu ON ccu.constraint_name=tc.constraint_name AND ccu.table_schema=tc.table_schema "
+                "JOIN information_schema.key_column_usage ccu2 ON ccu2.constraint_name=ccu.constraint_name AND ccu2.table_schema=ccu.table_schema "
+                "WHERE tc.constraint_type='FOREIGN KEY' AND kcu.table_schema=%s AND kcu.table_name=%s",
+                (schema_name, table_name),
+            ).fetchall()
+        ]
+        indexes = [
+            {"name": row[0], "unique": row[1], "definition": row[2]}
+            for row in connection.execute(
+                "SELECT indexname, indexdef LIKE 'CREATE UNIQUE%%', indexdef FROM pg_indexes "
+                "WHERE schemaname=%s AND tablename=%s ORDER BY indexname",
+                (schema_name, table_name),
+            ).fetchall()
+        ]
+        tables.append({"schema": schema_name, "name": table_name, "columns": columns, "foreign_keys": foreign_keys, "indexes": indexes})
     return {"engine": "postgresql", "tables": tables}
 
 
@@ -239,7 +259,13 @@ class ProjectDatabaseService:
                 except Exception as exc:
                     raise DatabaseContractError("PostgreSQL migration rolled back") from exc
             after = self._inspect(request)
-            return {"before": before, "after": after, "snapshot": "transactional pre-migration state", "verified": True}
+            history_entry = {
+                "fingerprint_before": before["schema_fingerprint"],
+                "fingerprint_after": after["schema_fingerprint"],
+                "checkpoint": "transactional pre-migration state",
+                "sql_sha256": hashlib.sha256(sql.encode()).hexdigest(),
+            }
+            return {"before": before, "after": after, "snapshot": history_entry["checkpoint"], "migration_history": history_entry, "verified": True}
         if request.engine != "sqlite":
             raise DatabaseContractError("database engine must be sqlite or postgresql")
         path = _sqlite_path(root, request.database)
