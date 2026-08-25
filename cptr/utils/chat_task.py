@@ -366,6 +366,7 @@ _cancel_requested: set[str] = set()
 _control_interrupt_requested: set[str] = set()
 _interruption_reasons: dict[str, str] = {}
 _pending_input_locks: dict[str, asyncio.Lock] = {}  # chat_id → Lock
+_control_readiness_watchers: dict[str, asyncio.Task] = {}
 
 CONTROL_INTERRUPT = "CONTROL_INTERRUPT"
 USER_CANCEL = "USER_CANCEL"
@@ -514,6 +515,77 @@ def is_running(message_id: str) -> bool:
 def get_live_state(message_id: str) -> dict | None:
     """Get live in-memory state for a running task."""
     return _task_state.get(message_id)
+
+
+def control_setup_ready(message_id: str) -> bool:
+    """Return whether the active turn completed at least one tool boundary.
+
+    Steering may interrupt a long native/tool operation, but it must not
+    interrupt the initial setup phase before any tool has returned.  A
+    completed function call is the durable execution boundary available to
+    the live task registry; the caller records the resulting readiness in
+    the control provenance ledger.
+    """
+    state = _task_state.get(message_id) or {}
+    output = state.get("output") or []
+    completed_calls = {
+        str(item.get("call_id"))
+        for item in output
+        if isinstance(item, dict)
+        and item.get("type") == "function_call"
+        and str(item.get("status") or "").lower() in {"completed", "complete", "done"}
+        and item.get("call_id")
+    }
+    return any(
+        isinstance(item, dict)
+        and item.get("type") == "function_call_output"
+        and str(item.get("call_id")) in completed_calls
+        for item in output
+    )
+
+
+def schedule_control_interrupt_after_setup(
+    message_id: str,
+    *,
+    control_message_id: str,
+    timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS,
+) -> None:
+    """Interrupt one active worker after setup, preserving its task identity.
+
+    A control arriving before the first completed tool boundary must remain
+    queued, but it must not wait for the worker to finish and accidentally
+    become a replacement-generation control. The watcher belongs to the
+    active task and exits when that task, or the durable control, is terminal.
+    """
+    existing = _control_readiness_watchers.get(message_id)
+    if existing is not None and not existing.done():
+        return
+
+    async def watch() -> None:
+        from cptr.services.control_store import ControlTaskStore
+
+        store = ControlTaskStore()
+        try:
+            while is_running(message_id):
+                control = await store.get_message(control_message_id)
+                if control is None or control.status not in {"QUEUED", "DELIVERED"}:
+                    return
+                if control_setup_ready(message_id):
+                    await store.mark_setup_ready_for_message(
+                        message_id,
+                        now=now_ms(),
+                    )
+                    if is_running(message_id) and not is_cancel_requested(message_id):
+                        await interrupt_for_control(message_id, timeout=timeout)
+                    return
+                await asyncio.sleep(0.05)
+        finally:
+            if _control_readiness_watchers.get(message_id) is asyncio.current_task():
+                _control_readiness_watchers.pop(message_id, None)
+
+    _control_readiness_watchers[message_id] = asyncio.create_task(
+        watch(), name=f"cptr-control-readiness-{message_id[:8]}"
+    )
 
 
 def get_active_chat_ids() -> set[str]:

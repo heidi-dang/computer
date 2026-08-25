@@ -38,6 +38,7 @@ class ExecutionCancellationTests(unittest.IsolatedAsyncioTestCase):
         service = AgentService(store=Store())
         with (
             patch("cptr.utils.chat_task.is_running", side_effect=[True, False]),
+            patch("cptr.utils.chat_task.control_setup_ready", return_value=True),
             patch("cptr.utils.chat_task.get_active_chat_ids", return_value=set()),
             patch(
                 "cptr.utils.chat_task.interrupt_for_control",

@@ -51,6 +51,7 @@ class ControlMessage(Base):
     content = Column(Text, nullable=False)
     dedupe_key = Column(Text, nullable=False)
     status = Column(Text, nullable=False, default="QUEUED")
+    setup_readiness_status = Column(Text, nullable=True)
     target_message_id = Column(Text, nullable=True)
     monitor_id = Column(Text, nullable=True)
     scope_id = Column(Text, nullable=True)
@@ -190,8 +191,6 @@ class ControlLiveEvent(Base):
     created_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint(
-            "target_key", "sequence", name="uq_control_live_event_target_sequence"
-        ),
+        UniqueConstraint("target_key", "sequence", name="uq_control_live_event_target_sequence"),
         Index("ix_control_live_event_target_created", "target_key", "created_at"),
     )

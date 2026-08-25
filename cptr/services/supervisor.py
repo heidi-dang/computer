@@ -437,6 +437,7 @@ class AutonomousSupervisor:
         intended_generation_id: str | None,
         baseline_diff_fingerprint: str | None = None,
         baseline_workspace_snapshot: dict[str, Any] | None = None,
+        setup_readiness_status: str | None = None,
     ) -> MonitorState:
         """Bind autonomous control to the worker generation it targeted."""
         monitor = await self._required_monitor(monitor_id)
@@ -452,7 +453,8 @@ class AutonomousSupervisor:
             "baseline_workspace_fingerprint": (baseline_workspace_snapshot or {}).get(
                 "fingerprint"
             ),
-            "setup_readiness_status": (
+            "setup_readiness_status": setup_readiness_status
+            or (
                 "READY"
                 if isinstance(baseline_workspace_snapshot, dict)
                 and baseline_workspace_snapshot.get("fingerprint")
@@ -1467,6 +1469,14 @@ class AutonomousSupervisor:
                 status = str(getattr(message, "status", "UNKNOWN")).upper()
                 request["status"] = status
                 request["target_generation_id"] = getattr(message, "target_message_id", None)
+                if request.get("intended_generation_id") is None:
+                    request["intended_generation_id"] = getattr(
+                        message, "target_message_id", None
+                    )
+                if getattr(message, "setup_readiness_status", None):
+                    request["setup_readiness_status"] = getattr(
+                        message, "setup_readiness_status"
+                    )
                 request["control_intended_generation_id"] = getattr(
                     message, "intended_message_id", None
                 )

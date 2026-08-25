@@ -459,9 +459,10 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
             scope_id=scope.scope_id,
             control_message_id=response["control_message_id"],
             intended_task_id=task_id,
-            intended_generation_id=response.get("target_message_id") or worker_task.message_id,
+            intended_generation_id=response.get("target_message_id"),
             baseline_diff_fingerprint=baseline_diff_fingerprint,
             baseline_workspace_snapshot=baseline_workspace_snapshot,
+            setup_readiness_status=response.get("setup_readiness_status"),
         )
         from cptr.services.live_events import safe_publish_monitor_event
 

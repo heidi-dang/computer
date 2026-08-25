@@ -4,13 +4,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from cptr.services.agent_service import AgentService
 from cptr.services.supervisor import (
     AutonomousSupervisor,
     Decision,
     InMemorySupervisorStore,
     ScopeStatus,
 )
-from cptr.services.agent_service import AgentService
 
 
 class ProvenanceAgent:
@@ -214,7 +214,7 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await store.get_monitor(monitor.monitor_id)).status.value, "RUNNING")
 
     async def test_consumption_by_replacement_task_cannot_verify_original_steering(self):
-        store, director, supervisor, monitor = await self._supervisor(
+        _store, director, supervisor, monitor = await self._supervisor(
             SimpleNamespace(
                 id="control-1",
                 status="CONSUMED",
@@ -428,6 +428,49 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["baseline_workspace_fingerprint"], "tracked-before")
         self.assertEqual(record["post_consumption_workspace_fingerprint"], "tracked-after")
         self.assertEqual(record["setup_readiness_status"], "READY")
+
+    async def test_record_steering_preserves_live_setup_readiness(self):
+        message = SimpleNamespace(
+            id="control-readiness",
+            status="QUEUED",
+            task_id="task_1",
+            consumed_task_id=None,
+            consumed_message_id=None,
+            consumed_at=None,
+        )
+        store = ProvenanceStore()
+        store.control_message = message
+        supervisor = AutonomousSupervisor(
+            store=store,
+            agent=ProvenanceAgent(message),
+            director=AcceptingDirector(),
+        )
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the requested change",
+            acceptance_criteria=["same worker consumes steering and produces EFFECT_OBSERVED"],
+            model_id="model-1",
+        )
+        await supervisor.run_once(monitor.monitor_id)
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id="control-readiness",
+            intended_task_id="task_1",
+            intended_generation_id="message-1",
+            baseline_workspace_snapshot={"fingerprint": "snapshot-fingerprint"},
+            setup_readiness_status="NOT_READY",
+        )
+
+        current = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        self.assertEqual(current.steering_requests[0]["setup_readiness_status"], "NOT_READY")
+
+        message.setup_readiness_status = "READY"
+        records = await supervisor._steering_provenance_records(current)
+        self.assertEqual(records[0]["setup_readiness_status"], "READY")
 
     async def test_same_worker_existing_untracked_file_content_effect_is_observed(self):
         message = SimpleNamespace(

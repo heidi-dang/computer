@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 import subprocess
@@ -15,7 +14,6 @@ from cptr.services.supervisor import (
     InMemorySupervisorStore,
     MonitorStatus,
 )
-
 
 INVALIDATION_SCRIPT = r"""
 import asyncio
@@ -117,7 +115,10 @@ class CancelAwareAgent:
         return {"task_id": task_id, "content": self.tasks[task_id]["output"]}
 
     async def get_diff(self, workspace_id, **kwargs):
-        return {"files": ["src/example.py"], "patch": "diff --git a/src/example.py b/src/example.py"}
+        return {
+            "files": ["src/example.py"],
+            "patch": "diff --git a/src/example.py b/src/example.py",
+        }
 
     async def cancel_task(self, task_id, **kwargs):
         self.cancelled.append(task_id)

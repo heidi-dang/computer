@@ -321,6 +321,7 @@ class AgentService:
         return {
             "id": row.id,
             "status": row.status,
+            "setup_readiness_status": getattr(row, "setup_readiness_status", None),
             "chat_message_id": row.chat_message_id,
             "target_message_id": row.target_message_id,
             "monitor_id": row.monitor_id,
@@ -397,17 +398,34 @@ class AgentService:
             )
             message_id = message.id
             await self.store.update_message(control_message.id, chat_message_id=message_id)
-        from cptr.utils.chat_task import process_pending_chat_inputs
+        from cptr.utils.chat_task import (
+            control_setup_ready,
+            get_active_chat_ids,
+            interrupt_for_control,
+            is_running,
+            process_pending_chat_inputs,
+            schedule_control_interrupt_after_setup,
+        )
 
-        from cptr.utils.chat_task import get_active_chat_ids, interrupt_for_control, is_running
-
-        if is_running(task.message_id):
+        setup_ready = control_setup_ready(task.message_id)
+        if is_running(task.message_id) and setup_ready:
             # A control message must not remain QUEUED behind an unbounded
             # native/tool call. Interrupt only the owned turn; the durable
             # pending-input path then starts a continuation and preserves the
             # same ControlTask identity for provenance and exactly-once checks.
+            # During initial setup, the outer condition is false, leaving the
+            # control durably queued until the first completed tool boundary.
             await interrupt_for_control(
                 task.message_id,
+                timeout=TASK_CANCELLATION_TIMEOUT_SECONDS,
+            )
+        elif is_running(task.message_id):
+            # The initial worker setup is not interruptible yet. Keep the
+            # durable control queued, then interrupt this same active worker
+            # as soon as it crosses its first completed tool boundary.
+            schedule_control_interrupt_after_setup(
+                task.message_id,
+                control_message_id=control_message.id,
                 timeout=TASK_CANCELLATION_TIMEOUT_SECONDS,
             )
 
@@ -440,6 +458,7 @@ class AgentService:
             "control_message_id": control_message.id,
             "status": "QUEUED",
             "delivery_status": control_message.status,
+            "setup_readiness_status": "READY" if setup_ready else "NOT_READY",
             "target_message_id": getattr(control_message, "target_message_id", None),
             "intended_message_id": getattr(control_message, "intended_message_id", None),
         }

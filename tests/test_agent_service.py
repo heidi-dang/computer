@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 from cptr.services.agent_service import AgentService
 
@@ -276,6 +276,58 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "QUEUED")
         self.assertEqual(result["delivery_status"], "QUEUED")
+        process.assert_not_awaited()
+
+    async def test_send_message_does_not_interrupt_before_execution_setup_is_ready(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-setup-fence",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do setup then wait",
+            model_id="model-1",
+            output=None,
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        queued = SimpleNamespace(
+            id="control-message-setup-fence",
+            chat_message_id="message-2",
+            status="QUEUED",
+            target_message_id=None,
+            intended_message_id=None,
+        )
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch.object(service.store, "enqueue_message", new=AsyncMock(return_value=queued)),
+            patch("cptr.utils.chat_task.is_running", return_value=True),
+            patch("cptr.utils.chat_task.control_setup_ready", return_value=False, create=True),
+            patch(
+                "cptr.utils.chat_task.schedule_control_interrupt_after_setup",
+                create=True,
+            ) as schedule,
+            patch("cptr.utils.chat_task.interrupt_for_control", new=AsyncMock()) as interrupt,
+            patch("cptr.utils.chat_task.process_pending_chat_inputs", new=AsyncMock()) as process,
+        ):
+            result = await service.send_message(
+                "task-setup-fence",
+                user_id="user-1",
+                content="STEERING_AFTER_SETUP",
+                idempotency_key="setup-fence-1",
+            )
+
+        self.assertEqual(result["delivery_status"], "QUEUED")
+        self.assertEqual(result["setup_readiness_status"], "NOT_READY")
+        schedule.assert_called_once_with(
+            "message-1",
+            control_message_id="control-message-setup-fence",
+            timeout=ANY,
+        )
+        interrupt.assert_not_awaited()
         process.assert_not_awaited()
 
     async def test_send_message_persists_task_model_on_queued_control(self):
