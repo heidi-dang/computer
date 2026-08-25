@@ -857,12 +857,16 @@ import LiveTerminal from './LiveTerminal.svelte';
 	}
 
 	function mergeFlowDeckEvent(event: any) {
-		const parentRunId =
-			event?.flowdeck_parent_run_id ||
-			event?.run_id ||
-			(event?.flowdeck_run_id && !event?.output && !event?.delta ? event.flowdeck_run_id : null);
+const parentRunId =
+event?.flowdeck_parent_run_id ||
+event?.run_id ||
+event?.flowdeck_run_id ||
+null;
 		if (!parentRunId || parentRunId !== flowdeckRunId) return;
-		const normalized = event?.run_id ? { ...event, flowdeck_parent_run_id: event.run_id } : event;
+const normalized =
+event?.flowdeck_parent_run_id || !event?.run_id
+? event
+: { ...event, flowdeck_parent_run_id: event.run_id };
 		const next = [...flowdeckEvents];
 		const key = flowDeckEventKey(normalized);
 		const index = next.findIndex((item) => flowDeckEventKey(item) === key);

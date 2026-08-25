@@ -61,6 +61,11 @@ const payload = event?.payload || {};
 const item = event?.output || {};
 const call = item?.type === 'function_call' ? item : null;
 const output = item?.type === 'function_call_output' ? item : null;
+const safeOutputSummary = firstValue(
+item?.type === 'reasoning' ? item?.summary : undefined,
+item?.type === 'reasoning' ? item?.status : undefined,
+item?.type === 'message' ? item?.summary : undefined
+);
 const tool = firstValue(call?.name, call?.tool_name, payload.tool_name, payload.tool);
 const command = firstValue(
 call?.arguments?.command,
@@ -87,7 +92,8 @@ payload.summary,
 payload.observation,
 payload.message,
 payload.status,
-event?.status
+event?.status,
+safeOutputSummary
 );
 const identities = [
 firstValue(payload.specialist_id, payload.child_agent_id),
@@ -98,6 +104,8 @@ const identity = identities.join(' · ');
 let title = tool ? `tool · ${tool}` : path ? `file · ${path}` : kind;
 if (command) title = `shell · ${command}`;
 if (output) title = `output · ${tool || 'tool result'}`;
+if (item?.type === 'reasoning') title = `agent activity · ${safeOutputSummary || 'safe summary'}`;
+if (item?.type === 'message') title = `agent update · ${safeOutputSummary || 'native transcript activity'}`;
 if (kind.includes('validation')) title = `validation · ${safeSummary || kind}`;
 if (kind.includes('verif') || kind.includes('review')) title = `verification · ${safeSummary || kind}`;
 if (kind.includes('run ') || kind.startsWith('run')) title = `lifecycle · ${kind}`;

@@ -51,6 +51,8 @@ class FlowDeckNativeTranscriptContractTests(unittest.TestCase):
     def test_polling_normalizes_durable_run_identity_and_is_reconciliation_only(self):
         self.assertIn("event?.run_id", self.source)
         self.assertIn("{ ...event, flowdeck_parent_run_id: event.run_id }", self.source)
+        self.assertIn("event?.flowdeck_run_id ||", self.source)
+        self.assertIn("event?.flowdeck_parent_run_id || !event?.run_id", self.source)
         self.assertIn("getFlowDeckOrchestration(runId, workspace)", self.source)
         self.assertIn("startFlowDeckPolling(flowdeckRunId)", self.source)
 
