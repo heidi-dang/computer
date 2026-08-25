@@ -33,8 +33,15 @@ class LocalStorage(StorageBackend):
         self._dir.mkdir(parents=True, exist_ok=True)
 
     def _path(self, key: str) -> Path:
-        # Keys are UUIDs, no path traversal risk
-        return self._dir / key
+        if not isinstance(key, str) or not key:
+            raise ValueError("storage key must be a non-empty string")
+        root = self._dir.resolve()
+        candidate = (self._dir / key).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise ValueError("storage key escapes the upload directory") from exc
+        return candidate
 
     async def put(self, key: str, data: bytes) -> None:
         self._path(key).write_bytes(data)

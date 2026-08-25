@@ -68,7 +68,10 @@ async def prepare_agent_attachments(
         file_id = file_meta.get("id")
         if not isinstance(file_id, str) or not file_id:
             continue
-        data = await storage.get(file_id)
+        try:
+            data = await storage.get(file_id)
+        except ValueError as exc:
+            raise RuntimeError("Uploaded file reference is invalid") from exc
         if data is None:
             raise RuntimeError(
                 f"Uploaded file is no longer available: {file_meta.get('name') or file_id}"

@@ -34,3 +34,22 @@ P0/P1 defects and real desktop/mobile end-to-end evidence.
   end-to-end qualification, and the final closure audit are still pending.
 
 Phase 11 is intentionally not accepted.
+
+## Security disposition (2026-08-25)
+
+- **Attachment storage-key traversal — fixed in scope.** Untrusted chat
+  attachment IDs now resolve within `DATA_DIR/uploads`; traversal, absolute
+  paths, and symlink escapes fail closed. Regression coverage verifies
+  `get`, `put`, and `delete` cannot affect an outside sentinel.
+- **Workspace path traversal — pre-existing, intentional boundary.** The
+  single-user CPTR contract intentionally permits authenticated absolute
+  filesystem paths. This is not a Phase 11 containment bypass; changing it
+  would alter the frozen CPTR product contract.
+- **Notification SSRF — pre-existing, outside Phase 11 scope.** Authenticated
+  ownership checks, private-address blocking, and redirect disabling are
+  present. DNS rebinding remains a defense-in-depth backlog item and is not
+  represented as fixed by Phase 11.
+- **Dependency and SAST findings — backlog.** Broad dependency upgrades and
+  unrelated security refactors are intentionally not applied during Phase 11.
+  The remaining high findings stay open for a separately scoped security
+  review.
