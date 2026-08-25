@@ -52,13 +52,15 @@ numeric score.
 ## Current qualification evidence
 
 - Focused auth/FlowDeck/database/runtime suite: **29 passed, 4 skipped**.
-- Full backend regression before the final callback tightening: **246 passed,
-  4 skipped, 47 subtests**; rerun the complete suite before acceptance.
+- Full backend regression after the final callback tightening: **246 passed,
+  4 skipped, 47 subtests**.
 - Frontend typecheck and production build: passed.
+- Visual regression: **16 passed**.
 - Static checks and Python compilation: passed.
 - Security scanners: HoundDog clean; dependency and SAST scanners reported
-  pre-existing high findings outside this Phase 10 change, so the security gate
-  is not accepted.
+  high findings in existing PDF/spreadsheet/crypto and unrelated workspace
+  path/SSRF surfaces. No finding was introduced by generated-auth code, but
+  the security gate is not accepted while those findings remain open.
 - External-provider credentials were not available; external adapters remain
   explicitly **unverified**, not mocked as passed.
 
