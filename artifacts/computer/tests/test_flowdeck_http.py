@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -97,6 +98,54 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
 
     def headers(self, user_id="user-a"):
         return {"Authorization": f"Bearer {self.tokens[user_id]}"}
+
+    async def test_generated_auth_callback_durable_record_excludes_verifier_settings(self):
+        config_dir = self.root_a / ".cptr"
+        config_dir.mkdir()
+        (config_dir / "generated-auth.json").write_text(
+            json.dumps({"provider": "oauth_oidc"}),
+            encoding="utf-8",
+        )
+        verifier = {
+            "provider": "oauth_oidc",
+            "verifier": {
+                "issuer": "https://issuer.example",
+                "audience": "phase10",
+                "jwks_url": "https://issuer.example/jwks",
+                "redirect_uri": "https://app.example/callback",
+            },
+        }
+        self.client.cookies.set("cptr_generated_csrf", "csrf-value")
+        with patch.dict(
+            os.environ,
+            {"CPTR_GENERATED_AUTH_VERIFIER_JSON": json.dumps(verifier)},
+            clear=False,
+        ):
+            response = await self.client.post(
+                "/v1/flowdeck/generated-auth/callback/verify",
+                headers={**self.headers(), "Idempotency-Key": "auth-callback-record-1"},
+                json={
+                    "workspace": str(self.root_a),
+                    "issuer": verifier["verifier"]["issuer"],
+                    "audience": verifier["verifier"]["audience"],
+                    "redirect_uri": verifier["verifier"]["redirect_uri"],
+                    "state": "csrf-value",
+                    "nonce": "csrf-value",
+                    "code_verifier": "a" * 43,
+                },
+            )
+        self.assertEqual(response.status_code, 200, response.text)
+        run_id = response.json()["run_id"]
+        status = await self.client.get(
+            f"/v1/flowdeck/generated-auth/operations/{run_id}",
+            params={"workspace": str(self.root_a)},
+            headers=self.headers(),
+        )
+        self.assertEqual(status.status_code, 200, status.text)
+        serialized = json.dumps(status.json())
+        for setting in verifier["verifier"].values():
+            self.assertNotIn(setting, serialized)
+        self.assertIn("external-callback", serialized)
 
     async def test_authenticated_project_postgresql_inspection_path(self):
         project_url = os.environ.get("CPTR_PROJECT_DATABASE_URL")

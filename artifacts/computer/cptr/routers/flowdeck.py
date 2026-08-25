@@ -1072,7 +1072,10 @@ async def generated_auth_callback(request: Request, body: GeneratedAuthCallback)
     _same_origin(request)
     result, reused, run_id = await _generated_auth_operation(
         request, workspace=body.workspace, capability="callback.verify",
-        target=body.issuer,
+        # Never persist provider verifier settings as the logical-operation
+        # target. Replay identity is the callback capability itself; the
+        # server-owned verifier remains inside the adapter only.
+        target="external-callback",
         execute=lambda service: (
             service.verify_external_callback(
                 issuer=body.issuer, audience=body.audience, redirect_uri=body.redirect_uri,
