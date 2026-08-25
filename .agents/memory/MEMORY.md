@@ -24,3 +24,4 @@
 - [Generated-auth durable operations](generated-auth-durable-operations.md) — auth side effects share FlowDeck lifecycle/evidence while secrets stay out of durable results.
 - [Heidi pre-execution validation](preexecution-validation-gate.md) — validate live workspace, model, policy, and frozen boundaries before child dispatch or mutation.
 - [Storage key containment](storage-key-containment.md) — attachment IDs are untrusted; resolved blob paths must stay inside the upload root.
+- [Live terminal proxy boundary](live-terminal-proxy-boundary.md) — same-origin FlowDeck mutations need the browser-facing host preserved through the frontend proxy.

@@ -89,12 +89,12 @@ payload.message,
 payload.status,
 event?.status
 );
-const identity = firstValue(
-payload.specialist_id,
-payload.child_agent_id,
-payload.attempt_id,
-event?.attempt_id
-);
+const identities = [
+firstValue(payload.specialist_id, payload.child_agent_id),
+firstValue(payload.attempt_id, event?.attempt_id),
+firstValue(payload.step_id, event?.step_id)
+].filter(Boolean);
+const identity = identities.join(' · ');
 let title = tool ? `tool · ${tool}` : path ? `file · ${path}` : kind;
 if (command) title = `shell · ${command}`;
 if (output) title = `output · ${tool || 'tool result'}`;
@@ -112,8 +112,19 @@ isLifecycle: !tool && !command && !path && !output
 };
 }
 
+const uniqueEvents = $derived.by(() => {
+const seen = new Map<string, any>();
+events.forEach((event, index) => seen.set(eventKey(event, index), event));
+return [...seen.values()].sort((a, b) => {
+const left = Number(a?.sequence);
+const right = Number(b?.sequence);
+if (Number.isFinite(left) && Number.isFinite(right)) return left - right;
+return 0;
+});
+});
+
 const lines = $derived(
-events
+uniqueEvents
 .map(eventLine)
 .filter((line) => line.title || line.detail)
 );
@@ -161,9 +172,9 @@ aria-expanded={open}
 </header>
 
 {#if open}
-<div class="terminal-output" bind:this={outputEl} onscroll={() => {
+<div class="terminal-output" role="log" aria-live="polite" bind:this={outputEl} onscroll={() => {
 if (outputEl && outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeight > 24) follow = false;
-}} tabindex="0">
+}}>
 {#if !lines.length}
 <div class="terminal-empty"><span class="prompt-mark">$</span> waiting for authenticated FlowDeck activity…</div>
 {:else}

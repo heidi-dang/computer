@@ -76,9 +76,11 @@ test('Heidi live terminal preserves safe activity and controls', async ({ page }
 await page.goto('/__visual-regression');
 const surface = page.getByTestId('live-terminal-surface');
 await expect(surface.getByTestId('heidi-live-terminal')).toBeVisible();
-await expect(surface.getByText('build-agent')).toBeVisible();
-await expect(surface.getByText('attempt-42')).toBeVisible();
+const identity = surface.locator('.line-identity').first();
+await expect(identity).toContainText('build-agent');
+await expect(identity).toContainText('attempt-42');
 await expect(surface.getByText('276 passed, 4 skipped')).toBeVisible();
+await expect(surface.getByText('276 passed, 4 skipped')).toHaveCount(1);
 await expect(surface.getByRole('button', { name: 'Pause' })).toBeVisible();
 await surface.getByRole('button', { name: 'Pause' }).click();
 await expect(surface.getByRole('button', { name: 'Resume' })).toBeVisible();
