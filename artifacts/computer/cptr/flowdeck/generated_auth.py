@@ -141,7 +141,13 @@ def _read_markers(workspace: Path) -> tuple[AuthProvider, dict[str, Any]]:
             "issuer": verifier.get("issuer"),
             "audience": verifier.get("audience"),
             "jwks_url": verifier.get("jwks_url"),
-            "verified": bool(verifier.get("issuer") and verifier.get("audience") and verifier.get("jwks_url")),
+            "redirect_uri": verifier.get("redirect_uri"),
+            "verified": bool(
+                verifier.get("issuer")
+                and verifier.get("audience")
+                and verifier.get("jwks_url")
+                and verifier.get("redirect_uri")
+            ),
         }
     return provider, config
 
@@ -198,6 +204,9 @@ class GeneratedAuthService:
             },
         }
 
+    def issue_csrf(self) -> str:
+        return secrets.token_urlsafe(24)
+
     def _ensure_local(self) -> None:
         if self.provider in EXTERNAL_PROVIDERS:
             raise GeneratedAuthError(
@@ -250,6 +259,7 @@ class GeneratedAuthService:
                 raise GeneratedAuthError("authentication required", code="unauthenticated", status=401)
             if row["expires_at"] <= int(time.time()):
                 connection.execute("DELETE FROM sessions WHERE token_hash=?", (_hash_token(token),))
+                connection.commit()
                 raise GeneratedAuthError("session expired", code="session_expired", status=401)
             if csrf_token and not hmac.compare_digest(row["csrf_hash"], _hash_token(csrf_token)):
                 raise GeneratedAuthError("CSRF validation failed", code="csrf_failed", status=403)
@@ -269,10 +279,26 @@ class GeneratedAuthService:
             raise GeneratedAuthError("forbidden", code="forbidden", status=403)
         return session.user
 
-    def verify_external_callback(self, *, issuer: str, audience: str, redirect_uri: str, state: str, expected_state: str) -> None:
+    def verify_external_callback(
+        self,
+        *,
+        issuer: str,
+        audience: str,
+        redirect_uri: str,
+        state: str,
+        expected_state: str,
+        nonce: str,
+        expected_nonce: str,
+        code_verifier: str,
+    ) -> None:
         if self.provider not in EXTERNAL_PROVIDERS or not self.provider_config.get("verified"):
             raise GeneratedAuthError("external provider is not verified", code="provider_unverified", status=503)
         if issuer != self.provider_config["issuer"] or audience != self.provider_config["audience"]:
             raise GeneratedAuthError("provider callback identity mismatch", code="callback_denied", status=403)
-        if not hmac.compare_digest(state, expected_state) or not redirect_uri.startswith("https://"):
+        if (
+            not hmac.compare_digest(state, expected_state)
+            or not hmac.compare_digest(nonce, expected_nonce)
+            or not code_verifier
+            or redirect_uri != self.provider_config["redirect_uri"]
+        ):
             raise GeneratedAuthError("unsafe provider callback", code="callback_denied", status=403)

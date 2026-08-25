@@ -10,6 +10,7 @@
 	import Icon from '$lib/components/Icon.svelte';
 import ManagedRuntimePanel from '$lib/components/ManagedRuntimePanel.svelte';
 import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
+	import GeneratedAuthPanel from '$lib/components/GeneratedAuthPanel.svelte';
 	import { currentWorkspace, workspaceList } from '$lib/stores';
 	import { chatModels, defaultModel } from '$lib/stores/chat';
 
@@ -671,6 +672,7 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 		{/if}
 <ManagedRuntimePanel workspace={workspace || $currentWorkspace?.path || ''} />
 <ProjectDatabasePanel workspace={workspace || $currentWorkspace?.path || ''} />
+<GeneratedAuthPanel workspace={workspace || $currentWorkspace?.path || ''} />
 	</main>
 </div>
 

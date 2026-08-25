@@ -1,8 +1,8 @@
 # FlowDeck Phase 10 Scope Review
 
-Status: **BLOCKED — definitive repository specification not present**
+Status: **RESOLVED — canonical Phase 10 specification added**
 
-## Evidence reviewed
+## Historical evidence reviewed
 
 The repository was searched for roadmap, phase, acceptance, generated-app,
 authentication, Auth.js, Clerk, Supabase, Firebase, OAuth, and OIDC scope
@@ -31,20 +31,13 @@ acceptance record:
 No repository roadmap, design, contract, acceptance rubric, generated-project
 template, provider-adapter interface, or end-to-end test plan defines Phase 10.
 
-## Required action before implementation
-
-Do not invent Phase 10 from the current prompt. Add or identify the canonical
-Phase 10 specification in the repository first, including its generated-app
-boundary, provider-adapter contract, server-owned configuration rules,
-CPTR/FlowDeck authority relationship, accepted provider set, native-auth
-contract, session/CSRF/CORS requirements, acceptance score rubric, and
-disposable-fixture test requirements.
+The canonical scope is now recorded in `FLOWDECK_PHASE10_DESIGN.md` and its
+acceptance gate is recorded in `FLOWDECK_PHASE10_ACCEPTANCE.md`.
 
 ## Preservation statement
 
-No Phase 10 implementation was retained. Phases 1–9 remain unchanged and
-frozen. In particular, the accepted Phase 9 PostgreSQL rules remain
-authoritative: `CPTR_PROJECT_DATABASE_URL` is the only project binding;
+Phases 1–9 remain unchanged and frozen. In particular, the accepted Phase 9
+PostgreSQL rules remain authoritative: `CPTR_PROJECT_DATABASE_URL` is the only project binding;
 CPTR’s internal `DATABASE_URL` is excluded; cancellation is durable;
 transactional rollback/checkpoint semantics are preserved; late outcomes are
 discarded; and cancelled idempotency keys cannot resurrect work.

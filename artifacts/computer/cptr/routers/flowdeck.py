@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import logging
 import re
@@ -34,6 +35,12 @@ from cptr.flowdeck.database import (
     project_database,
     register_database_operation,
     unregister_database_operation,
+)
+from cptr.flowdeck.generated_auth import (
+    CSRF_COOKIE,
+    SESSION_COOKIE,
+    GeneratedAuthError,
+    GeneratedAuthService,
 )
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
@@ -110,6 +117,27 @@ class DatabaseRestoreBody(DatabaseRequestBody):
     snapshot: str = Field(min_length=1, max_length=512)
 
 
+class GeneratedAuthRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(min_length=1, max_length=4096)
+
+
+class GeneratedAuthCredentials(GeneratedAuthRequest):
+    email: str = Field(min_length=3, max_length=320)
+    password: str = Field(min_length=1, max_length=512)
+    csrf: str = Field(min_length=1, max_length=256)
+
+
+class GeneratedAuthCallback(GeneratedAuthRequest):
+    issuer: str = Field(min_length=1, max_length=2048)
+    audience: str = Field(min_length=1, max_length=512)
+    redirect_uri: str = Field(min_length=1, max_length=2048)
+    state: str = Field(min_length=1, max_length=512)
+    nonce: str = Field(min_length=1, max_length=512)
+    code_verifier: str = Field(min_length=43, max_length=128)
+
+
 def _message_dict(message: ChatMessage) -> dict[str, Any]:
     return {
         "id": message.id,
@@ -177,6 +205,32 @@ async def _authenticate_flowdeck(request: Request) -> str:
         raise HTTPException(401, "Authentication required")
     request.state.auth = auth
     return auth.user_id
+
+
+def _same_origin(request: Request) -> None:
+    origin = request.headers.get("Origin")
+    if not origin:
+        return
+    expected = f"{request.url.scheme}://{request.headers.get('host', request.url.netloc)}"
+    if origin.rstrip("/") != expected.rstrip("/"):
+        raise HTTPException(403, "cross-origin request denied")
+
+
+async def _generated_auth_service(request: Request, workspace: str) -> tuple[str, GeneratedAuthService]:
+    user_id = await _authenticate_flowdeck(request)
+    try:
+        canonical = await resolve_gateway_workspace(
+            session_factory=get_session_factory(),
+            user_id=user_id,
+            requested_workspace=workspace,
+        )
+        return user_id, GeneratedAuthService(canonical)
+    except (AuthenticatedGatewayError, GeneratedAuthError) as exc:
+        raise HTTPException(getattr(exc, "status", 403), str(exc)) from exc
+
+
+def _auth_user_payload(user) -> dict[str, Any]:
+    return {"id": user.id, "email": user.email, "role": user.role, "provider": user.provider}
 
 
 def _safe_run(run, *, reused: bool = False) -> dict[str, Any]:
@@ -728,6 +782,131 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
         for event in events
     ]
     return response
+
+
+@router.get("/generated-auth/config")
+async def generated_auth_config(request: Request, workspace: str):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, workspace)
+    return service.metadata()
+
+
+@router.get("/generated-auth/csrf")
+async def generated_auth_csrf(request: Request, workspace: str, response: Response):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, workspace)
+    token = service.issue_csrf()
+    response.set_cookie(
+        CSRF_COOKIE,
+        token,
+        max_age=60 * 60,
+        httponly=False,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+    )
+    return {"csrf": token}
+
+
+@router.post("/generated-auth/signup")
+async def generated_auth_signup(request: Request, body: GeneratedAuthCredentials):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, body.workspace)
+    if not hmac.compare_digest(body.csrf, request.cookies.get(CSRF_COOKIE, "")):
+        raise HTTPException(403, "CSRF validation failed")
+    try:
+        user = service.signup(body.email, body.password)
+    except GeneratedAuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return {"user": _auth_user_payload(user), "provider": service.provider.value}
+
+
+@router.post("/generated-auth/signin")
+async def generated_auth_signin(request: Request, body: GeneratedAuthCredentials, response: Response):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, body.workspace)
+    if not hmac.compare_digest(body.csrf, request.cookies.get(CSRF_COOKIE, "")):
+        raise HTTPException(403, "CSRF validation failed")
+    try:
+        user, session_token, csrf_token, expires_at = service.signin(body.email, body.password)
+    except GeneratedAuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    response.set_cookie(
+        SESSION_COOKIE,
+        session_token,
+        max_age=60 * 60 * 24 * 7,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+    )
+    response.set_cookie(
+        CSRF_COOKIE,
+        csrf_token,
+        max_age=60 * 60,
+        httponly=False,
+        secure=request.url.scheme == "https",
+        samesite="strict",
+    )
+    return {"user": _auth_user_payload(user), "expires_at": expires_at, "provider": service.provider.value}
+
+
+@router.get("/generated-auth/session")
+async def generated_auth_session(request: Request, workspace: str):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, workspace)
+    try:
+        session = service.session(request.cookies.get(SESSION_COOKIE, ""))
+    except GeneratedAuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return {"user": _auth_user_payload(session.user), "expires_at": session.expires_at}
+
+
+@router.get("/generated-auth/protected")
+async def generated_auth_protected(request: Request, workspace: str, role: str | None = None):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, workspace)
+    try:
+        session = service.session(request.cookies.get(SESSION_COOKIE, ""))
+        if role:
+            service.require_role(session, role)
+    except GeneratedAuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return {"ok": True, "user": _auth_user_payload(session.user)}
+
+
+@router.post("/generated-auth/signout")
+async def generated_auth_signout(request: Request, body: GeneratedAuthRequest, response: Response):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, body.workspace)
+    try:
+        service.signout(
+            request.cookies.get(SESSION_COOKIE, ""),
+            request.cookies.get(CSRF_COOKIE, ""),
+        )
+    except GeneratedAuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    response.delete_cookie(SESSION_COOKIE)
+    response.delete_cookie(CSRF_COOKIE)
+    return {"ok": True}
+
+
+@router.post("/generated-auth/callback/verify")
+async def generated_auth_callback(request: Request, body: GeneratedAuthCallback):
+    _same_origin(request)
+    _, service = await _generated_auth_service(request, body.workspace)
+    try:
+        service.verify_external_callback(
+            issuer=body.issuer,
+            audience=body.audience,
+            redirect_uri=body.redirect_uri,
+            state=body.state,
+            expected_state=request.cookies.get(CSRF_COOKIE, ""),
+            nonce=body.nonce,
+            expected_nonce=request.cookies.get(CSRF_COOKIE, ""),
+            code_verifier=body.code_verifier,
+        )
+    except GeneratedAuthError as exc:
+        raise HTTPException(exc.status, str(exc)) from exc
+    return {"verified": True, "provider": service.provider.value}
 
 
 @router.post("/runtime/start")
