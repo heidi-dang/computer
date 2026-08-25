@@ -384,6 +384,7 @@ async def _create_orchestration(
                         parent_chat_id=chat.id,
                         parent_message_id=assistant_message.id,
                         build_request=build_request,
+                        audit_contract=audit_contract,
                     ),
                     authenticated_request=request,
                     store=store,

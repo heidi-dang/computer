@@ -60,6 +60,7 @@ class CoordinatorRequest:
     parent_chat_id: str
     parent_message_id: str | None = None
     build_request: BuildRequest | None = None
+    audit_contract: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -237,6 +238,15 @@ async def run_heidi_coordinator(
         return CoordinatorResult("succeeded", run.id, (), ())
     if run.status == RunStatus.CANCELLED.value:
         return CoordinatorResult("cancelled", run.id, (), ())
+    if request.audit_contract and created:
+        from cptr.flowdeck.audit_repository import collect_repository_facts
+
+        inspection = collect_repository_facts(root, request.audit_contract["scope"])
+        await store.record_event(
+            run.id,
+            "AUDIT_REPOSITORY_FACTS_COLLECTED",
+            inspection.as_dict(),
+        )
     if build_request and created:
         await store.record_event(
             run.id,
