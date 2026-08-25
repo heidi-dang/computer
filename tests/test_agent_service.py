@@ -72,6 +72,121 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["output"], "finished output")
         update.assert_awaited_once()
 
+    async def test_get_task_exposes_bounded_control_delivery_records_without_content(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="RUNNING",
+            prompt="do work",
+            model_id="model-1",
+            output="visible output",
+            error=None,
+            created_at=1,
+            updated_at=1,
+        )
+        message = SimpleNamespace(
+            id="message-1",
+            chat_id="chat-1",
+            done=False,
+            content="visible output",
+            output=[],
+            meta=None,
+        )
+        control_rows = [
+            SimpleNamespace(
+                id=f"control-{index}",
+                status="CONSUMED",
+                chat_message_id=f"queued-{index}",
+                target_message_id="message-1",
+                monitor_id="monitor-1",
+                scope_id="scope-1",
+                intended_message_id="message-1",
+                consumed_task_id="task-1",
+                consumed_message_id=f"worker-{index}",
+                created_at=index,
+                updated_at=index,
+                delivered_at=index + 100,
+                consumed_at=index + 200,
+                content="/home/shacker/secret TOKEN",
+                dedupe_key="secret-dedupe",
+            )
+            for index in range(25)
+        ]
+
+        class FakeResult:
+            def scalars(self):
+                return self
+
+            def all(self):
+                return control_rows[:21]
+
+        class FakeDb:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def execute(self, statement):
+                return FakeResult()
+
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
+            patch("cptr.utils.chat_task.is_running", return_value=True),
+            patch.object(service.store, "update", new=AsyncMock()),
+            patch("cptr.services.agent_service.get_db", new=AsyncMock(return_value=FakeDb())),
+        ):
+            result = await service.get_task("task-1", user_id="user-1")
+
+        self.assertEqual(len(result["control_messages"]), 20)
+        self.assertTrue(result["control_messages_truncated"])
+        first = result["control_messages"][0]
+        self.assertEqual(first["id"], "control-0")
+        self.assertEqual(first["status"], "CONSUMED")
+        self.assertEqual(first["intended_message_id"], "message-1")
+        self.assertEqual(first["consumed_task_id"], "task-1")
+        self.assertEqual(first["consumed_message_id"], "worker-0")
+        self.assertEqual(first["delivered_at"], 100)
+        self.assertEqual(first["consumed_at"], 200)
+        self.assertNotIn("content", first)
+        self.assertNotIn("dedupe_key", first)
+        self.assertNotIn("secret", str(result["control_messages"]).lower())
+
+    async def test_get_output_includes_control_delivery_records(self):
+        service = AgentService()
+        with patch.object(
+            service,
+            "get_task",
+            new=AsyncMock(
+                return_value={
+                    "id": "task-1",
+                    "status": "RUNNING",
+                    "output": "visible",
+                    "raw_output": [],
+                    "control_messages": [
+                        {
+                            "id": "control-1",
+                            "status": "DELIVERED",
+                            "consumed_task_id": None,
+                            "consumed_message_id": None,
+                            "consumed_at": None,
+                        }
+                    ],
+                    "control_messages_truncated": False,
+                }
+            ),
+        ):
+            result = await service.get_output("task-1", user_id="user-1")
+
+        self.assertEqual(result["control_messages"][0]["id"], "control-1")
+        self.assertEqual(result["control_messages"][0]["status"], "DELIVERED")
+        self.assertFalse(result["control_messages_truncated"])
+
     async def test_cancel_marks_task_cancelled_when_worker_exists(self):
         service = AgentService()
         task = SimpleNamespace(
