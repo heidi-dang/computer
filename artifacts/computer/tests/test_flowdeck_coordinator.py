@@ -250,6 +250,58 @@ class CoordinatorDurableWorkflowTests(unittest.IsolatedAsyncioTestCase):
         run = await self.store.get_run_by_request_key(request.request_key)
         self.assertEqual(run.status, RunStatus.CANCELLED.value)
 
+    async def test_reserved_audit_run_initializes_facts_once(self):
+        request = CoordinatorRequest(
+            request_key="reserved-audit",
+            task="audit the repository",
+            workspace=str(self.root),
+            model="fixture-model",
+            connection={},
+            parent_chat_id="chat",
+            audit_contract={
+                "scope": {
+                    "categories": ["architecture", "authentication_authorization"]
+                },
+                "completion_contract": ["evidence_bound_findings"],
+            },
+        )
+        reserved, created = await self.store.create_run(
+            request_key=request.request_key,
+            owner="owner",
+            workspace=str(self.root),
+            step_name="heidi-audit",
+        )
+        self.assertTrue(created)
+        with patch.dict(
+            os.environ,
+            {
+                "CPTR_FLOWDECK_ENABLED": "true",
+                "CPTR_FLOWDECK_MODE": "controlled",
+                "CPTR_FLOWDECK_GOVERNANCE": "strict",
+            },
+        ), patch(
+            "cptr.flowdeck.coordinator.dispatch_authenticated_specialist",
+            new=AsyncMock(return_value="fixture"),
+        ), patch(
+            "cptr.flowdeck.coordinator.classify_coordinator_request",
+            return_value=(),
+        ):
+            # Simulate the HTTP route's reservation: coordinator create_run
+            # must return created=False and still initialize the audit.
+            result = await run_heidi_coordinator(
+                request, authenticated_request=self.auth_request(), store=self.store
+            )
+        self.assertEqual(result.run_id, reserved.id)
+        events = await self.store.list_events(reserved.id)
+        self.assertEqual(
+            [event.kind for event in events].count("AUDIT_REPOSITORY_FACTS_COLLECTED"),
+            1,
+        )
+        self.assertEqual(
+            [event.kind for event in events].count("AUDIT_ANALYSIS_CREATED"),
+            1,
+        )
+
     async def test_unmatched_prompt_is_durable_clarification_without_dispatch(self):
         request = CoordinatorRequest(
             request_key="clarification-request",
