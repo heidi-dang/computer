@@ -1078,69 +1078,88 @@
 					</div>
 				{/each}
 				{#if homeTab?.type === 'home'}
-					<div class="h-full overflow-y-auto px-6">
-						<div class="mx-auto flex min-h-full w-full max-w-md flex-col justify-center py-5">
-							<div class="mb-4">
-								<div class="flex items-baseline gap-2">
-									<h1 class="text-lg font-medium tracking-tight text-gray-900 dark:text-white">
+					<div class="home-landing h-full overflow-y-auto px-6">
+						<div class="relative mx-auto flex min-h-full w-full max-w-2xl flex-col justify-center py-10 sm:py-14">
+							<div class="home-glow home-glow-one" aria-hidden="true"></div>
+							<div class="home-glow home-glow-two" aria-hidden="true"></div>
+							<div class="relative">
+								<div class="mb-8 flex items-start justify-between gap-6">
+									<div>
+										<div class="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-2xl bg-gray-900 text-white shadow-lg shadow-gray-900/10 dark:bg-white dark:text-gray-900 dark:shadow-black/20">
+											<Icon name="spark" size={20} strokeWidth={1.4} />
+										</div>
+										<h1 class="text-2xl font-semibold tracking-tight text-gray-950 dark:text-white sm:text-3xl">
 										{#if welcomeName}
 											{@const greeting = $t(`home.greeting.${greetingTime}.${greetingVariant}`, {
 												name: greetingNameMarker
 											})}
 											{@const [beforeName, afterName] = greeting.split(greetingNameMarker)}
-											{beforeName}<span class="capitalize">{welcomeName}</span>{afterName}
+											{beforeName}<span class="capitalize text-gray-500 dark:text-gray-300">{welcomeName}</span>{afterName}
 										{:else}
 											Computer
 										{/if}
-									</h1>
+										</h1>
+										<p class="mt-2 max-w-md text-sm leading-6 text-gray-500 dark:text-gray-400">
+											A calm space to open a workspace, pick up where you left off, and build something great.
+										</p>
+									</div>
+									<div class="hidden shrink-0 text-right font-mono text-[0.6875rem] leading-5 text-gray-400 dark:text-gray-600 sm:block">
+										{#if welcomeData?.hostname}
+											<div>{welcomeData.hostname}</div>
+										{/if}
+										{#if $appVersion}
+											<button
+												onclick={() => showChangelog.set(true)}
+												class="cursor-pointer transition-colors hover:text-gray-700 hover:underline dark:hover:text-gray-300"
+											>
+												v{$appVersion}
+											</button>
+										{/if}
+									</div>
 								</div>
-								<div
-									class="mt-0.5 flex items-baseline gap-2 font-mono text-xs text-gray-400 dark:text-gray-600"
-								>
-									{#if welcomeData?.hostname}
-										<span class="text-[0.6875rem]">{welcomeData.hostname}</span>
-									{/if}
-									{#if $appVersion}
-										<button
-											onclick={() => showChangelog.set(true)}
-											class="cursor-pointer text-[0.6875rem] hover:text-gray-500 hover:underline dark:hover:text-gray-400"
-										>
-											v{$appVersion}
-										</button>
-									{/if}
-								</div>
-							</div>
 
-							<div class="mb-5">
-								<h2 class="mb-1.5 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								<div class="mb-8">
+									<h2 class="mb-3 text-[0.6875rem] font-semibold uppercase tracking-[0.18em] text-gray-400 dark:text-gray-500">
 									{$t('home.start')}
-								</h2>
-								<button
-									class="text-xs text-gray-600 transition-colors duration-100 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
-									onclick={() => (showPicker = true)}
-								>
-									{$t('home.openWorkspace')}
-								</button>
-								{#if $chatEnabled}
-									<button
-										class="mt-1 block text-xs text-gray-600 transition-colors duration-100 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
-										onclick={() => openHomeChat(undefined, homePane.id)}
-									>
-										{$t('bar.newChat')}
-									</button>
-								{/if}
-							</div>
+									</h2>
+									<div class="grid gap-3 sm:grid-cols-2">
+										<button
+											class="home-action home-action-primary group"
+											onclick={() => (showPicker = true)}
+										>
+											<span class="home-action-icon"><Icon name="folder" size={17} strokeWidth={1.4} /></span>
+											<span class="min-w-0 text-left">
+												<span class="block text-sm font-medium">{$t('home.openWorkspace')}</span>
+												<span class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">Open a local project</span>
+											</span>
+											<span class="ml-auto text-gray-400 transition-transform group-hover:translate-x-0.5">→</span>
+										</button>
+										{#if $chatEnabled}
+											<button
+												class="home-action group"
+												onclick={() => openHomeChat(undefined, homePane.id)}
+											>
+												<span class="home-action-icon"><Icon name="chat-plus" size={17} strokeWidth={1.4} /></span>
+												<span class="min-w-0 text-left">
+													<span class="block text-sm font-medium">{$t('bar.newChat')}</span>
+													<span class="mt-0.5 block text-xs text-gray-500 dark:text-gray-400">Start with an idea</span>
+												</span>
+												<span class="ml-auto text-gray-400 transition-transform group-hover:translate-x-0.5">→</span>
+											</button>
+										{/if}
+									</div>
+								</div>
 
 							{#if continuation}
 								{@const unreadCount =
 									$workspaceList.find((workspace) => workspace.path === continuation.path)
 										?.unread_count ?? 0}
-								<div class="mb-4">
-									<h2 class="mb-1.5 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								<div class="home-section mb-5">
+									<h2 class="home-section-title">
 										{$t('home.continue')}
 									</h2>
 									<button
-										class="group w-full min-w-0 py-1 text-left transition-colors duration-100"
+										class="home-workspace-card group w-full min-w-0 text-left"
 										onclick={() => quickOpen(continuation.path)}
 									>
 										<span class="flex min-w-0 items-baseline gap-2">
@@ -1185,8 +1204,8 @@
 							{/if}
 
 							{#if recent.length}
-								<div class="mb-4">
-									<h2 class="mb-1.5 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								<div class="home-section mb-5">
+									<h2 class="home-section-title">
 										{$t('home.recent')}
 									</h2>
 									<div class="flex flex-col">
@@ -1197,7 +1216,7 @@
 												$workspaceList.find((workspace) => workspace.path === item.path)
 													?.unread_count ?? 0}
 											<button
-												class="group w-full min-w-0 py-1 text-left transition-colors duration-100"
+												class="home-workspace-card group w-full min-w-0 text-left"
 												onclick={() => quickOpen(item.path)}
 											>
 												<span class="flex min-w-0 items-baseline gap-2">
@@ -1242,12 +1261,12 @@
 									</div>
 								</div>
 							{:else if !continuation}
-								<div class="mb-4">
-									<h2 class="mb-1.5 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								<div class="home-section mb-5">
+									<h2 class="home-section-title">
 										{$t('home.recent')}
 									</h2>
 									<button
-										class="text-xs text-gray-500 transition-colors duration-100 hover:text-gray-900 dark:text-gray-500 dark:hover:text-white"
+										class="home-empty-action"
 										onclick={() => (showPicker = true)}
 									>
 										{$t('home.noWorkspaces')}
@@ -1256,8 +1275,8 @@
 							{/if}
 
 							{#if nearby.length && !welcomeData?.recent?.length}
-								<div>
-									<h2 class="mb-1.5 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								<div class="home-section">
+									<h2 class="home-section-title">
 										{$t('home.folders')}
 									</h2>
 									<div class="flex flex-col">
