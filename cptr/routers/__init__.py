@@ -8,6 +8,7 @@ from cptr.routers.bridge import router as bridge_router
 from cptr.routers.bridge import webhook_router
 from cptr.routers.browser import router as browser_router
 from cptr.routers.chat import router as chat_router
+from cptr.routers.coding import router as coding_router
 from cptr.routers.control import router as control_router
 from cptr.routers.gateway import router as gateway_router
 from cptr.routers.events import router as events_router
@@ -31,6 +32,7 @@ __all__ = [
     "browser_router",
     "webhook_router",
     "chat_router",
+    "coding_router",
     "control_router",
     "events_router",
     "files_router",

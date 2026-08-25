@@ -807,8 +807,23 @@ async def _ensure_chat(
 # ── API key admin endpoint ───────────────────────────────────
 
 
+DEFAULT_CONTROL_SCOPES = (
+    "workspace:read",
+    "task:read",
+    "task:write",
+    "autonomous:run",
+    "git:read",
+    "coding:read",
+    "coding:write",
+    "command:execute",
+)
+OPTIONAL_CONTROL_SCOPES = ("command:external",)
+ALLOWED_CONTROL_SCOPES = frozenset((*DEFAULT_CONTROL_SCOPES, *OPTIONAL_CONTROL_SCOPES))
+
+
 class CreateApiKeyRequest(BaseModel):
     name: str = "default"
+    scopes: list[str] | None = None
 
 
 @router.post("/keys")
@@ -822,19 +837,21 @@ async def create_api_key(request: Request, body: CreateApiKeyRequest):
     if not auth or not auth.user_id:
         raise HTTPException(401, "Admin authentication required")
 
+    requested_scopes = body.scopes if body.scopes is not None else list(DEFAULT_CONTROL_SCOPES)
+    scopes = list(dict.fromkeys(scope.strip() for scope in requested_scopes if scope.strip()))
+    if not scopes:
+        raise HTTPException(422, "at least one API-key scope is required")
+    unknown_scopes = sorted(set(scopes) - ALLOWED_CONTROL_SCOPES)
+    if unknown_scopes:
+        raise HTTPException(422, f"unsupported API-key scope(s): {', '.join(unknown_scopes)}")
+
     raw = f"sk-cptr-{secrets.token_urlsafe(32)}"
     entry = {
         "id": str(uuid.uuid4()),
         "key_hash": _hash_key(raw),
         "user_id": auth.user_id,
         "name": body.name,
-        "scopes": [
-            "workspace:read",
-            "task:read",
-            "task:write",
-            "autonomous:run",
-            "git:read",
-        ],
+        "scopes": scopes,
         "created_at": int(time.time()),
     }
     keys = await _get_api_keys()
