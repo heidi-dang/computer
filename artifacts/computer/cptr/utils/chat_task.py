@@ -1486,6 +1486,8 @@ async def run_chat_task(
     flowdeck_run_id: str | None = None,
     flowdeck_parent_run_id: str | None = None,
     flowdeck_parent_message_id: str | None = None,
+    qualification_command: str | None = None,
+    flowdeck_parent_chat_id: str | None = None,
 ):
     """Plain async function. Makes raw API calls in a loop."""
     if request is None:
@@ -1603,6 +1605,8 @@ async def run_chat_task(
             run_id=flowdeck_run_id,
             parent_run_id=flowdeck_parent_run_id,
             message_id=message_id,
+            delivery_chat_id=flowdeck_parent_chat_id,
+            delivery_message_id=flowdeck_parent_message_id,
         )
 
     async def _emit_done():
@@ -2412,6 +2416,20 @@ async def run_chat_task(
             "terminal_observer": observe_terminal,
             "child_agent_id": specialist_role,
         }
+
+        # The disposable qualification may exercise the existing CPTR command
+        # authority without widening the read-only specialist tool surface.
+        # This is server-generated, exact-command-only, and never exposed to
+        # the model as a callable tool.
+        if qualification_command == "pwd":
+            from cptr.utils.tools import run_command
+
+            await run_command(
+                command="pwd",
+                cwd=".",
+                wait=5,
+                __context__=tool_ctx,
+            )
 
         resumed_calls = await run_queued_tool_calls(tool_ctx)
         if resumed_calls in {"approval_required", "repeat_stopped"}:

@@ -186,6 +186,9 @@ export CPTR_FLOWDECK_ENABLED="${CPTR_FLOWDECK_ENABLED:-true}"
 export CPTR_FLOWDECK_MODE="${CPTR_FLOWDECK_MODE:-controlled}"
 export FLOWDECK_ENABLED="$CPTR_FLOWDECK_ENABLED"
 export FLOWDECK_MODE="$CPTR_FLOWDECK_MODE"
+# The qualification launcher alone enables the exact, server-generated
+# controlled probe. It is not a model-visible specialist capability.
+export CPTR_FLOWDECK_QUALIFICATION_COMMAND="pwd"
 # Never let the disposable instance discover the parent process's managed
 # provider credentials. An explicitly supplied qualification config is the only
 # supported way to provide a non-production model connection.

@@ -1141,6 +1141,9 @@ async def steer_orchestration(request: Request, run_id: str, body: SteeringReque
 async def get_orchestration(request: Request, run_id: str, workspace: str):
     _, _, run = await _owned_run(request, run_id, workspace)
     events = await DurableFlowDeck(get_session_factory()).list_events(run.id)
+    from cptr.flowdeck.terminal_observer import recent_terminal_frames
+
+    terminal_frames = recent_terminal_frames(run.id)
     response = _safe_run(run)
     response["events"] = [
         {
@@ -1153,6 +1156,18 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
         }
         for event in events
     ]
+    response["events"].extend(
+        {
+            "id": f"{run.id}:terminal:{frame['sequence']}",
+            "run_id": run.id,
+            "sequence": frame["sequence"],
+            "kind": "terminal_frame",
+            "payload": frame,
+            "created_at": frame["created_at"],
+        }
+        for frame in terminal_frames
+    )
+    response["events"].sort(key=lambda event: (event["sequence"], event["created_at"]))
     return response
 
 

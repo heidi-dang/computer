@@ -6,6 +6,7 @@ the authenticated CPTR request; request payload fields are untrusted.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,16 @@ async def dispatch_authenticated_specialist(
         except (OSError, RuntimeError, ValueError) as exc:
             raise AuthenticatedGatewayError("execution workspace is not an owned repository worktree") from exc
     if dispatch.role in {"backend-coder", "frontend-coder"}:
+        coding_kwargs: dict[str, Any] = {
+            "model": dispatch.model,
+            "connection": dispatch.connection,
+            "parent_chat_id": dispatch.parent_chat_id,
+            "parent_flowdeck_run_id": dispatch.parent_flowdeck_run_id,
+            "parent_message_id": dispatch.parent_message_id,
+            "store": store,
+        }
+        if os.environ.get("CPTR_FLOWDECK_QUALIFICATION_COMMAND") == "pwd":
+            coding_kwargs["authenticated_request"] = request
         return await _native_run_coding_specialist(
             CodingRequest(
                 role=dispatch.role,
@@ -141,12 +152,7 @@ async def dispatch_authenticated_specialist(
                 parent_message_id=dispatch.parent_message_id,
                 branch_scope=dispatch.branch_scope,
             ),
-            model=dispatch.model,
-            connection=dispatch.connection,
-            parent_chat_id=dispatch.parent_chat_id,
-            parent_flowdeck_run_id=dispatch.parent_flowdeck_run_id,
-            parent_message_id=dispatch.parent_message_id,
-            store=store,
+            **coding_kwargs,
         )
     if dispatch.role == "browser-debugger":
         return await _native_run_browser_debugger(

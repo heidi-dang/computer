@@ -72,6 +72,8 @@ async def emit_terminal_frame(
     run_id: str | None = None,
     parent_run_id: str | None = None,
     message_id: str | None = None,
+    delivery_chat_id: str | None = None,
+    delivery_message_id: str | None = None,
 ) -> dict[str, Any]:
     """Create, buffer, and send one safe observer frame over CPTR's event path."""
     owner = str(parent_run_id or run_id or message_id or f"user:{user_id}")
@@ -94,6 +96,8 @@ async def emit_terminal_frame(
         terminal_frame=True,
         sequence=frame["sequence"],
         created_at=frame["created_at"],
+        **({"chat_id": delivery_chat_id} if delivery_chat_id else {}),
+        **({"message_id": delivery_message_id} if delivery_message_id else {}),
     )
     return frame
 

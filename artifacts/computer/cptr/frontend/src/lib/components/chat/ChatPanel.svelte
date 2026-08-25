@@ -1470,7 +1470,7 @@ applyNativeTranscriptEvent(event, message, true);
 
 	function startFlowDeckPolling(runId: string) {
 		stopFlowDeckPolling();
-		flowdeckPoller = setInterval(async () => {
+const poll = async () => {
 			try {
 				const state = await getFlowDeckOrchestration(runId, workspace);
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
@@ -1489,7 +1489,9 @@ applyNativeTranscriptEvent(event, message, true);
 			} catch {
 				// Keep the last truthful state; the next poll or completion response can update it.
 			}
-		}, 2500);
+};
+void poll();
+flowdeckPoller = setInterval(poll, 2500);
 	}
 
 	async function sendToFlowDeck(text: string) {
@@ -1635,7 +1637,7 @@ reconcileFlowDeckEventOwner(previousFlowDeckOwner, flowdeckRunId);
 					allMessages = [...allMessages];
 				}
 			}
-			if (flowdeckRunId && !isFlowDeckTerminal(flowdeckStatus)) {
+if (flowdeckRunId) {
 				startFlowDeckPolling(flowdeckRunId);
 			} else if (flowdeckStatus !== 'clarification' && flowdeckMessageId) {
 				const message = allMessages.find((item) => item.id === flowdeckMessageId);

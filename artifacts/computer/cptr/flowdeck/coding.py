@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import hashlib
 import re
 from contextlib import suppress
@@ -281,6 +282,7 @@ async def _native_run_coding_specialist(
     parent_chat_id: str,
     parent_message_id: str | None = None,
     parent_flowdeck_run_id: str | None = None,
+    authenticated_request: Any = None,
     store: DurableFlowDeck | None = None,
 ) -> str:
     config = FlowDeckConfig.from_env()
@@ -502,6 +504,13 @@ async def _native_run_coding_specialist(
 			flowdeck_run_id=run.id,
             flowdeck_parent_run_id=parent_flowdeck_run_id,
             flowdeck_parent_message_id=parent_message_id,
+            qualification_command=(
+                "pwd"
+                if os.environ.get("CPTR_FLOWDECK_QUALIFICATION_COMMAND") == "pwd"
+                else None
+            ),
+            request=authenticated_request,
+            flowdeck_parent_chat_id=parent_chat_id,
         )
     except BaseException:
         await store.mark_attempt_unknown(root_attempt.id, error="coding session interrupted")

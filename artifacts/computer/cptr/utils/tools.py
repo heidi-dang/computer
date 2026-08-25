@@ -2815,6 +2815,9 @@ async def _run_existing_subagent_chat(
     flowdeck_run_id: str | None = None,
     flowdeck_parent_run_id: str | None = None,
     flowdeck_parent_message_id: str | None = None,
+    qualification_command: str | None = None,
+    request=None,
+    flowdeck_parent_chat_id: str | None = None,
 ) -> str:
     """Run the agent loop for an already-created sub-agent chat."""
     from cptr.models import ChatMessage
@@ -2823,7 +2826,7 @@ async def _run_existing_subagent_chat(
 
     task = asyncio.create_task(
         run_chat_task(
-            None,
+            request,
             message_id=assistant_msg_id,
             chat_id=chat_id,
             user_id=user_id,
@@ -2843,6 +2846,8 @@ async def _run_existing_subagent_chat(
             flowdeck_run_id=flowdeck_run_id,
             flowdeck_parent_run_id=flowdeck_parent_run_id,
             flowdeck_parent_message_id=flowdeck_parent_message_id,
+            qualification_command=qualification_command,
+            flowdeck_parent_chat_id=flowdeck_parent_chat_id,
         )
     )
     # Unlike the ordinary chat route, specialists historically awaited the
