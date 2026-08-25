@@ -46,7 +46,10 @@ printf '# Disposable Heidi qualification\n' > "$WORKSPACE/README.md"
 git -C "$WORKSPACE" add README.md
 git -C "$WORKSPACE" commit -qm "qualification seed"
 
-if [[ -n "${CPTR_QUALIFICATION_CONFIG_SOURCE:-}" ]]; then
+if [[ -n "${CPTR_QUALIFICATION_CONFIG_SOURCE:-}" && -n "${QUALIFICATION_DEEPSEEK_API_KEY:-}" ]]; then
+  echo "qualification config source and qualification secret are mutually exclusive" >&2
+  exit 2
+elif [[ -n "${CPTR_QUALIFICATION_CONFIG_SOURCE:-}" ]]; then
   case "$CPTR_QUALIFICATION_CONFIG_SOURCE" in
     /*) config_source="$CPTR_QUALIFICATION_CONFIG_SOURCE" ;;
     *) config_source="$ROOT/$CPTR_QUALIFICATION_CONFIG_SOURCE" ;;
@@ -56,6 +59,49 @@ if [[ -n "${CPTR_QUALIFICATION_CONFIG_SOURCE:-}" ]]; then
     exit 2
   }
   install -m 600 "$config_source" "$DATA_DIR/config.toml"
+elif [[ -n "${QUALIFICATION_DEEPSEEK_API_KEY:-}" ]]; then
+  QUAL_SECRET="$(
+    python - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+  )"
+  CPTR_DATA_DIR="$DATA_DIR" QUALIFICATION_DEEPSEEK_API_KEY="$QUALIFICATION_DEEPSEEK_API_KEY" QUAL_SECRET="$QUAL_SECRET" python - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from cptr.utils.crypto import encrypt_key
+
+data_dir = Path(os.environ["CPTR_DATA_DIR"])
+server_secret = os.environ["QUAL_SECRET"]
+api_key = os.environ["QUALIFICATION_DEEPSEEK_API_KEY"]
+connection = {
+    "id": "qualification-deepseek",
+    "name": "qualification-deepseek",
+    "provider": "openai",
+    "api_type": "chat_completions",
+    "provider_type": "default",
+    "prefix_id": "deepseek",
+    "base_url": "https://api.deepseek.com",
+    "api_key": encrypt_key(api_key, server_secret),
+    "enabled": True,
+    "data": {"models": ["deepseek-v4-flash"]},
+}
+config = (
+    "[server]\n"
+    f"secret = {json.dumps(server_secret)}\n\n"
+    "[app_config]\n"
+    f"\"chat.default_model\" = {json.dumps('deepseek/deepseek-v4-flash')}\n"
+    f"\"chat.connections\" = {json.dumps(json.dumps([connection], separators=(',', ':')))}\n"
+    "\"subagents.enabled\" = true\n"
+    "\"subagents.background_enabled\" = false\n"
+)
+(data_dir / "config.toml").write_text(config, encoding="utf-8")
+(data_dir / "config.toml").chmod(0o600)
+PY
+  # The running CPTR process receives only the encrypted temporary config.
+  unset QUALIFICATION_DEEPSEEK_API_KEY
 else
   QUAL_SECRET="$(
     python - <<'PY'
@@ -122,15 +168,6 @@ chmod 600 "$USER_ID_FILE"
 
 export CPTR_DATA_DIR="$DATA_DIR"
 export CPTR_AUTO_GITIGNORE_DOT_CPTR=false
-export CPTR_CORS_ALLOWED_ORIGINS="http://${HOST}:${PORT}"
-export CPTR_FLOWDECK_ENABLED="${CPTR_FLOWDECK_ENABLED:-true}"
-export CPTR_FLOWDECK_MODE="${CPTR_FLOWDECK_MODE:-controlled}"
-export FLOWDECK_ENABLED="$CPTR_FLOWDECK_ENABLED"
-export FLOWDECK_MODE="$CPTR_FLOWDECK_MODE"
-# Never let the disposable instance discover the parent process's managed
-# provider credentials. An explicitly supplied qualification config is the only
-# supported way to provide a non-production model connection.
-unset AI_INTEGRATIONS_OPENAI_API_KEY AI_INTEGRATIONS_OPENAI_BASE_URL
 
 if [[ "$PORT" == "0" ]]; then
   PORT="$(
@@ -143,6 +180,17 @@ s.close()
 PY
   )"
 fi
+
+export CPTR_CORS_ALLOWED_ORIGINS="http://${HOST}:${PORT}"
+export CPTR_FLOWDECK_ENABLED="${CPTR_FLOWDECK_ENABLED:-true}"
+export CPTR_FLOWDECK_MODE="${CPTR_FLOWDECK_MODE:-controlled}"
+export FLOWDECK_ENABLED="$CPTR_FLOWDECK_ENABLED"
+export FLOWDECK_MODE="$CPTR_FLOWDECK_MODE"
+# Never let the disposable instance discover the parent process's managed
+# provider credentials. An explicitly supplied qualification config is the only
+# supported way to provide a non-production model connection.
+unset AI_INTEGRATIONS_OPENAI_API_KEY AI_INTEGRATIONS_OPENAI_BASE_URL
+
 export CPTR_QUALIFICATION_PORT="$PORT"
 export CPTR_QUALIFICATION_URL="http://${HOST}:${PORT}/"
 printf '%s' "$CPTR_QUALIFICATION_URL" > "$URL_FILE"
@@ -160,6 +208,11 @@ SERVER_PID=$!
 for _ in $(seq 1 120); do
   if curl -fsS --max-time 1 "http://${HOST}:${PORT}/api/health" >/dev/null 2>&1; then
     echo "$CPTR_QUALIFICATION_URL"
+    if [[ -n "${CPTR_QUALIFICATION_RUNNER:-}" ]]; then
+      bash -lc -- "$CPTR_QUALIFICATION_RUNNER"
+      runner_status=$?
+      exit "$runner_status"
+    fi
     wait "$SERVER_PID"
     exit $?
   fi
