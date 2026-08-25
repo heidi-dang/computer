@@ -675,11 +675,7 @@ class AutonomousSupervisor:
 
         if steering_records:
             pending_steering = next(
-                (
-                    item
-                    for item in steering_records
-                    if item.get("status") != "CONSUMED"
-                ),
+                (item for item in steering_records if item.get("status") != "CONSUMED"),
                 None,
             )
             if pending_steering is not None:

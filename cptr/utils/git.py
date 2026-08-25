@@ -82,9 +82,7 @@ async def is_repo(root: str, identity: ExecutionIdentity | None = None) -> bool:
 
 async def diff_check(root: str, identity: ExecutionIdentity | None = None) -> dict[str, Any]:
     """Run Git's whitespace/error check with fixed arguments."""
-    code, stdout, stderr = await _run(
-        "diff", "--check", cwd=root, check=False, identity=identity
-    )
+    code, stdout, stderr = await _run("diff", "--check", cwd=root, check=False, identity=identity)
     return {
         "passed": code == 0,
         "returncode": code,
@@ -280,17 +278,13 @@ async def _config_values(
     key: str,
     identity: ExecutionIdentity | None = None,
 ) -> list[str]:
-    code, out, _ = await _run(
-        "config", "--get-all", key, cwd=root, check=False, identity=identity
-    )
+    code, out, _ = await _run("config", "--get-all", key, cwd=root, check=False, identity=identity)
     if code != 0:
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-async def effective_config(
-    root: str, identity: ExecutionIdentity | None = None
-) -> dict[str, Any]:
+async def effective_config(root: str, identity: ExecutionIdentity | None = None) -> dict[str, Any]:
     """Return the Git config fields the settings UI needs."""
     local_name = await _config_value(root, "--local", "user.name", identity)
     global_name = await _config_value(root, "--global", "user.name", identity)
@@ -507,18 +501,14 @@ async def stage(root: str, files: list[str], identity: ExecutionIdentity | None 
     await _run("add", "--", *files, cwd=root, identity=identity)
 
 
-async def unstage(
-    root: str, files: list[str], identity: ExecutionIdentity | None = None
-) -> None:
+async def unstage(root: str, files: list[str], identity: ExecutionIdentity | None = None) -> None:
     """Unstage files."""
     if not files:
         return
     await _run("restore", "--staged", "--", *files, cwd=root, identity=identity)
 
 
-async def discard(
-    root: str, files: list[str], identity: ExecutionIdentity | None = None
-) -> None:
+async def discard(root: str, files: list[str], identity: ExecutionIdentity | None = None) -> None:
     """Fully discard all changes for files — both staged and unstaged.
 
     Tracked modified/deleted files are unstaged then restored via checkout.
@@ -594,7 +584,9 @@ async def commit(
     author_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Create a commit. Returns hash and message."""
-    _, out, _ = await _run("commit", "-m", message, cwd=root, identity=identity, extra_env=author_env)
+    _, out, _ = await _run(
+        "commit", "-m", message, cwd=root, identity=identity, extra_env=author_env
+    )
     # Parse "main abc1234] message"
     hash_short = ""
     for line in out.splitlines():
@@ -789,9 +781,7 @@ def _parse_worktree_list(raw: str, current_root: str = "") -> list[dict[str, Any
 
 async def worktrees(root: str, identity: ExecutionIdentity | None = None) -> dict[str, Any]:
     """List worktrees for the current repository."""
-    _, repo_root_out, _ = await _run(
-        "rev-parse", "--show-toplevel", cwd=root, identity=identity
-    )
+    _, repo_root_out, _ = await _run("rev-parse", "--show-toplevel", cwd=root, identity=identity)
     repo_root = repo_root_out.strip() or root
     _, out, _ = await _run("worktree", "list", "--porcelain", cwd=root, identity=identity)
     items = _parse_worktree_list(out, repo_root)
@@ -820,9 +810,7 @@ async def create_worktree(
     identity: ExecutionIdentity | None = None,
 ) -> dict[str, str]:
     """Create a new branch-backed worktree beside the current repository."""
-    _, repo_root_out, _ = await _run(
-        "rev-parse", "--show-toplevel", cwd=root, identity=identity
-    )
+    _, repo_root_out, _ = await _run("rev-parse", "--show-toplevel", cwd=root, identity=identity)
     repo_root = repo_root_out.strip() or root
     target_path = path or _worktree_path_for_branch(repo_root, branch)
     await _run("worktree", "add", "-b", branch, target_path, cwd=root, identity=identity)
