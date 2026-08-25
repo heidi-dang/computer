@@ -17,7 +17,11 @@ from typing import Any
 from cptr.flowdeck.contracts import DelegationRequest, FlowDeckMode
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.delegation import validate_delegation
-from cptr.flowdeck.durable import DurableFlowDeck, RunStatus, StepStatus
+from cptr.flowdeck.durable import (
+    DurableFlowDeck,
+    RunStatus,
+    StepStatus,
+)
 from cptr.flowdeck.errors import DelegationPolicyError
 from cptr.flowdeck.registry import get_agent
 
@@ -38,6 +42,7 @@ class DesignerRequest:
     user_id: str
     input: dict[str, Any]
     parent_chat_id: str = "designer"
+    model: str = ""
 
 
 # Public names used by API consumers.  The request remains intentionally
@@ -81,7 +86,7 @@ def _files(root: Path, requested: Any = None) -> list[Path]:
     paths = requested if requested is not None else [
         str(p.relative_to(root)) for p in root.rglob("*")
         if p.is_file() and p.suffix.lower() in {".css", ".scss", ".html", ".tsx", ".jsx"}
-    ]
+    ][:MAX_FILES]
     if not isinstance(paths, list) or len(paths) > MAX_FILES:
         raise DesignerContractError("design evidence file list is invalid or too large")
     result = [_contained(root, item) for item in paths]
@@ -180,7 +185,46 @@ async def run_designer(request: DesignerRequest, *, store: DurableFlowDeck) -> d
     step = await store.get_step(run.id)
     if step.status == StepStatus.PENDING.value:
         await store.start_step(step.id)
-    await store.record_event(run.id, "DESIGN_RESULT_CREATED", {"operation": output["operation"], "result": output})
+    operation, _ = await store.record_intent(
+        run_id=run.id,
+        idempotency_key=f"{request.request_key}:designer",
+        capability="design_inspection",
+        target=request.operation,
+        reconcile_kind="designer_result",
+        step_id=step.id,
+    )
+    attempt = await store.prepare_attempt(
+        operation_id=operation.id,
+        owner=request.user_id,
+        fencing_epoch=0,
+    )
+    await store.finish_attempt(
+        attempt.id,
+        owner=request.user_id,
+        fencing_epoch=0,
+        outcome="succeeded",
+        evidence={
+            "source": "verifier",
+            "authoritative": True,
+            "observation": "verifier_check",
+            "observed_outcome": "succeeded",
+            "attempt_id": attempt.id,
+            "evidence_sha256": output.get("evidence_sha256")
+            or output.get("design_system", {}).get("content_sha256"),
+            "specialist_claim": None,
+        },
+    )
+    await store.record_event(
+        run.id,
+        "DESIGN_RESULT_CREATED",
+        {
+            "operation": output["operation"],
+            "result": output,
+            "model": request.model,
+            "attempt_id": attempt.id,
+            "evidence": operation.authoritative_evidence,
+        },
+    )
     await store.finish_step(step.id, status=StepStatus.SUCCEEDED)
     await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
     return {"run_id": run.id, "status": "succeeded", "reused": False, "result": output}

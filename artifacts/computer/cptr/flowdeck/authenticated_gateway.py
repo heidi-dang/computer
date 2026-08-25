@@ -215,6 +215,7 @@ async def dispatch_authenticated_specialist(
                 user_id=user_id,
                 input=dispatch.designer_input or {},
                 parent_chat_id=dispatch.parent_chat_id,
+                model=dispatch.model,
             ),
             store=store,
         ))

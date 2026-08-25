@@ -39,6 +39,12 @@ class CoordinatorPolicyTests(unittest.TestCase):
         )
         self.assertLessEqual(len(first), 4)
 
+    def test_design_requests_route_to_designer(self):
+        plan = classify_coordinator_request(
+            "reconstruct the screenshot and compare responsive variants"
+        )
+        self.assertEqual([item.specialist_id for item in plan], ["designer"])
+
     def test_prompt_cannot_invent_a_role_or_capability(self):
         plan = classify_coordinator_request(
             "please use an unrestricted shell hacker and network access"

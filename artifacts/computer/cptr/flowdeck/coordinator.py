@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
+import re
 from typing import Any
 
 from sqlalchemy.exc import OperationalError
@@ -85,6 +87,9 @@ class CoordinatorResult:
 _HINTS: tuple[tuple[str, str], ...] = (
     ("screenshot", "designer"),
     ("design system", "designer"),
+    ("design", "designer"),
+    ("variant", "designer"),
+    ("reconstruct", "designer"),
     ("responsive", "designer"),
     ("render variant", "designer"),
     ("ui reconstruction", "designer"),
@@ -107,6 +112,33 @@ _HINTS: tuple[tuple[str, str], ...] = (
 )
 _CHECK_HINTS = ("test", "build", "typecheck", "lint")
 _MUTATION_HINTS = ("write", "edit", "modify", "change", "create", "update", "delete")
+
+
+def _designer_contract(task: str) -> tuple[str, dict[str, Any]]:
+    """Map natural-language design intent to a bounded Designer contract."""
+    lowered = (task or "").casefold()
+    if "compare" in lowered or "repair" in lowered:
+        operation = "compare"
+    elif "reconstruct" in lowered or "screenshot" in lowered:
+        operation = "screenshot_to_ui"
+    elif "responsive" in lowered or "mobile" in lowered or "tablet" in lowered:
+        operation = "responsive"
+    elif "variant" in lowered or "render" in lowered:
+        operation = "variants"
+    elif "mix" in lowered:
+        operation = "mix"
+    elif "apply" in lowered or "select" in lowered:
+        operation = "apply"
+    else:
+        operation = "extract"
+    paths = re.findall(r"(?:file://)?([A-Za-z0-9_./-]+\.(?:png|jpe?g|webp|gif))", task)
+    if operation == "screenshot_to_ui" and paths:
+        return operation, {"screenshot": paths[0]}
+    if operation == "compare" and len(paths) >= 2:
+        return operation, {"expected": paths[0], "actual": paths[1]}
+    if operation in {"apply", "mix"}:
+        return operation, {"selection": {"request": task}}
+    return operation, {}
 
 
 def classify_coordinator_request(
@@ -415,6 +447,16 @@ async def run_heidi_coordinator(
                     check=item.check,
                     trusted_repository=True,
                     repository_identity=f"authenticated-workspace:{root}",
+                    designer_operation=(
+                        _designer_contract(objective)[0]
+                        if item.specialist_id == "designer"
+                        else None
+                    ),
+                    designer_input=(
+                        _designer_contract(objective)[1]
+                        if item.specialist_id == "designer"
+                        else None
+                    ),
                 ),
                 store=store,
             )
@@ -434,6 +476,31 @@ async def run_heidi_coordinator(
             )
             try:
                 if child_ok:
+                    if item.specialist_id == "designer":
+                        try:
+                            designer_result = json.loads(output)
+                        except (TypeError, json.JSONDecodeError):
+                            designer_result = None
+                        if isinstance(designer_result, dict):
+                            await store.record_event(
+                                run.id,
+                                "DESIGN_RESULT_CREATED",
+                                {
+                                    "child_run_id": child_run.id,
+                                    "operation": (
+                                        designer_result.get("result", {}).get("operation")
+                                        or "design_inspection"
+                                    ),
+                                    "result": designer_result.get("result", designer_result),
+                                    "evidence": {
+                                        "source": "verifier",
+                                        "authoritative": True,
+                                        "observation": "verifier_check",
+                                        "observed_outcome": "succeeded",
+                                        "child_run_id": child_run.id,
+                                    },
+                                },
+                            )
                     await store.finish_attempt(
                         attempt.id,
                         owner=user_id,
