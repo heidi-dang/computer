@@ -25,6 +25,7 @@ from cptr.flowdeck.coordinator import (
 )
 from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
 from cptr.flowdeck.designer import DesignerContractError, DesignerRequest, run_designer
+from cptr.flowdeck.runtime import RuntimeContractError, RuntimeRequest, managed_runtime
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
 from cptr.utils.config import now_ms
@@ -69,6 +70,13 @@ class DesignerRequestBody(BaseModel):
     workspace: str = Field(min_length=1, max_length=4096)
     operation: str = Field(min_length=1, max_length=64)
     input: dict[str, Any] = Field(default_factory=dict)
+
+
+class RuntimeRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(min_length=1, max_length=4096)
+    requested_port: int | None = Field(default=None, ge=3000, le=9000)
 
 
 def _message_dict(message: ChatMessage) -> dict[str, Any]:
@@ -689,6 +697,48 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
         for event in events
     ]
     return response
+
+
+@router.post("/runtime/start")
+async def start_runtime(request: Request, body: RuntimeRequestBody):
+    user_id = await _authenticate_flowdeck(request)
+    store = DurableFlowDeck(get_session_factory())
+    try:
+        workspace = await resolve_gateway_workspace(
+            session_factory=store.session_factory,
+            user_id=user_id,
+            requested_workspace=body.workspace,
+        )
+        result = await managed_runtime.start(
+            RuntimeRequest(
+                request_key=_request_key(request),
+                workspace=workspace,
+                owner=user_id,
+                requested_port=body.requested_port,
+            ),
+            store=store,
+        )
+    except (AuthenticatedGatewayError, RuntimeContractError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return result
+
+
+@router.get("/runtime/{run_id}")
+async def runtime_status(request: Request, run_id: str, workspace: str):
+    _, _, run = await _owned_run(request, run_id, workspace)
+    try:
+        return await managed_runtime.status(run.id, store=DurableFlowDeck(get_session_factory()))
+    except RuntimeContractError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+
+@router.post("/runtime/{run_id}/stop")
+async def stop_runtime(request: Request, run_id: str, workspace: str):
+    _, _, run = await _owned_run(request, run_id, workspace)
+    try:
+        return await managed_runtime.stop(run.id, store=DurableFlowDeck(get_session_factory()))
+    except RuntimeContractError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/audits/{run_id}")
