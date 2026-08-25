@@ -159,7 +159,7 @@ if (follow && outputEl) outputEl.scrollTop = outputEl.scrollHeight;
 }
 </script>
 
-<section class="live-terminal" data-testid="heidi-live-terminal" data-event-count={events.length} aria-label="Heidi live terminal">
+<section class="live-terminal" data-testid="heidi-live-terminal" aria-label="Heidi live terminal">
 <header class="terminal-header">
 <div class="terminal-title">
 <span class:terminal-pulse={!isTerminal} class:terminal-done={isTerminal} class="terminal-dot" aria-hidden="true"></span>

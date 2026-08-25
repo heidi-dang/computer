@@ -874,8 +874,8 @@ mergeFlowDeckEvent(data, transcriptRunId, trustedFlowDeckEvent);
 		].join('|');
 	}
 
-	function mergeFlowDeckEvents(events: any[]) {
-		for (const event of events) mergeFlowDeckEvent(event);
+function mergeFlowDeckEvents(events: any[], ownerRunId = flowdeckRunId) {
+for (const event of events) mergeFlowDeckEvent(event, ownerRunId);
 	}
 
 function reconcileFlowDeckEventOwner(previousOwner: string, nextOwner: string) {
@@ -1474,7 +1474,7 @@ const poll = async () => {
 			try {
 				const state = await getFlowDeckOrchestration(runId, workspace);
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
-				if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events);
+if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events, runId);
 				for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
 				if (isFlowDeckTerminal(flowdeckStatus)) {
 					if (flowdeckMessageId) {
