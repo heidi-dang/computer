@@ -372,6 +372,8 @@ class DurableFlowDeck:
         now = self.clock() if now is None else now
 
         async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            self._require(run.status, {RunStatus.RUNNING.value})
             node = await db.scalar(
                 select(FlowDeckBuildNode).where(
                     FlowDeckBuildNode.run_id == run_id,
@@ -435,6 +437,9 @@ class DurableFlowDeck:
         now = self.clock() if now is None else now
 
         async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            if run.status == RunStatus.CANCELLED.value:
+                raise StaleWriterError("Build parent is cancelled")
             node = await db.scalar(
                 select(FlowDeckBuildNode).where(
                     FlowDeckBuildNode.run_id == run_id,

@@ -22,6 +22,8 @@ The disposable harness used a temporary SQLite database, temporary Git repositor
 - Repeated cancellation: both cancellation requests returned HTTP 200.
 - Cancellation terminalization: message was terminal before the cancel request returned and remained terminal after a delay.
 - Late resurrection: no post-cancel state change observed.
+- Build cancellation fencing: queued nodes cannot be claimed after cancellation, and a late
+  completion cannot terminalize a cancelled parent.
 - Native task cleanup: zero active native tasks after cleanup.
 - Worktree cleanup: zero disposable worktree artifacts.
 - Workspace residue: only the expected `.gitignore` metadata file created by native chat export.
@@ -30,8 +32,8 @@ The authenticated provider-backed `/build` smoke had already completed successfu
 
 ## Automated acceptance matrix
 
-- Backend aggregate: **218 passed**, 43 subtests.
-- Focused Phase 3 lifecycle/transcript/realtime/gateway/coding/tester/worktree/migration suite: **95 passed**, 5 subtests.
+- Backend aggregate: **219 passed**, 43 subtests.
+- Focused Phase 3 lifecycle/transcript/realtime/gateway/coding/tester/worktree/migration suite: **96 passed**, 5 subtests.
 - Native cancellation regression suite: **22 passed**.
 - Python compilation: passed.
 - Changed-file Ruff: passed.

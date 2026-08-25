@@ -220,6 +220,61 @@ class DurableFlowDeckTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(current_attempt.attempt_no, 2)
 
+    async def test_cancelled_build_rejects_queued_claim_and_late_completion(self):
+        run, _ = await self._run_and_intent(request_key="cancelled-build")
+        nodes = await self.store.create_build_nodes(
+            run_id=run.id,
+            workspace="/workspace",
+            nodes=[
+                {
+                    "key": "backend",
+                    "role": "backend-coder",
+                    "mutation": True,
+                    "workspace": "/workspace",
+                    "worktree": "/workspace/.flowdeck/backend",
+                    "branch": "flowdeck/cancelled-build/backend",
+                    "common_base": "a" * 40,
+                }
+            ],
+            now=self.now,
+        )
+        await self.store.cancel_run(
+            run_id=run.id,
+            owner="worker-a",
+            workspace="/workspace",
+            now=self.now + 1,
+        )
+        self.assertEqual((await self.store.get_build_nodes(run.id))[0].status, "CANCELLED")
+        with self.assertRaises(LifecycleError):
+            await self.store.claim_build_node(
+                run_id=run.id,
+                node_key="backend",
+                owner="late-worker",
+                fencing_epoch=1,
+                now=self.now + 2,
+            )
+
+        # Simulate a child that had already claimed the node when cancellation
+        # won. The parent terminal state remains authoritative over its result.
+        async with self.store.session_factory() as session:
+            node = await session.get(type(nodes[0]), nodes[0].id)
+            node.status = "RUNNING"
+            node.attempt = 1
+            node.owner = "late-worker"
+            node.fencing_epoch = 1
+            await session.commit()
+        with self.assertRaises(StaleWriterError):
+            await self.store.finish_build_node(
+                run_id=run.id,
+                node_key="backend",
+                attempt=1,
+                owner="late-worker",
+                fencing_epoch=1,
+                status="SUCCEEDED",
+                now=self.now + 3,
+            )
+        self.assertEqual((await self.store.get_run(run.id)).status, RunStatus.CANCELLED.value)
+
     async def test_manual_review_is_terminal_and_closes_run_safely(self):
         run, operation = await self._run_and_intent()
         lease = await self.store.acquire_workspace_lease(
