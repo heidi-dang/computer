@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,18 +98,97 @@ class GeneratedAuthServiceTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            service = GeneratedAuthService(directory)
-            with self.assertRaisesRegex(GeneratedAuthError, "unsafe"):
+            with patch.dict(
+                os.environ,
+                {
+                    "CPTR_GENERATED_AUTH_VERIFIER_JSON": json.dumps(
+                        {
+                            "provider": "oauth_oidc",
+                            "verifier": {
+                                "issuer": "https://issuer.example",
+                                "audience": "app",
+                                "jwks_url": "https://issuer.example/jwks",
+                                "redirect_uri": "https://app.example/callback",
+                            },
+                        }
+                    )
+                },
+                clear=False,
+            ):
+                service = GeneratedAuthService(directory)
+                with self.assertRaisesRegex(GeneratedAuthError, "unsafe"):
+                    service.verify_external_callback(
+                        issuer="https://issuer.example",
+                        audience="app",
+                        redirect_uri="http://evil.example/callback",
+                        state="same",
+                        expected_state="same",
+                        nonce="same",
+                        expected_nonce="same",
+                        code_verifier="a" * 43,
+                    )
+
+    def test_external_callback_uses_server_owned_verifier_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, ".cptr").mkdir()
+            Path(directory, ".cptr", "generated-auth.json").write_text(
+                json.dumps(
+                    {
+                        "provider": "oauth_oidc",
+                        "verifier": {
+                            "issuer": "https://attacker.example",
+                            "audience": "attacker",
+                            "jwks_url": "https://attacker.example/jwks",
+                            "redirect_uri": "https://attacker.example/callback",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            server_config = {
+                "provider": "oauth_oidc",
+                "verifier": {
+                    "issuer": "https://issuer.example",
+                    "audience": "app",
+                    "jwks_url": "https://issuer.example/jwks",
+                    "redirect_uri": "https://app.example/callback",
+                },
+            }
+            with patch.dict(
+                os.environ,
+                {"CPTR_GENERATED_AUTH_VERIFIER_JSON": json.dumps(server_config)},
+                clear=False,
+            ):
+                service = GeneratedAuthService(directory)
+                self.assertEqual(service.provider, AuthProvider.OAUTH_OIDC)
+                self.assertTrue(service.metadata()["verified"])
                 service.verify_external_callback(
                     issuer="https://issuer.example",
                     audience="app",
-                    redirect_uri="http://evil.example/callback",
+                    redirect_uri="https://app.example/callback",
                     state="same",
                     expected_state="same",
                     nonce="same",
                     expected_nonce="same",
                     code_verifier="a" * 43,
                 )
+
+            # Removing the server-owned configuration returns to the safe
+            # unverified state; project-auth JSON cannot qualify the adapter.
+            with patch.dict(os.environ, {}, clear=True):
+                unverified = GeneratedAuthService(directory)
+                self.assertFalse(unverified.metadata()["verified"])
+                with self.assertRaisesRegex(GeneratedAuthError, "not verified"):
+                    unverified.verify_external_callback(
+                        issuer="https://attacker.example",
+                        audience="attacker",
+                        redirect_uri="https://attacker.example/callback",
+                        state="same",
+                        expected_state="same",
+                        nonce="same",
+                        expected_nonce="same",
+                        code_verifier="a" * 43,
+                    )
 
 
 if __name__ == "__main__":

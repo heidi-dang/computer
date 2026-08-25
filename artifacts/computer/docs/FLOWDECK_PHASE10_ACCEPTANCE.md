@@ -66,14 +66,22 @@ numeric score.
   high findings in existing PDF/spreadsheet/crypto and unrelated workspace
   path/SSRF surfaces. No finding was introduced by generated-auth code, but
   the security gate is not accepted while those findings remain open.
-- External-provider credentials were not available; external adapters remain
-  explicitly **unverified**, not mocked as passed.
+- The external-provider fixture is qualified when the server provisions
+  `CPTR_GENERATED_AUTH_VERIFIER_JSON`; the workspace descriptor can only
+  declare the provider and cannot provide verifier authority. This environment
+  does not provision that server-owned configuration, so the external adapter
+  remains explicitly **unverified**, not mocked as passed.
 
 ## Qualification notes
 
-- No server-owned external-provider verifier credentials were available in
-  this environment. External adapters remain explicitly **unverified** and
-  fail closed; no mocked external qualification is counted as passed.
+- Server-owned external-provider verifier configuration is supplied only
+  through `CPTR_GENERATED_AUTH_VERIFIER_JSON` and is never returned by the
+  config endpoint, emitted in logs/transcripts/events, or included in durable
+  evidence. Invalid, absent, or provider-mismatched configuration fails closed.
+- The disposable external-provider fixture verifies the configured issuer,
+  audience, exact redirect URI, state, nonce, and PKCE code verifier. Without
+  the server-owned configuration in this environment, it remains explicitly
+  **unverified** and no mocked external qualification is counted as passed.
 - No P0/P1 defects remain in the bounded local/native surface. A real
   external-provider qualification is intentionally deferred until its
   server-owned verifier configuration is provisioned.

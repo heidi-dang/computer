@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 import secrets
 import sqlite3
 import time
@@ -134,9 +135,26 @@ def _read_markers(workspace: Path) -> tuple[AuthProvider, dict[str, Any]]:
         raise GeneratedAuthError("multiple authentication providers detected; refusing replacement", code="ambiguous_provider")
     provider = next(iter(candidates), AuthProvider.LOCAL)
     if provider in EXTERNAL_PROVIDERS:
-        verifier = config.get("verifier", {})
-        if not isinstance(verifier, dict):
-            verifier = {}
+        # The project is allowed to declare which provider it uses, but its
+        # verifier is authority owned by CPTR. Never trust verifier settings
+        # from the workspace, since the workspace owner can edit that file.
+        verifier: dict[str, Any] = {}
+        raw_server_config = os.environ.get("CPTR_GENERATED_AUTH_VERIFIER_JSON", "")
+        if raw_server_config:
+            try:
+                parsed_server_config = json.loads(raw_server_config)
+                if not isinstance(parsed_server_config, dict):
+                    raise ValueError
+                configured_provider = parsed_server_config.get("provider")
+                if configured_provider and str(configured_provider) != provider.value:
+                    parsed_server_config = {}
+                candidate = parsed_server_config.get("verifier", parsed_server_config)
+                if isinstance(candidate, dict):
+                    verifier = candidate
+            except (TypeError, ValueError, json.JSONDecodeError):
+                # Invalid server configuration is deliberately indistinguish-
+                # able from absent configuration to callers: fail closed.
+                verifier = {}
         config = {
             "issuer": verifier.get("issuer"),
             "audience": verifier.get("audience"),
