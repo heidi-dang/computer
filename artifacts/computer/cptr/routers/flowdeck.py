@@ -53,6 +53,8 @@ from cptr.flowdeck.generated_auth import (
     GeneratedAuthError,
     GeneratedAuthService,
 )
+from cptr.flowdeck.checkpoints import CheckpointError, CheckpointService
+from cptr.models.flowdeck import FlowDeckCheckpoint
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
 from cptr.utils.config import now_ms
@@ -147,6 +149,16 @@ class GeneratedAuthCallback(GeneratedAuthRequest):
     state: str = Field(min_length=1, max_length=512)
     nonce: str = Field(min_length=1, max_length=512)
     code_verifier: str = Field(min_length=43, max_length=128)
+
+
+class CheckpointRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(min_length=1, max_length=4096)
+
+
+class CheckpointRestoreRequest(CheckpointRequest):
+    checkpoint_id: str = Field(min_length=1, max_length=128)
 
 
 async def _generated_auth_operation(
@@ -258,6 +270,124 @@ async def _generated_auth_operation(
             await store.mark_attempt_unknown(attempt.id, error="verifier interrupted")
             await store.require_manual_review(run.id, reason="auth verifier interrupted")
             raise HTTPException(503, "authentication operation requires manual review")
+    except (DuplicateRequestError, LifecycleError, StaleWriterError) as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+async def _checkpoint_operation(
+    request: Request,
+    *,
+    workspace: str,
+    capability: str,
+    target: str,
+    execute,
+) -> tuple[dict[str, Any], bool, str]:
+    owner = await _authenticate_flowdeck(request)
+    try:
+        canonical = await resolve_gateway_workspace(
+            session_factory=get_session_factory(),
+            user_id=owner,
+            requested_workspace=workspace,
+        )
+    except AuthenticatedGatewayError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    request_key = _request_key(request)
+    store = DurableFlowDeck(get_session_factory())
+    try:
+        run, created = await store.create_run(
+            request_key=request_key,
+            owner=owner,
+            workspace=canonical,
+            step_name=f"checkpoint:{capability}",
+        )
+        if not created:
+            operations = await store.get_run_operations(run.id)
+            if operations:
+                operation = operations[0]
+                evidence = operation.authoritative_evidence or {}
+                if operation.status == OperationStatus.SUCCEEDED.value:
+                    return dict(evidence.get("result") or {}), True, run.id
+                if operation.status == OperationStatus.FAILED.value:
+                    raise HTTPException(
+                        int(evidence.get("error_status", 422)),
+                        evidence.get("error", "checkpoint operation failed"),
+                    )
+                if run.status == RunStatus.CANCELLED.value:
+                    raise HTTPException(409, "checkpoint operation was cancelled")
+                raise HTTPException(409, "checkpoint operation requires recovery")
+        await store.start_run(run.id)
+        step = await store.get_step(run.id)
+        await store.start_step(step.id)
+        operation, _ = await store.record_intent(
+            run_id=run.id,
+            step_id=step.id,
+            idempotency_key=request_key,
+            capability=f"checkpoint.{capability}",
+            target=target,
+            reconcile_kind="checkpoint",
+        )
+        attempt = await store.prepare_attempt(operation_id=operation.id, owner=owner)
+        await store.record_event(
+            run.id,
+            "CHECKPOINT_OPERATION_STARTED",
+            {"operation": capability, "attempt_id": attempt.id, "source": "runtime"},
+        )
+        try:
+            result = execute(canonical, owner)
+            if inspect.isawaitable(result):
+                result = await result
+            evidence = {
+                "authoritative": True,
+                "source": "verifier",
+                "observation": "verifier_check",
+                "observed_outcome": "succeeded",
+                "attempt_id": attempt.id,
+                "operation": capability,
+                "result": result,
+            }
+            await store.finish_attempt(
+                attempt.id, owner=owner, outcome="succeeded", evidence=evidence
+            )
+            await store.finish_step(step.id, status=StepStatus.SUCCEEDED)
+            await store.record_event(
+                run.id,
+                "CHECKPOINT_OPERATION_VERIFIED",
+                {"operation": capability, "source": "verifier"},
+            )
+            await store.complete_run(run.id, status=RunStatus.SUCCEEDED)
+            return result, False, run.id
+        except asyncio.CancelledError:
+            await store.mark_attempt_unknown(attempt.id, error="cancelled")
+            await store.require_manual_review(
+                run.id, reason="checkpoint operation cancelled before verification"
+            )
+            raise
+        except CheckpointError as exc:
+            outcome = "failed" if exc.code not in {"restore_unknown", "restore_stale"} else "unknown"
+            if outcome == "unknown":
+                await store.mark_attempt_unknown(attempt.id, error=exc.code)
+                await store.require_manual_review(run.id, reason=exc.code)
+                raise HTTPException(409, "checkpoint restore requires manual review") from exc
+            evidence = {
+                "authoritative": True,
+                "source": "verifier",
+                "observation": "verifier_check",
+                "observed_outcome": "failed",
+                "attempt_id": attempt.id,
+                "operation": capability,
+                "error": str(exc),
+                "error_status": 422,
+            }
+            await store.finish_attempt(
+                attempt.id, owner=owner, outcome="failed", evidence=evidence
+            )
+            await store.finish_step(step.id, status=StepStatus.FAILED)
+            await store.complete_run(run.id, status=RunStatus.FAILED)
+            raise HTTPException(422, str(exc)) from exc
+        except Exception as exc:
+            await store.mark_attempt_unknown(attempt.id, error="checkpoint interrupted")
+            await store.require_manual_review(run.id, reason="checkpoint interrupted")
+            raise HTTPException(503, "checkpoint operation requires manual review") from exc
     except (DuplicateRequestError, LifecycleError, StaleWriterError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -928,6 +1058,40 @@ async def generated_auth_config(request: Request, workspace: str):
     _same_origin(request)
     _, service = await _generated_auth_service(request, workspace)
     return service.metadata()
+
+
+@router.post("/checkpoints/capture")
+async def capture_checkpoint(request: Request, body: CheckpointRequest):
+    _same_origin(request)
+    result, reused, run_id = await _checkpoint_operation(
+        request,
+        workspace=body.workspace,
+        capability="capture",
+        target="workspace-head",
+        execute=lambda canonical, owner: CheckpointService(
+            get_session_factory()
+        ).capture(workspace=canonical, owner=owner, run_id=run_id),
+    )
+    return {**result, "run_id": run_id, "reused": reused}
+
+
+@router.post("/checkpoints/restore")
+async def restore_checkpoint(request: Request, body: CheckpointRestoreRequest):
+    _same_origin(request)
+    result, reused, run_id = await _checkpoint_operation(
+        request,
+        workspace=body.workspace,
+        capability="restore",
+        target=body.checkpoint_id,
+        execute=lambda canonical, owner: CheckpointService(
+            get_session_factory()
+        ).restore(
+            checkpoint_id=body.checkpoint_id,
+            workspace=canonical,
+            owner=owner,
+        ),
+    )
+    return {**result, "run_id": run_id, "reused": reused}
 
 
 @router.get("/generated-auth/csrf")
