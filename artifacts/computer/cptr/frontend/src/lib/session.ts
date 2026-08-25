@@ -30,5 +30,5 @@ export function setSession(s: Session | null) {
 export function clearSession() {
 	session.set(null);
 	fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
-	window.location.reload();
+	window.dispatchEvent(new CustomEvent('cptr:session-expired'));
 }

@@ -18,3 +18,4 @@
 - [Worktree metadata side effects](worktree-metadata-side-effects.md) — CPTR metadata helpers must not edit branch `.gitignore` files during parallel execution.
 - [Native cancellation propagation](native-cancellation-propagation.md) — native child loops must re-raise cancellation after cleanup so parent timeout and durable UNKNOWN handling remain authoritative.
 - [Native cancellation finalization](native-cancel-finalization.md) — cancellation must durably finalize messages even when it wins before the native coroutine starts.
+- [Frontend session expiry](frontend-session-expiry.md) — protected 401s should render login in place instead of triggering a reload loop.

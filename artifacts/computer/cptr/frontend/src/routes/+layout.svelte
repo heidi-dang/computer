@@ -123,7 +123,12 @@ const isVisualRegressionRoute = import.meta.env.DEV && $page.url.pathname === '/
 			settingsTab = detail?.tab || 'general';
 			showSettings = true;
 		};
+		const handleSessionExpired = () => {
+			authState = 'needs_login';
+			stateLoaded.set(false);
+		};
 		window.addEventListener('cptr:open-settings', openSettings as EventListener);
+		window.addEventListener('cptr:session-expired', handleSessionExpired);
 
 		return () => {
 			clearInterval(healthCheck);
@@ -134,6 +139,7 @@ const isVisualRegressionRoute = import.meta.env.DEV && $page.url.pathname === '/
 			window.removeEventListener('offline', showOfflineToast);
 			window.removeEventListener('online', showOnlineToast);
 			window.removeEventListener('cptr:open-settings', openSettings as EventListener);
+			window.removeEventListener('cptr:session-expired', handleSessionExpired);
 		};
 		})();
 		return () => {};
