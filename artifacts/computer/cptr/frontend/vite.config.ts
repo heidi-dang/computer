@@ -15,16 +15,16 @@ export default defineConfig({
 		proxy: {
 			'/api': {
 				target: backendTarget,
-				changeOrigin: true,
+changeOrigin: false,
 				ws: true
 			},
 			'/v1': {
 				target: backendTarget,
-				changeOrigin: true
+changeOrigin: false
 			},
 			'/socket.io': {
 				target: backendTarget,
-				changeOrigin: true,
+changeOrigin: false,
 				ws: true
 			}
 		}

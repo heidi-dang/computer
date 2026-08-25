@@ -68,6 +68,24 @@ test('status and action affordances remain visible at narrow width', async ({ pa
 	await expect(page.getByTestId('tool-servers-surface').getByText('Available')).toBeVisible();
 	await expect(page.getByTestId('tool-call-surface').getByText('Done')).toBeVisible();
 	await expect(page.getByTestId('terminal-surface').getByText('Live session')).toBeVisible();
+await expect(page.getByTestId('live-terminal-surface').getByText('Live terminal')).toBeVisible();
+await expect(page.getByTestId('live-terminal-surface').getByText('npm test -- --runInBand')).toBeVisible();
+});
+
+test('Heidi live terminal preserves safe activity and controls', async ({ page }) => {
+await page.goto('/__visual-regression');
+const surface = page.getByTestId('live-terminal-surface');
+await expect(surface.getByTestId('heidi-live-terminal')).toBeVisible();
+await expect(surface.getByText('build-agent')).toBeVisible();
+await expect(surface.getByText('attempt-42')).toBeVisible();
+await expect(surface.getByText('276 passed, 4 skipped')).toBeVisible();
+await expect(surface.getByRole('button', { name: 'Pause' })).toBeVisible();
+await surface.getByRole('button', { name: 'Pause' }).click();
+await expect(surface.getByRole('button', { name: 'Resume' })).toBeVisible();
+await surface.getByRole('button', { name: 'Collapse' }).click();
+await expect(surface.getByRole('button', { name: 'Expand' })).toBeVisible();
+const overflow = await surface.evaluate((element) => element.scrollWidth > element.clientWidth);
+expect(overflow, 'Heidi live terminal is horizontally clipped').toBe(false);
 });
 
 test('captures stable desktop and narrow surface snapshots', async ({ page }) => {

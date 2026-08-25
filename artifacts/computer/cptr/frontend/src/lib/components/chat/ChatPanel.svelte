@@ -65,6 +65,7 @@
 
 	import ChatInput from './ChatInput.svelte';
 	import FlowDeckStatusStrip from './FlowDeckStatusStrip.svelte';
+import LiveTerminal from './LiveTerminal.svelte';
 	import type { DesignerAction } from './DesignerResults.svelte';
 	import UserMessage from './UserMessage.svelte';
 	import AssistantMessage from './AssistantMessage.svelte';
@@ -2327,6 +2328,7 @@ if (kind.includes('VALIDATION')) return 'validating';
 				</div>
 
 				{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
+<LiveTerminal events={flowdeckEvents} status={flowdeckStatus} runId={flowdeckRunId} />
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
@@ -2472,6 +2474,7 @@ nativeMessageId={flowdeckMessageId}
 					</div>
 				{/if}
 				{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
+<LiveTerminal events={flowdeckEvents} status={flowdeckStatus} runId={flowdeckRunId} />
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}

@@ -4,6 +4,7 @@
 	import Terminal from '$lib/components/Terminal.svelte';
 	import ToolCallCollapsible from '$lib/components/chat/ToolCallCollapsible.svelte';
 	import DesignerResults from '$lib/components/chat/DesignerResults.svelte';
+import LiveTerminal from '$lib/components/chat/LiveTerminal.svelte';
 	import { designerVisualFixture } from '$lib/components/chat/designer-fixtures';
 
 	const toolCall = {
@@ -23,6 +24,13 @@
 			files: ['dist/index.html', 'dist/assets/app.js']
 		})
 	};
+
+const liveTerminalEvents = [
+{ sequence: 1, kind: 'HEIDI_VALIDATION_PASSED', payload: { summary: 'qualified CPTR path' } },
+{ sequence: 2, kind: 'SPECIALIST_DISPATCHED', payload: { specialist_id: 'build-agent', attempt_id: 'attempt-42' } },
+{ sequence: 3, kind: 'TOOL_STARTED', payload: { tool_name: 'run_command', command: 'npm test -- --runInBand' } },
+{ sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } }
+];
 </script>
 
 <svelte:head>
@@ -86,5 +94,12 @@
 				oncancel={() => {}}
 			/>
 		</section>
+
+<section
+data-testid="live-terminal-surface"
+class="min-w-0 rounded-2xl border border-gray-200/70 p-3 dark:border-white/7"
+>
+<LiveTerminal events={liveTerminalEvents} status="verifying" runId="run-live-terminal-fixture" />
+</section>
 	</div>
 </main>
