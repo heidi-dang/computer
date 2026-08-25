@@ -50,6 +50,16 @@ class SnapshotProvenanceAgent(ProvenanceAgent):
         return self.snapshots[0]
 
 
+class FailingIntendedWorkerAgent(SnapshotProvenanceAgent):
+    async def start_task(self, **kwargs):
+        task_id = f"task_{len(self.started) + 1}"
+        self.started.append(task_id)
+        return {"id": task_id, "status": "RUNNING", "output": ""}
+
+    async def get_task(self, task_id, **kwargs):
+        return {"id": task_id, "status": "FAILED", "error": "worker failed before control proof"}
+
+
 class ProvenanceStore(InMemorySupervisorStore):
     async def get_message(self, message_id):
         return self.control_message
@@ -226,14 +236,124 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 status="CONSUMED",
                 task_id="task_1",
                 consumed_task_id="task_1",
-                consumed_message_id="message-2",
+                consumed_message_id="message-1",
             )
+        )
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        scope.steering_requests[0]["baseline_workspace_snapshot"] = {
+            "fingerprint": "before",
+            "files": [{"path": "fixture.txt"}],
+        }
+        scope.steering_requests[0]["baseline_workspace_fingerprint"] = "before"
+        supervisor.agent = SnapshotProvenanceAgent(
+            store.control_message,
+            [{"fingerprint": "after", "files": [{"path": "fixture.txt"}]}],
         )
 
         state = await supervisor.run_once(monitor.monitor_id)
 
         self.assertEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
         self.assertEqual(director.evaluations, 1)
+
+    async def test_consumption_by_replacement_generation_cannot_verify_original_steering(self):
+        message = SimpleNamespace(
+            id="control-1",
+            status="CONSUMED",
+            task_id="task_1",
+            consumed_task_id="task_1",
+            consumed_message_id="message-replacement",
+            consumed_at=20,
+        )
+        store = ProvenanceStore()
+        store.control_message = message
+        director = AcceptingDirector()
+        supervisor = AutonomousSupervisor(
+            store=store,
+            agent=SnapshotProvenanceAgent(
+                message,
+                [{"fingerprint": "after", "files": [{"path": "fixture.txt"}]}],
+            ),
+            director=director,
+        )
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the steering change",
+            acceptance_criteria=[
+                "same worker consumes the steering control and produces EFFECT_OBSERVED"
+            ],
+            model_id="model-1",
+        )
+        await supervisor.run_once(monitor.monitor_id)
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id="control-1",
+            intended_task_id="task_1",
+            intended_generation_id="message-1",
+            baseline_workspace_snapshot={
+                "fingerprint": "before",
+                "files": [{"path": "fixture.txt"}],
+            },
+        )
+
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertNotEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
+        self.assertEqual(director.evaluations, 0)
+        self.assertIn("generation", state.scopes[0].next_action.lower())
+
+    async def test_failed_intended_worker_blocks_recorded_steering_without_repair_rewrite(self):
+        message = SimpleNamespace(
+            id="control-1",
+            status="DELIVERED",
+            task_id="task_1",
+            consumed_task_id=None,
+            consumed_message_id=None,
+            consumed_at=None,
+        )
+        store = ProvenanceStore()
+        store.control_message = message
+        agent = FailingIntendedWorkerAgent(
+            message,
+            [{"fingerprint": "after", "files": [{"path": "fixture.txt"}]}],
+        )
+        supervisor = AutonomousSupervisor(
+            store=store,
+            agent=agent,
+            director=AcceptingDirector(),
+            max_attempts=5,
+        )
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Apply the steering change",
+            acceptance_criteria=[
+                "same worker consumes the steering control and produces EFFECT_OBSERVED"
+            ],
+            model_id="model-1",
+        )
+        await supervisor.run_once(monitor.monitor_id)
+        scope = (await store.get_monitor(monitor.monitor_id)).scopes[0]
+        await supervisor.record_steering(
+            monitor.monitor_id,
+            scope_id=scope.scope_id,
+            control_message_id="control-1",
+            intended_task_id="task_1",
+            intended_generation_id="message-1",
+            baseline_workspace_snapshot={
+                "fingerprint": "before",
+                "files": [{"path": "fixture.txt"}],
+            },
+        )
+
+        state = await supervisor.run_once(monitor.monitor_id)
+
+        self.assertEqual(state.status.value, "BLOCKED")
+        self.assertEqual(state.scopes[0].status, ScopeStatus.BLOCKED)
+        self.assertEqual(agent.started, ["task_1"])
+        self.assertEqual(state.scopes[0].steering_requests[0]["effect_status"], "DELIVERY_FAILED")
 
     async def test_preexisting_diff_without_new_effect_cannot_verify_steering(self):
         store, director, supervisor, monitor = await self._supervisor(
@@ -290,7 +410,7 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
             scope_id=scope.scope_id,
             control_message_id="control-1",
             intended_task_id="task_1",
-            intended_generation_id="message-1",
+            intended_generation_id="message-2",
             baseline_workspace_snapshot={
                 "fingerprint": "tracked-before",
                 "files": [{"path": "fixture.txt"}],
@@ -307,6 +427,7 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["effect_status"], "EFFECT_OBSERVED")
         self.assertEqual(record["baseline_workspace_fingerprint"], "tracked-before")
         self.assertEqual(record["post_consumption_workspace_fingerprint"], "tracked-after")
+        self.assertEqual(record["setup_readiness_status"], "READY")
 
     async def test_same_worker_existing_untracked_file_content_effect_is_observed(self):
         message = SimpleNamespace(
@@ -343,7 +464,7 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
             scope_id=scope.scope_id,
             control_message_id="control-1",
             intended_task_id="task_1",
-            intended_generation_id="message-1",
+            intended_generation_id="message-2",
             baseline_workspace_snapshot={
                 "fingerprint": "untracked-before",
                 "files": [{"path": "fixture.txt", "sha256": "base"}],
@@ -391,7 +512,7 @@ class SteeringProvenanceTests(unittest.IsolatedAsyncioTestCase):
             scope_id=scope.scope_id,
             control_message_id="control-1",
             intended_task_id="task_1",
-            intended_generation_id="message-1",
+            intended_generation_id="message-2",
             baseline_workspace_snapshot={"fingerprint": "unchanged", "files": []},
         )
 

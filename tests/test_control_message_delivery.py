@@ -66,6 +66,74 @@ async def main():
 asyncio.run(main())
 """
 
+GENERATION_FENCE_SCRIPT = r"""
+import asyncio
+import os
+from cptr.models import Chat, ControlTask, User, Workspace
+from cptr.services.control_store import ControlTaskStore
+from cptr.utils.db import init_db, get_db
+
+async def main():
+    await init_db()
+    user_id = await User.create("generation-fence", "password-hash", role="user", created_at=1)
+    workspace = await Workspace.upsert(user_id, os.environ["DELIVERY_WORKSPACE"], "delivery", {})
+    chat = await Chat.create(user_id=user_id, title="delivery", meta={}, created_at=1)
+    async with await get_db() as db:
+        db.add(ControlTask(
+            id="task_generation",
+            user_id=user_id,
+            workspace_id=workspace.id,
+            chat_id=chat.id,
+            message_id="worker-generation-0",
+            status="RUNNING",
+            prompt="worker",
+            model_id="model",
+            created_at=1,
+            updated_at=1,
+        ))
+        await db.commit()
+    store = ControlTaskStore()
+    message = await store.enqueue_message(
+        task_id="task_generation",
+        user_id=user_id,
+        chat_id=chat.id,
+        content="STEERING_GENERATION_FENCE",
+        dedupe_key="retry-generation",
+        chat_message_id="chat-message-generation",
+        now=2,
+        intended_message_id="worker-generation-1",
+    )
+    assert await store.update_message(
+        message.id,
+        status="DELIVERED",
+        target_message_id="worker-generation-1",
+        delivered_at=3,
+        updated_at=3,
+    )
+    wrong = await store.consume_message(
+        message.id,
+        task_id="task_generation",
+        message_id_for_run="worker-generation-2",
+        now=4,
+    )
+    current = await store.get_message(message.id)
+    assert wrong is False
+    assert current.status == "DELIVERED"
+    assert current.consumed_message_id is None
+    right = await store.consume_message(
+        message.id,
+        task_id="task_generation",
+        message_id_for_run="worker-generation-1",
+        now=5,
+    )
+    assert right is True
+    current = await store.get_message(message.id)
+    assert current.status == "CONSUMED"
+    assert current.consumed_message_id == "worker-generation-1"
+
+asyncio.run(main())
+"""
+
 
 class ControlMessageDeliveryTests(unittest.TestCase):
     def test_delivery_record_is_idempotent_and_survives_state_transitions(self):
@@ -89,6 +157,21 @@ class ControlMessageDeliveryTests(unittest.TestCase):
             self.assertEqual(status, "CONSUMED")
             self.assertEqual(target, "worker-message")
             self.assertEqual(consumed_at, 5)
+
+    def test_control_message_can_only_be_consumed_by_delivered_generation(self):
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            tempfile.TemporaryDirectory() as workspace_dir,
+        ):
+            env = {**os.environ, "CPTR_DATA_DIR": data_dir, "DELIVERY_WORKSPACE": workspace_dir}
+            result = subprocess.run(
+                [sys.executable, "-c", GENERATION_FENCE_SCRIPT],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_idle_chat_delivers_queued_message_to_one_continuation_worker(self):
         import asyncio
