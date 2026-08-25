@@ -1288,6 +1288,7 @@ class DurableFlowDeck:
                     RunStatus.PENDING.value,
                     RunStatus.RUNNING.value,
                     RunStatus.RECOVERING.value,
+                    RunStatus.ORPHANED.value,
                 },
             )
             operations = list(

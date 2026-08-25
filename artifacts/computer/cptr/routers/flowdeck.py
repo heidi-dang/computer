@@ -196,6 +196,15 @@ async def _generated_auth_operation(
             if operations:
                 operation = operations[0]
                 evidence = operation.authoritative_evidence or {}
+                expected_capability = f"generated_auth.{capability}"
+                if (
+                    operation.capability != expected_capability
+                    or operation.target != target
+                ):
+                    raise HTTPException(
+                        409,
+                        "Idempotency-Key is already used for a different authentication operation",
+                    )
                 if operation.status == OperationStatus.SUCCEEDED.value:
                     return dict(evidence.get("result") or {}), True, run.id
                 if operation.status == OperationStatus.FAILED.value:
@@ -314,6 +323,15 @@ async def _checkpoint_operation(
             if operations:
                 operation = operations[0]
                 evidence = operation.authoritative_evidence or {}
+                expected_capability = f"checkpoint.{capability}"
+                if (
+                    operation.capability != expected_capability
+                    or operation.target != target
+                ):
+                    raise HTTPException(
+                        409,
+                        "Idempotency-Key is already used for a different checkpoint operation",
+                    )
                 if operation.status == OperationStatus.SUCCEEDED.value:
                     return dict(evidence.get("result") or {}), True, run.id
                 if operation.status == OperationStatus.FAILED.value:
@@ -346,14 +364,35 @@ async def _checkpoint_operation(
             target=target,
             reconcile_kind="checkpoint",
         )
-        attempt = await store.prepare_attempt(operation_id=operation.id, owner=owner)
+        attempt = await store.prepare_attempt(
+            operation_id=operation.id,
+            owner=owner,
+            fencing_epoch=lease.epoch,
+        )
         await store.record_event(
             run.id,
             "CHECKPOINT_OPERATION_STARTED",
             {"operation": capability, "attempt_id": attempt.id, "source": "runtime"},
         )
+        checkpoint_tasks = getattr(request.app.state, "flowdeck_checkpoint_tasks", None)
+        if checkpoint_tasks is None:
+            checkpoint_tasks = {}
+            request.app.state.flowdeck_checkpoint_tasks = checkpoint_tasks
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            checkpoint_tasks[run.id] = current_task
         try:
-            result = execute(canonical, owner, run.id)
+            result = execute(
+                canonical,
+                owner,
+                run.id,
+                lambda: store.assert_workspace_fence(
+                    workspace=canonical,
+                    run_id=run.id,
+                    owner=owner,
+                    epoch=lease.epoch,
+                ),
+            )
             if inspect.isawaitable(result):
                 result = await result
             evidence = {
@@ -385,13 +424,17 @@ async def _checkpoint_operation(
             return result, False, run.id
         except asyncio.CancelledError:
             await store.mark_attempt_unknown(attempt.id, error="cancelled")
-            await store.require_manual_review(
-                run.id, reason="checkpoint operation cancelled before verification"
-            )
+            current = await store.get_run(run.id)
+            if current is None or current.status != RunStatus.CANCELLED.value:
+                await store.require_manual_review(
+                    run.id, reason="checkpoint operation cancelled before verification"
+                )
             await store.release_workspace_lease(
                 workspace=canonical, owner=owner, epoch=lease.epoch
             )
-            raise
+            raise HTTPException(
+                503, "checkpoint operation was cancelled and requires reconciliation"
+            )
         except CheckpointError as exc:
             outcome = "failed" if exc.code not in {"restore_unknown", "restore_stale"} else "unknown"
             if outcome == "unknown":
@@ -431,6 +474,9 @@ async def _checkpoint_operation(
                 workspace=canonical, owner=owner, epoch=lease.epoch
             )
             raise HTTPException(503, "checkpoint operation requires manual review") from exc
+        finally:
+            if current_task is not None and checkpoint_tasks.get(run.id) is current_task:
+                checkpoint_tasks.pop(run.id, None)
     except (DuplicateRequestError, LifecycleError, StaleWriterError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -746,17 +792,18 @@ async def _create_orchestration(
                 workspace=workspace,
                 step_name="heidi-coordinator",
             )
-        await store.record_event(
-            run.id,
-            "ADAPTIVE_ROUTE_SELECTED",
-            {
-                "path": adaptive.path,
-                "rationale": adaptive.rationale,
-                "specialist_ids": list(adaptive.specialist_ids),
-                "execution": "native_cptr",
-                "model": full_model_id,
-            },
-        )
+        if hasattr(store, "record_event"):
+            await store.record_event(
+                run.id,
+                "ADAPTIVE_ROUTE_SELECTED",
+                {
+                    "path": adaptive.path,
+                    "rationale": adaptive.rationale,
+                    "specialist_ids": list(adaptive.specialist_ids),
+                    "execution": "native_cptr",
+                    "model": full_model_id,
+                },
+            )
         if audit_contract:
             await store.record_event(
                 run.id,
@@ -1125,9 +1172,14 @@ async def capture_checkpoint(request: Request, body: CheckpointRequest):
         workspace=body.workspace,
         capability="capture",
         target="workspace-head",
-        execute=lambda canonical, owner, run_id: CheckpointService(
+        execute=lambda canonical, owner, run_id, fence=None: CheckpointService(
             get_session_factory()
-        ).capture(workspace=canonical, owner=owner, run_id=run_id),
+        ).capture(
+            workspace=canonical,
+            owner=owner,
+            run_id=run_id,
+            assert_fence=fence,
+        ),
     )
     return {**result, "run_id": run_id, "reused": reused}
 
@@ -1159,12 +1211,13 @@ async def restore_checkpoint(request: Request, body: CheckpointRestoreRequest):
         workspace=body.workspace,
         capability="restore",
         target=body.checkpoint_id,
-        execute=lambda canonical, owner, run_id: CheckpointService(
+        execute=lambda canonical, owner, run_id, fence=None: CheckpointService(
             get_session_factory()
         ).restore(
             checkpoint_id=body.checkpoint_id,
             workspace=canonical,
             owner=owner,
+            assert_fence=fence,
         ),
     )
     return {**result, "run_id": run_id, "reused": reused}
@@ -1591,6 +1644,10 @@ async def cancel_orchestration(request: Request, run_id: str, workspace: str):
     from cptr.utils.chat_task import cancel_flowdeck_tasks
 
     await cancel_flowdeck_tasks(run.id)
+    checkpoint_tasks = getattr(request.app.state, "flowdeck_checkpoint_tasks", {})
+    checkpoint_task = checkpoint_tasks.get(run.id)
+    if checkpoint_task is not None and checkpoint_task is not asyncio.current_task():
+        checkpoint_task.cancel()
     cancel_database_operation(run.id)
     return _safe_run(cancelled)
 

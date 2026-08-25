@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.app import app
 from cptr.flowdeck.durable import DurableFlowDeck, OperationStatus, RunStatus
+from cptr.flowdeck.checkpoints import CheckpointService
 from cptr.models import Auth, Base, Config, User, Workspace
 from cptr.models.flowdeck import (
     FlowDeckCheckpoint,
@@ -159,6 +160,18 @@ class AuthenticatedCheckpointHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(evidence["observation"], "verifier_check")
             self.assertEqual(evidence["result"]["revision"], payload["revision"])
 
+    async def test_replay_key_cannot_change_operation_or_target(self):
+        captured = await self.capture(key="replay-shape-1")
+        restore = await self.client.post(
+            "/v1/flowdeck/checkpoints/restore",
+            headers=self.headers(key="replay-shape-1"),
+            json={
+                "workspace": str(self.root_a),
+                "checkpoint_id": captured.json()["checkpoint_id"],
+            },
+        )
+        self.assertEqual(restore.status_code, 409, restore.text)
+
     async def test_dirty_capture_and_restore_are_rejected_without_success(self):
         (self.root_a / "dirty.txt").write_text("uncommitted\n", encoding="utf-8")
         capture = await self.capture(key="dirty-capture-1")
@@ -211,9 +224,10 @@ class AuthenticatedCheckpointHttpTests(unittest.IsolatedAsyncioTestCase):
                     "checkpoint_id": captured.json()["checkpoint_id"],
                 },
             )
-        self.assertEqual(response.status_code, 503, response.text)
-        run = await DurableFlowDeck(self.sessions).get_run(response.json().get("run_id", ""))
-        # The run id is intentionally not returned in the safe error body.
+        self.assertEqual(response.status_code, 409, response.text)
+        run = await DurableFlowDeck(self.sessions).get_run_by_request_key("uncertain-restore-1")
+        self.assertIsNotNone(run)
+        self.assertEqual(run.status, RunStatus.MANUAL_REVIEW_REQUIRED.value)
         async with self.sessions() as session:
             rows = list((await session.scalars(select(FlowDeckPhysicalAttempt))).all())
             self.assertEqual(len(rows), 2)
@@ -221,11 +235,15 @@ class AuthenticatedCheckpointHttpTests(unittest.IsolatedAsyncioTestCase):
             operations = list((await session.scalars(select(FlowDeckLogicalOperation))).all())
             self.assertEqual(operations[-1].status, OperationStatus.MANUAL_REVIEW_REQUIRED.value)
             self.assertNotEqual(operations[-1].status, OperationStatus.SUCCEEDED.value)
+            checkpoint = await session.get(
+                FlowDeckCheckpoint, captured.json()["checkpoint_id"]
+            )
+            self.assertEqual(checkpoint.status, "AVAILABLE")
 
     async def test_cancelled_restore_is_unknown_and_late_success_cannot_resurrect(self):
         captured = await self.capture(key="cancel-source-1")
 
-        async def cancelled_restore(*, checkpoint_id, workspace, owner):
+        async def cancelled_restore(_service, *, checkpoint_id, workspace, owner, assert_fence=None):
             await asyncio.sleep(0)
             raise asyncio.CancelledError()
 
@@ -241,12 +259,72 @@ class AuthenticatedCheckpointHttpTests(unittest.IsolatedAsyncioTestCase):
                     "checkpoint_id": captured.json()["checkpoint_id"],
                 },
             )
-        self.assertEqual(response.status_code, 500, response.text)
+        self.assertEqual(response.status_code, 503, response.text)
+        run = await DurableFlowDeck(self.sessions).get_run_by_request_key("cancel-restore-1")
+        self.assertIsNotNone(run)
+        self.assertEqual(run.status, RunStatus.MANUAL_REVIEW_REQUIRED.value)
         async with self.sessions() as session:
             operation = list((await session.scalars(select(FlowDeckLogicalOperation))).all())[-1]
             attempt = list((await session.scalars(select(FlowDeckPhysicalAttempt))).all())[-1]
             self.assertEqual(attempt.status, "UNKNOWN")
             self.assertEqual(operation.status, OperationStatus.MANUAL_REVIEW_REQUIRED.value)
+
+    async def test_authenticated_cancel_endpoint_cancels_active_restore(self):
+        captured = await self.capture(key="live-cancel-source-1")
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def waiting_restore(
+            _service, *, checkpoint_id, workspace, owner, assert_fence=None
+        ):
+            if assert_fence:
+                await assert_fence()
+            started.set()
+            await release.wait()
+            return {
+                "checkpoint_id": checkpoint_id,
+                "revision": "a" * 40,
+                "status": "RESTORED",
+            }
+
+        with patch(
+            "cptr.routers.flowdeck.CheckpointService.restore",
+            new=waiting_restore,
+        ):
+            restore_task = asyncio.create_task(
+                self.client.post(
+                    "/v1/flowdeck/checkpoints/restore",
+                    headers=self.headers(key="live-cancel-restore-1"),
+                    json={
+                        "workspace": str(self.root_a),
+                        "checkpoint_id": captured.json()["checkpoint_id"],
+                    },
+                )
+            )
+            for _ in range(30):
+                if started.is_set():
+                    break
+                await asyncio.sleep(0.02)
+            self.assertTrue(started.is_set())
+            run = await DurableFlowDeck(self.sessions).get_run_by_request_key(
+                "live-cancel-restore-1"
+            )
+            cancel = await self.client.post(
+                f"/v1/flowdeck/orchestrations/{run.id}/cancel",
+                headers=self.headers(key="live-cancel-request-1"),
+                params={"workspace": str(self.root_a)},
+            )
+            self.assertEqual(cancel.status_code, 200, cancel.text)
+            restore_response = await restore_task
+            self.assertEqual(restore_response.status_code, 503, restore_response.text)
+        async with self.sessions() as session:
+            operation = list((await session.scalars(select(FlowDeckLogicalOperation))).all())[-1]
+            attempt = list((await session.scalars(select(FlowDeckPhysicalAttempt))).all())[-1]
+            self.assertEqual(attempt.status, "UNKNOWN")
+            self.assertIn(
+                operation.status,
+                {OperationStatus.OUTCOME_UNKNOWN.value, OperationStatus.MANUAL_REVIEW_REQUIRED.value},
+            )
 
     async def test_restart_recovery_marks_abandoned_restore_unknown(self):
         store = DurableFlowDeck(self.sessions)
@@ -297,6 +375,24 @@ class AuthenticatedCheckpointHttpTests(unittest.IsolatedAsyncioTestCase):
                     "attempt_id": attempt.id,
                 },
             )
+
+    async def test_stale_fence_is_checked_before_native_restore(self):
+        captured = await CheckpointService(self.sessions).capture(
+            workspace=str(self.root_a), owner="user-a", run_id="stale-source"
+        )
+
+        async def stale_fence():
+            raise RuntimeError("stale workspace fence")
+
+        with patch("cptr.flowdeck.checkpoints._run") as native_git:
+            with self.assertRaises(RuntimeError):
+                await CheckpointService(self.sessions).restore(
+                    checkpoint_id=captured["checkpoint_id"],
+                    workspace=str(self.root_a),
+                    owner="user-a",
+                    assert_fence=stale_fence,
+                )
+        native_git.assert_not_called()
 
 
 async def async_uncertain_checkout(*args, **kwargs):

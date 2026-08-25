@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
 
@@ -72,14 +72,23 @@ class CheckpointService:
             ]
 
     async def capture(
-        self, *, workspace: str, owner: str, run_id: str | None = None
+        self,
+        *,
+        workspace: str,
+        owner: str,
+        run_id: str | None = None,
+        assert_fence: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         root = _root(workspace)
+        if assert_fence:
+            await assert_fence()
         if not await _clean(root):
             raise CheckpointError(
                 "checkpoint capture requires a clean worktree", code="dirty_workspace"
             )
         revision = await _revision(root)
+        if assert_fence:
+            await assert_fence()
         now = int(time.time() * 1000)
         checkpoint = FlowDeckCheckpoint(
             workspace=str(root),
@@ -108,9 +117,16 @@ class CheckpointService:
         }
 
     async def restore(
-        self, *, checkpoint_id: str, workspace: str, owner: str
+        self,
+        *,
+        checkpoint_id: str,
+        workspace: str,
+        owner: str,
+        assert_fence: Callable[[], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         root = _root(workspace)
+        if assert_fence:
+            await assert_fence()
         async with self.session_factory() as db:
             checkpoint = await db.scalar(
                 select(FlowDeckCheckpoint).where(
@@ -129,15 +145,22 @@ class CheckpointService:
             raise CheckpointError(
                 "restore requires a clean worktree", code="dirty_workspace"
             )
+        if assert_fence:
+            await assert_fence()
         try:
             await _run("checkout", "--detach", revision, cwd=str(root))
             observed = await _revision(root)
         except GitError as exc:
-            raise CheckpointError("checkpoint restore could not be verified") from exc
+            raise CheckpointError(
+                "checkpoint restore outcome is unknown",
+                code="restore_unknown",
+            ) from exc
         if observed != revision:
             raise CheckpointError(
                 "checkpoint restore outcome is unknown", code="restore_unknown"
             )
+        if assert_fence:
+            await assert_fence()
         async with self.session_factory() as db:
             checkpoint = await db.scalar(
                 select(FlowDeckCheckpoint).where(

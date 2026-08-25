@@ -50,6 +50,12 @@
 	const recoveryMessage = $derived(
 		status.toLowerCase() === 'manual_review_required'
 			? 'The model provider was unavailable. Check the provider connection and review the workspace before retrying. No completion was claimed.'
+			: status.toLowerCase() === 'unknown'
+				? 'The outcome could not be verified. Reconnect and reconcile the run before retrying. No completion was claimed.'
+				: status.toLowerCase() === 'orphaned'
+					? 'The worker disconnected before verification. Reconnect to recover the durable run; do not assume the workspace changed safely.'
+					: status.toLowerCase() === 'cancelled'
+						? 'Cancellation is authoritative. Any interrupted work remains unverified and cannot be reported as completed.'
 			: ''
 	);
 	const analysis = $derived.by(() => {
