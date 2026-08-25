@@ -24,6 +24,7 @@ from cptr.models.files import File
 from cptr.models.flowdeck import (
     FlowDeckApproval,
     FlowDeckBuildNode,
+    FlowDeckCheckpoint,
     FlowDeckEvent,
     FlowDeckLogicalOperation,
     FlowDeckPhysicalAttempt,
@@ -53,6 +54,7 @@ __all__ = [
     "AutomationRun",
     "FlowDeckApproval",
     "FlowDeckBuildNode",
+    "FlowDeckCheckpoint",
     "AutonomousApproval",
     "AutonomousEvidence",
     "AutonomousMonitor",

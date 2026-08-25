@@ -149,6 +149,30 @@ class FlowDeckRecoveryLease(Base):
     expires_at = Column(BigInteger, nullable=False)
 
 
+class FlowDeckCheckpoint(Base):
+    """Durable identity for a verified workspace checkpoint.
+
+    The checkpoint record is metadata only. Restores must be performed by a
+    fenced native CPTR operation; this table never grants execution authority.
+    """
+
+    __tablename__ = "flowdeck_checkpoints"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    run_id = Column(Text, nullable=True, index=True)
+    workspace = Column(Text, nullable=False)
+    owner = Column(Text, nullable=False)
+    revision = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="AVAILABLE")
+    evidence = Column(JSON, nullable=False, default=dict)
+    created_at = Column(BigInteger, nullable=False)
+    restored_at = Column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index("ix_flowdeck_checkpoints_workspace_created", "workspace", "created_at"),
+    )
+
+
 class FlowDeckApproval(Base):
     __tablename__ = "flowdeck_approvals"
 
