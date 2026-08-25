@@ -79,7 +79,7 @@ def _schema_sqlite(connection: sqlite3.Connection) -> dict[str, Any]:
             for row in connection.execute(f'PRAGMA table_info("{name}")')
         ]
         foreign_keys = [
-            {"table": row[2], "column": row[3], "references": row[4], "on_update": row[5], "on_delete": row[6]}
+            {"table": row[2], "column": row[3], "references": row[2], "references_column": row[4], "on_update": row[5], "on_delete": row[6]}
             for row in connection.execute(f'PRAGMA foreign_key_list("{name}")')
         ]
         indexes = []
@@ -92,6 +92,42 @@ def _schema_sqlite(connection: sqlite3.Connection) -> dict[str, Any]:
             })
         tables.append({"name": name, "columns": columns, "foreign_keys": foreign_keys, "indexes": indexes})
     return {"engine": "sqlite", "tables": tables}
+
+
+def _postgres_connection():
+    try:
+        import psycopg
+    except ImportError as exc:
+        raise DatabaseContractError("PostgreSQL support is unavailable because the server driver is not installed") from exc
+    # CPTR's own DATABASE_URL is never a project-database target. A project
+    # owner must explicitly configure this separate server-side binding.
+    dsn = os.environ.get("CPTR_PROJECT_DATABASE_URL")
+    if not dsn:
+        raise DatabaseContractError("PostgreSQL requires the server-configured CPTR_PROJECT_DATABASE_URL")
+    return psycopg.connect(dsn, connect_timeout=5)
+
+
+def _schema_postgres(connection) -> dict[str, Any]:
+    tables = []
+    table_rows = connection.execute(
+        "SELECT table_schema, table_name FROM information_schema.tables "
+        "WHERE table_schema NOT IN ('pg_catalog','information_schema') ORDER BY table_schema, table_name"
+    ).fetchall()
+    for schema_name, table_name in table_rows:
+        columns = [
+            {"name": row[0], "type": row[1], "nullable": row[2] == "YES", "default": row[3], "primary_key": row[4] == "PRIMARY KEY"}
+            for row in connection.execute(
+                "SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, "
+                "CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN 'PRIMARY KEY' ELSE '' END "
+                "FROM information_schema.columns c LEFT JOIN information_schema.key_column_usage k "
+                "ON k.table_schema=c.table_schema AND k.table_name=c.table_name AND k.column_name=c.column_name "
+                "LEFT JOIN information_schema.table_constraints tc ON tc.constraint_name=k.constraint_name "
+                "WHERE c.table_schema=%s AND c.table_name=%s ORDER BY c.ordinal_position",
+                (schema_name, table_name),
+            ).fetchall()
+        ]
+        tables.append({"schema": schema_name, "name": table_name, "columns": columns, "foreign_keys": [], "indexes": []})
+    return {"engine": "postgresql", "tables": tables}
 
 
 def _fingerprint(schema: dict[str, Any]) -> str:
@@ -148,14 +184,22 @@ class ProjectDatabaseService:
             with sqlite3.connect(path, timeout=5) as connection:
                 connection.execute("PRAGMA foreign_keys=ON")
                 schema = _schema_sqlite(connection)
-                tables = schema["tables"]
                 result = {"schema": schema, "schema_fingerprint": _fingerprint(schema), "usage": _usage_analysis(root, schema)}
                 result["migration_files"] = [str(p.relative_to(root)) for p in _discover_migrations(root)]
                 result["integrity"] = connection.execute("PRAGMA integrity_check").fetchone()[0]
                 result["database"] = str(path.relative_to(root))
                 return result
         if request.engine == "postgresql":
-            raise DatabaseContractError("PostgreSQL support requires the configured server driver; no credentials are accepted from requests")
+            with _postgres_connection() as connection:
+                schema = _schema_postgres(connection)
+                return {
+                    "schema": schema,
+                    "schema_fingerprint": _fingerprint(schema),
+                    "usage": _usage_analysis(root, schema),
+                    "migration_files": [str(p.relative_to(root)) for p in _discover_migrations(root)],
+                    "integrity": "verified by PostgreSQL constraints",
+                    "database": "server-configured PostgreSQL",
+                }
         raise DatabaseContractError("database engine must be sqlite or postgresql")
 
     async def query(self, request: DatabaseRequest, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
@@ -165,7 +209,10 @@ class ProjectDatabaseService:
         _query_allowed(sql)
         root = _root(request.workspace)
         if request.engine != "sqlite":
-            raise DatabaseContractError("PostgreSQL query execution is unavailable until its server driver is configured")
+            with _postgres_connection() as connection:
+                cursor = connection.execute(sql, params)
+                rows = [{str(key): _json_safe(value) for key, value in zip([d.name for d in cursor.description], row)} for row in cursor.fetchmany(MAX_ROWS)]
+                return {"columns": [d.name for d in cursor.description], "rows": rows, "truncated": len(rows) == MAX_ROWS}
         path = _sqlite_path(root, request.database)
         with sqlite3.connect(path, timeout=5) as connection:
             connection.row_factory = sqlite3.Row
@@ -183,8 +230,18 @@ class ProjectDatabaseService:
         if NULLABLE_RISK.search(sql):
             raise DatabaseContractError("unsafe NOT NULL migration denied without a staged backfill")
         root = _root(request.workspace)
+        if request.engine == "postgresql":
+            before = self._inspect(request)
+            with _postgres_connection() as connection:
+                try:
+                    with connection.transaction():
+                        connection.execute(sql)
+                except Exception as exc:
+                    raise DatabaseContractError("PostgreSQL migration rolled back") from exc
+            after = self._inspect(request)
+            return {"before": before, "after": after, "snapshot": "transactional pre-migration state", "verified": True}
         if request.engine != "sqlite":
-            raise DatabaseContractError("PostgreSQL migrations require the configured server driver")
+            raise DatabaseContractError("database engine must be sqlite or postgresql")
         path = _sqlite_path(root, request.database)
         snapshot_path = None
         if snapshot:
@@ -212,6 +269,24 @@ class ProjectDatabaseService:
         entries.append({"fingerprint_before": before["schema_fingerprint"], "fingerprint_after": after["schema_fingerprint"], "snapshot": str(snapshot_path.relative_to(root)) if snapshot_path else None, "sql_sha256": hashlib.sha256(sql.encode()).hexdigest()})
         history.write_text(json.dumps(entries[-100:], indent=2))
         return {"before": before, "after": after, "snapshot": entries[-1]["snapshot"], "migration_history": entries[-1], "verified": True}
+
+    async def restore(self, request: DatabaseRequest, snapshot: str) -> dict[str, Any]:
+        return await asyncio.to_thread(self._restore, request, snapshot)
+
+    def _restore(self, request: DatabaseRequest, snapshot: str) -> dict[str, Any]:
+        root = _root(request.workspace)
+        if request.engine != "sqlite":
+            raise DatabaseContractError("PostgreSQL restore requires an explicit provider snapshot")
+        database = _sqlite_path(root, request.database)
+        source = (root / ".cptr" / "database-snapshots" / Path(snapshot).name).resolve()
+        try:
+            source.relative_to(root / ".cptr" / "database-snapshots")
+        except ValueError as exc:
+            raise DatabaseContractError("snapshot is outside the workspace snapshot store") from exc
+        if not source.is_file():
+            raise DatabaseContractError("snapshot was not found")
+        shutil.copy2(source, database)
+        return self._inspect(request)
 
 
 project_database = ProjectDatabaseService()

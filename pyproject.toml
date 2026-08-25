@@ -15,6 +15,7 @@ dependencies = [
     "loguru>=0.7.3",
     "mcp>=1.8,<2",
     "openpyxl>=3.1",
+    "psycopg[binary]>=3.3.4",
     "pyjwt>=2.8",
     "pypdf>=4.0",
     "python-dateutil>=2.8",

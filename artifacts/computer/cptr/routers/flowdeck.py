@@ -102,6 +102,10 @@ class DatabaseMigrationBody(DatabaseRequestBody):
     snapshot: bool = True
 
 
+class DatabaseRestoreBody(DatabaseRequestBody):
+    snapshot: str = Field(min_length=1, max_length=512)
+
+
 def _message_dict(message: ChatMessage) -> dict[str, Any]:
     return {
         "id": message.id,
@@ -782,6 +786,99 @@ async def runtime_preview(request: Request, run_id: str, workspace: str):
         status_code=upstream.status_code,
         media_type=upstream.headers.get("content-type", "text/html"),
     )
+
+
+async def _database_request(request: Request, body: DatabaseRequestBody) -> tuple[str, str, DurableFlowDeck, DatabaseRequest]:
+    user_id = await _authenticate_flowdeck(request)
+    store = DurableFlowDeck(get_session_factory())
+    try:
+        workspace = await resolve_gateway_workspace(
+            session_factory=store.session_factory,
+            user_id=user_id,
+            requested_workspace=body.workspace,
+        )
+    except AuthenticatedGatewayError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    return user_id, workspace, store, DatabaseRequest(
+        request_key=_request_key(request),
+        owner=user_id,
+        workspace=workspace,
+        engine=body.engine,
+        database=body.database,
+    )
+
+
+async def _database_run(store: DurableFlowDeck, database_request: DatabaseRequest, operation: str, callback):
+    run, created = await store.create_run(
+        request_key=database_request.request_key,
+        owner=database_request.owner,
+        workspace=database_request.workspace,
+        step_name=f"database-{operation}",
+    )
+    if not created:
+        events = await store.list_events(run.id)
+        result = next((event.payload.get("result") for event in events if event.kind == "DATABASE_RESULT"), None)
+        if result is not None:
+            return result
+    await store.start_run(run.id)
+    await store.record_event(run.id, "DATABASE_OPERATION_STARTED", {"operation": operation, "authoritative": True, "source": "runtime"})
+    try:
+        result = await callback()
+        result["run_id"] = run.id
+        result["operation"] = operation
+        result["evidence"] = {
+            "authoritative": True,
+            "source": "verifier",
+            "observation": "verifier_check",
+            "observed_outcome": "succeeded",
+            "database_engine": database_request.engine,
+        }
+        await store.record_event(run.id, "DATABASE_RESULT", {"result": result})
+        return result
+    except DatabaseContractError:
+        await store.record_event(run.id, "DATABASE_OPERATION_DENIED", {"operation": operation, "authoritative": True, "source": "verifier"})
+        raise
+
+
+@router.post("/database/inspect")
+async def inspect_database(request: Request, body: DatabaseRequestBody):
+    _, _, store, database_request = await _database_request(request, body)
+    try:
+        return await _database_run(store, database_request, "inspect", lambda: project_database.inspect(database_request))
+    except DatabaseContractError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/database/query")
+async def query_database(request: Request, body: DatabaseQueryBody):
+    _, _, store, database_request = await _database_request(request, body)
+    try:
+        return await _database_run(store, database_request, "query", lambda: project_database.query(database_request, body.sql, body.params))
+    except DatabaseContractError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/database/migrate")
+async def migrate_database(request: Request, body: DatabaseMigrationBody):
+    _, _, store, database_request = await _database_request(request, body)
+    try:
+        return await _database_run(store, database_request, "migrate", lambda: project_database.migrate(database_request, body.sql, snapshot=body.snapshot))
+    except DatabaseContractError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@router.post("/database/restore")
+async def restore_database(request: Request, body: DatabaseRestoreBody):
+    _, _, store, database_request = await _database_request(request, body)
+    try:
+        return await _database_run(
+            store,
+            database_request,
+            "restore",
+            lambda: project_database.restore(database_request, body.snapshot),
+        )
+    except DatabaseContractError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.get("/audits/{run_id}")

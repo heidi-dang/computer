@@ -21,7 +21,7 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
-packages = ["cargo", "libiconv", "libxcrypt", "openssl", "pkg-config", "rustc", "chromium"]
+packages = ["cargo", "chromium", "libiconv", "libxcrypt", "openssl", "pkg-config", "postgresql", "rustc"]
 
 [userenv]
 

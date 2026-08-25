@@ -9,6 +9,7 @@
 	} from '$lib/apis/flowdeck';
 	import Icon from '$lib/components/Icon.svelte';
 import ManagedRuntimePanel from '$lib/components/ManagedRuntimePanel.svelte';
+import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 	import { currentWorkspace, workspaceList } from '$lib/stores';
 	import { chatModels, defaultModel } from '$lib/stores/chat';
 
@@ -669,6 +670,7 @@ import ManagedRuntimePanel from '$lib/components/ManagedRuntimePanel.svelte';
 			</section>
 		{/if}
 <ManagedRuntimePanel workspace={workspace || $currentWorkspace?.path || ''} />
+<ProjectDatabasePanel workspace={workspace || $currentWorkspace?.path || ''} />
 	</main>
 </div>
 
