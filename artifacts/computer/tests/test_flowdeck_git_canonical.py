@@ -1,10 +1,11 @@
+import asyncio
 import os
 import stat
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from cptr.flowdeck.git import (
     GitInspectionError,
@@ -164,6 +165,52 @@ class CanonicalGitSecurityTests(unittest.IsolatedAsyncioTestCase):
             (self.root / ".git" / "config").read_bytes(),
             (self.root / ".git" / "config").read_bytes(),
         )
+
+    async def test_inspection_uses_fixed_shell_free_process_without_ambient_credentials(self):
+        stdout = asyncio.StreamReader()
+        stderr = asyncio.StreamReader()
+        stdout.feed_data(b"## main\n")
+        stdout.feed_eof()
+        stderr.feed_eof()
+        process = type(
+            "Process",
+            (),
+            {
+                "stdout": stdout,
+                "stderr": stderr,
+                "returncode": 0,
+                "wait": AsyncMock(return_value=0),
+            },
+        )()
+        with (
+            patch(
+                "cptr.flowdeck.git.asyncio.create_subprocess_exec",
+                new=AsyncMock(return_value=process),
+            ) as create_process,
+            patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "must-not-cross-boundary",
+                    "GIT_ASKPASS": str(self.marker),
+                    "SSH_AUTH_SOCK": str(self.marker),
+                },
+                clear=False,
+            ),
+        ):
+            result = await inspect_git(
+                GitInspectionRequest(self.authorized, "status"),
+                authorized_workspace=self.authorized,
+            )
+
+        self.assertEqual(result["lines"], ["## main"])
+        args, kwargs = create_process.call_args
+        self.assertEqual(args[:7], ("git", "-C", self.authorized, "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null"))
+        self.assertEqual(args[7:], ("--no-optional-locks", "status", "--short", "--branch"))
+        self.assertNotIn("shell", kwargs)
+        self.assertEqual(kwargs["stdin"], asyncio.subprocess.DEVNULL)
+        self.assertNotIn("OPENAI_API_KEY", kwargs["env"])
+        self.assertNotIn("GIT_ASKPASS", kwargs["env"])
+        self.assertNotIn("SSH_AUTH_SOCK", kwargs["env"])
 
     async def _fake_git_failure(self, stream, output, expected):
         fake_dir = Path(self.temp.name) / "bin"

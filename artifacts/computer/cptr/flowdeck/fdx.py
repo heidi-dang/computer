@@ -195,43 +195,52 @@ async def run_fdx(
             except ProcessLookupError:
                 pass
             await process.wait()
+    except BaseException:
+        await store.release_workspace_lease(
+            workspace=str(root),
+            owner=owner,
+            epoch=lease.epoch,
+        )
+        raise
+
+    try:
+        if len(stdout) > config.max_output_bytes or len(stderr) > config.max_output_bytes:
+            raise FDXPolicyError("FDX output exceeded configured bound")
+        after = _snapshot_files(jail_root)
+        if before != after:
+            _restore_files(jail_root, before)
+            raise FDXPolicyError("FDX produced a workspace side effect")
+        if process.returncode != 0:
+            raise FDXPolicyError(f"FDX exited with status {process.returncode}")
+        try:
+            response = json.loads(stdout.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise FDXPolicyError("FDX returned invalid structured output") from exc
+        if (
+            not isinstance(response, dict)
+            or response.get("protocol") != FDX_PROTOCOL
+            or response.get("version") != FDX_VERSION
+            or response.get("health") != "ok"
+            or response.get("capabilities") != {
+                "read_only": True,
+                "network_writes": False,
+                "workspace_mutation": False,
+                "process_persistence": False,
+            }
+        ):
+            raise FDXPolicyError("FDX response protocol mismatch")
+        return FDXResult(
+            status="succeeded",
+            output=response,
+            authoritative=False,
+            used_fdx=True,
+        )
     finally:
         await store.release_workspace_lease(
             workspace=str(root),
             owner=owner,
             epoch=lease.epoch,
         )
-    if len(stdout) > config.max_output_bytes or len(stderr) > config.max_output_bytes:
-        raise FDXPolicyError("FDX output exceeded configured bound")
-    after = _snapshot_files(jail_root)
-    if before != after:
-        _restore_files(jail_root, before)
-        raise FDXPolicyError("FDX produced a workspace side effect")
-    if process.returncode != 0:
-        raise FDXPolicyError(f"FDX exited with status {process.returncode}")
-    try:
-        response = json.loads(stdout.decode())
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise FDXPolicyError("FDX returned invalid structured output") from exc
-    if (
-        not isinstance(response, dict)
-        or response.get("protocol") != FDX_PROTOCOL
-        or response.get("version") != FDX_VERSION
-        or response.get("health") != "ok"
-        or response.get("capabilities") != {
-            "read_only": True,
-            "network_writes": False,
-            "workspace_mutation": False,
-            "process_persistence": False,
-        }
-    ):
-        raise FDXPolicyError("FDX response protocol mismatch")
-    return FDXResult(
-        status="succeeded",
-        output=response,
-        authoritative=False,
-        used_fdx=True,
-    )
 
 
 async def run_optional_fdx(
