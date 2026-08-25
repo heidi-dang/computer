@@ -6,9 +6,13 @@ import unittest
 from pathlib import Path
 
 from cptr.flowdeck.database import (
+    DatabaseCancelledError,
     DatabaseContractError,
     DatabaseRequest,
     ProjectDatabaseService,
+    cancel_database_operation,
+    register_database_operation,
+    unregister_database_operation,
 )
 
 
@@ -109,3 +113,47 @@ class ProjectDatabaseTests(unittest.IsolatedAsyncioTestCase):
             with psycopg.connect(project_url) as connection:
                 connection.execute("DROP TABLE IF EXISTS phase9_posts CASCADE")
                 connection.execute("DROP TABLE IF EXISTS phase9_users CASCADE")
+
+    async def test_postgresql_query_and_migration_cancellation_interrupt_and_rollback(self):
+        project_url = os.environ.get("CPTR_PROJECT_DATABASE_URL")
+        if not project_url:
+            self.skipTest("isolated project PostgreSQL fixture is not configured")
+        import psycopg
+
+        request = DatabaseRequest("pg-cancel", "user-1", str(self.root), engine="postgresql")
+        with psycopg.connect(project_url) as connection:
+            connection.execute("DROP TABLE IF EXISTS phase9_cancel CASCADE")
+            connection.execute("CREATE TABLE phase9_cancel (id integer PRIMARY KEY)")
+        try:
+            query_handle = register_database_operation("pg-cancel-query")
+            query_task = asyncio.create_task(
+                self.service.query(request, "SELECT pg_sleep(30)", handle=query_handle)
+            )
+            await asyncio.sleep(0.2)
+            self.assertTrue(cancel_database_operation("pg-cancel-query"))
+            with self.assertRaises(DatabaseCancelledError):
+                await query_task
+
+            migration_handle = register_database_operation("pg-cancel-migration")
+            migration_task = asyncio.create_task(
+                self.service.migrate(
+                    request,
+                    "SELECT pg_sleep(30); ALTER TABLE phase9_cancel ADD COLUMN should_not_exist text",
+                    handle=migration_handle,
+                )
+            )
+            await asyncio.sleep(0.2)
+            migration_handle.cancel()
+            with self.assertRaises(DatabaseCancelledError):
+                await migration_task
+            with psycopg.connect(project_url) as connection:
+                self.assertIsNone(
+                    connection.execute(
+                        "SELECT 1 FROM information_schema.columns WHERE table_name='phase9_cancel' AND column_name='should_not_exist'"
+                    ).fetchone()
+                )
+        finally:
+            unregister_database_operation("pg-cancel-query")
+            unregister_database_operation("pg-cancel-migration")
+            with psycopg.connect(project_url) as connection:
+                connection.execute("DROP TABLE IF EXISTS phase9_cancel CASCADE")

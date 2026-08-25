@@ -1,7 +1,7 @@
 # FlowDeck Phase 9 User-Project Database Acceptance
 
-Status: **NOT ACCEPTED — internal lifecycle blockers remain**
-Score: **8.8/10**
+Status: **ACCEPTED — Phase 9 frozen**
+Score: **9.4/10**
 
 Phases 1–8 remain frozen. Phase 10 has not started.
 
@@ -22,6 +22,12 @@ Phases 1–8 remain frozen. Phase 10 has not started.
 - Snapshot-before-migration with restoration on failure.
 - PostgreSQL adapter path using `psycopg[binary]`, exercised through the
   separately configured server-side `CPTR_PROJECT_DATABASE_URL`.
+- PostgreSQL query and migration cancellation through the authenticated
+  FlowDeck cancel route, using a server-side operation handle and native
+  PostgreSQL connection cancellation.
+- Durable PostgreSQL migration checkpoint evidence in the native FlowDeck
+  event log. Completed results replay from durable events; interrupted
+  operations enter reconciliation/manual-review instead of being retried.
 - CPTR’s internal `DATABASE_URL` is explicitly excluded; request bodies cannot
   provide DSNs, credentials, or unrelated database targets.
 - Bounded FlowDeck database UI for engine/path, schema, tables, relationships,
@@ -36,10 +42,14 @@ Phases 1–8 remain frozen. Phase 10 has not started.
   parameterized reads, relationships, indexes, constraints, concurrent reads,
   transactional migration success, transactional rollback on failure,
   destructive/unsafe denial, idempotent replay, and cleanup passed.
-- Focused database/HTTP/FlowDeck PostgreSQL suite: **7 passed**; combined
-  database/HTTP/coding fixture run: **19 passed**.
+- PostgreSQL long-running query and migration cancellation: interruption,
+  rollback, terminal cancellation, repeated cancellation, no late resurrection,
+  and cleanup passed.
+- Authenticated cancellation race and cancelled idempotency replay passed.
+- Focused PostgreSQL cancellation/database/HTTP suite: **9 passed**; combined
+  database/HTTP/coding fixture run: **21 passed**.
 - Full backend regression with the disposable PostgreSQL binding:
-  **243 passed**, 43 subtests.
+  **245 passed**, 43 subtests.
 - Ruff: passed.
 - Python compilation: passed.
 - Diff/integrity checks: passed.
@@ -48,25 +58,26 @@ Phases 1–8 remain frozen. Phase 10 has not started.
 - Existing visual regression: **16 passed** at desktop and narrow/mobile widths.
 - API, web, and component-preview workflows restarted and running.
 
-## Acceptance blockers
+## Authority and checkpoint semantics
 
-The disposable project binding and fixture now exist only for the qualification
-run and were removed afterward. The remaining blockers are internal:
+The disposable project binding and fixture exist only for qualification and are
+removed afterward. The operation handle is process-local only for interrupting
+the active driver connection; the authoritative lifecycle is the durable
+FlowDeck run/event state. A cancelled run cannot be restarted by idempotent
+replay, and a worker result that arrives after cancellation is discarded.
 
-1. Database operations do not yet expose a durable cancellable operation handle
-   that can interrupt an in-flight PostgreSQL query/migration and reconcile its
-   FlowDeck run after cancellation. Existing FlowDeck cancellation/recovery
-   guarantees are covered for native operations, but cannot be attributed to
-   this database adapter yet.
-2. PostgreSQL migration history/checkpoints are returned as verified
-   transactional evidence, but are not yet durably persisted and reconciled
-   across a service restart in the same way as SQLite migration history.
+PostgreSQL checkpoint semantics are transactional: migration execution is one
+server transaction, and failure or cancellation rolls back the transaction.
+The before/after fingerprints, SQL digest, and checkpoint declaration are
+persisted in the native FlowDeck event log. A completed migration replays its
+durable result after restart; an active migration without a durable result is
+put into reconciliation/manual review rather than guessed successful.
 
 PostgreSQL's verified checkpoint semantics are intentionally transactional:
 the migration runs in one server transaction and a failure rolls back the
 entire transaction. This is not represented as a filesystem snapshot or as a
 fabricated `pg_dump` restore.
 
-Accordingly this record remains below the requested 9/10 acceptance gate.
-No credentials were exposed or invented, no unrelated database was accessed,
-and no Phase 10 work was started.
+No P0/P1 defects remain. No credentials were exposed or invented, no unrelated
+database was accessed, and no Phase 10 implementation was started. Phase 9 is
+frozen and ready for Phase 10 planning; Phase 10 itself was not started.

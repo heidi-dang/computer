@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.app import app
 from cptr.flowdeck.coordinator import CoordinatorResult
-from cptr.flowdeck.durable import LifecycleError, OperationStatus, RunStatus
+from cptr.flowdeck.durable import DurableFlowDeck, LifecycleError, OperationStatus, RunStatus
 from cptr.models import Auth, Base, ChatMessage, Config, User, Workspace
 from cptr.models.flowdeck import (
     FlowDeckEvent,
@@ -140,6 +140,57 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             with psycopg.connect(project_url) as connection:
                 connection.execute("DROP TABLE IF EXISTS phase9_http_child CASCADE")
                 connection.execute("DROP TABLE IF EXISTS phase9_http_parent CASCADE")
+
+    async def test_authenticated_postgresql_query_cancel_is_terminal_and_non_resurrecting(self):
+        project_url = os.environ.get("CPTR_PROJECT_DATABASE_URL")
+        if not project_url:
+            self.skipTest("isolated project PostgreSQL fixture is not configured")
+        import psycopg
+
+        with psycopg.connect(project_url) as connection:
+            connection.execute("SELECT 1")
+        request_key = "pg-http-cancel-123"
+        request_task = asyncio.create_task(
+            self.client.post(
+                "/v1/flowdeck/database/query",
+                headers={**self.headers(), "Idempotency-Key": request_key},
+                json={
+                    "workspace": str(self.root_a),
+                    "engine": "postgresql",
+                    "sql": "SELECT pg_sleep(30)",
+                    "params": [],
+                },
+            )
+        )
+        store = DurableFlowDeck(self.session_factory)
+        run = None
+        for _ in range(20):
+            run = await store.get_run_by_request_key(request_key)
+            if run:
+                break
+            await asyncio.sleep(0.05)
+        self.assertIsNotNone(run)
+        cancel = await self.client.post(
+            f"/v1/flowdeck/orchestrations/{run.id}/cancel",
+            headers=self.headers(),
+            params={"workspace": str(self.root_a)},
+        )
+        self.assertEqual(cancel.status_code, 200, cancel.text)
+        response = await request_task
+        self.assertEqual(response.status_code, 409, response.text)
+        final = await store.get_run(run.id)
+        self.assertEqual(final.status, "CANCELLED")
+        replay = await self.client.post(
+            "/v1/flowdeck/database/query",
+            headers={**self.headers(), "Idempotency-Key": request_key},
+            json={
+                "workspace": str(self.root_a),
+                "engine": "postgresql",
+                "sql": "SELECT 1",
+                "params": [],
+            },
+        )
+        self.assertEqual(replay.status_code, 409, replay.text)
 
     async def request_run(
         self,

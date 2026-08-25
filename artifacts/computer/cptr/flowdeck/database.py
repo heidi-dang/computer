@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,68 @@ NULLABLE_RISK = re.compile(r"\b(add\s+column|alter\s+column)\b.*\b(not\s+null)\b
 
 class DatabaseContractError(ValueError):
     pass
+
+
+class DatabaseCancelledError(DatabaseContractError):
+    """Raised when FlowDeck cancellation reaches the active database driver."""
+
+
+class DatabaseOperationHandle:
+    def __init__(self, operation_id: str):
+        self.operation_id = operation_id
+        self.cancel_event = threading.Event()
+        self._lock = threading.Lock()
+        self._connection = None
+
+    def attach(self, connection) -> None:
+        with self._lock:
+            self._connection = connection
+            cancelled = self.cancel_event.is_set()
+        if cancelled:
+            try:
+                connection.cancel()
+            except Exception:
+                pass
+
+    def detach(self, connection) -> None:
+        with self._lock:
+            if self._connection is connection:
+                self._connection = None
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
+        with self._lock:
+            connection = self._connection
+        if connection is not None:
+            try:
+                connection.cancel()
+            except Exception:
+                pass
+
+
+_active_operations: dict[str, DatabaseOperationHandle] = {}
+_active_operations_lock = threading.Lock()
+
+
+def register_database_operation(operation_id: str) -> DatabaseOperationHandle:
+    handle = DatabaseOperationHandle(operation_id)
+    with _active_operations_lock:
+        _active_operations[operation_id] = handle
+    return handle
+
+
+def unregister_database_operation(operation_id: str) -> None:
+    with _active_operations_lock:
+        _active_operations.pop(operation_id, None)
+
+
+def cancel_database_operation(operation_id: str) -> bool:
+    with _active_operations_lock:
+        handle = _active_operations.get(operation_id)
+    if handle is None:
+        return False
+    handle.cancel()
+    return True
 
 
 @dataclass(frozen=True)
@@ -94,7 +157,7 @@ def _schema_sqlite(connection: sqlite3.Connection) -> dict[str, Any]:
     return {"engine": "sqlite", "tables": tables}
 
 
-def _postgres_connection():
+def _postgres_connection(handle: DatabaseOperationHandle | None = None):
     try:
         import psycopg
     except ImportError as exc:
@@ -104,7 +167,16 @@ def _postgres_connection():
     dsn = os.environ.get("CPTR_PROJECT_DATABASE_URL")
     if not dsn:
         raise DatabaseContractError("PostgreSQL requires the server-configured CPTR_PROJECT_DATABASE_URL")
-    return psycopg.connect(dsn, connect_timeout=5)
+    connection = psycopg.connect(dsn, connect_timeout=5)
+    if handle is not None:
+        handle.attach(connection)
+        connection.execute("SET statement_timeout = '30s'")
+    return connection
+
+
+def _check_cancelled(handle: DatabaseOperationHandle | None) -> None:
+    if handle is not None and handle.cancel_event.is_set():
+        raise DatabaseCancelledError("database operation cancelled")
 
 
 def _schema_postgres(connection) -> dict[str, Any]:
@@ -192,10 +264,10 @@ def _usage_analysis(root: Path, schema: dict[str, Any]) -> dict[str, Any]:
 
 
 class ProjectDatabaseService:
-    async def inspect(self, request: DatabaseRequest) -> dict[str, Any]:
-        return await asyncio.to_thread(self._inspect, request)
+    async def inspect(self, request: DatabaseRequest, *, handle: DatabaseOperationHandle | None = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self._inspect, request, handle)
 
-    def _inspect(self, request: DatabaseRequest) -> dict[str, Any]:
+    def _inspect(self, request: DatabaseRequest, handle: DatabaseOperationHandle | None = None) -> dict[str, Any]:
         root = _root(request.workspace)
         if request.engine == "sqlite":
             path = _sqlite_path(root, request.database)
@@ -210,7 +282,8 @@ class ProjectDatabaseService:
                 result["database"] = str(path.relative_to(root))
                 return result
         if request.engine == "postgresql":
-            with _postgres_connection() as connection:
+            with _postgres_connection(handle) as connection:
+                _check_cancelled(handle)
                 schema = _schema_postgres(connection)
                 return {
                     "schema": schema,
@@ -222,15 +295,22 @@ class ProjectDatabaseService:
                 }
         raise DatabaseContractError("database engine must be sqlite or postgresql")
 
-    async def query(self, request: DatabaseRequest, sql: str, params: list[Any] | None = None) -> dict[str, Any]:
-        return await asyncio.to_thread(self._query, request, sql, params or [])
+    async def query(self, request: DatabaseRequest, sql: str, params: list[Any] | None = None, *, handle: DatabaseOperationHandle | None = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self._query, request, sql, params or [], handle)
 
-    def _query(self, request: DatabaseRequest, sql: str, params: list[Any]) -> dict[str, Any]:
+    def _query(self, request: DatabaseRequest, sql: str, params: list[Any], handle: DatabaseOperationHandle | None = None) -> dict[str, Any]:
         _query_allowed(sql)
         root = _root(request.workspace)
         if request.engine != "sqlite":
-            with _postgres_connection() as connection:
-                cursor = connection.execute(sql, params)
+            with _postgres_connection(handle) as connection:
+                _check_cancelled(handle)
+                try:
+                    cursor = connection.execute(sql, params)
+                except Exception as exc:
+                    if handle is not None and handle.cancel_event.is_set():
+                        raise DatabaseCancelledError("database query cancelled") from exc
+                    raise
+                _check_cancelled(handle)
                 rows = [{str(key): _json_safe(value) for key, value in zip([d.name for d in cursor.description], row)} for row in cursor.fetchmany(MAX_ROWS)]
                 return {"columns": [d.name for d in cursor.description], "rows": rows, "truncated": len(rows) == MAX_ROWS}
         path = _sqlite_path(root, request.database)
@@ -240,10 +320,10 @@ class ProjectDatabaseService:
             rows = [{key: _json_safe(row[key]) for key in row.keys()} for row in cursor.fetchmany(MAX_ROWS)]
             return {"columns": [item[0] for item in cursor.description or []], "rows": rows, "truncated": len(rows) == MAX_ROWS}
 
-    async def migrate(self, request: DatabaseRequest, sql: str, *, snapshot: bool = True) -> dict[str, Any]:
-        return await asyncio.to_thread(self._migrate, request, sql, snapshot)
+    async def migrate(self, request: DatabaseRequest, sql: str, *, snapshot: bool = True, handle: DatabaseOperationHandle | None = None) -> dict[str, Any]:
+        return await asyncio.to_thread(self._migrate, request, sql, snapshot, handle)
 
-    def _migrate(self, request: DatabaseRequest, sql: str, snapshot: bool) -> dict[str, Any]:
+    def _migrate(self, request: DatabaseRequest, sql: str, snapshot: bool, handle: DatabaseOperationHandle | None = None) -> dict[str, Any]:
         _query_allowed(sql, mutation=True)
         if DESTRUCTIVE.search(sql):
             raise DatabaseContractError("destructive migration denied; provide a non-destructive reconciliation")
@@ -251,14 +331,18 @@ class ProjectDatabaseService:
             raise DatabaseContractError("unsafe NOT NULL migration denied without a staged backfill")
         root = _root(request.workspace)
         if request.engine == "postgresql":
-            before = self._inspect(request)
-            with _postgres_connection() as connection:
+            before = self._inspect(request, handle)
+            with _postgres_connection(handle) as connection:
                 try:
                     with connection.transaction():
+                        _check_cancelled(handle)
                         connection.execute(sql)
+                        _check_cancelled(handle)
                 except Exception as exc:
+                    if handle is not None and handle.cancel_event.is_set():
+                        raise DatabaseCancelledError("PostgreSQL migration cancelled and rolled back") from exc
                     raise DatabaseContractError("PostgreSQL migration rolled back") from exc
-            after = self._inspect(request)
+            after = self._inspect(request, handle)
             history_entry = {
                 "fingerprint_before": before["schema_fingerprint"],
                 "fingerprint_after": after["schema_fingerprint"],

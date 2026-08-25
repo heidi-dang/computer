@@ -20,3 +20,4 @@
 - [Native cancellation finalization](native-cancel-finalization.md) — cancellation must durably finalize messages even when it wins before the native coroutine starts.
 - [Frontend session expiry](frontend-session-expiry.md) — protected 401s should render login in place instead of triggering a reload loop.
 - [Project database boundary](project-database-boundary.md) — project PostgreSQL access requires a separate explicit server binding, never CPTR's internal database URL.
+- [PostgreSQL cancellation reconciliation](postgres-cancellation-reconciliation.md) — native driver interruption is subordinate to durable FlowDeck terminal state and replay fencing.

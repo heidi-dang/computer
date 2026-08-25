@@ -27,9 +27,13 @@ from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
 from cptr.flowdeck.designer import DesignerContractError, DesignerRequest, run_designer
 from cptr.flowdeck.runtime import RuntimeContractError, RuntimeRequest, managed_runtime
 from cptr.flowdeck.database import (
+    DatabaseCancelledError,
     DatabaseContractError,
     DatabaseRequest,
+    cancel_database_operation,
     project_database,
+    register_database_operation,
+    unregister_database_operation,
 )
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
@@ -820,10 +824,27 @@ async def _database_run(store: DurableFlowDeck, database_request: DatabaseReques
         result = next((event.payload.get("result") for event in events if event.kind == "DATABASE_RESULT"), None)
         if result is not None:
             return result
+        if run.status == RunStatus.CANCELLED.value:
+            raise DatabaseCancelledError("database operation was cancelled")
+        if run.status == RunStatus.RUNNING.value:
+            await store.require_manual_review(
+                run.id,
+                reason="database operation was interrupted before its outcome was durable",
+            )
+            raise DatabaseCancelledError("database operation requires reconciliation after interruption")
     await store.start_run(run.id)
     await store.record_event(run.id, "DATABASE_OPERATION_STARTED", {"operation": operation, "authoritative": True, "source": "runtime"})
+    handle = register_database_operation(run.id)
     try:
-        result = await callback()
+        result = await callback(handle)
+        current = await store.get_run(run.id)
+        if current is None or current.status == RunStatus.CANCELLED.value or handle.cancel_event.is_set():
+            await store.record_event(
+                run.id,
+                "DATABASE_LATE_OUTCOME_DISCARDED",
+                {"operation": operation, "authoritative": True, "source": "verifier"},
+            )
+            raise DatabaseCancelledError("database outcome was discarded after cancellation")
         result["run_id"] = run.id
         result["operation"] = operation
         result["evidence"] = {
@@ -833,18 +854,51 @@ async def _database_run(store: DurableFlowDeck, database_request: DatabaseReques
             "observed_outcome": "succeeded",
             "database_engine": database_request.engine,
         }
+        if operation == "migrate" and "migration_history" in result:
+            await store.record_event(
+                run.id,
+                "DATABASE_MIGRATION_CHECKPOINT",
+                {"migration_history": result["migration_history"], "authoritative": True, "source": "verifier"},
+            )
         await store.record_event(run.id, "DATABASE_RESULT", {"result": result})
         return result
+    except DatabaseCancelledError:
+        if handle.cancel_event.is_set():
+            try:
+                current = await store.get_run(run.id)
+                if current is not None and current.status != RunStatus.CANCELLED.value:
+                    await store.cancel_run(
+                        run_id=run.id,
+                        owner=database_request.owner,
+                        workspace=database_request.workspace,
+                    )
+            except Exception:
+                pass
+        current = await store.get_run(run.id)
+        if current is not None and current.status != RunStatus.CANCELLED.value:
+            try:
+                await store.record_event(
+                    run_id=run.id,
+                    kind="DATABASE_OPERATION_CANCELLED",
+                    payload={"operation": operation, "authoritative": True, "source": "runtime"},
+                )
+            except Exception:
+                pass
+        raise
     except DatabaseContractError:
         await store.record_event(run.id, "DATABASE_OPERATION_DENIED", {"operation": operation, "authoritative": True, "source": "verifier"})
         raise
+    finally:
+        unregister_database_operation(run.id)
 
 
 @router.post("/database/inspect")
 async def inspect_database(request: Request, body: DatabaseRequestBody):
     _, _, store, database_request = await _database_request(request, body)
     try:
-        return await _database_run(store, database_request, "inspect", lambda: project_database.inspect(database_request))
+        return await _database_run(store, database_request, "inspect", lambda handle: project_database.inspect(database_request, handle=handle))
+    except DatabaseCancelledError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except DatabaseContractError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -853,7 +907,9 @@ async def inspect_database(request: Request, body: DatabaseRequestBody):
 async def query_database(request: Request, body: DatabaseQueryBody):
     _, _, store, database_request = await _database_request(request, body)
     try:
-        return await _database_run(store, database_request, "query", lambda: project_database.query(database_request, body.sql, body.params))
+        return await _database_run(store, database_request, "query", lambda handle: project_database.query(database_request, body.sql, body.params, handle=handle))
+    except DatabaseCancelledError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except DatabaseContractError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -862,7 +918,9 @@ async def query_database(request: Request, body: DatabaseQueryBody):
 async def migrate_database(request: Request, body: DatabaseMigrationBody):
     _, _, store, database_request = await _database_request(request, body)
     try:
-        return await _database_run(store, database_request, "migrate", lambda: project_database.migrate(database_request, body.sql, snapshot=body.snapshot))
+        return await _database_run(store, database_request, "migrate", lambda handle: project_database.migrate(database_request, body.sql, snapshot=body.snapshot, handle=handle))
+    except DatabaseCancelledError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except DatabaseContractError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -875,8 +933,10 @@ async def restore_database(request: Request, body: DatabaseRestoreBody):
             store,
             database_request,
             "restore",
-            lambda: project_database.restore(database_request, body.snapshot),
+            lambda _handle: project_database.restore(database_request, body.snapshot),
         )
+    except DatabaseCancelledError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except DatabaseContractError as exc:
         raise HTTPException(422, str(exc)) from exc
 
@@ -905,6 +965,7 @@ async def cancel_orchestration(request: Request, run_id: str, workspace: str):
     from cptr.utils.chat_task import cancel_flowdeck_tasks
 
     await cancel_flowdeck_tasks(run.id)
+    cancel_database_operation(run.id)
     return _safe_run(cancelled)
 
 
