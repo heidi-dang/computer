@@ -26,6 +26,11 @@ from cptr.flowdeck.coordinator import (
 from cptr.flowdeck.durable import DurableFlowDeck, RunStatus
 from cptr.flowdeck.designer import DesignerContractError, DesignerRequest, run_designer
 from cptr.flowdeck.runtime import RuntimeContractError, RuntimeRequest, managed_runtime
+from cptr.flowdeck.database import (
+    DatabaseContractError,
+    DatabaseRequest,
+    project_database,
+)
 from cptr.models import Chat, ChatMessage
 from cptr.utils.chat_export import export_chat_to_file
 from cptr.utils.config import now_ms
@@ -77,6 +82,24 @@ class RuntimeRequestBody(BaseModel):
 
     workspace: str = Field(min_length=1, max_length=4096)
     requested_port: int | None = Field(default=None, ge=3000, le=9000)
+
+
+class DatabaseRequestBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(min_length=1, max_length=4096)
+    engine: str = Field(default="sqlite", pattern="^(sqlite|postgresql)$")
+    database: str | None = Field(default=None, max_length=512)
+
+
+class DatabaseQueryBody(DatabaseRequestBody):
+    sql: str = Field(min_length=1, max_length=20_000)
+    params: list[Any] = Field(default_factory=list, max_length=100)
+
+
+class DatabaseMigrationBody(DatabaseRequestBody):
+    sql: str = Field(min_length=1, max_length=20_000)
+    snapshot: bool = True
 
 
 def _message_dict(message: ChatMessage) -> dict[str, Any]:
