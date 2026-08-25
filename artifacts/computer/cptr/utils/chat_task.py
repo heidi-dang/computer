@@ -1591,6 +1591,20 @@ async def run_chat_task(
                 else:
                     await output_queue.put({"type": "done", "finish_reason": "stop"})
 
+    async def observe_terminal(kind: str, payload: dict[str, Any] | None = None):
+        """Execution observer hook; uses the same authenticated CPTR emitter."""
+        from cptr.flowdeck.terminal_observer import emit_terminal_frame
+
+        await emit_terminal_frame(
+            user_id=user_id,
+            emit=emit,
+            kind=kind,
+            payload=payload,
+            run_id=flowdeck_run_id,
+            parent_run_id=flowdeck_parent_run_id,
+            message_id=message_id,
+        )
+
     async def _emit_done():
         """Emit done=True enriched with chat title and content preview."""
         try:
@@ -1919,6 +1933,26 @@ async def run_chat_task(
                 flushed_item = _flush_text()
                 if flushed_item:
                     await emit(output=flushed_item)
+                if observe_terminal:
+                    observer_kind = (
+                        "command_exit"
+                        if event.name == "run_command" and event.status in {"completed", "failed"}
+                        else "action_exit"
+                        if event.status in {"completed", "failed"}
+                        else "command_start"
+                        if event.name == "run_command"
+                        else "action_start"
+                    )
+                    await observe_terminal(
+                        observer_kind,
+                        {
+                            "tool_name": event.name or "agent_tool",
+                            "command": (event.arguments or {}).get("command"),
+                            "status": event.status,
+                            "text": event.output,
+                            "child_agent_id": specialist_role,
+                        },
+                    )
                 existing = next(
                     (
                         item
@@ -1980,6 +2014,15 @@ async def run_chat_task(
                 flushed_item = _flush_text()
                 if flushed_item:
                     await emit(output=flushed_item)
+                if observe_terminal:
+                    await observe_terminal(
+                        "command_output" if event.stream_kind == "command_output" else "action_output",
+                        {
+                            "stream": "stdout",
+                            "text": event.delta,
+                            "child_agent_id": specialist_role,
+                        },
+                    )
                 existing_call = next(
                     (
                         item
@@ -2366,6 +2409,8 @@ async def run_chat_task(
                 if before_mutation is not None
                 else frozenset()
             ),
+            "terminal_observer": observe_terminal,
+            "child_agent_id": specialist_role,
         }
 
         resumed_calls = await run_queued_tool_calls(tool_ctx)

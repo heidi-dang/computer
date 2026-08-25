@@ -753,16 +753,18 @@ function applyNativeTranscriptEvent(data: any, msg: any, trustedFlowDeckEvent = 
 const transcriptRunId = String(
 msg?.meta?.flowdeck_run_id || flowdeckRunId || flowdeckMessageId || ''
 );
+const isTerminalObserverFrame =
+	data?.terminal_frame === true || data?.kind === 'terminal_frame';
+const isFlowDeckLifecycleEvent =
+	typeof data?.kind === 'string' &&
+	!data?.delta &&
+	!data?.output &&
+	!data?.done;
 if (
 transcriptRunId &&
-(data?.flowdeck_run_id ||
-data?.flowdeck_parent_run_id ||
-data?.run_id ||
-data?.kind ||
-data?.delta ||
-data?.output ||
-data?.done ||
-data?.message_id === flowdeckMessageId)
+	(isTerminalObserverFrame ||
+		isFlowDeckLifecycleEvent ||
+		trustedFlowDeckEvent && (data?.flowdeck_run_id || data?.flowdeck_parent_run_id))
 ) {
 mergeFlowDeckEvent(data, transcriptRunId, trustedFlowDeckEvent);
 }
@@ -899,7 +901,7 @@ const isActiveNativeTranscriptEvent =
 !parentRunId &&
 ownerRunId === flowdeckMessageId &&
 Boolean(event?.message_id && event.message_id === flowdeckMessageId) &&
-Boolean(event?.delta || event?.output || event?.done);
+Boolean(event?.terminal_frame || event?.kind === 'terminal_frame');
 if (
 (!parentRunId && !isActiveNativeTranscriptEvent && !trustedFlowDeckEvent) ||
 (parentRunId && parentRunId !== ownerRunId && !trustedFlowDeckEvent)
@@ -1509,6 +1511,23 @@ applyNativeTranscriptEvent(event, message, true);
 		const userId = `heidi-user-${Date.now()}`;
 		const assistantId = `heidi-assistant-${Date.now()}`;
 		flowdeckMessageId = assistantId;
+		flowdeckEvents = [
+			{
+				kind: 'terminal_frame',
+				terminal_frame: true,
+				payload: {
+					kind: 'terminal_frame',
+					frame_kind: 'run_start',
+					payload: { status: 'starting' },
+					sequence: 1,
+					created_at: Date.now(),
+					terminal_message_id: assistantId
+				},
+				sequence: 1,
+				created_at: Date.now(),
+				message_id: assistantId
+			}
+		];
 		allMessages = [
 			...allMessages,
 			{

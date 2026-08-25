@@ -32,10 +32,11 @@ normalizedStatus === 'manual_review_required' || normalizedStatus === 'manual_re
 );
 
 function eventKey(event: any, index: number) {
+const frame = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
 return String(
 event?.id ||
 event?.event_id ||
-`${event?.sequence ?? index}:${event?.kind || event?.type || ''}:${event?.run_id || ''}:${event?.payload?.step_id || ''}`
+  `${frame?.sequence ?? event?.sequence ?? index}:${frame?.frame_kind || event?.kind || event?.type || ''}:${event?.run_id || frame?.terminal_run_id || ''}:${event?.payload?.step_id || ''}`
 );
 }
 
@@ -56,8 +57,9 @@ return values.find((value) => value !== undefined && value !== null && String(va
 }
 
 function eventLine(event: any, index: number) {
-const kind = String(event?.kind || event?.type || 'activity').replaceAll('_', ' ').toLowerCase();
-const payload = event?.payload || {};
+const frame = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
+const kind = String(frame?.frame_kind || event?.kind || event?.type || 'activity').replaceAll('_', ' ').toLowerCase();
+const payload = frame?.payload || event?.payload || {};
 const item = event?.output || {};
 const call = item?.type === 'function_call' ? item : null;
 const output = item?.type === 'function_call_output' ? item : null;
@@ -81,6 +83,7 @@ payload.file,
 payload.file_path
 );
 const stream = firstValue(
+payload.text,
 output?.output,
 payload.stdout,
 payload.stderr,
@@ -98,12 +101,18 @@ safeOutputSummary
 const identities = [
 firstValue(payload.specialist_id, payload.child_agent_id),
 firstValue(payload.attempt_id, event?.attempt_id),
-firstValue(payload.step_id, event?.step_id)
+firstValue(payload.step_id, event?.step_id),
+firstValue(payload.session_id, payload.terminal_id)
 ].filter(Boolean);
 const identity = identities.join(' · ');
 let title = tool ? `tool · ${tool}` : path ? `file · ${path}` : kind;
 if (command) title = `shell · ${command}`;
 if (output) title = `output · ${tool || 'tool result'}`;
+if (frame?.frame_kind === 'command_start') title = 'shell · command started';
+if (frame?.frame_kind === 'command_output') title = `shell · ${payload.stream || 'output'}`;
+if (frame?.frame_kind === 'command_exit') title = `shell · exited (${payload.exit_code ?? 'unknown'})`;
+if (frame?.frame_kind === 'action_start') title = `action · ${payload.tool_name || 'started'}`;
+if (frame?.frame_kind === 'action_exit') title = `action · ${payload.tool_name || 'completed'}`;
 if (event?.delta) title = 'agent update · native transcript activity';
 if (item?.type === 'reasoning') title = `agent activity · ${safeOutputSummary || 'safe summary'}`;
 if (item?.type === 'message') title = `agent update · ${safeOutputSummary || 'native transcript activity'}`;
@@ -116,8 +125,8 @@ sequence: event?.sequence ?? index + 1,
 title,
 detail: stream ? stringify(stream) : safeSummary || identity || '',
 identity,
-isError: Boolean(payload.stderr) || /failed|error|rejected/i.test(`${kind} ${safeSummary || ''}`),
-isLifecycle: !tool && !command && !path && !output
+isError: Boolean(payload.stderr) || payload.status === 'failed' || /failed|error|rejected/i.test(`${kind} ${safeSummary || ''}`),
+isLifecycle: Boolean(frame) || (!tool && !command && !path && !output)
 };
 }
 

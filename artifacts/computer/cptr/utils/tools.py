@@ -185,6 +185,20 @@ async def stream_command_session_output(command_session_id: str):
                     session["output"] = session["output"][-256 * 1024 :]
                 async with session["condition"]:
                     session["condition"].notify_all()
+                observer = session.get("terminal_observer")
+                if observer:
+                    await observer(
+                        "command_output",
+                        {
+                            "session_id": command_session_id,
+                            "terminal_id": command_session_id,
+                            "cwd": session.get("cwd"),
+                            "stream": "combined" if master_fd is not None else "stdout",
+                            "text": chunk.decode(errors="replace"),
+                            "child_agent_id": session.get("child_agent_id"),
+                            "attempt_id": session.get("attempt_id"),
+                        },
+                    )
 
             if log_file:
                 entry = (
@@ -224,6 +238,20 @@ async def stream_command_session_output(command_session_id: str):
             session["master_fd"] = None  # fd is closed
             async with session["condition"]:
                 session["condition"].notify_all()
+            observer = session.get("terminal_observer")
+            if observer:
+                await observer(
+                    "command_exit",
+                    {
+                        "session_id": command_session_id,
+                        "terminal_id": command_session_id,
+                        "cwd": session.get("cwd"),
+                        "exit_code": exit_code,
+                        "status": "succeeded" if exit_code == 0 else "failed",
+                        "child_agent_id": session.get("child_agent_id"),
+                        "attempt_id": session.get("attempt_id"),
+                    },
+                )
 
         if log_file:
             log_file.write(
@@ -1353,6 +1381,7 @@ async def run_command(
         "total_bytes": 0,
         "command": command,
         "workspace": workspace,
+        "cwd": str(work_dir),
         "user_id": user_id,
         "identity": identity,
         "chat_id": __context__.get("chat_id"),
@@ -1364,7 +1393,23 @@ async def run_command(
         "log_path": str(log_path),
         "log_task": None,
         "condition": asyncio.Condition(),
+        "terminal_observer": __context__.get("terminal_observer"),
+        "child_agent_id": __context__.get("child_agent_id"),
+        "attempt_id": __context__.get("attempt_id"),
     }
+    observer = __context__.get("terminal_observer")
+    if observer:
+        await observer(
+            "command_start",
+            {
+                "session_id": command_session_id,
+                "terminal_id": command_session_id,
+                "command": command,
+                "cwd": str(work_dir),
+                "child_agent_id": __context__.get("child_agent_id"),
+                "attempt_id": __context__.get("attempt_id"),
+            },
+        )
     log_task = asyncio.create_task(stream_command_session_output(command_session_id))
     command_sessions[command_session_id]["log_task"] = log_task
 
@@ -3346,6 +3391,17 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
         args = dict(args)
         args.pop("workspace", None)
         try:
+            observer = __context__.get("terminal_observer")
+            if observer and name != "run_command":
+                await observer(
+                    "action_start",
+                    {
+                        "tool_name": name,
+                        "cwd": __context__.get("workspace"),
+                        "child_agent_id": __context__.get("child_agent_id"),
+                        "attempt_id": __context__.get("attempt_id"),
+                    },
+                )
             sig = inspect.signature(fn)
             if "__context__" in sig.parameters:
                 result = await fn(**args, __context__=__context__)
@@ -3358,8 +3414,29 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
                     verified = await verified
                 if verified is not True:
                     return f"Error: mutation verification failed: {name}"
+            if observer and name != "run_command":
+                await observer(
+                    "action_exit",
+                    {
+                        "tool_name": name,
+                        "status": "succeeded",
+                        "child_agent_id": __context__.get("child_agent_id"),
+                        "attempt_id": __context__.get("attempt_id"),
+                    },
+                )
             return result
         except Exception as e:
+            observer = __context__.get("terminal_observer")
+            if observer and name != "run_command":
+                await observer(
+                    "action_exit",
+                    {
+                        "tool_name": name,
+                        "status": "failed",
+                        "child_agent_id": __context__.get("child_agent_id"),
+                        "attempt_id": __context__.get("attempt_id"),
+                    },
+                )
             return f"Error executing {name}: {e}"
 
     # Check external tool servers
