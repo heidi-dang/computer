@@ -37,15 +37,6 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.root_b.mkdir()
         self.root_a_alias.symlink_to(self.root_a, target_is_directory=True)
         self.db_file = Path(self.temp.name, "http.db")
-    async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root_a = Path(self.temp.name, "workspace-a").resolve()
-        self.root_b = Path(self.temp.name, "workspace-b").resolve()
-        self.root_a_alias = Path(self.temp.name, "workspace-a-alias").resolve()
-        self.root_a.mkdir()
-        self.root_b.mkdir()
-        self.root_a_alias.symlink_to(self.root_a, target_is_directory=True)
-        self.db_file = Path(self.temp.name, "http.db")
         self.engine = create_async_engine(
             f"sqlite+aiosqlite:///{self.db_file}", connect_args={"timeout": 5}
         )
