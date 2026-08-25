@@ -753,6 +753,10 @@ class ControlTaskStore:
                     ControlMessage.id == message_id,
                     ControlMessage.status == "DELIVERED",
                     ControlMessage.task_id == task_id,
+                    or_(
+                        ControlMessage.target_message_id.is_(None),
+                        ControlMessage.target_message_id == message_id_for_run,
+                    ),
                 )
                 .values(
                     status="CONSUMED",

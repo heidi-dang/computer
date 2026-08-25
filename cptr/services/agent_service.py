@@ -7,8 +7,10 @@ import uuid
 import hashlib
 from typing import Any
 
+from sqlalchemy import select
+
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
-from cptr.models import Chat, ChatMessage, ControlTask, Workspace
+from cptr.models import Chat, ChatMessage, ControlMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import get_db
 from cptr.utils.redaction import (
@@ -17,6 +19,8 @@ from cptr.utils.redaction import (
     redact_sensitive,
     redact_text,
 )
+
+CONTROL_MESSAGE_OUTPUT_LIMIT = 20
 
 
 class AgentService:
@@ -269,6 +273,7 @@ class AgentService:
                 output={"content": safe_output},
                 updated_at=int(time.time() * 1000),
             )
+        control_messages, control_messages_truncated = await self._control_delivery_records(task.id)
         return {
             "id": task.id,
             "workspace_id": task.workspace_id,
@@ -280,6 +285,8 @@ class AgentService:
             "output": safe_output,
             "raw_output": redact_external(message.output or []),
             "error": redact_text(error) if error else None,
+            "control_messages": control_messages,
+            "control_messages_truncated": control_messages_truncated,
             "created_at": task.created_at,
             "updated_at": task.updated_at,
         }
@@ -291,6 +298,40 @@ class AgentService:
             "status": task["status"],
             "content": redact_text(task["output"]),
             "raw_output": redact_sensitive(task["raw_output"]),
+            "control_messages": task.get("control_messages", []),
+            "control_messages_truncated": bool(task.get("control_messages_truncated", False)),
+        }
+
+    async def _control_delivery_records(self, task_id: str) -> tuple[list[dict[str, Any]], bool]:
+        async with await get_db() as db:
+            result = await db.execute(
+                select(ControlMessage)
+                .where(ControlMessage.task_id == task_id)
+                .order_by(ControlMessage.created_at, ControlMessage.id)
+                .limit(CONTROL_MESSAGE_OUTPUT_LIMIT + 1)
+            )
+            rows = list(result.scalars().all())
+        truncated = len(rows) > CONTROL_MESSAGE_OUTPUT_LIMIT
+        return [
+            self._control_delivery_record(row) for row in rows[:CONTROL_MESSAGE_OUTPUT_LIMIT]
+        ], truncated
+
+    @staticmethod
+    def _control_delivery_record(row: ControlMessage) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "status": row.status,
+            "chat_message_id": row.chat_message_id,
+            "target_message_id": row.target_message_id,
+            "monitor_id": row.monitor_id,
+            "scope_id": row.scope_id,
+            "intended_message_id": row.intended_message_id,
+            "consumed_task_id": row.consumed_task_id,
+            "consumed_message_id": row.consumed_message_id,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+            "delivered_at": row.delivered_at,
+            "consumed_at": row.consumed_at,
         }
 
     async def send_message(
@@ -399,6 +440,8 @@ class AgentService:
             "control_message_id": control_message.id,
             "status": "QUEUED",
             "delivery_status": control_message.status,
+            "target_message_id": getattr(control_message, "target_message_id", None),
+            "intended_message_id": getattr(control_message, "intended_message_id", None),
         }
 
     async def cancel_task(self, task_id: str, *, user_id: str) -> dict[str, Any]:
