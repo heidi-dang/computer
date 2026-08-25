@@ -1473,6 +1473,7 @@ applyNativeTranscriptEvent(event, message, true);
 const poll = async () => {
 			try {
 				const state = await getFlowDeckOrchestration(runId, workspace);
+console.info('[flowdeck-replay]', runId, state.events?.length ?? 0, state.events?.map((event: any) => event.kind));
 				flowdeckStatus = String(state.status || state.state || 'active').toLowerCase();
 				if (Array.isArray(state.events)) mergeFlowDeckEvents(state.events);
 				for (const event of (state.events as any[]) || []) applyFlowDeckEventToMessage(event);
