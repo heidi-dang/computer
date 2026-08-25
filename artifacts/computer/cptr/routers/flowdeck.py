@@ -341,7 +341,7 @@ async def _checkpoint_operation(
             {"operation": capability, "attempt_id": attempt.id, "source": "runtime"},
         )
         try:
-            result = execute(canonical, owner)
+            result = execute(canonical, owner, run.id)
             if inspect.isawaitable(result):
                 result = await result
             evidence = {
@@ -1076,11 +1076,30 @@ async def capture_checkpoint(request: Request, body: CheckpointRequest):
         workspace=body.workspace,
         capability="capture",
         target="workspace-head",
-        execute=lambda canonical, owner: CheckpointService(
+        execute=lambda canonical, owner, run_id: CheckpointService(
             get_session_factory()
         ).capture(workspace=canonical, owner=owner, run_id=run_id),
     )
     return {**result, "run_id": run_id, "reused": reused}
+
+
+@router.get("/checkpoints")
+async def list_checkpoints(request: Request, workspace: str):
+    _same_origin(request)
+    owner = await _authenticate_flowdeck(request)
+    try:
+        canonical = await resolve_gateway_workspace(
+            session_factory=get_session_factory(),
+            user_id=owner,
+            requested_workspace=workspace,
+        )
+    except AuthenticatedGatewayError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    return {
+        "checkpoints": await CheckpointService(get_session_factory()).list(
+            workspace=canonical, owner=owner
+        )
+    }
 
 
 @router.post("/checkpoints/restore")
@@ -1091,7 +1110,7 @@ async def restore_checkpoint(request: Request, body: CheckpointRestoreRequest):
         workspace=body.workspace,
         capability="restore",
         target=body.checkpoint_id,
-        execute=lambda canonical, owner: CheckpointService(
+        execute=lambda canonical, owner, run_id: CheckpointService(
             get_session_factory()
         ).restore(
             checkpoint_id=body.checkpoint_id,

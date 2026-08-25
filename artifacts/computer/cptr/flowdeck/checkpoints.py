@@ -9,8 +9,8 @@ from typing import Any
 
 from sqlalchemy import select
 
-from cptr.flowdeck.git import GitInspectionError, _git
 from cptr.models.flowdeck import FlowDeckCheckpoint
+from cptr.utils.git import GitError, _run, status as git_status
 
 
 class CheckpointError(RuntimeError):
@@ -28,8 +28,8 @@ def _root(workspace: str) -> Path:
 
 async def _revision(root: Path) -> str:
     try:
-        value = await _git(root, "rev-parse", "--verify", "HEAD", output_limit=256)
-    except GitInspectionError as exc:
+        _, value, _ = await _run("rev-parse", "--verify", "HEAD", cwd=str(root))
+    except GitError as exc:
         raise CheckpointError("checkpoint revision could not be verified") from exc
     revision = value.strip()
     if len(revision) != 40 or any(char not in "0123456789abcdef" for char in revision):
@@ -39,21 +39,37 @@ async def _revision(root: Path) -> str:
 
 async def _clean(root: Path) -> bool:
     try:
-        value = await _git(
-            root,
-            "status",
-            "--porcelain=v1",
-            "--untracked-files=all",
-            output_limit=128 * 1024,
-        )
-    except GitInspectionError as exc:
+        value = await git_status(str(root))
+    except GitError as exc:
         raise CheckpointError("workspace state could not be verified") from exc
-    return not value.strip()
+    return not value["files"]
 
 
 class CheckpointService:
     def __init__(self, session_factory):
         self.session_factory = session_factory
+
+    async def list(self, *, workspace: str, owner: str) -> list[dict[str, Any]]:
+        root = _root(workspace)
+        async with self.session_factory() as db:
+            rows = await db.scalars(
+                select(FlowDeckCheckpoint)
+                .where(
+                    FlowDeckCheckpoint.workspace == str(root),
+                    FlowDeckCheckpoint.owner == owner,
+                )
+                .order_by(FlowDeckCheckpoint.created_at.desc())
+            )
+            return [
+                {
+                    "checkpoint_id": row.id,
+                    "revision": row.revision,
+                    "status": row.status,
+                    "created_at": row.created_at,
+                    "restored_at": row.restored_at,
+                }
+                for row in rows
+            ]
 
     async def capture(
         self, *, workspace: str, owner: str, run_id: str | None = None
@@ -114,9 +130,9 @@ class CheckpointService:
                 "restore requires a clean worktree", code="dirty_workspace"
             )
         try:
-            await _git(root, "checkout", "--detach", revision, output_limit=1024)
+            await _run("checkout", "--detach", revision, cwd=str(root))
             observed = await _revision(root)
-        except GitInspectionError as exc:
+        except GitError as exc:
             raise CheckpointError("checkpoint restore could not be verified") from exc
         if observed != revision:
             raise CheckpointError(
