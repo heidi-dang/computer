@@ -247,6 +247,14 @@ async def run_heidi_coordinator(
             "AUDIT_REPOSITORY_FACTS_COLLECTED",
             inspection.as_dict(),
         )
+        from cptr.flowdeck.audit_analysis import analyze_repository_facts
+
+        analysis = analyze_repository_facts(inspection.as_dict())
+        await store.record_event(
+            run.id,
+            "AUDIT_ANALYSIS_CREATED",
+            analysis.as_dict(),
+        )
     if build_request and created:
         await store.record_event(
             run.id,
