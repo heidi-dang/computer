@@ -229,11 +229,14 @@ async def _generated_auth_operation(
             await store.require_manual_review(run.id, reason="auth operation cancelled before verification")
             raise
         except GeneratedAuthError as exc:
+            failure = _generated_auth_failure(exc, capability)
             evidence = {
                 "authoritative": True, "source": "verifier",
                 "observation": "verifier_check", "observed_outcome": "failed",
                 "attempt_id": attempt.id, "operation": capability,
-                "error": str(exc), "error_status": exc.status,
+                "error": failure["message"],
+                "error_code": failure["code"],
+                "error_status": failure["status"],
             }
             await store.finish_attempt(
                 attempt.id, owner=owner, outcome="failed", evidence=evidence,
@@ -241,10 +244,16 @@ async def _generated_auth_operation(
             await store.finish_step(step.id, status=StepStatus.FAILED)
             await store.record_event(
                 run.id, "AUTH_OPERATION_FAILED",
-                {"operation": capability, "authoritative": True, "source": "verifier"},
+                {
+                    "operation": capability,
+                    "authoritative": True,
+                    "source": "verifier",
+                    "error_code": failure["code"],
+                    "error_status": failure["status"],
+                },
             )
             await store.complete_run(run.id, status=RunStatus.FAILED)
-            raise HTTPException(exc.status, str(exc)) from exc
+            raise HTTPException(failure["status"], failure["message"]) from exc
         except Exception:
             await store.mark_attempt_unknown(attempt.id, error="verifier interrupted")
             await store.require_manual_review(run.id, reason="auth verifier interrupted")
@@ -273,6 +282,21 @@ def _request_key(request: Request) -> str:
     if not _KEY_PATTERN.fullmatch(value):
         raise HTTPException(400, "a valid Idempotency-Key header is required")
     return value
+
+
+def _generated_auth_failure(exc: GeneratedAuthError, capability: str) -> dict[str, Any]:
+    """Return failure metadata safe to expose and persist.
+
+    Callback inputs include verifier settings and bearer-shaped values. Keep
+    callback failures independent of exception text so a future adapter
+    change cannot echo one of those inputs into durable state.
+    """
+    message = (
+        "provider callback rejected"
+        if capability == "callback.verify"
+        else str(exc)
+    )
+    return {"message": message, "code": exc.code, "status": exc.status}
 
 
 def _audit_fingerprint(
