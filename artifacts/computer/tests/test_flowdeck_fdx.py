@@ -3,6 +3,7 @@ import os
 import stat
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -242,6 +243,85 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.used_fdx)
         self.assertTrue(result.authoritative)
         self.assertFalse((self.workspace / "created.txt").exists())
+
+    async def test_fdx_cleans_workspace_before_releasing_lease(self):
+        self.executable.write_text(
+            "#!/bin/sh\n"
+            "read payload\n"
+            "printf side-effect > created.txt\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
+            "\"health\":\"ok\",\"capabilities\":{\"read_only\":true,\"network_writes\":false,"
+            "\"workspace_mutation\":false,\"process_persistence\":false}}'\n"
+        )
+        self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+
+        from cptr.flowdeck import fdx
+
+        events = []
+        original_restore = fdx._restore_files
+        original_release = self.store.release_workspace_lease
+
+        def record_restore(*args, **kwargs):
+            events.append("cleanup")
+            return original_restore(*args, **kwargs)
+
+        async def record_release(*args, **kwargs):
+            events.append("release")
+            return await original_release(*args, **kwargs)
+
+        with (
+            mock.patch.object(fdx, "_restore_files", side_effect=record_restore),
+            mock.patch.object(
+                self.store, "release_workspace_lease", side_effect=record_release
+            ),
+        ):
+            with self.assertRaises(FDXPolicyError):
+                await self._run_fdx(
+                    {},
+                    workspace=str(self.workspace),
+                    configured_root=str(self.root),
+                    config=self.config(),
+                )
+
+        self.assertEqual(events, ["cleanup", "release"])
+        self.assertFalse((self.workspace / "created.txt").exists())
+
+    async def test_fdx_preserves_newer_mutation_during_cleanup(self):
+        self.executable.write_text(
+            "#!/bin/sh\n"
+            "read payload\n"
+            "printf fdx > created.txt\n"
+            "printf '%s' '{\"protocol\":\"flowdeck-fdx/1\",\"version\":\"1\","
+            "\"health\":\"ok\",\"capabilities\":{\"read_only\":true,\"network_writes\":false,"
+            "\"workspace_mutation\":false,\"process_persistence\":false}}'\n"
+        )
+        self.executable.chmod(self.executable.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP)
+
+        from cptr.flowdeck import fdx
+
+        original_snapshot = fdx._snapshot_files
+        snapshots = 0
+
+        def snapshot_with_race(root):
+            nonlocal snapshots
+            result = original_snapshot(root)
+            snapshots += 1
+            if snapshots == 3:
+                (self.workspace / "created.txt").write_text("newer external data")
+            return result
+
+        with mock.patch.object(fdx, "_snapshot_files", side_effect=snapshot_with_race):
+            with self.assertRaises(FDXPolicyError):
+                await self._run_fdx(
+                    {},
+                    workspace=str(self.workspace),
+                    configured_root=str(self.root),
+                    config=self.config(),
+                )
+
+        self.assertEqual(
+            (self.workspace / "created.txt").read_text(), "newer external data"
+        )
 
     async def test_fdx_rejects_configured_jail_escape_and_restores_it(self):
         self.executable.write_text(

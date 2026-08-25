@@ -72,7 +72,20 @@ def _snapshot_files(root: Path) -> dict[str, bytes]:
     }
 
 
-def _restore_files(root: Path, snapshot: dict[str, bytes]) -> None:
+def _restore_files(
+    root: Path,
+    snapshot: dict[str, bytes],
+    *,
+    expected_current: dict[str, bytes],
+) -> None:
+    """Restore a snapshot only when the workspace still has the observed state.
+
+    The extra comparison closes the snapshot/restore gap.  A process outside
+    FDX may change the workspace after the side-effect snapshot was taken; in
+    that case cleanup must stop rather than overwrite its newer data.
+    """
+    if _snapshot_files(root) != expected_current:
+        raise FDXPolicyError("workspace changed during FDX cleanup")
     current = {
         str(path.relative_to(root)): path
         for path in root.rglob("*")
@@ -80,10 +93,17 @@ def _restore_files(root: Path, snapshot: dict[str, bytes]) -> None:
     }
     for relative, path in current.items():
         if relative not in snapshot:
+            if (
+                relative not in expected_current
+                or path.read_bytes() != expected_current[relative]
+            ):
+                raise FDXPolicyError("workspace changed during FDX cleanup")
             path.unlink()
     for relative, content in snapshot.items():
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_file() and path.read_bytes() != expected_current.get(relative):
+            raise FDXPolicyError("workspace changed during FDX cleanup")
         path.write_bytes(content)
 
 
@@ -208,7 +228,7 @@ async def run_fdx(
             raise FDXPolicyError("FDX output exceeded configured bound")
         after = _snapshot_files(jail_root)
         if before != after:
-            _restore_files(jail_root, before)
+            _restore_files(jail_root, before, expected_current=after)
             raise FDXPolicyError("FDX produced a workspace side effect")
         if process.returncode != 0:
             raise FDXPolicyError(f"FDX exited with status {process.returncode}")
