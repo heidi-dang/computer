@@ -37,6 +37,15 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.root_b.mkdir()
         self.root_a_alias.symlink_to(self.root_a, target_is_directory=True)
         self.db_file = Path(self.temp.name, "http.db")
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root_a = Path(self.temp.name, "workspace-a").resolve()
+        self.root_b = Path(self.temp.name, "workspace-b").resolve()
+        self.root_a_alias = Path(self.temp.name, "workspace-a-alias").resolve()
+        self.root_a.mkdir()
+        self.root_b.mkdir()
+        self.root_a_alias.symlink_to(self.root_a, target_is_directory=True)
+        self.db_file = Path(self.temp.name, "http.db")
         self.engine = create_async_engine(
             f"sqlite+aiosqlite:///{self.db_file}", connect_args={"timeout": 5}
         )
@@ -1100,6 +1109,100 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rejected.status_code, 200)
         self.assertFalse(rejected.json()["accepted"])
         self.assertEqual(rejected.json()["state"], "cancelled")
+
+    async def test_external_auth_callback_durable_records_exclude_verifier_settings(self):
+        verifier_settings = {
+            "issuer": "https://issuer.example",
+            "audience": "generated-app",
+            "jwks_url": "https://issuer.example/.well-known/jwks.json",
+            "redirect_uri": "https://app.example/auth/callback",
+            "client_id": "server-owned-client",
+            "client_secret": "server-owned-secret",
+        }
+        Path(self.root_a, ".cptr").mkdir()
+        Path(self.root_a, ".cptr", "generated-auth.json").write_text(
+            '{"provider":"oauth_oidc"}', encoding="utf-8"
+        )
+        request_key = "generated-auth-verifier-redaction-123"
+        server_config = json.dumps(
+            {"provider": "oauth_oidc", "verifier": verifier_settings}
+        )
+
+        csrf = await self.client.get(
+            "/v1/flowdeck/generated-auth/csrf",
+            params={"workspace": str(self.root_a)},
+            headers=self.headers(),
+        )
+        self.assertEqual(csrf.status_code, 200, csrf.text)
+        csrf_token = csrf.json()["csrf"]
+
+        with patch.dict(
+            os.environ,
+            {"CPTR_GENERATED_AUTH_VERIFIER_JSON": server_config},
+            clear=False,
+        ):
+            callback = await self.client.post(
+                "/v1/flowdeck/generated-auth/callback/verify",
+                headers={
+                    **self.headers(),
+                    "Idempotency-Key": request_key,
+                },
+                json={
+                    "workspace": str(self.root_a),
+                    "issuer": verifier_settings["issuer"],
+                    "audience": verifier_settings["audience"],
+                    "redirect_uri": verifier_settings["redirect_uri"],
+                    "state": csrf_token,
+                    "nonce": csrf_token,
+                    "code_verifier": "v" * 43,
+                },
+            )
+        self.assertEqual(callback.status_code, 200, callback.text)
+        callback_payload = callback.json()
+        self.assertEqual(
+            callback_payload,
+            {
+                "verified": True,
+                "provider": "oauth_oidc",
+                "run_id": callback_payload["run_id"],
+                "reused": False,
+            },
+        )
+
+        status = await self.client.get(
+            f"/v1/flowdeck/generated-auth/operations/{callback_payload['run_id']}",
+            params={"workspace": str(self.root_a)},
+            headers=self.headers(),
+        )
+        self.assertEqual(status.status_code, 200, status.text)
+        durable_payload = status.json()
+        self.assertEqual(durable_payload["status"], "succeeded")
+        self.assertEqual(
+            durable_payload["operations"][0]["evidence"]["result"],
+            {"verified": True, "provider": "oauth_oidc"},
+        )
+
+        forbidden_keys = {
+            "issuer", "audience", "redirect_uri", "jwks_url",
+            "client_id", "client_secret", "code_verifier",
+        }
+
+        def assert_no_verifier_fields(value):
+            if isinstance(value, dict):
+                self.assertTrue(forbidden_keys.isdisjoint(value))
+                for nested in value.values():
+                    assert_no_verifier_fields(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    assert_no_verifier_fields(nested)
+
+        assert_no_verifier_fields(callback_payload)
+        assert_no_verifier_fields(durable_payload)
+        serialized_records = json.dumps(
+            [callback_payload, durable_payload], sort_keys=True
+        )
+        for setting in verifier_settings.values():
+            self.assertNotIn(setting, serialized_records)
 
 
 if __name__ == "__main__":

@@ -18,3 +18,13 @@ control task with no trusted postcondition to appear successful.
 
 **How to apply:** Require an authoritative verifier/runtime envelope with the
 active attempt identity before accepting control-plane success.
+
+Untrusted verifier inputs must never be used as durable operation identity,
+targets, fingerprints, transcript content, or log metadata.
+
+**Why:** Callback parameters such as issuer and redirect URI can contain
+credentials or provider configuration, and operation fingerprints are exposed
+through status and evidence APIs.
+
+**How to apply:** Use a fixed safe operation target for external callbacks;
+validate submitted values only inside the server-owned verifier boundary.
