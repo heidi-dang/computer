@@ -1319,7 +1319,8 @@
 							{/if}
 						</div>
 					</div>
-				{/if}
+			</div>
+			{/if}
 			</div>
 			{#if dragOverZone?.groupId === homePane.id}
 				<div class={`split-drop-zone split-drop-${dragOverZone.zone}`}></div>
@@ -1696,4 +1697,158 @@
 	.git-review-panel {
 		z-index: 2;
 	}
+
+/* Home landing polish */
+.home-landing {
+position: relative;
+isolation: isolate;
+background:
+radial-gradient(circle at 50% 0%, color-mix(in oklab, var(--app-active) 10%, transparent), transparent 34rem),
+var(--app-bg);
+}
+
+.home-glow {
+position: absolute;
+width: 18rem;
+height: 18rem;
+border-radius: 999px;
+filter: blur(54px);
+opacity: 0.18;
+pointer-events: none;
+z-index: -1;
+animation: home-float 12s ease-in-out infinite;
+}
+
+.home-glow-one {
+top: 8%;
+right: 3%;
+background: #38bdf8;
+}
+
+.home-glow-two {
+bottom: 12%;
+left: -8%;
+background: #a78bfa;
+animation-delay: -5s;
+}
+
+.home-action {
+display: flex;
+align-items: center;
+gap: 0.75rem;
+min-height: 4.5rem;
+padding: 0.85rem 1rem;
+border: 1px solid color-mix(in oklab, var(--app-fg) 9%, transparent);
+border-radius: 0.9rem;
+background: color-mix(in oklab, var(--app-bg) 78%, white 22%);
+color: var(--app-fg);
+text-align: left;
+box-shadow: 0 8px 24px color-mix(in oklab, var(--app-fg) 4%, transparent);
+transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
+}
+
+.home-action:hover,
+.home-action:focus-visible {
+transform: translateY(-2px);
+border-color: color-mix(in oklab, var(--app-active) 42%, transparent);
+background: color-mix(in oklab, var(--app-bg) 68%, white 32%);
+box-shadow: 0 12px 28px color-mix(in oklab, var(--app-fg) 9%, transparent);
+outline: none;
+}
+
+.home-action-primary {
+border-color: color-mix(in oklab, var(--app-active) 24%, transparent);
+background: color-mix(in oklab, var(--app-active) 8%, var(--app-bg));
+}
+
+.home-action-icon {
+display: inline-flex;
+align-items: center;
+justify-content: center;
+width: 2.2rem;
+height: 2.2rem;
+flex-shrink: 0;
+border-radius: 0.65rem;
+background: color-mix(in oklab, var(--app-active) 13%, transparent);
+color: var(--app-active);
+}
+
+.home-section-title {
+margin-bottom: 0.75rem;
+font-size: 0.6875rem;
+font-weight: 600;
+letter-spacing: 0.18em;
+text-transform: uppercase;
+color: color-mix(in oklab, var(--app-fg) 42%, transparent);
+}
+
+.home-workspace-card {
+padding: 0.85rem 1rem;
+border: 1px solid color-mix(in oklab, var(--app-fg) 7%, transparent);
+border-radius: 0.75rem;
+background: color-mix(in oklab, var(--app-bg) 88%, white 12%);
+transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.home-workspace-card:hover,
+.home-workspace-card:focus-visible {
+transform: translateX(3px);
+border-color: color-mix(in oklab, var(--app-active) 34%, transparent);
+background: color-mix(in oklab, var(--app-active) 5%, var(--app-bg));
+outline: none;
+}
+
+.home-empty-action {
+padding: 0.8rem 1rem;
+border: 1px dashed color-mix(in oklab, var(--app-fg) 14%, transparent);
+border-radius: 0.75rem;
+font-size: 0.75rem;
+color: color-mix(in oklab, var(--app-fg) 55%, transparent);
+transition: border-color 160ms ease, color 160ms ease, background 160ms ease;
+}
+
+.home-empty-action:hover,
+.home-empty-action:focus-visible {
+border-color: color-mix(in oklab, var(--app-active) 42%, transparent);
+color: var(--app-fg);
+background: color-mix(in oklab, var(--app-active) 5%, transparent);
+outline: none;
+}
+
+:global(.dark) .home-action,
+:global(.dark) .home-workspace-card {
+background: color-mix(in oklab, var(--app-bg) 88%, white 12%);
+box-shadow: 0 8px 24px rgb(0 0 0 / 14%);
+}
+
+:global(.dark) .home-action:hover,
+:global(.dark) .home-action:focus-visible {
+background: color-mix(in oklab, var(--app-bg) 78%, white 22%);
+}
+
+@keyframes home-float {
+0%, 100% { transform: translate3d(0, 0, 0) scale(1); }
+50% { transform: translate3d(0, -14px, 0) scale(1.06); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+.home-glow,
+.home-action,
+.home-workspace-card {
+animation: none;
+transition: none;
+}
+}
+
+@media (max-width: 640px) {
+.home-landing {
+padding-left: 1rem;
+padding-right: 1rem;
+}
+
+.home-glow {
+width: 12rem;
+height: 12rem;
+}
+}
 </style>
