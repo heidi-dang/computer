@@ -1552,6 +1552,7 @@ lowlight.highlight = (lang: string, value: string, opts?: any) => {
 
 	<div
 		class="app-surface rounded-3xl shadow-lg border transition px-1"
+class:heidi-composer={selectedAgent === 'heidi'}
 	>
 		<!-- Uploaded Files Preview -->
 		{#if attachedUploads.length > 0}
@@ -1638,7 +1639,7 @@ lowlight.highlight = (lang: string, value: string, opts?: any) => {
 		<!-- Toolbar. stopPropagation prevents TipTap from stealing focus -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
-			class="flex items-center justify-between mt-0.5 mb-2.5 mx-0.5"
+class="chat-input-toolbar flex items-center justify-between mt-0.5 mb-2.5 mx-0.5"
 			onmousedown={(e) => e.stopPropagation()}
 		>
 			<div class="ml-0.5 self-end flex items-center gap-1">
@@ -1728,6 +1729,56 @@ lowlight.highlight = (lang: string, value: string, opts?: any) => {
 		font-size: 0.8125rem;
 		color: var(--app-fg);
 	}
+
+.heidi-composer {
+border-color: color-mix(in oklab, #38bdf8 20%, var(--app-fg));
+box-shadow:
+0 10px 28px color-mix(in oklab, #0f172a 12%, transparent),
+inset 0 1px 0 color-mix(in oklab, #67e8f9 8%, transparent);
+}
+
+.heidi-composer .chat-input-toolbar {
+margin-bottom: .45rem;
+}
+
+@media (max-width: 640px) {
+.heidi-composer {
+border-radius: 1.15rem;
+padding-inline: .35rem;
+}
+
+.heidi-composer .chat-editor-mount :global(.chat-prosemirror) {
+padding-top: .65rem;
+padding-bottom: .55rem;
+font-size: .8rem;
+}
+
+.heidi-composer .chat-input-toolbar {
+align-items: center;
+gap: .4rem;
+margin-inline: .15rem;
+margin-bottom: .4rem;
+}
+
+.heidi-composer .chat-input-toolbar > :first-child {
+flex: 0 0 auto;
+}
+
+.heidi-composer .chat-input-toolbar > :last-child {
+flex: 1 1 auto;
+gap: .25rem;
+}
+
+.heidi-composer .chat-input-toolbar :global(button) {
+min-width: 1.9rem;
+min-height: 1.9rem;
+}
+
+.heidi-composer .chat-input-toolbar :global(.agent-selector),
+.heidi-composer .chat-input-toolbar :global(.model-selector) {
+max-width: 5.9rem;
+}
+}
 
 	/* Placeholder */
 	.chat-editor-mount :global(.chat-prosemirror p.is-editor-empty:first-child::before) {

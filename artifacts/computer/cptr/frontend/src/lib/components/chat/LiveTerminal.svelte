@@ -154,9 +154,9 @@ if (follow && outputEl) outputEl.scrollTop = outputEl.scrollHeight;
 <div class="terminal-title">
 <span class:terminal-pulse={!isTerminal} class:terminal-done={isTerminal} class="terminal-dot" aria-hidden="true"></span>
 <div class="min-w-0">
-<div class="terminal-name">Live terminal</div>
+<div class="terminal-name">Heidi Live Terminal</div>
 <div class="terminal-subtitle">
-{statusLabel}
+<span class="terminal-phase">{statusLabel}</span>
 {#if runId}<span class="terminal-id" title={runId}>run {runId.slice(0, 10)}</span>{/if}
 </div>
 </div>
@@ -203,35 +203,39 @@ if (outputEl && outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeig
 
 <style>
 .live-terminal {
-margin: 0 0 .65rem;
+margin: 0 0 .7rem;
 overflow: hidden;
-border: 1px solid color-mix(in oklab, #22d3ee 24%, transparent);
-border-radius: .85rem;
-background: #080d12;
+border: 1px solid color-mix(in oklab, #22d3ee 28%, transparent);
+border-radius: 1rem;
+background:
+linear-gradient(145deg, color-mix(in oklab, #10232a 72%, #080d12), #080d12 55%);
 color: #d5e4e8;
-box-shadow: 0 -10px 28px color-mix(in oklab, #020617 12%, transparent);
+box-shadow:
+0 -12px 30px color-mix(in oklab, #020617 16%, transparent),
+inset 0 1px 0 color-mix(in oklab, #67e8f9 10%, transparent);
 }
 .terminal-header {
 display: flex;
 align-items: center;
 justify-content: space-between;
 gap: .65rem;
-min-height: 2.65rem;
-padding: .5rem .7rem;
+min-height: 2.85rem;
+padding: .55rem .75rem;
 border-bottom: 1px solid color-mix(in oklab, #94a3b8 14%, transparent);
-background: linear-gradient(90deg, #0b151b, #0a1117);
+background: linear-gradient(90deg, color-mix(in oklab, #12303a 55%, transparent), #0a1117);
 }
 .terminal-title, .terminal-actions { display: flex; align-items: center; gap: .5rem; min-width: 0; }
-.terminal-dot { width: .45rem; height: .45rem; flex: 0 0 auto; border-radius: 999px; background: #64748b; }
+.terminal-dot { width: .5rem; height: .5rem; flex: 0 0 auto; border-radius: 999px; background: #64748b; }
 .terminal-pulse { background: #22d3ee; box-shadow: 0 0 0 4px color-mix(in oklab, #22d3ee 12%, transparent); animation: terminal-pulse 1.7s ease-in-out infinite; }
 .terminal-done { background: #34d399; }
-.terminal-name { color: #f8fafc; font: 600 .7rem ui-sans-serif, system-ui, sans-serif; letter-spacing: .04em; text-transform: uppercase; }
-.terminal-subtitle { color: #7f9ba4; font: .62rem ui-monospace, SFMono-Regular, monospace; text-transform: capitalize; }
-.terminal-id { margin-left: .5rem; color: #5d7881; }
-.terminal-live { color: #67e8f9; font: 700 .56rem ui-monospace, SFMono-Regular, monospace; letter-spacing: .12em; }
-.terminal-action { border: 1px solid transparent; border-radius: .35rem; padding: .25rem .4rem; color: #8eaab2; font: .62rem ui-sans-serif, system-ui, sans-serif; }
+.terminal-name { color: #f8fafc; font: 650 .69rem ui-sans-serif, system-ui, sans-serif; letter-spacing: .07em; text-transform: uppercase; }
+.terminal-subtitle { display: flex; align-items: center; gap: .35rem; color: #7f9ba4; font: .61rem ui-monospace, SFMono-Regular, monospace; text-transform: capitalize; }
+.terminal-phase { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terminal-id { margin-left: .15rem; color: #5d7881; }
+.terminal-live { color: #67e8f9; font: 750 .56rem ui-monospace, SFMono-Regular, monospace; letter-spacing: .12em; }
+.terminal-action { border: 1px solid color-mix(in oklab, #94a3b8 12%, transparent); border-radius: .45rem; padding: .28rem .45rem; color: #8eaab2; font: .62rem ui-sans-serif, system-ui, sans-serif; }
 .terminal-action:hover, .terminal-action[aria-pressed="true"] { border-color: #24505b; background: #10252c; color: #c7f9ff; }
-.terminal-output { max-height: 14rem; overflow: auto; padding: .6rem .7rem .7rem; scrollbar-color: #27434b transparent; }
+.terminal-output { max-height: 14rem; overflow: auto; padding: .65rem .75rem .75rem; scrollbar-color: #27434b transparent; }
 .terminal-line { display: flex; gap: .65rem; min-width: 0; padding: .24rem 0; font: .69rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 .line-sequence { flex: 0 0 1.8rem; color: #45616a; text-align: right; user-select: none; }
 .line-content { min-width: 0; flex: 1; }
@@ -245,10 +249,12 @@ background: linear-gradient(90deg, #0b151b, #0a1117);
 .prompt-mark { margin-right: .5rem; color: #34d399; }
 @keyframes terminal-pulse { 50% { opacity: .5; box-shadow: 0 0 0 6px color-mix(in oklab, #22d3ee 0%, transparent); } }
 @media (max-width: 640px) {
-.terminal-header { align-items: flex-start; }
-.terminal-actions { flex-wrap: wrap; justify-content: flex-end; gap: .25rem; }
+.live-terminal { margin-bottom: .55rem; border-radius: .85rem; }
+.terminal-header { align-items: flex-start; gap: .45rem; padding: .5rem .6rem; }
+.terminal-title { gap: .4rem; }
+.terminal-actions { flex-wrap: wrap; justify-content: flex-end; gap: .2rem; }
 .terminal-collapse { max-width: 4.8rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.terminal-output { max-height: 12rem; padding-inline: .5rem; }
+.terminal-output { max-height: 12rem; padding: .5rem .55rem .6rem; }
 .terminal-line { gap: .4rem; font-size: .62rem; }
 .line-sequence { flex-basis: 1.5rem; }
 }

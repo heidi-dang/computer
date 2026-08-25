@@ -2457,7 +2457,7 @@ nativeMessageId={flowdeckMessageId}
 
 		<!-- Input area -->
 		<div
-			class="shrink-0 px-4 py-3"
+class="shrink-0 px-4 py-3 {selectedAgent === 'heidi' ? 'heidi-lower-interaction' : ''}"
 			style="background: var(--app-bg); padding-bottom: calc(0.75rem + env(safe-area-inset-bottom, 0px));"
 		>
 			<div class="{$widescreenMode ? 'max-w-full' : 'max-w-2xl'} mx-auto w-full relative">
@@ -2553,6 +2553,23 @@ nativeMessageId={flowdeckMessageId}
 		}}
 	/>
 {/if}
+
+<style>
+.heidi-lower-interaction {
+position: relative;
+z-index: 20;
+padding-top: .55rem;
+background:
+linear-gradient(to bottom, color-mix(in oklab, var(--app-bg) 88%, transparent), var(--app-bg) 18%);
+}
+
+@media (max-width: 640px) {
+.heidi-lower-interaction {
+padding-inline: .7rem;
+padding-top: .4rem;
+}
+}
+</style>
 
 {#if showSkillsModal}
 	<SkillsModal
