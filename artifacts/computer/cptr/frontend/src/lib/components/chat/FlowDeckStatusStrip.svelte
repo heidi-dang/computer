@@ -54,14 +54,27 @@ evidenceSummary = null,
 	const isActive = $derived(
 		!isTerminal && ['preparing', 'active', 'planning', 'verifying'].includes(status.toLowerCase())
 	);
+const normalizedStatus = $derived(status.toLowerCase());
+const needsRecovery = $derived(
+['orphaned', 'unknown', 'manual_review', 'manual_review_required'].includes(normalizedStatus)
+);
+const latestTerminalReason = $derived.by(() => {
+const terminalEvent = [...events].reverse().find((event) =>
+['RUN_ORPHANED', 'RUN_UNKNOWN', 'RUN_MANUAL_REVIEW'].includes(
+String(event?.kind || event?.type || '').toUpperCase()
+)
+);
+const reason = terminalEvent?.payload?.reason || terminalEvent?.reason;
+return typeof reason === 'string' && reason.trim() ? reason : '';
+});
 	const recoveryMessage = $derived(
-		status.toLowerCase() === 'manual_review_required'
-			? 'The model provider was unavailable. Check the provider connection and review the workspace before retrying. No completion was claimed.'
-			: status.toLowerCase() === 'unknown'
-				? 'The outcome could not be verified. Reconnect and reconcile the run before retrying. No completion was claimed.'
-				: status.toLowerCase() === 'orphaned'
-					? 'The worker disconnected before verification. Reconnect to recover the durable run; do not assume the workspace changed safely.'
-					: status.toLowerCase() === 'cancelled'
+normalizedStatus === 'manual_review_required' || normalizedStatus === 'manual_review'
+? `This run requires review before it can be resumed. ${latestTerminalReason || 'Its outcome was interrupted before completion could be verified.'} No completion was claimed.`
+: normalizedStatus === 'unknown'
+? `The outcome could not be verified. ${latestTerminalReason || 'Reconnect to rehydrate the durable run and inspect its evidence.'} No completion was claimed.`
+: normalizedStatus === 'orphaned'
+? `The worker disconnected before verification. ${latestTerminalReason || 'Reconnect to rehydrate the durable run.'} Do not assume the workspace changed safely.`
+: normalizedStatus === 'cancelled'
 						? 'Cancellation is authoritative. Any interrupted work remains unverified and cannot be reported as completed.'
 			: ''
 	);
@@ -144,9 +157,24 @@ let auditTrailOpen = $state(false);
 		{#if oncancel && !isTerminal}
 			<button type="button" class="flowdeck-cancel" onclick={oncancel}>Cancel</button>
 		{/if}
+{#if needsRecovery && onreconnect}
+<button
+type="button"
+class="flowdeck-reconnect"
+data-testid="button-flowdeck-reconnect"
+onclick={onreconnect}
+>
+Reconnect &amp; rehydrate
+</button>
+{/if}
 	</div>
 	{#if recoveryMessage}
-		<p class="flowdeck-status-recovery">{recoveryMessage}</p>
+<div class="flowdeck-status-recovery" role="alert" data-testid="flowdeck-recovery-explanation">
+<strong>Recovery status:</strong> {recoveryMessage}
+{#if needsRecovery}
+<span class="flowdeck-recovery-note">Reconnecting only replays the existing run and evidence; it does not create a second terminal event.</span>
+{/if}
+</div>
 	{/if}
 	{#if isAudit && analysis}
 		<section class="flowdeck-report" aria-label="Audit report">
@@ -312,14 +340,16 @@ onclick={() => (auditTrailOpen = !auditTrailOpen)}
 		color: color-mix(in oklab, var(--app-fg) 40%, transparent);
 		font-size: 0.6rem;
 	}
-	.flowdeck-cancel,
+.flowdeck-cancel,
+.flowdeck-reconnect,
 	.flowdeck-evidence-toggle {
 		border-radius: 0.35rem;
 		padding: 0.2rem 0.45rem;
 		color: color-mix(in oklab, var(--app-fg) 62%, transparent);
 		font-size: 0.62rem;
 	}
-	.flowdeck-cancel:hover,
+.flowdeck-cancel:hover,
+.flowdeck-reconnect:hover,
 	.flowdeck-evidence-toggle:hover {
 		background: color-mix(in oklab, var(--app-fg) 8%, transparent);
 		color: var(--app-fg);

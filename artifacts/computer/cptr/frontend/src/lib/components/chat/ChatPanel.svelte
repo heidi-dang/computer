@@ -1032,9 +1032,13 @@ applyNativeTranscriptEvent(event, message, true);
 				eventStatus ||
 				(kind === 'RUN_CANCELLED'
 					? 'cancelled'
-					: kind === 'RUN_FAILED' || kind === 'RUN_ORPHANED'
+: kind === 'RUN_FAILED'
 						? 'failed'
-						: 'succeeded');
+: kind === 'RUN_ORPHANED'
+? 'orphaned'
+: kind === 'RUN_UNKNOWN'
+? 'unknown'
+: 'manual_review_required');
 			message.done = true;
 			stopFlowDeckPolling();
 		}
