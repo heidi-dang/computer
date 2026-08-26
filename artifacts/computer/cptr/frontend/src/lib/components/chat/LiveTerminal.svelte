@@ -215,6 +215,7 @@ terminalEvents
 .map(eventLine)
 .filter((line) => line.title || line.detail)
 );
+const hasActivity = $derived(uniqueEvents.length > 0);
 const hasAuditAnalysis = $derived(
 isAudit && uniqueEvents.some((event) => event?.kind === 'AUDIT_ANALYSIS_CREATED')
 );
@@ -297,7 +298,12 @@ if (outputEl && outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeig
 {#if !lines.length && normalizedStatus === 'preparing'}
 <div class="terminal-empty"><span class="prompt-mark">$</span> starting Heidi run…</div>
 {:else if !lines.length}
-<div class="terminal-empty"><span class="prompt-mark">$</span> waiting for authenticated FlowDeck activity…</div>
+<div class="terminal-empty">
+<span class="prompt-mark">$</span>
+{hasActivity
+? 'read-only planning is active; terminal output starts with the authorized coding step…'
+: 'waiting for authenticated FlowDeck activity…'}
+</div>
 {:else}
 {#each lines as line (line.key)}
 <div class:error-line={line.isError} class:lifecycle-line={line.isLifecycle} class="terminal-line">
