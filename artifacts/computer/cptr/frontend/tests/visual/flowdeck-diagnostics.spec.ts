@@ -508,6 +508,7 @@ test('FlowDeck session expiry renders login in place without a reload loop', asy
 
 test('FlowDeck returns to the workspace after re-login without a reload', async ({ page }) => {
 	let sessionAuthenticated = true;
+	let orchestrationRequestCount = 0;
 	await page.unroute('**/api/auth');
 	await page.route('**/api/auth', (route) =>
 		route.fulfill({
@@ -552,6 +553,7 @@ test('FlowDeck returns to the workspace after re-login without a reload', async 
 	);
 	await page.route('**/v1/flowdeck/orchestrations', (route) =>
 		(async () => {
+			orchestrationRequestCount += 1;
 			sessionAuthenticated = false;
 			return route.fulfill({
 				status: 401,
@@ -577,13 +579,27 @@ test('FlowDeck returns to the workspace after re-login without a reload', async 
 	await page.getByRole('button', { name: /Start run/ }).click();
 
 	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+	const persistedDraft = await page.evaluate(() => {
+		const raw = sessionStorage.getItem('flowdeck:composer-draft');
+		return raw ? JSON.parse(raw) : null;
+	});
+	expect(persistedDraft).toEqual({
+		mode: 'composer',
+		workspace: '/workspace/project',
+		objective: 'Return to the existing workspace after re-login.'
+	});
 	await page.getByPlaceholder('Username').fill('operator');
 	await page.getByPlaceholder('Password').fill('valid-password');
 	await page.getByRole('button', { name: /Sign In/ }).click();
 
 	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
 	await expect(page.getByLabel('Objective')).toBeVisible();
+	await expect(page.getByLabel('Objective')).toHaveValue(
+		'Return to the existing workspace after re-login.'
+	);
+	await expect(page.getByLabel('Workspace', { exact: true })).toHaveValue('/workspace/project');
 	await expect(page.locator('#main-col')).toBeVisible();
+	expect(orchestrationRequestCount).toBe(1);
 	await expect
 		.poll(() => navigationCount)
 		.toBe(initialNavigationCount);

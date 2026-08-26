@@ -37,7 +37,7 @@
 	import { matchKeybinding, executeAction } from '$lib/stores/keybindings';
 	import { systemEvents } from '$lib/stores/systemEvents.svelte';
 	import { socketStore } from '$lib/stores/socket.svelte';
-	import { setSession, clearSession, session } from '$lib/session';
+	import { setSession, clearSession, session, SESSION_EXPIRED_EVENT } from '$lib/session';
 	import { getSession, getConfig } from '$lib/apis/auth';
 	import { fetchJSON } from '$lib/apis';
 	import { getGitConfig } from '$lib/apis/git';
@@ -82,7 +82,7 @@
 		};
 		// Register before startup auth/state loading so a protected request made
 		// by the first authenticated page cannot lose the expiry transition.
-		window.addEventListener('cptr:session-expired', handleSessionExpired);
+		window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
 
 		let healthCheck: ReturnType<typeof setInterval> | null = null;
 		// iOS Safari keeps 100vh/100dvh at the layout viewport height when
@@ -150,7 +150,7 @@
 			window.removeEventListener('offline', showOfflineToast);
 			window.removeEventListener('online', showOnlineToast);
 			window.removeEventListener('cptr:open-settings', openSettings as EventListener);
-			window.removeEventListener('cptr:session-expired', handleSessionExpired);
+			window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired);
 		};
 	});
 

@@ -7,6 +7,8 @@
 
 import { writable } from 'svelte/store';
 
+export const SESSION_EXPIRED_EVENT = 'cptr:session-expired';
+
 export interface Session {
 	user_id: string;
 	username: string;
@@ -30,5 +32,5 @@ export function setSession(s: Session | null) {
 export function clearSession() {
 	session.set(null);
 	fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
-	window.dispatchEvent(new CustomEvent('cptr:session-expired'));
+	window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT));
 }

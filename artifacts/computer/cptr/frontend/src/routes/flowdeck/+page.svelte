@@ -18,9 +18,11 @@ FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 	import CheckpointPanel from '$lib/components/CheckpointPanel.svelte';
 	import { currentWorkspace, workspaceList } from '$lib/stores';
 	import { chatModels, defaultModel } from '$lib/stores/chat';
+	import { SESSION_EXPIRED_EVENT } from '$lib/session';
 
 	type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'error';
 	type RunKind = 'success' | 'failure' | 'cancelled' | 'manual' | 'active' | 'unknown';
+	type FlowDeckMode = 'composer' | 'run';
 
 	let workspace = $state('');
 	let objective = $state('');
@@ -28,6 +30,7 @@ FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 	let runId = $state('');
 	let runWorkspace = $state('');
 	let runObjective = $state('');
+	let flowdeckMode = $state<FlowDeckMode>('composer');
 	let connectionState = $state<ConnectionState>('connecting');
 	let lastCheckedAt = $state<Date | null>(null);
 	let startError = $state('');
@@ -56,6 +59,9 @@ let diagnosticsMounted = false;
 	const DIAGNOSTICS_REFRESH_INTERVAL_MS = 30_000;
 
 	const STORAGE_KEY = 'flowdeck:owned-run';
+	const DRAFT_STORAGE_KEY = 'flowdeck:composer-draft';
+	const MAX_DRAFT_OBJECTIVE_LENGTH = 20_000;
+	const MAX_WORKSPACE_LENGTH = 4_096;
 	const terminalStatuses = new Set([
 		'succeeded',
 		'success',
@@ -87,7 +93,7 @@ let diagnosticsMounted = false;
 	let isTerminal = $derived(
 		runKind === 'success' || runKind === 'failure' || runKind === 'cancelled'
 	);
-	let hasRun = $derived(Boolean(runId));
+	let hasRun = $derived(flowdeckMode === 'run' && Boolean(runId));
 	let reconnectLabel = $derived(
 		connectionState === 'connected'
 			? 'Connected'
@@ -391,15 +397,81 @@ void refreshDiagnostics();
 		return 'Not reported';
 	}
 
+	function safeWorkspace(value: unknown): string {
+		if (typeof value !== 'string') return '';
+		const candidate = value.trim();
+		return candidate &&
+			candidate.length <= MAX_WORKSPACE_LENGTH &&
+			!/[\u0000-\u001f\u007f]/.test(candidate)
+			? candidate
+			: '';
+	}
+
+	function safeDraftObjective(value: unknown): string {
+		if (typeof value !== 'string') return '';
+		return value.length <= MAX_DRAFT_OBJECTIVE_LENGTH && !/[\u0000]/.test(value) ? value : '';
+	}
+
+	function readStoredRecoveryState(key: string): {
+		runId?: string;
+		workspace?: string;
+		objective?: string;
+		mode?: FlowDeckMode;
+	} {
+		if (typeof sessionStorage === 'undefined') return {};
+		try {
+			const value: unknown = JSON.parse(sessionStorage.getItem(key) ?? '{}');
+			if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+			const record = value as Record<string, unknown>;
+			const mode = record.mode === 'composer' || record.mode === 'run' ? record.mode : undefined;
+			return {
+				runId: safeRunId(record.runId),
+				workspace: safeWorkspace(record.workspace),
+				objective: safeDraftObjective(record.objective),
+				mode
+			};
+		} catch {
+			return {};
+		}
+	}
+
+	function clearComposerDraft() {
+		if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+	}
+
+	function persistComposerDraft() {
+		if (typeof sessionStorage === 'undefined') return;
+		if (flowdeckMode === 'run' || runId) {
+			clearComposerDraft();
+			return;
+		}
+		const draft = {
+			mode: 'composer' as const,
+			workspace: safeWorkspace(workspace),
+			objective: safeDraftObjective(objective)
+		};
+		if (!draft.workspace && !draft.objective) {
+			clearComposerDraft();
+			return;
+		}
+		sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+	}
+
 	function persistOwnedRun() {
 		if (typeof sessionStorage === 'undefined') return;
 		if (!runId) {
 			sessionStorage.removeItem(STORAGE_KEY);
 			return;
 		}
+		clearComposerDraft();
 		sessionStorage.setItem(
 			STORAGE_KEY,
-			JSON.stringify({ runId, workspace: runWorkspace, objective: runObjective })
+			JSON.stringify({
+				mode: 'run' as const,
+				runId,
+				workspace: safeWorkspace(runWorkspace),
+				objective: safeDraftObjective(runObjective)
+			})
 		);
 	}
 
@@ -452,6 +524,7 @@ void refreshDiagnostics();
 		runId = '';
 		runWorkspace = '';
 		runObjective = '';
+		flowdeckMode = 'composer';
 		objective = '';
 		confirmCancel = false;
 		startError = '';
@@ -459,12 +532,14 @@ void refreshDiagnostics();
 		orchestrationDisabled = false;
 		stopPolling();
 		persistOwnedRun();
+		clearComposerDraft();
 		updateRunUrl();
 	}
 
 	async function startOrchestration(event: SubmitEvent) {
 		event.preventDefault();
 		if (!workspace || !objective.trim() || isStarting) return;
+		persistComposerDraft();
 		isStarting = true;
 		startError = '';
 		orchestrationDisabled = false;
@@ -483,6 +558,7 @@ void refreshDiagnostics();
 			runId = returnedId;
 			runWorkspace = workspace;
 			runObjective = objective.trim();
+			flowdeckMode = 'run';
 			connectionState = 'connected';
 			lastCheckedAt = new Date();
 			persistOwnedRun();
@@ -521,34 +597,42 @@ void refreshDiagnostics();
 		if (typeof window === 'undefined') return;
 		const params = new URLSearchParams(window.location.search);
 		const queryRunId = params.get('run_id');
-		const queryWorkspace = params.get('workspace');
-		let stored: { runId?: string; workspace?: string; objective?: string } = {};
-		try {
-			stored = JSON.parse(sessionStorage.getItem(STORAGE_KEY) ?? '{}');
-		} catch {
-			stored = {};
-		}
+		const queryWorkspace = safeWorkspace(params.get('workspace'));
+		const stored = readStoredRecoveryState(STORAGE_KEY);
+		const draft = readStoredRecoveryState(DRAFT_STORAGE_KEY);
 		const ownedId = safeRunId(queryRunId || stored.runId);
 		const ownedWorkspace = queryWorkspace || stored.workspace;
 		if (ownedId && ownedWorkspace) {
 			runId = ownedId;
 			runWorkspace = ownedWorkspace;
 			runObjective = stored.objective ?? '';
+			flowdeckMode = 'run';
 			workspace = ownedWorkspace;
 			connectionState = 'reconnecting';
 			updateRunUrl();
 			void refreshRun();
 		} else {
+			flowdeckMode = 'composer';
+			workspace = queryWorkspace || draft.workspace || '';
+			objective = draft.objective || '';
 			connectionState = 'connected';
 		}
 		hydrated = true;
 	}
 
 	onMount(() => {
-diagnosticsMounted = true;
+		diagnosticsMounted = true;
 		hydrateOwnedRun();
 		void refreshDiagnostics();
 		startDiagnosticsRefresh();
+		const onSessionExpired = () => {
+			// This runs before the layout removes the page. Only the three
+			// allowlisted composer fields are retained; no request, response,
+			// credential, or session data crosses the auth boundary.
+			if (flowdeckMode === 'run' || runId) persistOwnedRun();
+			else persistComposerDraft();
+		};
+		window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
 		const onOnline = () => {
 			if (runId) {
 				connectionState = 'reconnecting';
@@ -561,14 +645,19 @@ diagnosticsMounted = true;
 		window.addEventListener('online', onOnline);
 		window.addEventListener('offline', onOffline);
 		return () => {
-diagnosticsMounted = false;
-diagnosticsRefreshQueued = false;
+			diagnosticsMounted = false;
+			diagnosticsRefreshQueued = false;
 			stopPolling();
 			stopDiagnosticsRefresh();
 			diagnosticsRequestId += 1;
+			window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
 			window.removeEventListener('online', onOnline);
 			window.removeEventListener('offline', onOffline);
 		};
+	});
+
+	$effect(() => {
+		if (hydrated && flowdeckMode === 'composer') persistComposerDraft();
 	});
 
 	$effect(() => {
@@ -578,7 +667,7 @@ diagnosticsRefreshQueued = false;
 	});
 
 	$effect(() => {
-		if (hydrated && runId && run) startPolling();
+		if (hydrated && flowdeckMode === 'run' && runId && run) startPolling();
 	});
 </script>
 

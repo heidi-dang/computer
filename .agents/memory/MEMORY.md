@@ -19,6 +19,7 @@
 - [Native cancellation propagation](native-cancellation-propagation.md) — native child loops must re-raise cancellation after cleanup so parent timeout and durable UNKNOWN handling remain authoritative.
 - [Native cancellation finalization](native-cancel-finalization.md) — cancellation must durably finalize messages even when it wins before the native coroutine starts.
 - [Frontend session expiry](frontend-session-expiry.md) — protected 401s should render login in place instead of triggering a reload loop.
+- [FlowDeck session recovery](flowdeck-session-recovery.md) — snapshot only allowlisted composer context across in-place login; keep owned runs separate.
 - [Project database boundary](project-database-boundary.md) — project PostgreSQL access requires a separate explicit server binding, never CPTR's internal database URL.
 - [PostgreSQL cancellation reconciliation](postgres-cancellation-reconciliation.md) — native driver interruption is subordinate to durable FlowDeck terminal state and replay fencing.
 - [Generated-auth durable operations](generated-auth-durable-operations.md) — auth side effects share FlowDeck lifecycle/evidence while secrets stay out of durable results.
