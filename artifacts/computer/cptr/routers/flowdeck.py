@@ -1498,7 +1498,11 @@ async def export_evidence_report(request: Request, run_id: str, workspace: str):
                 ),
                 "Cache-Control": "no-store",
                 "X-FlowDeck-Export-Outcome": (
-                    "replayed" if export.reused else "delivery_unknown"
+                    "replay"
+                    if export.reused and export.delivered
+                    else "retry"
+                    if export.reused
+                    else "delivery_unknown"
                 ),
             },
         )

@@ -1,6 +1,8 @@
 <script lang="ts">
 	import DesignerResults, { type DesignerAction } from './DesignerResults.svelte';
-import { downloadFlowDeckEvidenceReport } from '$lib/apis/flowdeck';
+	import {
+		downloadFlowDeckEvidenceReport
+	} from '$lib/apis/flowdeck';
 
 	interface Props {
 		status?: string;
@@ -114,15 +116,109 @@ let auditTrailOpen = $state(false);
 let exportingEvidence = $state(false);
 let exportError = $state('');
 let exportIdempotencyKey = $state('');
+type EvidenceReportDeliveryState = 'pending' | 'unknown' | 'delivered' | 'retry' | 'replay';
+let exportDeliveryState = $state<EvidenceReportDeliveryState | null>(null);
+let exportStateRunId = $state('');
+
+const exportEventKinds = new Set([
+	'EVIDENCE_REPORT_EXPORTED',
+	'EVIDENCE_REPORT_EXPORT_DELIVERED',
+	'EVIDENCE_REPORT_EXPORT_RETRIED',
+	'EVIDENCE_REPORT_EXPORT_REPLAYED'
+]);
+
+function exportEventState(entries: any[]): EvidenceReportDeliveryState | null {
+	const exportEntries = entries
+		.filter((entry) => exportEventKinds.has(String(entry?.kind || '').toUpperCase()))
+		.sort((left, right) => Number(left?.sequence || 0) - Number(right?.sequence || 0));
+	if (!exportEntries.length) return null;
+
+	const latest = exportEntries[exportEntries.length - 1];
+	const latestKind = String(latest?.kind || '').toUpperCase();
+	if (latestKind === 'EVIDENCE_REPORT_EXPORT_RETRIED') return 'unknown';
+	if (latestKind === 'EVIDENCE_REPORT_EXPORT_REPLAYED') return 'replay';
+	if (latestKind === 'EVIDENCE_REPORT_EXPORT_DELIVERED') {
+		const previousAction = [...exportEntries]
+			.slice(0, -1)
+			.reverse()
+			.find((entry) =>
+				[
+					'EVIDENCE_REPORT_EXPORTED',
+					'EVIDENCE_REPORT_EXPORT_RETRIED',
+					'EVIDENCE_REPORT_EXPORT_REPLAYED'
+				].includes(String(entry?.kind || '').toUpperCase())
+			);
+		const previousKind = String(previousAction?.kind || '').toUpperCase();
+		return previousKind === 'EVIDENCE_REPORT_EXPORT_RETRIED'
+			? 'retry'
+			: previousKind === 'EVIDENCE_REPORT_EXPORT_REPLAYED'
+				? 'replay'
+				: 'delivered';
+	}
+	return 'unknown';
+}
+
+const observedExportState = $derived(
+	exportEventState(Array.isArray(evidenceSummary?.entries) ? evidenceSummary.entries : [])
+);
+const reportDeliveryState = $derived.by(() => {
+	if (exportingEvidence) return 'pending' as EvidenceReportDeliveryState;
+	if (observedExportState === 'delivered' || observedExportState === 'retry' || observedExportState === 'replay') {
+		return observedExportState;
+	}
+	return exportDeliveryState || observedExportState;
+});
+const reportDeliveryLabel = $derived.by(() => {
+	switch (reportDeliveryState) {
+		case 'pending':
+			return 'Delivery pending';
+		case 'unknown':
+			return 'Delivery unknown';
+		case 'delivered':
+			return 'Delivered to transport';
+		case 'retry':
+			return 'Safe retry';
+		case 'replay':
+			return 'Replay';
+		default:
+			return '';
+	}
+});
+const reportDeliveryMessage = $derived.by(() => {
+	switch (reportDeliveryState) {
+		case 'pending':
+			return 'Preparing the report. If the download is interrupted, retry this same report safely.';
+		case 'unknown':
+			return 'The server cannot verify whether the browser received the report. Retry this same report safely.';
+		case 'delivered':
+			return 'The server handed the report to the response transport. Browser receipt is not confirmed.';
+		case 'retry':
+			return 'The report was delivered to transport after a safe retry using the same export request. Browser receipt is not confirmed.';
+		case 'replay':
+			return 'This report was replayed after an earlier delivery to transport. Browser receipt is not confirmed.';
+		default:
+			return '';
+	}
+});
+
+$effect(() => {
+	if (runId !== exportStateRunId) {
+		exportStateRunId = runId;
+		exportDeliveryState = null;
+		exportError = '';
+		exportIdempotencyKey = '';
+	}
+});
 
 async function exportEvidence() {
 if (!runId || !workspace || exportingEvidence) return;
 exportingEvidence = true;
 exportError = '';
+exportDeliveryState = 'pending';
 if (!exportIdempotencyKey) exportIdempotencyKey = crypto.randomUUID();
 try {
-const blob = await downloadFlowDeckEvidenceReport(runId, workspace, exportIdempotencyKey);
-const url = URL.createObjectURL(blob);
+const download = await downloadFlowDeckEvidenceReport(runId, workspace, exportIdempotencyKey);
+const url = URL.createObjectURL(download.blob);
 const link = document.createElement('a');
 link.href = url;
 link.download = `flowdeck-evidence-${runId.slice(0, 8)}.json`;
@@ -130,12 +226,34 @@ document.body.appendChild(link);
 link.click();
 link.remove();
 URL.revokeObjectURL(url);
+exportDeliveryState =
+download.outcome === 'replay'
+	? 'replay'
+	: download.outcome === 'retry'
+		? 'retry'
+		: 'delivered';
 exportIdempotencyKey = '';
-} catch (error) {
-exportError = error instanceof Error ? error.message : 'Unable to export evidence';
+} catch {
+exportDeliveryState = 'unknown';
+exportError = 'The report download was interrupted or failed. Retry the same report safely.';
 } finally {
 exportingEvidence = false;
 }
+}
+
+function evidenceEntryLabel(entry: any): string {
+	switch (String(entry?.kind || '').toUpperCase()) {
+		case 'EVIDENCE_REPORT_EXPORTED':
+			return 'Report prepared · delivery unknown';
+		case 'EVIDENCE_REPORT_EXPORT_DELIVERED':
+			return 'Report delivered to transport';
+		case 'EVIDENCE_REPORT_EXPORT_RETRIED':
+			return 'Report safely retried';
+		case 'EVIDENCE_REPORT_EXPORT_REPLAYED':
+			return 'Report replayed';
+		default:
+			return entry?.kind;
+	}
 }
 
 	const label = $derived.by(() => {
@@ -313,11 +431,23 @@ disabled={!workspace || exportingEvidence}
 aria-label="Download safe FlowDeck evidence report"
 onclick={exportEvidence}
 >
-{exportingEvidence ? 'Preparing…' : 'Download report'}
+{exportingEvidence ? 'Preparing…' : reportDeliveryState === 'unknown' || exportError ? 'Retry report' : 'Download report'}
 </button>
 </div>
 {#if exportError}
 <p class="flowdeck-export-error" role="alert">{exportError}</p>
+{/if}
+{#if reportDeliveryState}
+<div
+	class="flowdeck-export-status"
+	class:flowdeck-export-status-warning={reportDeliveryState === 'unknown' || reportDeliveryState === 'pending'}
+	class:flowdeck-export-status-success={reportDeliveryState === 'delivered'}
+	data-testid="flowdeck-export-status"
+	aria-live="polite"
+>
+	<strong>{reportDeliveryLabel}</strong>
+	<span>{reportDeliveryMessage}</span>
+</div>
 {/if}
 {#if auditTrailOpen}
 <ol class="flowdeck-audit-list">
@@ -326,7 +456,7 @@ onclick={exportEvidence}
 <span class:authoritative={entry.authority === 'authoritative'} class="flowdeck-audit-badge">
 {entry.authority === 'authoritative' ? 'Authoritative' : 'Advisory'}
 </span>
-<span class="flowdeck-audit-kind">{entry.kind}</span>
+<span class="flowdeck-audit-kind">{evidenceEntryLabel(entry)}</span>
 <span class="flowdeck-audit-sequence">#{entry.sequence}</span>
 </li>
 {/each}
@@ -370,7 +500,7 @@ onclick={exportEvidence}
 						<span class:authoritative={entry.authority === 'authoritative'} class="flowdeck-audit-badge">
 							{entry.authority === 'authoritative' ? 'Authoritative' : 'Advisory'}
 						</span>
-						<span class="flowdeck-audit-kind">{entry.kind}</span>
+						<span class="flowdeck-audit-kind">{evidenceEntryLabel(entry)}</span>
 						<span class="flowdeck-audit-sequence">#{entry.sequence}</span>
 					</li>
 				{/each}
@@ -567,6 +697,33 @@ opacity: 0.55;
 margin: 0 0.7rem 0.45rem;
 color: #fca5a5;
 font-size: 0.62rem;
+}
+.flowdeck-export-status {
+	display: grid;
+	gap: 0.15rem;
+	margin: 0 0.7rem 0.55rem;
+	border: 1px solid color-mix(in oklab, #60a5fa 28%, transparent);
+	border-radius: 0.4rem;
+	padding: 0.45rem 0.5rem;
+	color: color-mix(in oklab, var(--app-fg) 68%, transparent);
+	font-size: 0.62rem;
+	line-height: 1.35;
+}
+.flowdeck-export-status strong {
+	color: color-mix(in oklab, #93c5fd 88%, var(--app-fg));
+	font-size: 0.64rem;
+}
+.flowdeck-export-status-warning {
+	border-color: color-mix(in oklab, #f59e0b 42%, transparent);
+}
+.flowdeck-export-status-warning strong {
+	color: color-mix(in oklab, #fbbf24 88%, var(--app-fg));
+}
+.flowdeck-export-status-success {
+	border-color: color-mix(in oklab, #34d399 34%, transparent);
+}
+.flowdeck-export-status-success strong {
+	color: color-mix(in oklab, #6ee7b7 88%, var(--app-fg));
 }
 .flowdeck-audit-entry {
 display: flex;

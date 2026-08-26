@@ -53,6 +53,13 @@ export interface NewFlowDeckRunInput extends CreateOrchestrationInput {
 	original_run_id: string;
 }
 
+export type FlowDeckEvidenceExportOutcome = 'delivery_unknown' | 'retry' | 'replay';
+
+export interface FlowDeckEvidenceReportDownload {
+	blob: Blob;
+	outcome: FlowDeckEvidenceExportOutcome;
+}
+
 export const FDX_CONTAINMENT_CATEGORIES = [
 	'containment_failure',
 	'configuration_violation',
@@ -266,7 +273,7 @@ export async function downloadFlowDeckEvidenceReport(
 runId: string,
 workspace: string,
 idempotencyKey?: string
-): Promise<Blob> {
+): Promise<FlowDeckEvidenceReportDownload> {
 const query = new URLSearchParams({ workspace });
 const response = await fetchHandler(
 `/v1/flowdeck/orchestrations/${encodeURIComponent(runId)}/evidence-report?${query.toString()}`,
@@ -278,7 +285,14 @@ throw new Error(
 data.detail || data.error || data.message || response.statusText || 'Unable to export evidence'
 );
 }
-return response.blob();
+const rawOutcome = response.headers.get('X-FlowDeck-Export-Outcome');
+const outcome: FlowDeckEvidenceExportOutcome =
+rawOutcome === 'retry'
+	? 'retry'
+	: rawOutcome === 'replay' || rawOutcome === 'replayed'
+		? 'replay'
+		: 'delivery_unknown';
+return { blob: await response.blob(), outcome };
 }
 
 export async function cancelFlowDeckOrchestration(

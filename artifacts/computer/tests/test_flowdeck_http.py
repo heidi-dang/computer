@@ -1779,7 +1779,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(retry.status_code, 200, retry.text)
-        self.assertEqual(retry.headers["x-flowdeck-export-outcome"], "replayed")
+        self.assertEqual(retry.headers["x-flowdeck-export-outcome"], "retry")
         self.assertEqual(
             retry.json()["entries"][-1]["payload"]["outcome"],
             "prior_response_delivery_unknown",
@@ -1794,7 +1794,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(replay.status_code, 200, replay.text)
-        self.assertEqual(replay.headers["x-flowdeck-export-outcome"], "replayed")
+        self.assertEqual(replay.headers["x-flowdeck-export-outcome"], "replay")
 
         async with self.session_factory() as session:
             events = (
