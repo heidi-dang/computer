@@ -1740,6 +1740,92 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(forbidden.status_code, 403)
 
+    async def test_interrupted_keyed_evidence_report_is_unknown_and_retry_is_not_export(self):
+        run_id = "interrupted-export-report-run"
+        async with self.session_factory() as session:
+            session.add(
+                FlowDeckRun(
+                    id=run_id,
+                    request_key="interrupted-export-report-key",
+                    workspace=str(self.root_a),
+                    owner="user-a",
+                    status="SUCCEEDED",
+                    created_at=1,
+                    updated_at=1,
+                    version=1,
+                )
+            )
+            await session.commit()
+
+        store = DurableFlowDeck(self.session_factory)
+        reserved = await store.record_evidence_report_export(
+            run_id=run_id,
+            owner="user-a",
+            idempotency_key="interrupted-download-123",
+        )
+        self.assertFalse(reserved.reused)
+        self.assertFalse(reserved.delivered)
+        self.assertEqual(
+            reserved.event.payload["outcome"],
+            "response_delivery_unknown",
+        )
+
+        retry = await self.client.get(
+            f"/v1/flowdeck/orchestrations/{run_id}/evidence-report",
+            params={"workspace": str(self.root_a)},
+            headers={
+                **self.headers(),
+                "Idempotency-Key": "interrupted-download-123",
+            },
+        )
+        self.assertEqual(retry.status_code, 200, retry.text)
+        self.assertEqual(retry.headers["x-flowdeck-export-outcome"], "replayed")
+        self.assertEqual(
+            retry.json()["entries"][-1]["payload"]["outcome"],
+            "prior_response_delivery_unknown",
+        )
+
+        replay = await self.client.get(
+            f"/v1/flowdeck/orchestrations/{run_id}/evidence-report",
+            params={"workspace": str(self.root_a)},
+            headers={
+                **self.headers(),
+                "Idempotency-Key": "interrupted-download-123",
+            },
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.headers["x-flowdeck-export-outcome"], "replayed")
+
+        async with self.session_factory() as session:
+            events = (
+                await session.execute(
+                    select(FlowDeckEvent)
+                    .where(FlowDeckEvent.run_id == run_id)
+                    .order_by(FlowDeckEvent.sequence)
+                )
+            ).scalars().all()
+        self.assertEqual(
+            [event.kind for event in events],
+            [
+                "EVIDENCE_REPORT_EXPORTED",
+                "EVIDENCE_REPORT_EXPORT_RETRIED",
+                "EVIDENCE_REPORT_EXPORT_DELIVERED",
+                "EVIDENCE_REPORT_EXPORT_REPLAYED",
+            ],
+        )
+        self.assertEqual(
+            sum(event.kind == "EVIDENCE_REPORT_EXPORTED" for event in events),
+            1,
+        )
+        self.assertEqual(
+            events[0].payload["outcome"],
+            "response_delivery_unknown",
+        )
+        self.assertEqual(
+            events[2].payload["outcome"],
+            "response_sent_to_transport",
+        )
+
     async def test_simultaneous_evidence_report_downloads_are_individually_audited(self):
         run_id = "concurrent-export-report-run"
         async with self.session_factory() as session:

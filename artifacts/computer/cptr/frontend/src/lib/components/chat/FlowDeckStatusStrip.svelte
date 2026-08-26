@@ -113,13 +113,15 @@ let auditTrailOpen = $state(false);
 	let preservedEvidenceOpen = $state(false);
 let exportingEvidence = $state(false);
 let exportError = $state('');
+let exportIdempotencyKey = $state('');
 
 async function exportEvidence() {
 if (!runId || !workspace || exportingEvidence) return;
 exportingEvidence = true;
 exportError = '';
+if (!exportIdempotencyKey) exportIdempotencyKey = crypto.randomUUID();
 try {
-const blob = await downloadFlowDeckEvidenceReport(runId, workspace);
+const blob = await downloadFlowDeckEvidenceReport(runId, workspace, exportIdempotencyKey);
 const url = URL.createObjectURL(blob);
 const link = document.createElement('a');
 link.href = url;
@@ -128,6 +130,7 @@ document.body.appendChild(link);
 link.click();
 link.remove();
 URL.revokeObjectURL(url);
+exportIdempotencyKey = '';
 } catch (error) {
 exportError = error instanceof Error ? error.message : 'Unable to export evidence';
 } finally {

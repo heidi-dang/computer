@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from sqlalchemy import select
+from starlette.responses import StreamingResponse
 
 from cptr.flowdeck.authenticated_gateway import (
     AuthenticatedGatewayError,
@@ -1359,11 +1360,22 @@ async def export_evidence_report(request: Request, run_id: str, workspace: str):
 
     Unlike the orchestration status response, an exported report must be
     reproducible by any API worker. Terminal observer frames are intentionally
-    process-local and are therefore not part of this durable export.
+    process-local and are therefore not part of this durable export. Callers
+    that send an ``Idempotency-Key`` receive an explicit delivery outcome:
+    the export starts as ``response_delivery_unknown`` and is finalized as
+    ``response_sent_to_transport`` only after its body is handed to the
+    response transport. Retrying that key never creates another export event.
     """
     owner, _, run = await _owned_run(request, run_id, workspace)
     store = DurableFlowDeck(get_session_factory())
-    await store.record_evidence_report_export(run_id=run.id, owner=owner)
+    idempotency_key = request.headers.get("Idempotency-Key", "").strip() or None
+    if idempotency_key and not _KEY_PATTERN.fullmatch(idempotency_key):
+        raise HTTPException(400, "a valid Idempotency-Key header is required")
+    export = await store.record_evidence_report_export(
+        run_id=run.id,
+        owner=owner,
+        idempotency_key=idempotency_key,
+    )
     events = await store.list_events(run.id)
 
     events = [
@@ -1382,8 +1394,45 @@ async def export_evidence_report(request: Request, run_id: str, workspace: str):
         run_id=run.id,
         owner=run.owner,
     )
+    serialized = json.dumps(summary, sort_keys=True, separators=(",", ":"))
+    if idempotency_key:
+        async def report_body():
+            try:
+                yield serialized
+            except asyncio.CancelledError:
+                # No delivery event is committed when the worker is
+                # interrupted before the body is handed to the transport.
+                raise
+            else:
+                try:
+                    await store.record_evidence_report_delivery(
+                        run_id=run.id,
+                        owner=owner,
+                        export_event_id=export.event.id,
+                    )
+                except Exception:
+                    # The durable reservation remains explicitly unknown if
+                    # delivery finalization itself is interrupted or fails.
+                    logger.warning(
+                        "unable to finalize evidence report delivery",
+                        exc_info=True,
+                    )
+
+        return StreamingResponse(
+            report_body(),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="flowdeck-evidence-{run.id[:8]}.json"'
+                ),
+                "Cache-Control": "no-store",
+                "X-FlowDeck-Export-Outcome": (
+                    "replayed" if export.reused else "delivery_unknown"
+                ),
+            },
+        )
     return Response(
-        content=json.dumps(summary, sort_keys=True, separators=(",", ":")),
+        content=serialized,
         media_type="application/json",
         headers={
             "Content-Disposition": (

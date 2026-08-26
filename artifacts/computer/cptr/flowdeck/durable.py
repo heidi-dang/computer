@@ -115,6 +115,22 @@ class RecoveryGrant:
     expires_at: int
 
 
+@dataclass(frozen=True)
+class EvidenceReportExport:
+    """Durable export reservation and its server-observed delivery state.
+
+    ``EVIDENCE_REPORT_EXPORTED`` means that the report was prepared, not that
+    a browser received it. A keyed response gets a later
+    ``EVIDENCE_REPORT_EXPORT_DELIVERED`` event only after its body has been
+    handed to the response transport. A missing delivery event is therefore
+    an explicit unknown outcome across worker interruption and client retry.
+    """
+
+    event: FlowDeckEvent
+    reused: bool
+    delivered: bool
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -125,6 +141,9 @@ def _id() -> str:
 
 AUDIT_SUMMARY_LIMIT = 100
 EVIDENCE_REPORT_EXPORT_EVENT_KIND = "EVIDENCE_REPORT_EXPORTED"
+EVIDENCE_REPORT_EXPORT_DELIVERED_EVENT_KIND = "EVIDENCE_REPORT_EXPORT_DELIVERED"
+EVIDENCE_REPORT_EXPORT_RETRY_EVENT_KIND = "EVIDENCE_REPORT_EXPORT_RETRIED"
+EVIDENCE_REPORT_EXPORT_REPLAY_EVENT_KIND = "EVIDENCE_REPORT_EXPORT_REPLAYED"
 _AUDIT_SAFE_PAYLOAD_KEYS = frozenset(
     {
         "status",
@@ -1710,14 +1729,141 @@ class DurableFlowDeck:
         *,
         run_id: str,
         owner: str,
+        idempotency_key: str | None = None,
         now: int | None = None,
-    ) -> FlowDeckEvent:
-        """Record one authorized evidence-report export without report data.
+    ) -> EvidenceReportExport:
+        """Reserve one authorized evidence-report export without report data.
 
         Export events are allowed for terminal runs because archived reports
         remain downloadable. Ownership is checked again inside the durable
         transaction so callers cannot append an export event to another user's
         run.
+
+        A keyed request is idempotent. Its first event deliberately records
+        ``response_delivery_unknown`` because committing this event happens
+        before the response can reach the client. The router records a
+        separate transport-delivery event after the response body is sent.
+        Retrying before that event records one explicit retry outcome rather
+        than another export; replaying after it records one explicit replay
+        outcome. Requests without a key retain the legacy per-request event.
+        """
+        now = self.clock() if now is None else now
+        key_hash = (
+            hashlib.sha256(idempotency_key.encode()).hexdigest()
+            if idempotency_key
+            else None
+        )
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            if run.owner != owner:
+                raise LifecycleError("run ownership mismatch")
+            if key_hash:
+                exports = list(
+                    (
+                        await db.scalars(
+                            select(FlowDeckEvent)
+                            .where(
+                                FlowDeckEvent.run_id == run_id,
+                                FlowDeckEvent.kind == EVIDENCE_REPORT_EXPORT_EVENT_KIND,
+                            )
+                            .order_by(FlowDeckEvent.sequence)
+                        )
+                    ).all()
+                )
+                existing = next(
+                    (
+                        event
+                        for event in reversed(exports)
+                        if event.payload.get("export_key_hash") == key_hash
+                    ),
+                    None,
+                )
+                if existing:
+                    delivery = await db.scalar(
+                        select(FlowDeckEvent)
+                        .where(
+                            FlowDeckEvent.run_id == run_id,
+                            FlowDeckEvent.kind == EVIDENCE_REPORT_EXPORT_DELIVERED_EVENT_KIND,
+                            FlowDeckEvent.payload["export_event_id"].as_string()
+                            == existing.id,
+                        )
+                        .order_by(FlowDeckEvent.sequence.desc())
+                    )
+                    replay_kind = (
+                        EVIDENCE_REPORT_EXPORT_REPLAY_EVENT_KIND
+                        if delivery
+                        else EVIDENCE_REPORT_EXPORT_RETRY_EVENT_KIND
+                    )
+                    replayed = await db.scalar(
+                        select(FlowDeckEvent)
+                        .where(
+                            FlowDeckEvent.run_id == run_id,
+                            FlowDeckEvent.kind == replay_kind,
+                            FlowDeckEvent.payload["export_event_id"].as_string()
+                            == existing.id,
+                        )
+                        .order_by(FlowDeckEvent.sequence.desc())
+                    )
+                    if not replayed:
+                        await self._event(
+                            db,
+                            run_id,
+                            replay_kind,
+                            {
+                                "action": "retry" if not delivery else "replay",
+                                "resource": "evidence_report",
+                                "outcome": (
+                                    "prior_response_delivery_unknown"
+                                    if not delivery
+                                    else "already_delivered_to_transport"
+                                ),
+                                "export_event_id": existing.id,
+                                "export_key_hash": key_hash,
+                            },
+                            now,
+                        )
+                    return EvidenceReportExport(existing, True, delivery is not None)
+
+                event = await self._event(
+                    db,
+                    run_id,
+                    EVIDENCE_REPORT_EXPORT_EVENT_KIND,
+                    {
+                        "action": "download",
+                        "resource": "evidence_report",
+                        "outcome": "response_delivery_unknown",
+                        "export_key_hash": key_hash,
+                    },
+                    now,
+                )
+                return EvidenceReportExport(event, False, False)
+
+            event = await self._event(
+                db,
+                run_id,
+                EVIDENCE_REPORT_EXPORT_EVENT_KIND,
+                {"action": "download", "resource": "evidence_report"},
+                now,
+            )
+            return EvidenceReportExport(event, False, False)
+
+        return await self._transaction(operation)
+
+    async def record_evidence_report_delivery(
+        self,
+        *,
+        run_id: str,
+        owner: str,
+        export_event_id: str,
+        now: int | None = None,
+    ) -> FlowDeckEvent:
+        """Record that a keyed report body was handed to the response transport.
+
+        This is intentionally weaker than claiming the browser observed the
+        download. If the worker stops before this transaction, the reservation
+        remains ``response_delivery_unknown`` and a retry can say so
+        explicitly.
         """
         now = self.clock() if now is None else now
 
@@ -1725,11 +1871,36 @@ class DurableFlowDeck:
             run = await self._run(db, run_id)
             if run.owner != owner:
                 raise LifecycleError("run ownership mismatch")
+            export = await db.scalar(
+                select(FlowDeckEvent).where(
+                    FlowDeckEvent.id == export_event_id,
+                    FlowDeckEvent.run_id == run_id,
+                    FlowDeckEvent.kind == EVIDENCE_REPORT_EXPORT_EVENT_KIND,
+                )
+            )
+            if not export:
+                raise LifecycleError("unknown evidence-report export")
+            existing = await db.scalar(
+                select(FlowDeckEvent)
+                .where(
+                    FlowDeckEvent.run_id == run_id,
+                    FlowDeckEvent.kind == EVIDENCE_REPORT_EXPORT_DELIVERED_EVENT_KIND,
+                    FlowDeckEvent.payload["export_event_id"].as_string() == export_event_id,
+                )
+                .order_by(FlowDeckEvent.sequence.desc())
+            )
+            if existing:
+                return existing
             return await self._event(
                 db,
                 run_id,
-                EVIDENCE_REPORT_EXPORT_EVENT_KIND,
-                {"action": "download", "resource": "evidence_report"},
+                EVIDENCE_REPORT_EXPORT_DELIVERED_EVENT_KIND,
+                {
+                    "action": "delivery",
+                    "resource": "evidence_report",
+                    "outcome": "response_sent_to_transport",
+                    "export_event_id": export_event_id,
+                },
                 now,
             )
 
