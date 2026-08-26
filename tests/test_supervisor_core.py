@@ -297,6 +297,8 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
 
         prompt = agent.started[0][1]
         self.assertIn("workspace_scope=current", prompt)
+        self.assertIn("inspection_scope=workspace", prompt)
+        self.assertNotIn("inspection_scope=assignment", prompt)
         self.assertNotIn("workspace_scope=all", prompt)
 
     async def test_cancel_propagates_to_the_active_worker(self):

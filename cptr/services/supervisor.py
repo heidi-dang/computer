@@ -1104,10 +1104,10 @@ class AutonomousSupervisor:
         scoped_assignment = (
             f"Work only in the CPTR workspace identified by {monitor.workspace_id}. "
             "workspace_scope=current. "
-            "inspection_scope=assignment. "
-            "Do not search, read, modify, or verify other workspaces or historical fixtures "
-            "unless the original goal explicitly requires cross-workspace work. "
-            "Only inspect files named by this assignment or created during this monitor.\n\n"
+            "inspection_scope=workspace. "
+            "Do not search, read, modify, or verify other workspaces unless the original goal "
+            "explicitly requires cross-workspace work. Repository-wide investigation, edits, and "
+            "validation commands are authorized only inside this selected workspace.\n\n"
             f"Assignment: {assignment}"
         )
         task = await self.agent.start_task(
