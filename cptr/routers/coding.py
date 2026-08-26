@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from cptr.models import Workspace
+from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.control_auth import authenticate_control_request
 from cptr.utils.db import get_db
 from cptr.utils.runtime import FileError, Runtime
@@ -126,6 +127,8 @@ async def _workspace(user_id: str, workspace_id: str) -> Workspace:
         workspace = await db.get(Workspace, workspace_id)
     if workspace is None or workspace.user_id != user_id:
         raise HTTPException(status_code=404, detail="workspace not found")
+    if not is_workspace_available(workspace):
+        raise HTTPException(status_code=409, detail="workspace is unavailable")
     return workspace
 
 

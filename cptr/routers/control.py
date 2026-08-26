@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from cptr.models import Workspace
+from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.agent_service import AgentService
 from cptr.services.control_auth import authenticate_control_request
 from cptr.services.control_store import SqlSupervisorStore
@@ -126,6 +127,8 @@ async def _ensure_workspace(user_id: str, workspace_id: str) -> Workspace:
         workspace = await db.get(Workspace, workspace_id)
     if workspace is None or workspace.user_id != user_id:
         raise HTTPException(status_code=404, detail="workspace not found")
+    if not is_workspace_available(workspace):
+        raise HTTPException(status_code=409, detail="workspace is unavailable")
     return workspace
 
 
@@ -214,7 +217,12 @@ async def list_workspaces(request: Request):
     workspaces = await Workspace.get_by_user(user_id)
     return {
         "workspaces": [
-            {"workspace_id": workspace.id, "name": workspace.name} for workspace in workspaces
+            {
+                "workspace_id": workspace.id,
+                "name": workspace.name,
+                "available": is_workspace_available(workspace),
+            }
+            for workspace in workspaces
         ]
     }
 
@@ -223,7 +231,7 @@ async def list_workspaces(request: Request):
 async def get_workspace(request: Request, workspace_id: str):
     user_id = await _user(request, "workspace:read")
     workspace = await _ensure_workspace(user_id, workspace_id)
-    return {"workspace_id": workspace.id, "name": workspace.name}
+    return {"workspace_id": workspace.id, "name": workspace.name, "available": True}
 
 
 @router.post("/tasks")
