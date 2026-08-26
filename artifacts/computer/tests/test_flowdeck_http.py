@@ -1872,6 +1872,141 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             if shared_engine is not None:
                 await shared_engine.dispose()
 
+    async def test_evidence_report_download_recovers_after_api_worker_stops(self):
+        shared_data_dir = Path(self.temp.name, "api-worker-restart")
+        shared_data_dir.mkdir()
+        first_port = self.free_port()
+        second_port = self.free_port()
+        while second_port == first_port:
+            second_port = self.free_port()
+        first_worker = self.start_worker(shared_data_dir, first_port)
+        second_worker = None
+        shared_engine = None
+        try:
+            await asyncio.to_thread(self.wait_for_health, first_port)
+
+            shared_engine = create_async_engine(
+                f"sqlite+aiosqlite:///{shared_data_dir / 'app.db'}",
+                connect_args={"timeout": 10},
+            )
+            shared_sessions = async_sessionmaker(shared_engine, expire_on_commit=False)
+            async with shared_sessions() as session:
+                session.add_all(
+                    [
+                        User(id="restart-user", role="user", created_at=1),
+                        Auth(user_id="restart-user", username="restart", password=None),
+                        Workspace(
+                            user_id="restart-user",
+                            path=str(self.root_a),
+                            name="workspace-a",
+                            data={},
+                            created_at=1,
+                        ),
+                        Config(
+                            key="api_keys",
+                            value=[
+                                {
+                                    "key_hash": hashlib.sha256(
+                                        b"restart-download-token"
+                                    ).hexdigest(),
+                                    "user_id": "restart-user",
+                                }
+                            ],
+                        ),
+                        FlowDeckRun(
+                            id="worker-restart-export-run",
+                            request_key="worker-restart-export-key",
+                            workspace=str(self.root_a),
+                            owner="restart-user",
+                            status="SUCCEEDED",
+                            created_at=1,
+                            updated_at=1,
+                            version=1,
+                        ),
+                        FlowDeckEvent(
+                            id="worker-restart-export-event",
+                            run_id="worker-restart-export-run",
+                            sequence=1,
+                            kind="VERIFY",
+                            payload={
+                                "authoritative": True,
+                                "source": "verifier",
+                                "outcome": "succeeded",
+                                "reasoning": "private reasoning",
+                                "credential": "secret-value",
+                            },
+                            created_at=1,
+                        ),
+                    ]
+                )
+                await session.commit()
+
+            second_worker = self.start_worker(shared_data_dir, second_port)
+            await asyncio.to_thread(self.wait_for_health, second_port)
+
+            report_url = (
+                "/v1/flowdeck/orchestrations/"
+                "worker-restart-export-run/evidence-report"
+            )
+            headers = {"Authorization": "Bearer restart-download-token"}
+            async with httpx.AsyncClient(timeout=30) as client:
+                before_stop = await client.get(
+                    f"http://127.0.0.1:{first_port}{report_url}",
+                    params={"workspace": str(self.root_a)},
+                    headers=headers,
+                )
+                self.assertEqual(before_stop.status_code, 200, before_stop.text)
+                first_report = before_stop.json()
+
+                first_worker.terminate()
+                try:
+                    first_worker.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    first_worker.kill()
+                    first_worker.wait(timeout=10)
+                first_worker = None
+
+                after_stop = await client.get(
+                    f"http://127.0.0.1:{second_port}{report_url}",
+                    params={"workspace": str(self.root_a)},
+                    headers=headers,
+                )
+
+            self.assertEqual(after_stop.status_code, 200, after_stop.text)
+            second_report = after_stop.json()
+            self.assertEqual(second_report, first_report)
+            serialized = json.dumps(second_report)
+            self.assertNotIn("private reasoning", serialized)
+            self.assertNotIn("secret-value", serialized)
+
+            async with shared_sessions() as session:
+                events = (
+                    await session.execute(
+                        select(FlowDeckEvent)
+                        .where(FlowDeckEvent.run_id == "worker-restart-export-run")
+                        .order_by(FlowDeckEvent.sequence)
+                    )
+                ).scalars().all()
+            self.assertEqual(
+                [event.sequence for event in events],
+                [1, 2, 3],
+            )
+            self.assertEqual(
+                sum(event.kind == "EVIDENCE_REPORT_EXPORTED" for event in events),
+                2,
+            )
+        finally:
+            for worker in (first_worker, second_worker):
+                if worker and worker.poll() is None:
+                    worker.terminate()
+                    try:
+                        worker.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        worker.kill()
+                        worker.wait(timeout=10)
+            if shared_engine is not None:
+                await shared_engine.dispose()
+
     async def test_active_run_steering_is_durable_and_idempotent(self):
         async def submit(request, *, authenticated_request, store):
             return CoordinatorResult("pending", request.request_key, (), ())
