@@ -21,6 +21,10 @@ from cptr.models.control import (
     ControlLiveEvent,
     ControlMessage,
     ControlTask,
+    DirectOperation,
+    DirectOperationApproval,
+    DirectOperationEvent,
+    WorkspaceOperationLease,
 )
 from cptr.models.files import File
 from cptr.models.users import Auth, User, UserStates
@@ -43,6 +47,10 @@ __all__ = [
     "ControlLiveEvent",
     "ControlMessage",
     "ControlTask",
+    "DirectOperation",
+    "DirectOperationApproval",
+    "DirectOperationEvent",
+    "WorkspaceOperationLease",
     "File",
     "User",
     "UserStates",

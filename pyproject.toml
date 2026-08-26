@@ -44,6 +44,7 @@ dev = [
 
 [project.scripts]
 cptr = "cptr.cli:main"
+cptr-direct-sandbox-runner = "cptr.services.direct_sandbox_runner:main"
 
 [build-system]
 requires = ["hatchling"]

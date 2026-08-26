@@ -171,6 +171,96 @@ class AutonomousWorkspaceLease(Base):
     expires_at = Column(BigInteger, nullable=False)
 
 
+class DirectOperation(Base):
+    """Durable owner for an agent-free direct workspace operation."""
+
+    __tablename__ = "direct_operations"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    user_id = Column(Text, ForeignKey("users.id"), nullable=False)
+    workspace_id = Column(Text, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    kind = Column(Text, nullable=False)
+    state = Column(Text, nullable=False, default="REQUESTED")
+    request = Column(JSON, nullable=False, default=dict)
+    request_digest = Column(Text, nullable=False)
+    idempotency_key = Column(Text, nullable=False)
+    expected_revision = Column(Text, nullable=True)
+    lease_fencing_token = Column(BigInteger, nullable=True)
+    approval_id = Column(Text, nullable=True)
+    executor_type = Column(Text, nullable=True)
+    executor_ref = Column(Text, nullable=True)
+    public_result = Column(JSON, nullable=True)
+    public_error_code = Column(Text, nullable=True)
+    cancel_reason = Column(Text, nullable=True)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+    started_at = Column(BigInteger, nullable=True)
+    finished_at = Column(BigInteger, nullable=True)
+    cancel_requested_at = Column(BigInteger, nullable=True)
+    version = Column(BigInteger, nullable=False, default=1)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "workspace_id",
+            "kind",
+            "idempotency_key",
+            name="uq_direct_operation_idempotency",
+        ),
+        Index("ix_direct_operation_workspace_state", "workspace_id", "state"),
+        Index("ix_direct_operation_user_created", "user_id", "created_at"),
+        Index("ix_direct_operation_executor_ref", "executor_ref"),
+    )
+
+
+class DirectOperationEvent(Base):
+    """Append-only public-safe lifecycle evidence for a direct operation."""
+
+    __tablename__ = "direct_operation_events"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    operation_id = Column(
+        Text, ForeignKey("direct_operations.id", ondelete="CASCADE"), nullable=False
+    )
+    event_type = Column(Text, nullable=False)
+    state = Column(Text, nullable=True)
+    payload = Column(JSON, nullable=False, default=dict)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (Index("ix_direct_operation_event_operation", "operation_id", "created_at"),)
+
+
+class DirectOperationApproval(Base):
+    """Operation-specific approval that cannot be forged by an execution request flag."""
+
+    __tablename__ = "direct_operation_approvals"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    operation_id = Column(
+        Text, ForeignKey("direct_operations.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    request_digest = Column(Text, nullable=False)
+    reason = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="PENDING")
+    requested_at = Column(BigInteger, nullable=False)
+    expires_at = Column(BigInteger, nullable=True)
+    decided_at = Column(BigInteger, nullable=True)
+    decided_by = Column(Text, nullable=True)
+
+
+class WorkspaceOperationLease(Base):
+    """A generalized fenced workspace mutation lease shared by monitors and direct operations."""
+
+    __tablename__ = "workspace_operation_leases"
+
+    workspace_id = Column(Text, ForeignKey("workspaces.id", ondelete="CASCADE"), primary_key=True)
+    holder_type = Column(Text, nullable=False)
+    holder_id = Column(Text, nullable=False)
+    fencing_token = Column(BigInteger, nullable=False, default=0)
+    acquired_at = Column(BigInteger, nullable=False)
+    expires_at = Column(BigInteger, nullable=False)
+
+
 class ControlIdempotency(Base):
     __tablename__ = "control_idempotency"
 

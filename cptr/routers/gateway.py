@@ -813,11 +813,20 @@ DEFAULT_CONTROL_SCOPES = (
     "task:write",
     "autonomous:run",
     "git:read",
+)
+# Mutation, execution, and legacy direct-coding access are deliberately opt-in.
+# A connector should receive a dedicated key containing only the direct scopes
+# it needs for its authorized workspaces.
+OPTIONAL_CONTROL_SCOPES = (
     "coding:read",
     "coding:write",
     "command:execute",
+    "command:external",
+    "direct:inspect",
+    "direct:mutate",
+    "direct:execute",
+    "direct:approve",
 )
-OPTIONAL_CONTROL_SCOPES = ("command:external",)
 ALLOWED_CONTROL_SCOPES = frozenset((*DEFAULT_CONTROL_SCOPES, *OPTIONAL_CONTROL_SCOPES))
 
 

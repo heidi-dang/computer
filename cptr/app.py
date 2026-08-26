@@ -16,6 +16,7 @@ from cptr.routers import (
     browser_router,
     chat_router,
     coding_router,
+    direct_operations_router,
     control_router,
     control_stream_router,
     events_router,
@@ -54,8 +55,12 @@ async def lifespan(app: FastAPI):
 
     await init_db()
     from cptr.routers.control import recover_monitors
+    from cptr.routers.direct_operations import recover_direct_operations, store as direct_operation_store
+    from cptr.services.direct_executor import DirectExecutorManager
 
+    app.state.direct_executor = DirectExecutorManager(direct_operation_store)
     await recover_monitors(app)
+    await recover_direct_operations(app)
     app.state.MODELS = {}
     from cptr.env import STARTUP_TOKEN
 
@@ -91,6 +96,9 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        direct_executor = getattr(app.state, "direct_executor", None)
+        if direct_executor:
+            await direct_executor.shutdown()
         for monitor_task in getattr(app.state, "control_monitor_tasks", {}).values():
             monitor_task.cancel()
         for monitor_task in getattr(app.state, "control_monitor_tasks", {}).values():
@@ -301,6 +309,7 @@ app.include_router(browser_router)
 app.include_router(webhook_router)
 app.include_router(chat_router)
 app.include_router(coding_router)
+app.include_router(direct_operations_router)
 app.include_router(control_router)
 app.include_router(control_stream_router)
 app.include_router(events_router)

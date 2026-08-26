@@ -19,6 +19,7 @@ from cptr.models import (
     ControlIdempotency,
     ControlMessage,
     ControlTask,
+    WorkspaceOperationLease,
 )
 from cptr.services.supervisor import (
     ApprovalRecord,
@@ -370,12 +371,19 @@ class SqlSupervisorStore:
             )
 
     async def claim_workspace(self, workspace_id: str, monitor_id: str) -> bool:
+        """Claim the generalized workspace lease for an autonomous monitor.
+
+        New monitors coordinate with direct operations through
+        ``workspace_operation_leases``. The legacy table is cleared only after
+        the generalized lease is committed, which keeps existing deployments
+        safe while active legacy monitor leases age out.
+        """
         now = _now_ms()
-        token = secrets.token_urlsafe(18)
+        expires_at = now + 300_000
         async with await get_db() as db:
-            existing = await db.get(AutonomousWorkspaceLease, workspace_id)
-            if existing is not None and existing.monitor_id != monitor_id:
-                owner = await db.get(AutonomousMonitor, existing.monitor_id)
+            legacy = await db.get(AutonomousWorkspaceLease, workspace_id)
+            if legacy is not None and legacy.monitor_id != monitor_id:
+                owner = await db.get(AutonomousMonitor, legacy.monitor_id)
                 terminal_owner = owner is None or owner.status in {
                     MonitorStatus.COMPLETE.value,
                     MonitorStatus.CANCELLED.value,
@@ -384,45 +392,55 @@ class SqlSupervisorStore:
                 }
                 if not terminal_owner:
                     return False
-                await db.delete(existing)
+                await db.delete(legacy)
                 await db.flush()
-            updated = await db.execute(
-                update(AutonomousWorkspaceLease)
-                .where(
-                    AutonomousWorkspaceLease.workspace_id == workspace_id,
-                    or_(
-                        AutonomousWorkspaceLease.monitor_id == monitor_id,
-                        AutonomousWorkspaceLease.expires_at < now,
-                    ),
+
+            lease = await db.get(WorkspaceOperationLease, workspace_id)
+            if lease is not None:
+                held_by_other = (
+                    lease.holder_type != "AUTONOMOUS_MONITOR" or lease.holder_id != monitor_id
                 )
-                .values(
-                    monitor_id=monitor_id,
-                    lock_token=token,
-                    acquired_at=now,
-                    expires_at=now + 300_000,
+                if held_by_other and lease.expires_at >= now:
+                    return False
+                lease.holder_type = "AUTONOMOUS_MONITOR"
+                lease.holder_id = monitor_id
+                lease.fencing_token = int(lease.fencing_token or 0) + 1
+                lease.acquired_at = now
+                lease.expires_at = expires_at
+            else:
+                db.add(
+                    WorkspaceOperationLease(
+                        workspace_id=workspace_id,
+                        holder_type="AUTONOMOUS_MONITOR",
+                        holder_id=monitor_id,
+                        fencing_token=1,
+                        acquired_at=now,
+                        expires_at=expires_at,
+                    )
                 )
-            )
-            if updated.rowcount:
-                await db.commit()
-                return True
-            db.add(
-                AutonomousWorkspaceLease(
-                    workspace_id=workspace_id,
-                    monitor_id=monitor_id,
-                    lock_token=token,
-                    acquired_at=now,
-                    expires_at=now + 300_000,
-                )
-            )
             try:
-                await db.commit()
+                await db.flush()
             except IntegrityError:
                 await db.rollback()
                 return False
+            if legacy is not None and legacy.monitor_id == monitor_id:
+                legacy.expires_at = 0
+            await db.commit()
             return True
 
     async def release_workspace(self, workspace_id: str, monitor_id: str) -> None:
         async with await get_db() as db:
+            await db.execute(
+                update(WorkspaceOperationLease)
+                .where(
+                    and_(
+                        WorkspaceOperationLease.workspace_id == workspace_id,
+                        WorkspaceOperationLease.holder_type == "AUTONOMOUS_MONITOR",
+                        WorkspaceOperationLease.holder_id == monitor_id,
+                    )
+                )
+                .values(expires_at=0)
+            )
             await db.execute(
                 update(AutonomousWorkspaceLease)
                 .where(

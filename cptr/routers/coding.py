@@ -276,6 +276,10 @@ async def search_workspace_files(request: Request, workspace_id: str, body: Sear
 
 @router.post("/workspaces/{workspace_id}/coding/write")
 async def write_workspace_file(request: Request, workspace_id: str, body: WriteRequest):
+    raise HTTPException(
+        status_code=410,
+        detail="legacy direct mutation is retired; use the durable v2 direct-operations API",
+    )
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
     root = Path(workspace.path).resolve()
@@ -289,6 +293,10 @@ async def write_workspace_file(request: Request, workspace_id: str, body: WriteR
 
 @router.post("/workspaces/{workspace_id}/coding/edit")
 async def edit_workspace_file(request: Request, workspace_id: str, body: EditRequest):
+    raise HTTPException(
+        status_code=410,
+        detail="legacy direct mutation is retired; use the durable v2 direct-operations API",
+    )
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
     root = Path(workspace.path).resolve()
@@ -388,6 +396,10 @@ async def delete_workspace_file(request: Request, workspace_id: str, body: Delet
 
 @router.post("/workspaces/{workspace_id}/coding/commands")
 async def start_workspace_command(request: Request, workspace_id: str, body: CommandRequest):
+    raise HTTPException(
+        status_code=410,
+        detail="raw shell commands are retired; use an approved durable v2 structured action",
+    )
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
     root = Path(workspace.path).resolve()
