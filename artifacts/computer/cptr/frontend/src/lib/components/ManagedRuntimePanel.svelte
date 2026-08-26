@@ -6,6 +6,7 @@ startManagedRuntime,
 stopManagedRuntime,
 type ManagedRuntime
 } from '$lib/apis/runtime';
+import { getRecoveryMessage, isSessionExpired } from '$lib/apis';
 
 interface Props { workspace: string; }
 let { workspace }: Props = $props();
@@ -23,7 +24,16 @@ runtime = await getManagedRuntime(runtime.run_id, workspace);
 if (['running', 'crashed', 'unknown', 'stopped'].includes(runtime.state) && timer) {
 clearInterval(timer); timer = null;
 }
-		} catch (e) { error = 'Preview state unavailable. Try again shortly.'; }
+		} catch (e) {
+			if (isSessionExpired(e)) {
+				if (timer) {
+					clearInterval(timer);
+					timer = null;
+				}
+				runtime = null;
+			}
+			error = getRecoveryMessage(e, 'Preview state unavailable. Try again shortly.');
+		}
 }, 500);
 }
 
@@ -33,14 +43,19 @@ loading = true; error = '';
 try {
 runtime = await startManagedRuntime(workspace, `runtime-${crypto.randomUUID()}`);
 beginPolling();
-	} catch (e) { error = 'Unable to start preview. Try again shortly.'; }
+	} catch (e) { error = getRecoveryMessage(e, 'Unable to start preview. Try again shortly.'); }
 finally { loading = false; }
 }
 
 async function stop() {
 if (!runtime?.run_id) return;
-try { runtime = await stopManagedRuntime(runtime.run_id, workspace); }
-	catch (e) { error = 'Unable to stop preview. Try again shortly.'; }
+	loading = true; error = '';
+	try { runtime = await stopManagedRuntime(runtime.run_id, workspace); }
+	catch (e) {
+		if (isSessionExpired(e)) runtime = null;
+		error = getRecoveryMessage(e, 'Unable to stop preview. Try again shortly.');
+	}
+	finally { loading = false; }
 }
 
 onDestroy(() => { if (timer) clearInterval(timer); });

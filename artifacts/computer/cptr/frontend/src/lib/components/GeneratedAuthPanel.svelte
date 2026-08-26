@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { getRecoveryMessage, isSessionExpired } from '$lib/apis';
 	import {
 		getGeneratedAuthConfig,
 		getGeneratedAuthCsrf,
@@ -28,11 +29,15 @@
 			csrf = csrfResponse.csrf;
 			try {
 				session = await getGeneratedAuthSession(workspace);
-			} catch {
+			} catch (cause) {
+				if (isSessionExpired(cause)) throw cause;
 				session = null;
 			}
 		} catch (cause) {
-			error = 'Auth inspection failed. Review the generated app configuration and try again.';
+			error = getRecoveryMessage(
+				cause,
+				'Auth inspection failed. Review the generated app configuration and try again.'
+			);
 		} finally {
 			loading = false;
 		}
@@ -46,7 +51,7 @@
 			session = await getGeneratedAuthSession(workspace);
 			password = '';
 		} catch (cause) {
-			error = 'Sign in failed. Check the submitted details and try again.';
+			error = getRecoveryMessage(cause, 'Sign in failed. Check the submitted details and try again.');
 		} finally {
 			loading = false;
 		}
@@ -59,7 +64,7 @@
 			await signUpGeneratedAuth(workspace, email, password, csrf);
 			await signIn();
 		} catch (cause) {
-			error = 'Sign up failed. Check the submitted details and try again.';
+			error = getRecoveryMessage(cause, 'Sign up failed. Check the submitted details and try again.');
 			loading = false;
 		}
 	}
@@ -70,7 +75,7 @@
 			await signOutGeneratedAuth(workspace);
 			session = null;
 		} catch (cause) {
-			error = 'Sign out failed. Try again shortly.';
+			error = getRecoveryMessage(cause, 'Sign out failed. Try again shortly.');
 		} finally {
 			loading = false;
 		}

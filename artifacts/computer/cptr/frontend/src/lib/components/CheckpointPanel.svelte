@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import Icon from '$lib/components/Icon.svelte';
+	import { getRecoveryMessage } from '$lib/apis';
 	import {
 		captureCheckpoint,
 		listCheckpoints,
@@ -21,7 +22,7 @@
 			checkpoints = (await listCheckpoints(workspace)).checkpoints;
 			if (!selected && checkpoints[0]) selected = checkpoints[0].checkpoint_id;
 		} catch (cause) {
-			error = 'Checkpoint state is unavailable. Try again shortly.';
+			error = getRecoveryMessage(cause, 'Checkpoint state is unavailable. Try again shortly.');
 		}
 	}
 
@@ -37,7 +38,7 @@
 			await refresh();
 			selected = result.checkpoint_id;
 		} catch (cause) {
-			error = 'Capture was not completed. Review the worktree and try again.';
+			error = getRecoveryMessage(cause, 'Capture was not completed. Review the worktree and try again.');
 		} finally { busy = false; }
 	}
 
@@ -49,7 +50,7 @@
 			message = `Restored ${result.revision.slice(0, 10)}.`;
 			await refresh();
 		} catch (cause) {
-			error = 'Restore requires review. No changes were applied.';
+			error = getRecoveryMessage(cause, 'Restore requires review. No changes were applied.');
 		} finally { busy = false; }
 	}
 

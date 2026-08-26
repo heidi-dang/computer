@@ -22,6 +22,11 @@ export async function fetchHandler(path: string, init?: RequestInit): Promise<Re
 export async function fetchJSON<T = unknown>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetchHandler(path, init);
 	if (!res.ok) {
+		// Authentication responses can contain server-side diagnostics. Never let
+		// those details become an error message that a panel might render.
+		if (res.status === 401) {
+			throw new ApiError(res.status, SESSION_EXPIRED_MESSAGE);
+		}
 		const data = await res.json().catch(() => ({}));
 		throw new ApiError(res.status, data.detail || data.error || data.message || res.statusText);
 	}
@@ -34,6 +39,16 @@ export class ApiError extends Error {
 		super(message);
 		this.status = status;
 	}
+}
+
+export const SESSION_EXPIRED_MESSAGE = 'Your session expired. Sign in again, then retry.';
+
+export function isSessionExpired(error: unknown): boolean {
+	return error instanceof ApiError && error.status === 401;
+}
+
+export function getRecoveryMessage(error: unknown, fallback: string): string {
+	return isSessionExpired(error) ? SESSION_EXPIRED_MESSAGE : fallback;
 }
 
 /** Shorthand for JSON POST/PUT body. */

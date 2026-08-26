@@ -1,4 +1,5 @@
 <script lang="ts">
+import { getRecoveryMessage } from '$lib/apis';
 import { inspectProjectDatabase, queryProjectDatabase, type DatabaseRequest } from '$lib/apis/database';
 
 let { workspace }: { workspace: string } = $props();
@@ -13,14 +14,14 @@ let result = $state<any>(null);
 async function inspect() {
   loading = true; error = '';
   try { inspection = await inspectProjectDatabase({ workspace, engine, database } satisfies DatabaseRequest); }
-  catch (cause) { error = 'Database inspection failed. Review the request and try again.'; }
+  catch (cause) { error = getRecoveryMessage(cause, 'Database inspection failed. Review the request and try again.'); }
   finally { loading = false; }
 }
 
 async function query() {
   loading = true; error = '';
   try { result = await queryProjectDatabase({ workspace, engine, database, sql }); }
-  catch (cause) { error = 'Database query failed. Review the request and try again.'; }
+  catch (cause) { error = getRecoveryMessage(cause, 'Database query failed. Review the request and try again.'); }
   finally { loading = false; }
 }
 </script>

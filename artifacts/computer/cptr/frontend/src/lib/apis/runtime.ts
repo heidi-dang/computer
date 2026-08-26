@@ -1,4 +1,4 @@
-import { fetchHandler, fetchJSON, jsonBody } from '$lib/apis';
+import { fetchJSON, jsonBody } from '$lib/apis';
 
 export interface ManagedRuntime {
 run_id: string;
@@ -24,10 +24,8 @@ return fetchJSON<ManagedRuntime>(`/v1/flowdeck/runtime/${encodeURIComponent(runI
 
 export async function stopManagedRuntime(runId: string, workspace: string) {
 const query = new URLSearchParams({ workspace });
-const response = await fetchHandler(
+	return fetchJSON<ManagedRuntime>(
 `/v1/flowdeck/runtime/${encodeURIComponent(runId)}/stop?${query}`,
 jsonBody({})
 );
-if (!response.ok) throw new Error('Unable to stop managed runtime');
-return response.json() as Promise<ManagedRuntime>;
 }
