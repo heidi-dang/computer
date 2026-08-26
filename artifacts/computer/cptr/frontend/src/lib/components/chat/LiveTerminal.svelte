@@ -1,13 +1,18 @@
 <script lang="ts">
+	import FlowDeckAuditReport from './FlowDeckAuditReport.svelte';
+	import Icon from '../Icon.svelte';
+
 interface Props {
 events?: any[];
 status?: string;
 runId?: string;
+isAudit?: boolean;
 }
 
-let { events = [], status = '', runId = '' }: Props = $props();
+let { events = [], status = '', runId = '', isAudit = false }: Props = $props();
 let open = $state(true);
 let follow = $state(true);
+let auditReportOpen = $state(false);
 let outputEl: HTMLDivElement;
 
 const terminalStatuses = new Set([
@@ -146,6 +151,9 @@ uniqueEvents
 .map(eventLine)
 .filter((line) => line.title || line.detail)
 );
+const hasAuditAnalysis = $derived(
+isAudit && uniqueEvents.some((event) => event?.kind === 'AUDIT_ANALYSIS_CREATED')
+);
 
 $effect(() => {
 if (open && follow && outputEl) {
@@ -174,6 +182,19 @@ if (follow && outputEl) outputEl.scrollTop = outputEl.scrollHeight;
 <div class="terminal-actions">
 {#if !isTerminal}
 <span class="terminal-live">LIVE</span>
+{/if}
+{#if hasAuditAnalysis}
+<button
+type="button"
+class="terminal-audit-button"
+class:is-selected={auditReportOpen}
+onclick={() => (auditReportOpen = !auditReportOpen)}
+aria-expanded={auditReportOpen}
+aria-label={auditReportOpen ? 'Hide audit report' : 'Show audit report'}
+title={auditReportOpen ? 'Hide audit report' : 'Show audit report'}
+>
+<Icon name="page-text" size={12} />
+</button>
 {/if}
 <button type="button" class="terminal-action" onclick={toggleFollow} aria-pressed={follow}>
 {follow ? 'Pause' : 'Resume'}
@@ -211,6 +232,13 @@ if (outputEl && outputEl.scrollHeight - outputEl.scrollTop - outputEl.clientHeig
 {/if}
 </div>
 {/if}
+{#if hasAuditAnalysis}
+<FlowDeckAuditReport
+events={uniqueEvents}
+open={auditReportOpen}
+ontoggle={() => (auditReportOpen = !auditReportOpen)}
+/>
+{/if}
 </section>
 
 <style>
@@ -245,6 +273,20 @@ background: linear-gradient(90deg, color-mix(in oklab, #12303a 55%, transparent)
 .terminal-phase { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-id { margin-left: .15rem; color: #5d7881; }
 .terminal-live { color: #67e8f9; font: 750 .56rem ui-monospace, SFMono-Regular, monospace; letter-spacing: .12em; }
+.terminal-audit-button {
+display: grid;
+width: 1.3rem;
+height: 1.3rem;
+place-items: center;
+border: 1px solid color-mix(in oklab, #a78bfa 34%, transparent);
+border-radius: .35rem;
+color: #c4b5fd;
+}
+.terminal-audit-button:hover, .terminal-audit-button.is-selected {
+background: color-mix(in oklab, #a78bfa 16%, transparent);
+border-color: color-mix(in oklab, #a78bfa 62%, transparent);
+color: #ede9fe;
+}
 .terminal-action { border: 1px solid color-mix(in oklab, #94a3b8 12%, transparent); border-radius: .45rem; padding: .28rem .45rem; color: #8eaab2; font: .62rem ui-sans-serif, system-ui, sans-serif; }
 .terminal-action:hover, .terminal-action[aria-pressed="true"] { border-color: #24505b; background: #10252c; color: #c7f9ff; }
 .terminal-output { max-height: 14rem; overflow: auto; padding: .65rem .75rem .75rem; scrollbar-color: #27434b transparent; }

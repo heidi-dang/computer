@@ -30,7 +30,24 @@ const liveTerminalEvents = [
 { sequence: 2, kind: 'SPECIALIST_DISPATCHED', payload: { specialist_id: 'build-agent', attempt_id: 'attempt-42' } },
 { sequence: 3, kind: 'TOOL_STARTED', payload: { tool_name: 'run_command', command: 'npm test -- --runInBand' } },
 { sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } },
-{ sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } }
+{ sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } },
+{
+sequence: 5,
+kind: 'AUDIT_ANALYSIS_CREATED',
+payload: {
+checks: [{ status: 'passed' }, { status: 'unverified' }, { status: 'unverified' }],
+findings: [
+{
+id: 'visual-audit-finding',
+severity: 'high',
+title: 'Review a public input boundary',
+confidence: 'high',
+status: 'unverified',
+impact: 'The fixture preserves the compact audit report within the terminal.'
+}
+]
+}
+}
 ];
 </script>
 
@@ -100,7 +117,12 @@ const liveTerminalEvents = [
 data-testid="live-terminal-surface"
 class="min-w-0 rounded-2xl border border-gray-200/70 p-3 dark:border-white/7"
 >
-<LiveTerminal events={liveTerminalEvents} status="verifying" runId="run-live-terminal-fixture" />
+<LiveTerminal
+events={liveTerminalEvents}
+status="verifying"
+runId="run-live-terminal-fixture"
+isAudit={true}
+/>
 </section>
 	</div>
 </main>

@@ -2469,8 +2469,13 @@ if (flowdeckRunId) {
 					</h1>
 				</div>
 
-				{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
-<LiveTerminal events={flowdeckEvents} status={flowdeckStatus} runId={flowdeckRunId} />
+{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
+<LiveTerminal
+events={flowdeckEvents}
+status={flowdeckStatus}
+runId={flowdeckRunId}
+isAudit={flowdeckIsAudit}
+/>
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
@@ -2619,8 +2624,13 @@ class="shrink-0 px-4 py-3 {selectedAgent === 'heidi' ? 'heidi-lower-interaction'
 						</button>
 					</div>
 				{/if}
-				{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
-<LiveTerminal events={flowdeckEvents} status={flowdeckStatus} runId={flowdeckRunId} />
+{#if selectedAgent === 'heidi' && (flowdeckStatus || sending)}
+<LiveTerminal
+events={flowdeckEvents}
+status={flowdeckStatus}
+runId={flowdeckRunId}
+isAudit={flowdeckIsAudit}
+/>
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
