@@ -80,13 +80,37 @@ _TASK_TRUNCATION_MARKER = "... [truncated]"
 
 
 def _spawn_pty(command: str, cwd: str, env: dict, preexec_fn=None) -> tuple:
-    """Spawn a command under a PTY (Unix only). Returns (proc, master_fd)."""
+    """Spawn a shell command under a PTY (Unix only). Returns (proc, master_fd)."""
     master_fd, slave_fd = pty.openpty()
     try:
         fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
         proc = subprocess.Popen(
             command,
             shell=True,
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            cwd=cwd,
+            env=env,
+            start_new_session=True,
+            preexec_fn=preexec_fn,
+        )
+    except Exception:
+        os.close(slave_fd)
+        os.close(master_fd)
+        raise
+    os.close(slave_fd)
+    return proc, master_fd
+
+
+def _spawn_pty_argv(argv: list[str], cwd: str, env: dict, preexec_fn=None) -> tuple:
+    """Spawn an argv command under a PTY without invoking a local shell."""
+    master_fd, slave_fd = pty.openpty()
+    try:
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        proc = subprocess.Popen(
+            argv,
+            shell=False,
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
@@ -1419,6 +1443,7 @@ async def run_command(
     wait: Optional[int] = None,
     *,
     __context__: dict,
+    __argv: list[str] | None = None,
 ) -> str:
     """Run a shell command. Returns a task_id for status checks and input.
     :param command: The shell command to execute.
@@ -1455,22 +1480,36 @@ async def run_command(
 
     try:
         if _PTY_AVAILABLE:
-            proc, master_fd = _spawn_pty(command, str(work_dir), env, preexec)
+            if __argv is None:
+                proc, master_fd = _spawn_pty(command, str(work_dir), env, preexec)
+            else:
+                proc, master_fd = _spawn_pty_argv(__argv, str(work_dir), env, preexec)
         else:
             # Keep the fallback subprocess in its own process group so task
             # cancellation cannot signal the CPTR parent or another task.
             kwargs = {"start_new_session": True}
             if preexec is not None:
                 kwargs["preexec_fn"] = preexec
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                stdin=asyncio.subprocess.PIPE,
-                cwd=str(work_dir),
-                env=env,
-                **kwargs,
-            )
+            if __argv is None:
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=asyncio.subprocess.PIPE,
+                    cwd=str(work_dir),
+                    env=env,
+                    **kwargs,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *__argv,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    stdin=asyncio.subprocess.PIPE,
+                    cwd=str(work_dir),
+                    env=env,
+                    **kwargs,
+                )
     except Exception as e:
         return f"Error: {e}"
 

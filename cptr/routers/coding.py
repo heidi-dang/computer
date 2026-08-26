@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shlex
+import shutil
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
@@ -20,6 +22,7 @@ from cptr.models import Workspace
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.control_auth import authenticate_control_request
 from cptr.utils.db import get_db
+from cptr.utils.identity import IdentityUnavailable, env_for, expand_user_path, identity_for_context
 from cptr.utils.runtime import FileError, Runtime
 from cptr.utils.tools import (
     command_session_bytes_since,
@@ -35,6 +38,8 @@ MAX_READ_BYTES = 500_000
 MAX_WRITE_BYTES = 1_000_000
 MAX_COMMAND_CHARS = 20_000
 MAX_COMMAND_OUTPUT_CHARS = 20_000
+MAX_SSH_ALIAS_CHARS = 128
+_SSH_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
 # Direct coding supports local development and validation. Deliberately refuse
 # operations that publish, deploy, destroy state, or obtain credentials. Network
@@ -51,6 +56,10 @@ _EXTERNAL_COMMAND = re.compile(
     r"curl\b|wget\b|ssh\b|scp\b|rsync\b|"
     r"docker\s+(?:push|login)\b|kubectl\b|terraform\s+(?:apply|destroy)\b|"
     r"(?:aws|gcloud|az)\b)",
+    re.IGNORECASE,
+)
+_SSH_TRANSPORT_COMMAND = re.compile(
+    r"(?:^|[;&|]\s*|\s)(?:ssh|scp|rsync)\b",
     re.IGNORECASE,
 )
 
@@ -93,6 +102,12 @@ class CommandRequest(BaseModel):
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=30, ge=0, le=60)
     allow_network: bool = False
+
+
+class SshCommandRequest(BaseModel):
+    alias: str = Field(min_length=1, max_length=MAX_SSH_ALIAS_CHARS)
+    command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
+    wait_seconds: int = Field(default=0, ge=0, le=60)
 
 
 class CreateDirectoryRequest(BaseModel):
@@ -163,11 +178,74 @@ def _validate_command(command: str, allow_network: bool) -> None:
             status_code=403,
             detail="destructive commands are not available through direct coding",
         )
+    if _SSH_TRANSPORT_COMMAND.search(command):
+        raise HTTPException(
+            status_code=403,
+            detail="SSH transport commands are available only through the dedicated SSH control tools",
+        )
     if not allow_network and _EXTERNAL_COMMAND.search(command):
         raise HTTPException(
             status_code=403,
             detail="command may contact an external service; obtain explicit user approval and set allow_network",
         )
+
+
+def _require_external_scope(request: Request) -> None:
+    scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
+    if "command:external" not in scopes:
+        raise HTTPException(status_code=403, detail="SSH commands require the command:external scope")
+
+
+def _parse_ssh_aliases(content: str) -> list[str]:
+    """Return literal SSH Host aliases without exposing config values or wildcard patterns."""
+    aliases: set[str] = set()
+    for raw_line in content.splitlines():
+        try:
+            parts = shlex.split(raw_line, comments=True, posix=True)
+        except ValueError:
+            continue
+        if len(parts) < 2 or parts[0].lower() != "host":
+            continue
+        for candidate in parts[1:]:
+            if _SSH_ALIAS_RE.fullmatch(candidate):
+                aliases.add(candidate)
+    return sorted(aliases, key=str.casefold)
+
+
+async def _ssh_runtime(request: Request, *, user_id: str, workspace_path: str) -> tuple[str, list[str]]:
+    try:
+        identity = await identity_for_context(
+            {"request": request, "user_id": user_id, "workspace": workspace_path}
+        )
+    except IdentityUnavailable as exc:
+        raise HTTPException(status_code=503, detail="SSH execution identity is unavailable") from exc
+
+    environment = env_for(identity, Path(workspace_path))
+    ssh_executable = shutil.which("ssh", path=environment.get("PATH"))
+    if ssh_executable is None:
+        raise HTTPException(status_code=503, detail="OpenSSH client is not available")
+
+    config_path = expand_user_path("~/.ssh/config", identity)
+    try:
+        data = await Runtime.read_file(request, str(config_path))
+    except FileError as exc:
+        if exc.status_code == 404:
+            return ssh_executable, []
+        raise HTTPException(status_code=exc.status_code, detail="SSH config is not available") from exc
+    if data.get("binary"):
+        raise HTTPException(status_code=415, detail="SSH config is not a text file")
+    return ssh_executable, _parse_ssh_aliases(str(data.get("content") or ""))
+
+
+def _ssh_session(request: Request, command_id: str, workspace_path: str) -> dict[str, Any]:
+    session = get_command_session(request, command_id)
+    if (
+        session is None
+        or session.get("workspace") != workspace_path
+        or session.get("transport") != "ssh"
+    ):
+        raise HTTPException(status_code=404, detail="SSH command not found")
+    return session
 
 
 def _line_slice(content: str, start_line: int, end_line: int) -> tuple[str, int, int, int]:
@@ -456,3 +534,119 @@ async def cancel_workspace_command(request: Request, workspace_id: str, command_
         workspace_path=workspace.path,
         command_id=command_id,
     )
+
+
+@router.get("/workspaces/{workspace_id}/ssh/hosts")
+async def list_ssh_hosts(request: Request, workspace_id: str):
+    user_id = await _user(request, "command:execute")
+    _require_external_scope(request)
+    workspace = await _workspace(user_id, workspace_id)
+    _, aliases = await _ssh_runtime(request, user_id=user_id, workspace_path=workspace.path)
+    return {"workspace_id": workspace_id, "aliases": aliases}
+
+
+@router.post("/workspaces/{workspace_id}/ssh/commands")
+async def start_ssh_command(request: Request, workspace_id: str, body: SshCommandRequest):
+    user_id = await _user(request, "command:execute")
+    _require_external_scope(request)
+    workspace = await _workspace(user_id, workspace_id)
+    if "\x00" in body.command:
+        raise HTTPException(status_code=422, detail="SSH command contains an invalid NUL byte")
+    if not _SSH_ALIAS_RE.fullmatch(body.alias):
+        raise HTTPException(status_code=422, detail="SSH alias is invalid")
+
+    ssh_executable, aliases = await _ssh_runtime(
+        request, user_id=user_id, workspace_path=workspace.path
+    )
+    canonical_alias = next(
+        (alias for alias in aliases if alias.casefold() == body.alias.casefold()), None
+    )
+    if canonical_alias is None:
+        raise HTTPException(status_code=422, detail="SSH alias is not configured")
+
+    argv = [
+        ssh_executable,
+        "-T",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=15",
+        canonical_alias,
+        body.command,
+    ]
+    response = await run_command(
+        f"ssh {canonical_alias}",
+        ".",
+        body.wait_seconds,
+        __context__={
+            "workspace": workspace.path,
+            "workspace_id": workspace_id,
+            "request": request,
+            "user_id": user_id,
+        },
+        __argv=argv,
+    )
+    match = re.match(r"^Task ([0-9a-f]{8}):", response)
+    if match is None:
+        raise HTTPException(status_code=422, detail=response)
+    command_id = match.group(1)
+    session = get_command_session(request, command_id)
+    if session is None or session.get("workspace") != workspace.path:
+        raise HTTPException(status_code=500, detail="SSH command session was not created")
+    session["transport"] = "ssh"
+    session["ssh_alias"] = canonical_alias
+    snapshot = await _command_snapshot(
+        request,
+        workspace_path=workspace.path,
+        command_id=command_id,
+    )
+    return {**snapshot, "workspace_id": workspace_id, "alias": canonical_alias}
+
+
+@router.get("/workspaces/{workspace_id}/ssh/commands/{command_id}")
+async def get_ssh_command(
+    request: Request,
+    workspace_id: str,
+    command_id: str,
+    offset: int = 0,
+    wait_seconds: int = 0,
+):
+    user_id = await _user(request, "command:execute")
+    _require_external_scope(request)
+    workspace = await _workspace(user_id, workspace_id)
+    if offset < 0 or wait_seconds < 0 or wait_seconds > 60:
+        raise HTTPException(status_code=422, detail="offset and wait_seconds must be within their allowed range")
+    session = _ssh_session(request, command_id, workspace.path)
+    snapshot = await _command_snapshot(
+        request,
+        workspace_path=workspace.path,
+        command_id=command_id,
+        offset=offset,
+        wait_seconds=wait_seconds,
+    )
+    return {
+        **snapshot,
+        "workspace_id": workspace_id,
+        "alias": str(session.get("ssh_alias") or ""),
+    }
+
+
+@router.post("/workspaces/{workspace_id}/ssh/commands/{command_id}/cancel")
+async def cancel_ssh_command(request: Request, workspace_id: str, command_id: str):
+    user_id = await _user(request, "command:execute")
+    _require_external_scope(request)
+    workspace = await _workspace(user_id, workspace_id)
+    session = _ssh_session(request, command_id, workspace.path)
+    error = stop_command_session(request, command_id)
+    if error:
+        raise HTTPException(status_code=409, detail=error)
+    snapshot = await _command_snapshot(
+        request,
+        workspace_path=workspace.path,
+        command_id=command_id,
+    )
+    return {
+        **snapshot,
+        "workspace_id": workspace_id,
+        "alias": str(session.get("ssh_alias") or ""),
+    }
