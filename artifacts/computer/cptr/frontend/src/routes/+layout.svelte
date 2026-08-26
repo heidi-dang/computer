@@ -55,9 +55,12 @@
 	let { children } = $props();
 	const isFixtureRoute =
 		import.meta.env.DEV &&
-		['/__visual-regression', '/__recovery-regression', '/__flowdeck-report-regression'].includes(
-			$page.url.pathname
-		);
+		[
+			'/__visual-regression',
+			'/__recovery-regression',
+			'/__flowdeck-report-regression',
+			'/__flowdeck-draft-settings-regression'
+		].includes($page.url.pathname);
 	let showSettings = $state(false);
 	let settingsTab = $state('general');
 	let showUpdateToast = $state(false);
