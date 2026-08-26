@@ -48,7 +48,15 @@ class MonitorStatus(StrEnum):
     COMPLETE = "COMPLETE"
 
 
-TERMINAL_TASK_STATUSES = {"COMPLETE", "COMPLETED", "SUCCEEDED", "FAILED", "ERROR", "CANCELLED"}
+TERMINAL_TASK_STATUSES = {
+    "COMPLETE",
+    "COMPLETE_WITH_TOOL_ERRORS",
+    "COMPLETED",
+    "SUCCEEDED",
+    "FAILED",
+    "ERROR",
+    "CANCELLED",
+}
 APPROVAL_PATTERNS = (
     re.compile(r"\bgit\s+push\b", re.IGNORECASE),
     re.compile(r"\bpush\s+(?:to\s+)?(?:github|gitlab|origin)\b", re.IGNORECASE),
@@ -538,7 +546,12 @@ class AutonomousSupervisor:
                             # only an explicit non-terminal result means cancellation
                             # failed to stop owned execution.
                             result_status = str(result.get("status") or "").upper()
-                            if result_status not in {"COMPLETE", "FAILED", "CANCELLED"}:
+                            if result_status not in {
+                                "COMPLETE",
+                                "COMPLETE_WITH_TOOL_ERRORS",
+                                "FAILED",
+                                "CANCELLED",
+                            }:
                                 cancellation_blocked = True
                     except Exception:  # noqa: BLE001 - cancellation remains durable
                         logger.warning("worker cancellation failed for task %s", task_id)

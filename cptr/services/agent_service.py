@@ -12,6 +12,11 @@ from sqlalchemy import select
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.models import Chat, ChatMessage, ControlMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
+from cptr.services.task_integrity import (
+    COMPLETE_WITH_TOOL_ERRORS,
+    completion_integrity,
+    successful_terminal_status,
+)
 from cptr.utils.db import get_db
 from cptr.utils.redaction import (
     redact_external,
@@ -196,27 +201,38 @@ class AgentService:
         status = task.status
         error = (message.meta or {}).get("error") if isinstance(message.meta, dict) else None
         error = redact_text(error) if error else None
+        integrity = completion_integrity(message.output or [])
         if message.done:
-            desired_status = (
-                status
-                if status in {
-                    "CANCEL_REQUESTED",
-                    "CANCELLED",
-                    "COMPLETE",
-                    "REVIEW_REQUIRED",
-                    "REJECTED",
-                }
-                else ("FAILED" if error else "COMPLETE")
-            )
+            if status in {
+                "CANCEL_REQUESTED",
+                "CANCELLED",
+                "FAILED",
+                "REVIEW_REQUIRED",
+                "REJECTED",
+            }:
+                desired_status = status
+            elif error:
+                desired_status = "FAILED"
+            else:
+                desired_status = successful_terminal_status(message.output or [])
+
             if desired_status != status:
                 transition = getattr(self.store, "transition_terminal", None)
                 if callable(transition) and task.__class__ is ControlTask:
-                    won = await transition(
-                        task.id,
-                        status=desired_status,
-                        error=error,
-                        updated_at=int(time.time() * 1000),
-                    )
+                    if status == "COMPLETE" and desired_status == COMPLETE_WITH_TOOL_ERRORS:
+                        refine = getattr(self.store, "refine_complete_with_tool_errors", None)
+                        won = (
+                            await refine(task.id, updated_at=int(time.time() * 1000))
+                            if callable(refine)
+                            else False
+                        )
+                    else:
+                        won = await transition(
+                            task.id,
+                            status=desired_status,
+                            error=error,
+                            updated_at=int(time.time() * 1000),
+                        )
                     if won:
                         status = desired_status
                     else:
@@ -227,7 +243,14 @@ class AgentService:
         else:
             from cptr.utils.chat_task import is_running
 
-            if status in {"CANCELLED", "COMPLETE", "FAILED", "REVIEW_REQUIRED", "REJECTED"}:
+            if status in {
+                "CANCELLED",
+                "COMPLETE",
+                COMPLETE_WITH_TOOL_ERRORS,
+                "FAILED",
+                "REVIEW_REQUIRED",
+                "REJECTED",
+            }:
                 # A durable terminal transition wins over a late worker
                 # heartbeat or a message row that has not flushed yet.
                 pass
@@ -300,6 +323,7 @@ class AgentService:
             "output": safe_output,
             "raw_output": redact_external(message.output or []),
             "error": redact_text(error) if error else None,
+            "completion_integrity": integrity,
             "review": review,
             "control_messages": control_messages,
             "control_messages_truncated": control_messages_truncated,
@@ -314,6 +338,7 @@ class AgentService:
             "status": task["status"],
             "content": redact_text(task["output"]),
             "raw_output": redact_sensitive(task["raw_output"]),
+            "completion_integrity": task.get("completion_integrity"),
             "review": task.get("review"),
             "control_messages": task.get("control_messages", []),
             "control_messages_truncated": bool(task.get("control_messages_truncated", False)),
@@ -575,7 +600,9 @@ class AgentService:
                 result = await self.get_task(task.id, user_id=user_id)
                 result["cancelled"] = False
                 result["cancel_race"] = (
-                    "completion_won" if current.status == "COMPLETE" else "terminal_state_won"
+                    "completion_won"
+                    if current.status in {"COMPLETE", COMPLETE_WITH_TOOL_ERRORS}
+                    else "terminal_state_won"
                 )
                 return result
         elif callable(transition):
@@ -592,7 +619,7 @@ class AgentService:
                 result["cancelled"] = False
                 result["cancel_race"] = (
                     "completion_won"
-                    if current and current.status == "COMPLETE"
+                    if current and current.status in {"COMPLETE", COMPLETE_WITH_TOOL_ERRORS}
                     else "terminal_state_won"
                 )
                 return result

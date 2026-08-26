@@ -577,6 +577,7 @@ class ControlTaskStore:
                     ControlTask.status.not_in(
                         (
                             "COMPLETE",
+                            "COMPLETE_WITH_TOOL_ERRORS",
                             "FAILED",
                             "CANCELLED",
                             "CANCEL_REQUESTED",
@@ -586,6 +587,20 @@ class ControlTaskStore:
                     ),
                 )
                 .values(**values)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def refine_complete_with_tool_errors(self, task_id: str, *, updated_at: int) -> bool:
+        """Atomically refine a persisted COMPLETE task when durable tool evidence contradicts clean success."""
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.status == "COMPLETE",
+                )
+                .values(status="COMPLETE_WITH_TOOL_ERRORS", updated_at=updated_at)
             )
             await db.commit()
             return result.rowcount == 1
@@ -604,7 +619,14 @@ class ControlTaskStore:
                 .where(
                     ControlTask.id == task_id,
                     ControlTask.status.not_in(
-                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED", "REJECTED")
+                        (
+                            "COMPLETE",
+                            "COMPLETE_WITH_TOOL_ERRORS",
+                            "FAILED",
+                            "CANCELLED",
+                            "CANCEL_REQUESTED",
+                            "REJECTED",
+                        )
                     ),
                 )
                 .values(
@@ -689,7 +711,14 @@ class ControlTaskStore:
                 .where(
                     ControlTask.id == task_id,
                     ControlTask.status.not_in(
-                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED", "REJECTED")
+                        (
+                            "COMPLETE",
+                            "COMPLETE_WITH_TOOL_ERRORS",
+                            "FAILED",
+                            "CANCELLED",
+                            "CANCEL_REQUESTED",
+                            "REJECTED",
+                        )
                     ),
                 )
                 .values(status="CANCEL_REQUESTED", updated_at=requested_at)

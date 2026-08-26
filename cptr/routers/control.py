@@ -473,7 +473,13 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
         worker_task = await agent.store.get(task_id)
         if worker_task is None or worker_task.user_id != user_id:
             raise HTTPException(status_code=404, detail="worker task not found")
-        if str(worker_task.status).upper() in {"COMPLETE", "FAILED", "CANCELLED", "ERROR"}:
+        if str(worker_task.status).upper() in {
+            "COMPLETE",
+            "COMPLETE_WITH_TOOL_ERRORS",
+            "FAILED",
+            "CANCELLED",
+            "ERROR",
+        }:
             raise HTTPException(status_code=409, detail="monitor worker is no longer steerable")
         from cptr.utils.chat_task import is_running
 

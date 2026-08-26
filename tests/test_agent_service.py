@@ -2,6 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
 
+from cptr.models import ControlTask
 from cptr.services.agent_service import AgentService
 
 
@@ -70,6 +71,61 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["id"], "task-1")
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(result["output"], "finished output")
+        update.assert_awaited_once()
+
+    async def test_get_task_refines_false_complete_when_tool_evidence_failed(self):
+        service = AgentService()
+        task = ControlTask(
+            id="task-1",
+            user_id="user-1",
+            workspace_id="workspace-1",
+            chat_id="chat-1",
+            message_id="message-1",
+            status="COMPLETE",
+            prompt="inspect fixture",
+            model_id="model-1",
+            created_at=1,
+            updated_at=1,
+        )
+        message = SimpleNamespace(
+            id="message-1",
+            chat_id="chat-1",
+            done=True,
+            content="CPTR_TASK_SELF_AUDIT_OK",
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": "call-1",
+                    "name": "list_directory",
+                    "status": "completed",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call-1",
+                    "output": "Error: inspection scope violation: assignment scope has no allowed paths",
+                },
+            ],
+            meta=None,
+        )
+
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch("cptr.models.ChatMessage.get_by_id", new=AsyncMock(return_value=message)),
+            patch.object(
+                service.store,
+                "refine_complete_with_tool_errors",
+                new=AsyncMock(return_value=True),
+            ) as refine,
+            patch.object(service.store, "update", new=AsyncMock()) as update,
+        ):
+            result = await service.get_task("task-1", user_id="user-1")
+
+        self.assertEqual(result["status"], "COMPLETE_WITH_TOOL_ERRORS")
+        self.assertEqual(
+            result["completion_integrity"],
+            {"status": "TOOL_ERRORS", "tool_error_count": 1},
+        )
+        refine.assert_awaited_once()
         update.assert_awaited_once()
 
     async def test_get_task_exposes_bounded_control_delivery_records_without_content(self):

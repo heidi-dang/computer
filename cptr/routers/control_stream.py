@@ -17,6 +17,7 @@ from cptr.utils.redaction import redact_external_text
 router = APIRouter(prefix="/api/control/v1", tags=["control-live"])
 TERMINAL_STATUSES = {
     "COMPLETE",
+    "COMPLETE_WITH_TOOL_ERRORS",
     "FAILED",
     "BLOCKED",
     "CANCELLED",

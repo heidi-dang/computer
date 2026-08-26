@@ -1746,8 +1746,17 @@ async def run_chat_task(
             )
 
     async def _request_control_review() -> None:
-        """Pause a successful direct task until its scoped diff is explicitly reviewed."""
+        """Pause only a clean successful direct task until its scoped diff is explicitly reviewed."""
         if not control_task_id:
+            return
+        from cptr.services.task_integrity import (
+            COMPLETE_WITH_TOOL_ERRORS,
+            successful_terminal_status,
+        )
+
+        completion_status = successful_terminal_status(output_items)
+        if completion_status == COMPLETE_WITH_TOOL_ERRORS:
+            await _finalize_control_terminal(completion_status)
             return
         if not review_required:
             await _finalize_control_terminal("COMPLETE")
