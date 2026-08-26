@@ -29,11 +29,11 @@ _sequences: dict[str, int] = defaultdict(int)
 _lock = Lock()
 
 
-def redact_terminal_text(value: Any) -> str:
+def redact_terminal_text(value: Any, limit: int = _MAX_TEXT) -> str:
     text = str(value or "")
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(r"\1[REDACTED]", text)
-    return text[:_MAX_TEXT]
+    return text[: max(0, limit)]
 
 
 def safe_terminal_payload(payload: dict[str, Any] | None) -> dict[str, Any]:

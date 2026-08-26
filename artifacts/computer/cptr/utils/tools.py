@@ -2455,6 +2455,29 @@ async def notify(message: str, target: str = "", title: str = "", *, __context__
         return f"Error: failed to send notification: {exc}"
 
 
+async def agent_terminal_command(
+    command: str,
+    cwd: str = ".",
+    timeout_seconds: float = 120,
+    *,
+    __context__: dict,
+) -> str:
+    """Run one bounded command in Heidi's persistent FlowDeck terminal.
+
+    :param command: Shell command to execute. The shell process persists between calls.
+    :param cwd: Initial workspace-relative cwd for the session.
+    :param timeout_seconds: Maximum command duration before the session is discarded.
+    """
+    from cptr.flowdeck.agent_terminal import execute_agent_terminal_command
+
+    return await execute_agent_terminal_command(
+        command,
+        cwd,
+        timeout_seconds,
+        __context__=__context__,
+    )
+
+
 # ── Registry ────────────────────────────────────────────────
 
 ToolApprovalPolicy = Literal["allow", "review"]
@@ -2484,6 +2507,7 @@ TOOLS: dict[str, dict] = {
     "multi_edit_file": {"fn": multi_edit_file},
     "write_file": {"fn": write_file},
     "run_command": {"fn": run_command},
+    "agent_terminal_command": {"fn": agent_terminal_command},
     "send_input": {"fn": send_input},
     "kill_task": {"fn": kill_task},
     "create_automation": {"fn": create_automation},
@@ -2818,6 +2842,8 @@ async def _run_existing_subagent_chat(
     qualification_command: str | None = None,
     request=None,
     flowdeck_parent_chat_id: str | None = None,
+    flowdeck_store=None,
+    flowdeck_attempt_id: str | None = None,
 ) -> str:
     """Run the agent loop for an already-created sub-agent chat."""
     from cptr.models import ChatMessage
@@ -2848,6 +2874,8 @@ async def _run_existing_subagent_chat(
             flowdeck_parent_message_id=flowdeck_parent_message_id,
             qualification_command=qualification_command,
             flowdeck_parent_chat_id=flowdeck_parent_chat_id,
+            flowdeck_store=flowdeck_store,
+            flowdeck_attempt_id=flowdeck_attempt_id,
         )
     )
     # Unlike the ordinary chat route, specialists historically awaited the
@@ -2941,7 +2969,13 @@ BUILTIN_TOOL_GROUPS: dict[str, tuple[str, ...]] = {
         "multi_edit_file",
         "write_file",
     ),
-    "terminal": ("run_command", "send_input", "check_task", "kill_task"),
+    "terminal": (
+        "run_command",
+        "agent_terminal_command",
+        "send_input",
+        "check_task",
+        "kill_task",
+    ),
     "web": ("web_search", "read_url"),
     "browser": (
         "browser_navigate",
@@ -3305,6 +3339,13 @@ async def get_tool_list(
     and external tool server tools when configured.
     """
     tools = dict(TOOLS)
+    try:
+        from cptr.flowdeck.config import FlowDeckConfig
+
+        if not FlowDeckConfig.from_env().agent_terminal_enabled:
+            tools.pop("agent_terminal_command", None)
+    except Exception:
+        tools.pop("agent_terminal_command", None)
     background_subagents_enabled = False
     try:
         from cptr.models import Config

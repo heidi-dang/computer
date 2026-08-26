@@ -35,6 +35,10 @@ class FlowDeckConfig:
     max_tool_calls: int = 200
     max_model_turns: int = 100
     max_wall_seconds: int = 1800
+    agent_terminal_enabled: bool = False
+    max_terminal_command_chars: int = 12000
+    max_terminal_output_chars: int = 24000
+    max_terminal_timeout_seconds: int = 300
     global_kill_switch: bool = False
     disabled_specialists: frozenset[str] = frozenset()
 
@@ -70,6 +74,9 @@ class FlowDeckConfig:
         )
         coding_role = os.environ.get("CPTR_FLOWDECK_CODING_ROLE", "backend-coder").strip()
         global_kill_switch = _bool(os.environ.get("CPTR_FLOWDECK_KILL_SWITCH"), False)
+        agent_terminal_enabled = _bool(
+            os.environ.get("CPTR_FLOWDECK_AGENT_TERMINAL_ENABLED"), False
+        )
         disabled_specialists = frozenset(
             item.strip()
             for item in os.environ.get("CPTR_FLOWDECK_DISABLED_SPECIALISTS", "").split(",")
@@ -90,6 +97,16 @@ class FlowDeckConfig:
             max_tool_calls=_positive_int("CPTR_FLOWDECK_MAX_TOOL_CALLS", 200),
             max_model_turns=_positive_int("CPTR_FLOWDECK_MAX_MODEL_TURNS", 100),
             max_wall_seconds=_positive_int("CPTR_FLOWDECK_MAX_WALL_SECONDS", 1800),
+            agent_terminal_enabled=agent_terminal_enabled,
+            max_terminal_command_chars=_positive_int(
+                "CPTR_FLOWDECK_MAX_TERMINAL_COMMAND_CHARS", 12000
+            ),
+            max_terminal_output_chars=_positive_int(
+                "CPTR_FLOWDECK_MAX_TERMINAL_OUTPUT_CHARS", 24000
+            ),
+            max_terminal_timeout_seconds=_positive_int(
+                "CPTR_FLOWDECK_MAX_TERMINAL_TIMEOUT_SECONDS", 300
+            ),
             global_kill_switch=global_kill_switch,
             disabled_specialists=disabled_specialists,
         )

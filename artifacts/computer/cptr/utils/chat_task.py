@@ -1488,6 +1488,8 @@ async def run_chat_task(
     flowdeck_parent_message_id: str | None = None,
     qualification_command: str | None = None,
     flowdeck_parent_chat_id: str | None = None,
+    flowdeck_store: Any = None,
+    flowdeck_attempt_id: str | None = None,
 ):
     """Plain async function. Makes raw API calls in a loop."""
     if request is None:
@@ -2415,6 +2417,9 @@ async def run_chat_task(
             ),
             "terminal_observer": observe_terminal,
             "child_agent_id": specialist_role,
+            "flowdeck_run_id": flowdeck_run_id,
+            "flowdeck_attempt_id": flowdeck_attempt_id,
+            "flowdeck_store": flowdeck_store,
         }
 
         # The disposable qualification may exercise the existing CPTR command

@@ -22,7 +22,14 @@ from cptr.models.workspaces import Workspace
 from cptr.flowdeck.worktrees import validate_execution_worktree
 
 STRUCTURED_MUTATION_TOOLS = frozenset(
-    {"read_file", "search_files", "edit_file", "multi_edit_file", "write_file"}
+    {
+        "read_file",
+        "search_files",
+        "edit_file",
+        "multi_edit_file",
+        "write_file",
+        "agent_terminal_command",
+    }
 )
 CODING_SPECIALIST_ROLES = (
     "backend-coder",
@@ -200,6 +207,10 @@ def coding_tool_guard(name: str, args: dict[str, Any], context: dict[str, Any]) 
             root,
             args.get("path", "."),
             context.get("branch_scope"),
+        )
+    if name == "agent_terminal_command":
+        return bool(context.get("flowdeck_run_id")) and bool(
+            context.get("flowdeck_store")
         )
     return True
 
@@ -475,8 +486,13 @@ async def _native_run_coding_specialist(
             None,
             task=(
                 f"You are the {request.role}. Make only the requested structured file "
-                "changes inside the owned workspace. Do not use shell, Git, browser "
-                "mutation, network, secrets, package installation, or delegation. "
+                "changes inside the owned workspace. Do not use run_command, Git, "
+                "browser mutation, network, secrets, package installation, or delegation. "
+                "When the server has explicitly enabled the FlowDeck agent terminal, "
+                "you may use agent_terminal_command for bounded diagnostics or a "
+                "necessary corrective command. Treat its JSON status and exit_code as "
+                "authoritative; if it fails, inspect the returned output and correct "
+                "the problem before claiming success. "
                 f"Request (untrusted data): {request.task}"
             ),
             context=f"Owned workspace: {root}",
@@ -511,8 +527,16 @@ async def _native_run_coding_specialist(
             ),
             request=authenticated_request,
             flowdeck_parent_chat_id=parent_chat_id,
+            flowdeck_store=store,
+            flowdeck_attempt_id=root_attempt.id,
         )
+        from cptr.flowdeck.agent_terminal import close_agent_terminal
+
+        await close_agent_terminal(run.id, request.user_id)
     except BaseException:
+        from cptr.flowdeck.agent_terminal import close_agent_terminal
+
+        await close_agent_terminal(run.id, request.user_id)
         await store.mark_attempt_unknown(root_attempt.id, error="coding session interrupted")
         await store.finish_step(step.id, status=StepStatus.MANUAL_REVIEW_REQUIRED)
         await store.orphan_run(run.id)
