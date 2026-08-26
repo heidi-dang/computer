@@ -32,7 +32,7 @@ const isTerminal = $derived(terminalStatuses.has(normalizedStatus));
 type TerminalInterruption = 'timed_out' | 'cancelled';
 
 function interruptionFor(event: any): TerminalInterruption | null {
-const frame = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
+const frame = terminalFrameFor(event);
 const kind = String(frame?.frame_kind || event?.kind || event?.type || '').toLowerCase();
 const payload = frame?.payload || event?.payload || {};
 const reportedStatus = String(payload.status || event?.status || '').toLowerCase();
@@ -51,7 +51,7 @@ return null;
 }
 
 function eventKey(event: any, index: number) {
-const frame = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
+const frame = terminalFrameFor(event);
 return String(
 event?.id ||
 event?.event_id ||
@@ -75,8 +75,23 @@ return values.find((value) => value !== undefined && value !== null && String(va
 | undefined;
 }
 
+function terminalFrameFor(event: any) {
+const nested = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
+if (nested) return nested;
+if (event?.kind === 'terminal_frame' && event?.frame_kind) return event;
+return null;
+}
+
+function isTerminalEvent(event: any) {
+const frame = terminalFrameFor(event);
+if (frame) {
+return ['command_start', 'command_output', 'command_exit'].includes(frame.frame_kind);
+}
+return String(event?.kind || event?.type || '').startsWith('AGENT_TERMINAL_');
+}
+
 function eventLine(event: any, index: number) {
-const frame = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
+const frame = terminalFrameFor(event);
 const kind = String(frame?.frame_kind || event?.kind || event?.type || 'activity').replaceAll('_', ' ').toLowerCase();
 const payload = frame?.payload || event?.payload || {};
 const item = event?.output || {};
@@ -173,8 +188,10 @@ return 0;
 });
 });
 
+const terminalEvents = $derived(uniqueEvents.filter(isTerminalEvent));
+
 const latestInterruption = $derived.by(() => {
-for (const event of [...uniqueEvents].reverse()) {
+for (const event of [...terminalEvents].reverse()) {
 const interruption = interruptionFor(event);
 if (interruption) return interruption;
 }
@@ -194,7 +211,7 @@ latestInterruption === 'timed_out'
 );
 
 const lines = $derived(
-uniqueEvents
+terminalEvents
 .map(eventLine)
 .filter((line) => line.title || line.detail)
 );

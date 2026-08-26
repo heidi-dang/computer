@@ -489,10 +489,12 @@ async def _native_run_coding_specialist(
                 "changes inside the owned workspace. Do not use run_command, Git, "
                 "browser mutation, network, secrets, package installation, or delegation. "
                 "When the server has explicitly enabled the FlowDeck agent terminal, "
-                "you may use agent_terminal_command for bounded diagnostics or a "
-                "necessary corrective command. Treat its JSON status and exit_code as "
-                "authoritative; if it fails, inspect the returned output and correct "
-                "the problem before claiming success. "
+                "begin by using agent_terminal_command with pwd, and prefer it for "
+                "workspace inspection, tests, builds, and bounded diagnostics. Use "
+                "read_file or search_files only for targeted source reads. Treat the "
+                "terminal JSON status and exit_code as authoritative; if a command "
+                "fails, inspect its returned output and correct the problem before "
+                "claiming success. "
                 f"Request (untrusted data): {request.task}"
             ),
             context=f"Owned workspace: {root}",
