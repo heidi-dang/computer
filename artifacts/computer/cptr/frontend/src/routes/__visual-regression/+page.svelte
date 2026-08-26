@@ -32,6 +32,51 @@ const liveTerminalEvents = [
 { sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } },
 { sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } },
 {
+sequence: 6,
+kind: 'terminal_frame',
+frame_kind: 'action_start',
+payload: { tool_name: 'list_directory', status: 'running', child_agent_id: 'mapper' }
+},
+{
+sequence: 7,
+kind: 'terminal_frame',
+frame_kind: 'action_output',
+payload: { stream: 'stdout', text: 'README.md · src · tests' }
+},
+{
+sequence: 7,
+kind: 'terminal_frame',
+frame_kind: 'action_output',
+payload: { stream: 'stdout', text: 'README.md · src · tests' }
+},
+{
+sequence: 8,
+kind: 'terminal_frame',
+frame_kind: 'action_exit',
+payload: { tool_name: 'list_directory', status: 'succeeded', child_agent_id: 'mapper' }
+},
+{
+sequence: 9,
+kind: 'terminal_frame',
+payload: {
+kind: 'terminal_frame',
+frame_kind: 'action_start',
+payload: { tool_name: 'read_file', status: 'running', child_agent_id: 'mapper' }
+}
+},
+{
+sequence: 10,
+kind: 'terminal_frame',
+frame_kind: 'action_output',
+payload: { stream: 'stdout', text: '# Computer · A native CPTR workspace.' }
+},
+{
+sequence: 11,
+kind: 'terminal_frame',
+frame_kind: 'action_exit',
+payload: { tool_name: 'read_file', status: 'succeeded', child_agent_id: 'mapper' }
+},
+{
 sequence: 5,
 kind: 'AUDIT_ANALYSIS_CREATED',
 payload: {

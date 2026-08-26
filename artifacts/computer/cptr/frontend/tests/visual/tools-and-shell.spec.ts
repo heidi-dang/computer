@@ -90,6 +90,28 @@ const overflow = await surface.evaluate((element) => element.scrollWidth > eleme
 expect(overflow, 'Heidi live terminal is horizontally clipped').toBe(false);
 });
 
+test('Heidi live terminal shows read-only tool activity in order', async ({ page }) => {
+	await page.goto('/__visual-regression');
+	const surface = page.getByTestId('live-terminal-surface');
+	const titles = surface.locator('.line-title');
+
+	await expect(titles.filter({ hasText: 'action · list_directory' })).toHaveCount(2);
+	await expect(titles.filter({ hasText: 'action · read_file' })).toHaveCount(2);
+	await expect(titles.filter({ hasText: 'action · output' })).toHaveCount(2);
+	await expect(surface.getByText('README.md · src · tests')).toBeVisible();
+	await expect(surface.getByText('# Computer · A native CPTR workspace.')).toBeVisible();
+
+	const renderedTitles = await titles.allTextContents();
+	const listStart = renderedTitles.indexOf('action · list_directory');
+	const listOutput = renderedTitles.indexOf('action · output');
+	const listExit = renderedTitles.lastIndexOf('action · list_directory');
+	const readStart = renderedTitles.indexOf('action · read_file');
+	expect(listStart).toBeGreaterThanOrEqual(0);
+	expect(listStart).toBeLessThan(listOutput);
+	expect(listOutput).toBeLessThan(listExit);
+	expect(listExit).toBeLessThan(readStart);
+});
+
 test('captures stable desktop and narrow surface snapshots', async ({ page }) => {
 	await page.goto('/__visual-regression');
 	await expect(page.getByTestId('tools-surface')).toHaveScreenshot('tools-surface.png', {
