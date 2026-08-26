@@ -1587,9 +1587,35 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         report = response.json()
         self.assertEqual(report["run_id"], run_id)
         self.assertEqual(report["entries"][0]["payload"]["outcome"], "succeeded")
+        self.assertEqual(
+            [
+                entry["kind"]
+                for entry in report["entries"]
+                if entry["kind"] == "EVIDENCE_REPORT_EXPORTED"
+            ],
+            ["EVIDENCE_REPORT_EXPORTED"],
+        )
         serialized = json.dumps(report)
         self.assertNotIn("private reasoning", serialized)
         self.assertNotIn("secret-value", serialized)
+
+        repeated = await self.client.get(
+            f"/v1/flowdeck/orchestrations/{run_id}/evidence-report",
+            params={"workspace": str(self.root_a)},
+            headers=self.headers(),
+        )
+        self.assertEqual(repeated.status_code, 200, repeated.text)
+        self.assertEqual(repeated.json(), report)
+        async with self.session_factory() as session:
+            export_events = (
+                await session.execute(
+                    select(FlowDeckEvent).where(
+                        FlowDeckEvent.run_id == run_id,
+                        FlowDeckEvent.kind == "EVIDENCE_REPORT_EXPORTED",
+                    )
+                )
+            ).scalars().all()
+        self.assertEqual(len(export_events), 2)
 
         forbidden = await self.client.get(
             f"/v1/flowdeck/orchestrations/{run_id}/evidence-report",

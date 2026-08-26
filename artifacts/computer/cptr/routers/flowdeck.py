@@ -1349,8 +1349,9 @@ async def list_fdx_containment_diagnostics(
 @router.get("/orchestrations/{run_id}/evidence-report")
 async def export_evidence_report(request: Request, run_id: str, workspace: str):
     """Download the bounded, redacted evidence summary for an owned run."""
-    _, _, run = await _owned_run(request, run_id, workspace)
+    owner, _, run = await _owned_run(request, run_id, workspace)
     store = DurableFlowDeck(get_session_factory())
+    await store.record_evidence_report_export(run_id=run.id, owner=owner)
     events = await store.list_events(run.id)
     from cptr.flowdeck.terminal_observer import recent_terminal_frames
 

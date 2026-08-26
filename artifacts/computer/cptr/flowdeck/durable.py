@@ -124,6 +124,7 @@ def _id() -> str:
 
 
 AUDIT_SUMMARY_LIMIT = 100
+EVIDENCE_REPORT_EXPORT_EVENT_KIND = "EVIDENCE_REPORT_EXPORTED"
 _AUDIT_SAFE_PAYLOAD_KEYS = frozenset(
     {
         "status",
@@ -141,6 +142,8 @@ _AUDIT_SAFE_PAYLOAD_KEYS = frozenset(
         "authoritative",
         "category",
         "fallback",
+        "action",
+        "resource",
     }
 )
 
@@ -1684,6 +1687,36 @@ class DurableFlowDeck:
                 {RunStatus.PENDING.value, RunStatus.RUNNING.value},
             )
             return await self._event(db, run_id, kind, payload, now)
+
+        return await self._transaction(operation)
+
+    async def record_evidence_report_export(
+        self,
+        *,
+        run_id: str,
+        owner: str,
+        now: int | None = None,
+    ) -> FlowDeckEvent:
+        """Record one authorized evidence-report export without report data.
+
+        Export events are allowed for terminal runs because archived reports
+        remain downloadable. Ownership is checked again inside the durable
+        transaction so callers cannot append an export event to another user's
+        run.
+        """
+        now = self.clock() if now is None else now
+
+        async def operation(db: AsyncSession):
+            run = await self._run(db, run_id)
+            if run.owner != owner:
+                raise LifecycleError("run ownership mismatch")
+            return await self._event(
+                db,
+                run_id,
+                EVIDENCE_REPORT_EXPORT_EVENT_KIND,
+                {"action": "download", "resource": "evidence_report"},
+                now,
+            )
 
         return await self._transaction(operation)
 
