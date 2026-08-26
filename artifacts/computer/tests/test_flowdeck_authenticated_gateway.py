@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -368,6 +369,182 @@ class AuthenticatedGatewayTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         self.assertIn("no longer active", after_finalize.lower())
+
+    async def test_separate_authenticated_coding_runs_receive_isolated_terminals_and_frames(self):
+        from dataclasses import replace
+
+        request = auth_request("owner")
+        (self.root / "first-run-only").mkdir()
+        fake_chat = type("Chat", (), {"id": "isolated-terminal-chat"})()
+        fake_message = type("Message", (), {"id": "isolated-terminal-message"})()
+        invocations = []
+
+        async def native_loop(*_args, **kwargs):
+            run_index = len(invocations)
+            emitted = []
+
+            async def emit(**data):
+                emitted.append(data)
+
+            async def observe(kind, payload):
+                from cptr.flowdeck.terminal_observer import emit_terminal_frame
+
+                await emit_terminal_frame(
+                    user_id="owner",
+                    emit=emit,
+                    kind=kind,
+                    payload=payload,
+                    run_id=kwargs["flowdeck_run_id"],
+                )
+
+            context = {
+                "workspace": kwargs["workspace"],
+                "user_id": "owner",
+                "request": kwargs["request"],
+                "specialist_role": kwargs["specialist_role"],
+                "allowed_tool_names": kwargs["allowed_tool_names"],
+                "tool_guard": kwargs["tool_guard"],
+                "before_mutation": kwargs["before_mutation"],
+                "after_mutation": kwargs["after_mutation"],
+                "flowdeck_run_id": kwargs["flowdeck_run_id"],
+                "flowdeck_attempt_id": kwargs["flowdeck_attempt_id"],
+                "flowdeck_store": self.store,
+                "terminal_observer": observe,
+            }
+            command = (
+                "cd first-run-only && printf 'first-run-only\\n'"
+                if run_index == 0
+                else "pwd && printf 'second-run-only\\n'"
+            )
+            result = await execute_tool(
+                "agent_terminal_command",
+                {"command": command},
+                context,
+            )
+            invocations.append(
+                {
+                    "run_id": kwargs["flowdeck_run_id"],
+                    "result": json.loads(result),
+                    "emitted": emitted,
+                }
+            )
+            return result
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CPTR_FLOWDECK_ENABLED": "true",
+                    "CPTR_FLOWDECK_MODE": "controlled",
+                    "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                    "CPTR_FLOWDECK_MUTATING_AGENTS": "true",
+                    "CPTR_FLOWDECK_AGENT_TERMINAL_ENABLED": "true",
+                    "CPTR_FLOWDECK_CODING_ROLE": "backend-coder",
+                },
+                clear=False,
+            ),
+            patch(
+                "cptr.utils.tools._create_subagent_chat",
+                new=AsyncMock(return_value=(fake_chat, None, fake_message)),
+            ),
+            patch(
+                "cptr.utils.tools._run_existing_subagent_chat",
+                new=native_loop,
+            ),
+        ):
+            await dispatch_authenticated_specialist(
+                request,
+                replace(
+                    self.dispatch(role="backend-coder"),
+                    request_key="gateway-backend-coder-isolation-first",
+                ),
+                store=self.store,
+            )
+            await dispatch_authenticated_specialist(
+                request,
+                replace(
+                    self.dispatch(role="backend-coder"),
+                    request_key="gateway-backend-coder-isolation-second",
+                ),
+                store=self.store,
+            )
+
+        self.assertEqual(len(invocations), 2)
+        first_run = await self.store.get_run_by_request_key(
+            "gateway-backend-coder-isolation-first"
+        )
+        second_run = await self.store.get_run_by_request_key(
+            "gateway-backend-coder-isolation-second"
+        )
+        self.assertIsNotNone(first_run)
+        self.assertIsNotNone(second_run)
+        self.assertNotEqual(first_run.id, second_run.id)
+        self.assertEqual(first_run.status, "SUCCEEDED")
+        self.assertEqual(second_run.status, "SUCCEEDED")
+
+        first_result = invocations[0]["result"]
+        second_result = invocations[1]["result"]
+        self.assertEqual(first_result["status"], "succeeded")
+        self.assertEqual(second_result["status"], "succeeded")
+        self.assertNotEqual(first_result["session_id"], second_result["session_id"])
+        self.assertIn("first-run-only", first_result["output"])
+        self.assertIn(str(self.root), second_result["output"])
+        self.assertIn("second-run-only", second_result["output"])
+        self.assertNotIn("first-run-only", second_result["output"])
+
+        first_all_frames = recent_terminal_frames(first_run.id)
+        second_all_frames = recent_terminal_frames(second_run.id)
+        first_frames = [
+            frame
+            for frame in first_all_frames
+            if frame["frame_kind"] in {"command_start", "command_output", "command_exit"}
+        ]
+        second_frames = [
+            frame
+            for frame in second_all_frames
+            if frame["frame_kind"] in {"command_start", "command_output", "command_exit"}
+        ]
+        self.assertGreaterEqual(len(first_frames), 3)
+        self.assertGreaterEqual(len(second_frames), 3)
+        first_sessions = {
+            frame["payload"]["session_id"] for frame in first_frames
+        }
+        second_sessions = {
+            frame["payload"]["session_id"] for frame in second_frames
+        }
+        self.assertEqual(first_sessions, {first_result["session_id"]})
+        self.assertEqual(second_sessions, {second_result["session_id"]})
+        self.assertTrue(first_sessions.isdisjoint(second_sessions))
+        self.assertTrue(
+            all(frame["terminal_run_id"] == first_run.id for frame in first_frames)
+        )
+        self.assertTrue(
+            all(frame["terminal_run_id"] == second_run.id for frame in second_frames)
+        )
+        first_text = " ".join(
+            frame["payload"].get("text", "")
+            for frame in first_frames
+            if frame["frame_kind"] == "command_output"
+        )
+        second_text = " ".join(
+            frame["payload"].get("text", "")
+            for frame in second_frames
+            if frame["frame_kind"] == "command_output"
+        )
+        self.assertIn("first-run-only", first_text)
+        self.assertNotIn("second-run-only", first_text)
+        self.assertIn("second-run-only", second_text)
+        self.assertNotIn("first-run-only", second_text)
+        self.assertEqual(first_all_frames[0]["sequence"], 1)
+        self.assertEqual(second_all_frames[0]["sequence"], 1)
+        self.assertEqual(
+            [frame["sequence"] for frame in first_all_frames],
+            sorted(frame["sequence"] for frame in first_all_frames),
+        )
+        self.assertEqual(
+            [frame["sequence"] for frame in second_all_frames],
+            sorted(frame["sequence"] for frame in second_all_frames),
+        )
 
     async def test_compatibility_boundaries_reject_missing_authenticated_context(self):
         coding = CodingRequest(
