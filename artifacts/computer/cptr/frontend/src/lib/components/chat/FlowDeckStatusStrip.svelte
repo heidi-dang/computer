@@ -14,8 +14,15 @@ entries?: any[];
 total?: number;
 truncated?: boolean;
 } | null;
+	preservedEvidenceSummary?: {
+		run_id?: string;
+		entries?: any[];
+		total?: number;
+		truncated?: boolean;
+	} | null;
 		oncancel?: () => void;
 		onreconnect?: () => void;
+		onnewrun?: () => void;
 		onaction?: (action: DesignerAction) => void;
 		telemetry?: {
 			input_tokens: number;
@@ -33,8 +40,10 @@ truncated?: boolean;
 		isAudit = false,
 		events = [],
 evidenceSummary = null,
+		preservedEvidenceSummary = null,
 		oncancel,
 		onreconnect,
+		onnewrun,
 		onaction,
 		telemetry = { input_tokens: 0, output_tokens: 0, total_tokens: 0, cost: null }
 	}: Props = $props();
@@ -98,6 +107,7 @@ normalizedStatus === 'manual_review_required' || normalizedStatus === 'manual_re
 	let reportOpen = $state(false);
 	let evidenceOpen = $state<Record<string, boolean>>({});
 let auditTrailOpen = $state(false);
+	let preservedEvidenceOpen = $state(false);
 
 	const label = $derived.by(() => {
 		switch (status.toLowerCase()) {
@@ -276,9 +286,53 @@ onclick={() => (auditTrailOpen = !auditTrailOpen)}
 <span class="flowdeck-audit-sequence">#{entry.sequence}</span>
 </li>
 {/each}
-</ol>
+		</ol>
+		{#if onnewrun}
+			<div class="flowdeck-new-run">
+				<p>Review complete: the evidence above belongs to the interrupted run and is read-only.</p>
+				<button
+					type="button"
+					class="flowdeck-new-run-button"
+					data-testid="button-flowdeck-new-run"
+					onclick={onnewrun}
+				>
+					Start a new run
+				</button>
+			</div>
+		{/if}
 {/if}
 </section>
+{/if}
+{#if preservedEvidenceSummary?.entries?.length}
+	<section class="flowdeck-audit-trail flowdeck-preserved-evidence" aria-label="Preserved FlowDeck evidence">
+		<button
+			type="button"
+			class="flowdeck-report-toggle"
+			aria-expanded={preservedEvidenceOpen}
+			onclick={() => (preservedEvidenceOpen = !preservedEvidenceOpen)}
+		>
+			<span>
+				<strong>Preserved evidence</strong>
+				<span class="flowdeck-report-subtitle">
+					Read-only record from run {preservedEvidenceSummary.run_id?.slice(0, 8) || 'unknown'}
+				</span>
+			</span>
+			<span aria-hidden="true">{preservedEvidenceOpen ? '−' : '+'}</span>
+		</button>
+		{#if preservedEvidenceOpen}
+			<ol class="flowdeck-audit-list">
+				{#each preservedEvidenceSummary.entries as entry (entry.id)}
+					<li class="flowdeck-audit-entry">
+						<span class:authoritative={entry.authority === 'authoritative'} class="flowdeck-audit-badge">
+							{entry.authority === 'authoritative' ? 'Authoritative' : 'Advisory'}
+						</span>
+						<span class="flowdeck-audit-kind">{entry.kind}</span>
+						<span class="flowdeck-audit-sequence">#{entry.sequence}</span>
+					</li>
+				{/each}
+			</ol>
+		{/if}
+	</section>
 {/if}
 	<DesignerResults
 		{events}
@@ -353,6 +407,31 @@ onclick={() => (auditTrailOpen = !auditTrailOpen)}
 	.flowdeck-evidence-toggle:hover {
 		background: color-mix(in oklab, var(--app-fg) 8%, transparent);
 		color: var(--app-fg);
+	}
+	.flowdeck-new-run {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		border-top: 1px solid color-mix(in oklab, var(--app-fg) 10%, transparent);
+		padding: 0.6rem 0.7rem 0.65rem;
+	}
+	.flowdeck-new-run p {
+		margin: 0;
+		color: color-mix(in oklab, var(--app-fg) 55%, transparent);
+		font-size: 0.62rem;
+		line-height: 1.35;
+	}
+	.flowdeck-new-run-button {
+		flex: 0 0 auto;
+		border: 1px solid color-mix(in oklab, #a78bfa 42%, transparent);
+		border-radius: 0.35rem;
+		padding: 0.28rem 0.5rem;
+		color: var(--app-fg);
+		font-size: 0.62rem;
+	}
+	.flowdeck-new-run-button:hover {
+		background: color-mix(in oklab, #a78bfa 15%, transparent);
 	}
 	.flowdeck-report {
 		margin: 0.35rem 0 0.65rem 1.1rem;
@@ -522,6 +601,10 @@ font-family: ui-monospace, SFMono-Regular, monospace;
 		}
 		.flowdeck-report {
 			margin-left: 0.1rem;
+		}
+		.flowdeck-new-run {
+			align-items: stretch;
+			flex-direction: column;
 		}
 	}
 

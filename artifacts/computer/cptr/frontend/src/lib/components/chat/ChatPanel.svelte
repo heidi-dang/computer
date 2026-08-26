@@ -26,6 +26,7 @@
 	import {
 		cancelFlowDeckOrchestration,
 		createAudit,
+	createNewFlowDeckRun,
 		createFlowDeckOrchestration,
 		getFlowDeckOrchestration,
 		steerFlowDeckOrchestration
@@ -188,6 +189,7 @@ import LiveTerminal from './LiveTerminal.svelte';
 	let flowdeckEvents = $state<any[]>([]);
 let flowdeckEventBuffer: any[] = [];
 let flowdeckEvidenceSummary = $state<any>(null);
+	let preservedFlowDeckEvidence = $state<any>(null);
 	let flowdeckClarification = $state('');
 	let flowdeckMessageId = $state<string | null>(null);
 	const FLOWDECK_EVENT_LIMIT = 200;
@@ -1049,6 +1051,19 @@ applyNativeTranscriptEvent(event, message, true);
 		if (chatId) loadChat(chatId);
 	}
 
+	function handleNewFlowDeckRun() {
+		if (!flowdeckRunId) return;
+		const assistant = allMessages.find((message) => message.id === flowdeckMessageId);
+		const objective = assistant?.parent_id
+			? allMessages.find((message) => message.id === assistant.parent_id)?.content
+			: '';
+		if (!objective) {
+			toast.error('The original FlowDeck objective is no longer available.');
+			return;
+		}
+		void sendToFlowDeck(objective, flowdeckRunId);
+	}
+
 	function handleDesignerAction(action: DesignerAction) {
 		const variantText = action.variantIds?.length ? ` (${action.variantIds.join(', ')})` : '';
 		void steerActiveFlowDeck(`${action.label}${variantText}. Keep the native transcript linked and report the resulting evidence.`);
@@ -1070,6 +1085,7 @@ applyNativeTranscriptEvent(event, message, true);
 		flowdeckEventBuffer = [];
 		flowdeckEvents = [];
 flowdeckEvidenceSummary = null;
+		preservedFlowDeckEvidence = null;
 		flowdeckClarification = '';
 		flowdeckMessageId = null;
 	}
@@ -1529,13 +1545,16 @@ void poll();
 flowdeckPoller = setInterval(poll, 2500);
 	}
 
-	async function sendToFlowDeck(text: string) {
+	async function sendToFlowDeck(text: string, freshRunOf?: string) {
 		if (!workspace) {
 			toast.error('Choose a workspace before using Heidi.');
 			return;
 		}
 		stopTtsPlayback();
 		sending = true;
+		if (freshRunOf && flowdeckEvidenceSummary) {
+			preservedFlowDeckEvidence = flowdeckEvidenceSummary;
+		}
 		// Show truthful feedback while the immediate durable-run POST is in flight.
 		flowdeckStatus = 'preparing';
 		flowdeckRunId = '';
@@ -1596,7 +1615,17 @@ flowdeckPoller = setInterval(poll, 2500);
 		];
 		currentMessageId = assistantId;
 		try {
-			const result = flowdeckIsAudit
+			const result = freshRunOf
+				? await createNewFlowDeckRun(
+						{
+							workspace,
+							objective: text,
+							original_run_id: freshRunOf,
+							metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
+						},
+						`chat-flowdeck-new-run-${crypto.randomUUID()}`
+					)
+				: flowdeckIsAudit
 				? await createAudit(
 						{
 							workspace,
@@ -2449,9 +2478,11 @@ if (flowdeckRunId) {
 						isAudit={flowdeckIsAudit}
 						events={flowdeckEvents}
 evidenceSummary={flowdeckEvidenceSummary}
+preservedEvidenceSummary={preservedFlowDeckEvidence}
 						telemetry={flowdeckTelemetry}
 						oncancel={handleCancel}
 onreconnect={handleReconnect}
+						onnewrun={handleNewFlowDeckRun}
 onaction={handleDesignerAction}
 nativeMessageId={flowdeckMessageId}
 					/>
@@ -2596,9 +2627,11 @@ class="shrink-0 px-4 py-3 {selectedAgent === 'heidi' ? 'heidi-lower-interaction'
 						isAudit={flowdeckIsAudit}
 						events={flowdeckEvents}
 evidenceSummary={flowdeckEvidenceSummary}
+preservedEvidenceSummary={preservedFlowDeckEvidence}
 						telemetry={flowdeckTelemetry}
 						oncancel={handleCancel}
 onreconnect={handleReconnect}
+						onnewrun={handleNewFlowDeckRun}
 onaction={handleDesignerAction}
 nativeMessageId={flowdeckMessageId}
 					/>

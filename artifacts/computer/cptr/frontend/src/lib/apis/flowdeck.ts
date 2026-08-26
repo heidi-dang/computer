@@ -49,6 +49,10 @@ export interface CreateAuditInput {
 	metadata?: Record<string, unknown>;
 }
 
+export interface NewFlowDeckRunInput extends CreateOrchestrationInput {
+	original_run_id: string;
+}
+
 export async function createAudit(
 	input: CreateAuditInput,
 	idempotencyKey: string
@@ -73,6 +77,22 @@ export async function createFlowDeckOrchestration(
 			'Idempotency-Key': idempotencyKey
 		}
 	});
+}
+
+export async function createNewFlowDeckRun(
+	input: NewFlowDeckRunInput,
+	idempotencyKey: string
+): Promise<FlowDeckOrchestration> {
+	return fetchJSON<FlowDeckOrchestration>(
+		`/v1/flowdeck/orchestrations/${encodeURIComponent(input.original_run_id)}/new-run`,
+		{
+		...jsonBody(input),
+		headers: {
+			'Content-Type': 'application/json',
+			'Idempotency-Key': idempotencyKey
+		}
+		}
+	);
 }
 
 export async function getFlowDeckOrchestration(

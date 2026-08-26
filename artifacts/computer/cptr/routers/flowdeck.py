@@ -86,6 +86,15 @@ class AuditRequest(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class NewRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workspace: str = Field(min_length=1, max_length=4096)
+    objective: str = Field(min_length=1, max_length=20_000)
+    original_run_id: str = Field(min_length=1, max_length=128)
+    metadata: dict[str, Any] | None = None
+
+
 class SteeringRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -792,6 +801,17 @@ async def _create_orchestration(
                 workspace=workspace,
                 step_name="heidi-coordinator",
             )
+        fresh_run_of = str(metadata.get("flowdeck_fresh_run_of") or "").strip()
+        if fresh_run_of:
+            await store.record_event(
+                run.id,
+                "RUN_FRESH_ATTEMPT_STARTED",
+                {
+                    "original_run_id": fresh_run_of,
+                    "idempotency_boundary": "new_request_key",
+                    "original_run_read_only": True,
+                },
+            )
         if hasattr(store, "record_event"):
             await store.record_event(
                 run.id,
@@ -941,6 +961,11 @@ async def _create_orchestration(
         "chat_id": chat.id,
         "user_message": _message_dict(user_message),
         "assistant_message": _message_dict(assistant_message),
+        **(
+            {"fresh_run": True, "original_run_id": fresh_run_of}
+            if fresh_run_of
+            else {}
+        ),
         **({"audit": True, "reused": False} if audit_contract else {}),
     }
 
@@ -949,6 +974,59 @@ async def _create_orchestration(
 async def create_orchestration(request: Request, body: OrchestrationRequest):
     """Run one controlled Heidi orchestration using server-owned policy."""
     return await _create_orchestration(request, body)
+
+
+@router.post("/orchestrations/{run_id}/new-run", status_code=status.HTTP_200_OK)
+async def create_new_orchestration_run(
+    request: Request, run_id: str, body: NewRunRequest
+):
+    """Start a distinct attempt after a reviewer has inspected a terminal run.
+
+    The original run is deliberately read-only here. A fresh Idempotency-Key
+    creates a new durable run and the coordinator receives no authority to
+    append events to the original run.
+    """
+    if run_id != body.original_run_id:
+        raise HTTPException(409, "original run identity does not match the route")
+    user_id, workspace, original = await _owned_run(request, run_id, body.workspace)
+    if original.status not in {
+        RunStatus.MANUAL_REVIEW_REQUIRED.value,
+        RunStatus.ORPHANED.value,
+    }:
+        raise HTTPException(
+            409,
+            "a new FlowDeck run is only available for an unknown or manual-review outcome",
+        )
+
+    store = DurableFlowDeck(get_session_factory())
+    original_events = await store.list_events(original.id)
+    scope_event = next(
+        (event for event in original_events if event.kind == "AUDIT_SCOPE_CREATED"),
+        None,
+    )
+    metadata = dict(body.metadata or {})
+    metadata["flowdeck_fresh_run_of"] = original.id
+    metadata["source"] = "flowdeck-reviewer"
+    audit_contract = None
+    if scope_event:
+        audit_contract = {
+            "scope": scope_event.payload.get("scope") or {},
+            "completion_contract": list(
+                scope_event.payload.get("completion_contract") or []
+            ),
+        }
+        if not audit_contract["scope"] or not audit_contract["completion_contract"]:
+            raise HTTPException(409, "original audit evidence is incomplete")
+
+    return await _create_orchestration(
+        request,
+        OrchestrationRequest(
+            workspace=workspace,
+            objective=body.objective,
+            metadata=metadata,
+        ),
+        audit_contract=audit_contract,
+    )
 
 
 @router.post("/design", status_code=status.HTTP_200_OK)
