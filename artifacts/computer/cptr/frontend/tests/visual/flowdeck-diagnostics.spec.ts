@@ -236,6 +236,54 @@ await expect(panel.locator('.diagnostic-row').nth(2)).toContainText('Run run-old
 await expect(panel.getByRole('button', { name: 'Load older events' })).toHaveCount(0);
 });
 
+test('FlowDeck diagnostics discard malformed rows and cursors before older-page requests', async ({
+	page
+}) => {
+	const newestDiagnostic = {
+		id: 'diag-safe',
+		run_id: 'run-safe',
+		sequence: 2,
+		category: 'process_failure',
+		fallback: 'native',
+		run_status: 'failed',
+		run_outcome: 'native_fallback',
+		created_at: 1_735_689_601_000
+	};
+	let requestUrls: string[] = [];
+
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) => {
+		requestUrls = [...requestUrls, route.request().url()];
+		return route.fulfill({
+			json: {
+				categories: ['process_failure', 'future_category'],
+				diagnostics: [
+					newestDiagnostic,
+					{
+						...newestDiagnostic,
+						id: 'diag-malformed',
+						sequence: 'not-a-sequence'
+					},
+					{
+						...newestDiagnostic,
+						id: '/unsafe-diagnostic-id'
+					}
+				],
+				total: 3,
+				has_more: true,
+				next_cursor: '../private/diagnostics'
+			}
+		});
+	});
+
+	await page.goto('/flowdeck');
+	const panel = page.getByTestId('fdx-diagnostics-panel');
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+	await expect(panel.getByRole('button', { name: 'Load older events' })).toHaveCount(0);
+	expect(requestUrls).toHaveLength(1);
+	expect(new URL(requestUrls[0]).searchParams.has('cursor')).toBe(false);
+	await expectDocumentToStaySafe(page);
+});
+
 test('FlowDeck diagnostics outage stays safe and leaves the run composer usable', async ({
 	page
 }) => {

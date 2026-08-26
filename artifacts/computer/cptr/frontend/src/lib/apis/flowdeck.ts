@@ -190,8 +190,8 @@ return {
 categories,
 diagnostics,
 total,
-has_more: value.has_more === true,
-next_cursor: isSafeCursor(value.next_cursor) ? value.next_cursor : null
+		has_more: value.has_more === true && isSafeCursor(value.next_cursor),
+		next_cursor: isSafeCursor(value.next_cursor) ? value.next_cursor : null
 };
 }
 
@@ -204,7 +204,7 @@ const params = new URLSearchParams({
 limit: String(Math.max(1, Math.min(limit, FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE)))
 });
 if (category) params.set('category', category);
-if (cursor) params.set('cursor', cursor);
+	if (isSafeCursor(cursor)) params.set('cursor', cursor);
 const query = `?${params.toString()}`;
 	const response = await fetchJSON<unknown>(`/v1/flowdeck/diagnostics/fdx-containment${query}`);
 	return sanitizeFdxContainmentDiagnostics(response);
