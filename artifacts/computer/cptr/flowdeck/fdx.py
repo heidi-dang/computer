@@ -21,6 +21,18 @@ FDX_PROTOCOL = "flowdeck-fdx/1"
 FDX_VERSION = "1"
 DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
+FDX_CONTAINMENT_EVENT_KIND = "FDX_CONTAINMENT_FAILURE"
+FDX_CONTAINMENT_CATEGORIES = (
+    "containment_failure",
+    "configuration_violation",
+    "process_failure",
+    "protocol_violation",
+    "timeout",
+    "workspace_cleanup_race",
+    "workspace_lease",
+    "workspace_side_effect",
+)
+FDX_CONTAINMENT_EVENT_FIELDS = frozenset({"category", "fallback", "source"})
 
 
 class FDXPolicyError(RuntimeError):
@@ -105,6 +117,26 @@ def _containment_failure_category(error: BaseException) -> str:
     }:
         return "configuration_violation"
     return "containment_failure"
+
+
+def safe_containment_category(payload: Any) -> str | None:
+    """Return the category only for the exact safe lifecycle event shape.
+
+    FDX output and durable event payloads are untrusted. Requiring the fixed
+    shape here lets readers reject both malformed records and records from a
+    future producer version before projecting anything to an operator.
+    """
+    if not isinstance(payload, dict) or set(payload) != FDX_CONTAINMENT_EVENT_FIELDS:
+        return None
+    category = payload.get("category")
+    if (
+        type(category) is not str
+        or category not in FDX_CONTAINMENT_CATEGORIES
+        or payload.get("fallback") != "native"
+        or payload.get("source") != "lifecycle"
+    ):
+        return None
+    return category
 
 
 def _snapshot_files(root: Path) -> dict[str, bytes]:
@@ -338,7 +370,7 @@ async def run_optional_fdx(
             try:
                 await store.record_event(
                     run_id,
-                    "FDX_CONTAINMENT_FAILURE",
+                    FDX_CONTAINMENT_EVENT_KIND,
                     {
                         "category": category,
                         "fallback": "native",

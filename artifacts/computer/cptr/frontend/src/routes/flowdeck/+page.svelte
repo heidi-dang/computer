@@ -4,6 +4,7 @@
 	import {
 		cancelFlowDeckOrchestration,
 		createFlowDeckOrchestration,
+		FDX_CONTAINMENT_CATEGORIES,
 		getFlowDeckOrchestration,
 getFdxContainmentDiagnostics,
 type FdxContainmentDiagnostic,
@@ -38,7 +39,7 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let requestInFlight = false;
 let diagnostics = $state<FdxContainmentDiagnostic[]>([]);
-let diagnosticCategories = $state<string[]>([]);
+let diagnosticCategories = $state<string[]>([...FDX_CONTAINMENT_CATEGORIES]);
 let diagnosticCategory = $state('');
 let diagnosticsLoading = $state(false);
 let diagnosticsError = $state('');
@@ -186,9 +187,13 @@ diagnosticsError = '';
 try {
 const result = await getFdxContainmentDiagnostics(diagnosticCategory);
 diagnostics = result.diagnostics;
-diagnosticCategories = result.categories;
+		diagnosticCategories = result.categories.filter((category) =>
+			FDX_CONTAINMENT_CATEGORIES.includes(category as (typeof FDX_CONTAINMENT_CATEGORIES)[number])
+		);
 } catch (error) {
-diagnosticsError = error instanceof Error ? error.message : 'Unable to load diagnostics.';
+		// Do not put server exception text, paths, process output, or credentials
+		// into this operator-facing surface.
+		diagnosticsError = 'Containment diagnostics are temporarily unavailable.';
 } finally {
 diagnosticsLoading = false;
 }

@@ -55,6 +55,11 @@ from cptr.flowdeck.generated_auth import (
     GeneratedAuthError,
     GeneratedAuthService,
 )
+from cptr.flowdeck.fdx import (
+    FDX_CONTAINMENT_CATEGORIES,
+    FDX_CONTAINMENT_EVENT_KIND,
+    safe_containment_category,
+)
 from cptr.flowdeck.checkpoints import CheckpointError, CheckpointService
 from cptr.flowdeck.adaptive import adaptive_route
 from cptr.models import Chat, ChatMessage
@@ -68,16 +73,20 @@ from cptr.utils.db import get_session_factory
 router = APIRouter(prefix="/v1/flowdeck", tags=["flowdeck"])
 logger = logging.getLogger(__name__)
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
-FDX_CONTAINMENT_CATEGORIES = (
-    "containment_failure",
-    "configuration_violation",
-    "process_failure",
-    "protocol_violation",
-    "timeout",
-    "workspace_cleanup_race",
-    "workspace_lease",
-    "workspace_side_effect",
+_SAFE_RUN_STATUSES = frozenset(
+    {
+        "pending",
+        "running",
+        "orphaned",
+        "recovering",
+        "succeeded",
+        "failed",
+        "manual_review_required",
+        "cancelled",
+    }
 )
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_FDX_DIAGNOSTIC_SCAN_MULTIPLIER = 10
 
 
 class OrchestrationRequest(BaseModel):
@@ -1284,20 +1293,37 @@ async def list_fdx_containment_diagnostics(
             .join(FlowDeckRun, FlowDeckRun.id == FlowDeckEvent.run_id)
             .where(
                 FlowDeckRun.owner == owner,
-                FlowDeckEvent.kind == "FDX_CONTAINMENT_FAILURE",
+                FlowDeckEvent.kind == FDX_CONTAINMENT_EVENT_KIND,
             )
             .order_by(FlowDeckEvent.created_at.desc())
-            .limit(limit)
         )
+        # Apply the requested category in SQL when possible, but keep the
+        # exact payload validation below for both unfiltered and future data.
+        if category:
+            query = query.where(FlowDeckEvent.payload["category"].as_string() == category)
+        query = query.limit(limit * _FDX_DIAGNOSTIC_SCAN_MULTIPLIER)
         rows = (await db.execute(query)).all()
 
     diagnostics = []
     for event, run in rows:
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        event_category = payload.get("category")
-        if event_category not in FDX_CONTAINMENT_CATEGORIES:
+        event_category = safe_containment_category(event.payload)
+        if event_category is None:
             continue
         if category and event_category != category:
+            continue
+        if (
+            not isinstance(event.id, str)
+            or not _SAFE_IDENTIFIER.fullmatch(event.id)
+            or not isinstance(run.id, str)
+            or not _SAFE_IDENTIFIER.fullmatch(run.id)
+            or type(event.sequence) is not int
+            or event.sequence < 0
+            or type(event.created_at) is not int
+            or event.created_at < 0
+        ):
+            continue
+        run_status = str(run.status).lower()
+        if run_status not in _SAFE_RUN_STATUSES:
             continue
         diagnostics.append(
             {
@@ -1306,11 +1332,13 @@ async def list_fdx_containment_diagnostics(
                 "sequence": event.sequence,
                 "category": event_category,
                 "fallback": "native",
-                "run_status": str(run.status).lower(),
+                "run_status": run_status,
                 "run_outcome": "native_fallback",
                 "created_at": event.created_at,
             }
         )
+        if len(diagnostics) >= limit:
+            break
     return {
         "categories": list(FDX_CONTAINMENT_CATEGORIES),
         "diagnostics": diagnostics,

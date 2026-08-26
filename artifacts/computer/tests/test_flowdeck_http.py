@@ -403,6 +403,127 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(response.status_code, 403)
 
+    async def test_fdx_containment_diagnostics_are_bounded_and_owner_scoped(self):
+        store = DurableFlowDeck(self.session_factory)
+        owned_run, _ = await store.create_run(
+            request_key="fdx-diagnostics-owned",
+            owner="user-a",
+            workspace=str(self.root_a),
+        )
+        other_run, _ = await store.create_run(
+            request_key="fdx-diagnostics-other",
+            owner="user-b",
+            workspace=str(self.root_b),
+        )
+        async with self.session_factory() as session:
+            session.add_all(
+                [
+                    FlowDeckEvent(
+                        run_id=owned_run.id,
+                        sequence=10,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=100,
+                    ),
+                    FlowDeckEvent(
+                        run_id=owned_run.id,
+                        sequence=11,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "future_category",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=101,
+                    ),
+                    FlowDeckEvent(
+                        run_id=owned_run.id,
+                        sequence=12,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                            "process_output": "cat /etc/passwd",
+                            "filesystem_path": "/srv/private",
+                            "credential": "Bearer secret-token",
+                            "exception": "Traceback: provider failed",
+                        },
+                        created_at=102,
+                    ),
+                    FlowDeckEvent(
+                        run_id=owned_run.id,
+                        sequence=13,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload=["malformed"],
+                        created_at=103,
+                    ),
+                    FlowDeckEvent(
+                        run_id=other_run.id,
+                        sequence=10,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "process_failure",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=104,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        response = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(len(result["diagnostics"]), 1)
+        self.assertEqual(result["diagnostics"][0]["category"], "timeout")
+        self.assertEqual(
+            set(result["categories"]),
+            {
+                "containment_failure",
+                "configuration_violation",
+                "process_failure",
+                "protocol_violation",
+                "timeout",
+                "workspace_cleanup_race",
+                "workspace_lease",
+                "workspace_side_effect",
+            },
+        )
+        serialized = json.dumps(result)
+        for unsafe in (
+            "future_category",
+            "cat /etc/passwd",
+            "/srv/private",
+            "Bearer secret-token",
+            "Traceback: provider failed",
+            other_run.id,
+        ):
+            self.assertNotIn(unsafe, serialized)
+
+        filtered = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            params={"category": "process_failure"},
+            headers=self.headers(),
+        )
+        self.assertEqual(filtered.status_code, 200, filtered.text)
+        self.assertEqual(filtered.json()["diagnostics"], [])
+
+        unsupported = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            params={"category": "future_category"},
+            headers=self.headers(),
+        )
+        self.assertEqual(unsupported.status_code, 400)
+
     async def test_retry_and_reconnect_key_reuse_persists_one_run(self):
         calls = []
         created_flags = []

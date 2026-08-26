@@ -53,11 +53,35 @@ export interface NewFlowDeckRunInput extends CreateOrchestrationInput {
 	original_run_id: string;
 }
 
+export const FDX_CONTAINMENT_CATEGORIES = [
+	'containment_failure',
+	'configuration_violation',
+	'process_failure',
+	'protocol_violation',
+	'timeout',
+	'workspace_cleanup_race',
+	'workspace_lease',
+	'workspace_side_effect'
+] as const;
+
+export type FdxContainmentCategory = (typeof FDX_CONTAINMENT_CATEGORIES)[number];
+
+const FDX_RUN_STATUSES = [
+	'pending',
+	'running',
+	'orphaned',
+	'recovering',
+	'succeeded',
+	'failed',
+	'manual_review_required',
+	'cancelled'
+] as const;
+
 export interface FdxContainmentDiagnostic {
 id: string;
 run_id: string;
 sequence: number;
-category: string;
+	category: FdxContainmentCategory;
 fallback: 'native';
 run_status: string;
 run_outcome: string | null;
@@ -70,15 +94,88 @@ diagnostics: FdxContainmentDiagnostic[];
 total: number;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isSafeIdentifier(value: unknown): value is string {
+	return typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(value);
+}
+
+function isContainmentCategory(value: unknown): value is FdxContainmentCategory {
+	return (
+		typeof value === 'string' &&
+		(FDX_CONTAINMENT_CATEGORIES as readonly string[]).includes(value)
+	);
+}
+
+function isRunStatus(value: unknown): value is (typeof FDX_RUN_STATUSES)[number] {
+	return typeof value === 'string' && (FDX_RUN_STATUSES as readonly string[]).includes(value);
+}
+
+function isSafeTimestamp(value: unknown): value is number {
+	return (
+		typeof value === 'number' &&
+		Number.isSafeInteger(value) &&
+		value >= 0 &&
+		value <= 8_640_000_000_000_000
+	);
+}
+
+function sanitizeDiagnostic(value: unknown): FdxContainmentDiagnostic | null {
+	if (!isRecord(value)) return null;
+	if (
+		!isSafeIdentifier(value.id) ||
+		!isSafeIdentifier(value.run_id) ||
+		typeof value.sequence !== 'number' ||
+		!Number.isSafeInteger(value.sequence) ||
+		value.sequence < 0 ||
+		!isContainmentCategory(value.category) ||
+		value.fallback !== 'native' ||
+		value.run_outcome !== 'native_fallback' ||
+		!isRunStatus(value.run_status) ||
+		!isSafeTimestamp(value.created_at)
+	) {
+		return null;
+	}
+	return {
+		id: value.id,
+		run_id: value.run_id,
+		sequence: value.sequence,
+		category: value.category,
+		fallback: 'native',
+		run_status: value.run_status,
+		run_outcome: 'native_fallback',
+		created_at: value.created_at
+	};
+}
+
+/** Keep operator diagnostics safe even if an older/future server responds. */
+export function sanitizeFdxContainmentDiagnostics(
+	value: unknown
+): FdxContainmentDiagnosticsResponse {
+	if (!isRecord(value)) {
+		return { categories: [], diagnostics: [], total: 0 };
+	}
+	const categories = Array.isArray(value.categories)
+		? value.categories.filter(isContainmentCategory)
+		: [];
+	const diagnostics = Array.isArray(value.diagnostics)
+		? value.diagnostics.map(sanitizeDiagnostic).filter(
+				(item): item is FdxContainmentDiagnostic => item !== null
+			)
+		: [];
+	return { categories, diagnostics, total: diagnostics.length };
+}
+
 export async function getFdxContainmentDiagnostics(
 category = ''
 ): Promise<FdxContainmentDiagnosticsResponse> {
 const query = category
 ? `?${new URLSearchParams({ category }).toString()}`
 : '';
-return fetchJSON<FdxContainmentDiagnosticsResponse>(
-`/v1/flowdeck/diagnostics/fdx-containment${query}`
-);
+	const response = await fetchJSON<unknown>(`/v1/flowdeck/diagnostics/fdx-containment${query}`);
+	return sanitizeFdxContainmentDiagnostics(response);
 }
 
 export async function createAudit(
