@@ -334,3 +334,72 @@ The durable direct-operation design is ready to implement when the team accepts 
 [1]: https://github.com/heidi-dang/computer/pull/3 "Current computer direct-coding PR"
 [2]: https://github.com/heidi-dang/chatgpt-computer-plugin/pull/2 "Current plugin direct-coding PR"
 [3]: The user-supplied independent PR review, retained as the embedded review-map artifact in this document.
+
+## 17. Implemented v2 deployment contract
+
+The durable implementation uses `/api/control/v2` and **does not call** CPTR's agent service, autonomous supervisor, model listing endpoint, OpenAI-compatible gateway, or any external model API while serving default direct-operation tools. The connector must use a dedicated API key with only the required direct scopes; generated default keys do not include any `direct:*` scope.
+
+| Scope | Implemented permission |
+|---|---|
+| `direct:inspect` | Bounded workspace list and read inspection. |
+| `direct:mutate` | Versioned `WRITE_FILE` and `EDIT_FILE` operation creation. |
+| `direct:execute` | `RUN_ACTION`, `RUN_CODE_BLOCK`, and `SSH_EXECUTE` operation creation. |
+| `direct:approve` | Approval decision for a specific waiting operation. |
+
+Every operation create, cancellation request, and approval decision carries an idempotency key and canonical request digest. The create key is scoped by user, workspace, kind, and key. Cancellation and approval decisions are also persisted in `direct_operation_requests`, so an identical retry returns the current durable state without emitting a duplicate event or scheduling a second executor. A conflicting reuse of either key returns `IDEMPOTENCY_KEY_CONFLICT`.
+
+### 17.1 Event cursors
+
+Operation event pagination uses the opaque cursor form `<created_at>:<event_id>`. The event query orders by `(created_at, id)` and returns events strictly after that pair. This avoids dropping entries when multiple transitions receive the same millisecond timestamp. Clients must treat a cursor as opaque and pass the returned `next_cursor` unchanged.
+
+### 17.2 Sandboxed code blocks
+
+`RUN_CODE_BLOCK` accepts only `python`, `javascript`, `typescript`, or `bash`, creates `WAITING_APPROVAL`, and never falls back to host-shell execution. The bundled trusted runner is installed as `cptr-direct-sandbox-runner`; deployments may instead provide an approved external runner with `CPTR_DIRECT_CODE_SANDBOX_RUNNER`.
+
+On supported Linux hosts, the bundled runner launches user code in a new user, mount, PID, and network namespace. It mounts interpreter/runtime files read-only, mounts only the authorized workspace read-write, chroots before executing code, drops ambient and bounding capabilities, disables network access, and enforces CPU, file-size, and process-count limits. Python is constrained to a 512 MiB address-space limit. Node uses a 256 MiB old-space limit with a larger virtual-address reservation required by V8. The runner passes code through standard input and invokes the selected interpreter by fixed argument vector; it does not use `shell=True`, `create_subprocess_shell`, or a command-string API.
+
+> **Operational requirement:** A deployment that cannot provide Linux user and mount namespaces must configure a separately reviewed isolated runner or leave code-block execution unavailable. The service rejects unavailable runners; it must not substitute host execution.
+
+### 17.3 Approved SSH profile actions
+
+`SSH_EXECUTE` also begins in `WAITING_APPROVAL`. Its request contains `ssh_profile` and `ssh_action`, not a `remote_command`. Profiles are deployment-owned configuration in `CPTR_DIRECT_SSH_PROFILES_JSON`. A valid profile declares a hostname, user, port, identity path, known-hosts path, and a nonempty mapping of action IDs to remote commands. ChatGPT can select only one configured action after approval; it cannot submit arbitrary remote shell text.
+
+The executor invokes `ssh` through fixed argv with `-F /dev/null`, batch mode, identity-only mode, strict host-key checking, a fixed known-hosts path, a fixed identity path, and connection timeout. It returns only the profile and action identifiers plus bounded stdout/stderr. It never returns credentials, known-host contents, or configured remote command text.
+
+```json
+{
+  "production": {
+    "host": "example.internal",
+    "user": "deployer",
+    "port": 22,
+    "identity_file": "/run/secrets/cptr-production.key",
+    "known_hosts_file": "/etc/cptr/ssh/production.known_hosts",
+    "actions": {
+      "status": "systemctl is-system-running",
+      "restart-web": "sudo systemctl restart web.service"
+    }
+  }
+}
+```
+
+The profile configuration is operator-managed and must not be exposed through an MCP tool or stored in an operation result. Because an SSH action is an external side effect, an approval is mandatory even when the connector key carries `direct:execute`.
+
+### 17.4 Explicit legacy fallback
+
+The plugin advertises durable direct-operation tools by default. Legacy CPTR model/task/autonomous tools appear only when `CPTR_LEGACY_FALLBACK_ENABLED=true` is set in the plugin environment, and each is named `cptr_legacy_*`. These compatibility tools may contain `model_id`; default durable tools never do. Retired v1 direct write, edit, and raw-command routes remain unavailable and return HTTP 410; enabling legacy fallback does not restore raw host shell access.
+
+### 17.5 Current action-policy boundary
+
+`RUN_ACTION` remains a named policy registry and is deliberately rejected as `SANDBOX_EXECUTOR_UNAVAILABLE` until a deployment wires each action to the same reviewed isolated execution boundary. The API never treats an action name as permission to synthesize a host command. This preserves the no-raw-host-shell invariant while allowing deployments to introduce action profiles deliberately.
+
+## 18. Validation evidence
+
+The implementation test suite covers idempotent operation creation, persisted approval and cancellation replay, request-digest conflict rejection, stale revision rejection, restart-to-`ORPHANED` recovery, lease fencing between autonomous monitors and direct operations, compound event cursor pagination, v1 raw-command retirement, actual Python and JavaScript namespace-sandbox smoke execution, and mocked fixed-argv SSH profile execution. The connector suite verifies that its default tool list contains the durable code-block and SSH-action tools but no model-backed task tool, raw command field, `model_id`, or `/v1/chat/completions` request; a separate test verifies that explicit legacy fallback is gated by configuration.
+
+A live official ChatGPT session remains a deployment acceptance test because platform-side connector permissions are outside this repository. That session should validate tool discovery, connector credential scopes, user approval presentation, sandbox availability on the deployed host, and the expected operation/event lifecycle.
+
+## References
+
+[4]: https://www.kernel.org/doc/html/latest/admin-guide/namespaces/index.html "Linux namespaces documentation"
+[5]: https://man7.org/linux/man-pages/man1/unshare.1.html "unshare(1) manual"
+[6]: https://man7.org/linux/man-pages/man1/ssh.1.html "ssh(1) manual"

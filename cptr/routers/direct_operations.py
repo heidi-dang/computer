@@ -456,18 +456,24 @@ async def get_operation(request: Request, operation_id: str):
 
 
 @router.get("/operations/{operation_id}/events")
-async def get_operation_events(request: Request, operation_id: str, cursor: int = 0, limit: int = 50):
+async def get_operation_events(
+    request: Request, operation_id: str, cursor: str | None = None, limit: int = 50
+):
     user_id = await _require_any_scope(request, {"direct:inspect", "direct:mutate", "direct:execute"})
     operation = await store.get(operation_id, user_id)
     if operation is None:
         raise _public_error("OPERATION_NOT_FOUND", 404)
-    if cursor < 0 or limit < 1 or limit > MAX_EVENT_LIMIT:
+    if limit < 1 or limit > MAX_EVENT_LIMIT:
         raise _public_error("INVALID_EVENT_PAGE", 422)
-    events = await store.list_events(operation_id, cursor=cursor, limit=limit)
+    try:
+        events = await store.list_events(operation_id, cursor=cursor, limit=limit)
+    except ValueError as exc:
+        raise _public_error("INVALID_EVENT_PAGE", 422) from exc
     return {
         "operation_id": operation_id,
         "events": [
             {
+                "event_id": item.id,
                 "event_type": item.event_type,
                 "state": item.state,
                 "payload": dict(item.payload or {}),
@@ -475,7 +481,9 @@ async def get_operation_events(request: Request, operation_id: str, cursor: int 
             }
             for item in events
         ],
-        "next_cursor": events[-1].created_at + 1 if len(events) == limit else None,
+        "next_cursor": (
+            f"{events[-1].created_at}:{events[-1].id}" if len(events) == limit else None
+        ),
     }
 
 
@@ -485,10 +493,15 @@ async def cancel_operation(request: Request, operation_id: str, body: CancelRequ
     operation = await store.get(operation_id, user_id)
     if operation is None:
         raise _public_error("OPERATION_NOT_FOUND", 404)
-    cancelled = await store.request_cancel(operation_id, reason=body.reason)
+    try:
+        cancelled, cancellation_applied = await store.request_cancel(
+            operation_id, reason=body.reason, idempotency_key=body.idempotency_key
+        )
+    except IdempotencyConflict as exc:
+        raise _public_error(exc.code, 409) from exc
     if cancelled is None:
         raise _public_error("OPERATION_NOT_FOUND", 404)
-    if cancelled.state == "CANCEL_REQUESTED":
+    if cancellation_applied and cancelled.state == "CANCEL_REQUESTED":
         executor = getattr(request.app.state, "direct_executor", None)
         owns_process = bool(executor and await executor.cancel(operation_id))
         # File mutations are synchronous. An executor-owned process completes
@@ -504,10 +517,22 @@ async def approve_operation(request: Request, operation_id: str, body: ApprovalR
     operation = await store.get(operation_id, user_id)
     if operation is None:
         raise _public_error("OPERATION_NOT_FOUND", 404)
-    decided = await store.decide_approval(operation_id, approved=body.approved, decided_by=user_id)
+    try:
+        decided, approval_applied = await store.decide_approval(
+            operation_id,
+            approved=body.approved,
+            decided_by=user_id,
+            idempotency_key=body.idempotency_key,
+        )
+    except IdempotencyConflict as exc:
+        raise _public_error(exc.code, 409) from exc
     if decided is None:
         raise _public_error("APPROVAL_NOT_PENDING", 409)
-    if decided.state == "QUEUED" and decided.kind in {"RUN_CODE_BLOCK", "SSH_EXECUTE"}:
+    if (
+        approval_applied
+        and decided.state == "QUEUED"
+        and decided.kind in {"RUN_CODE_BLOCK", "SSH_EXECUTE"}
+    ):
         executor = getattr(request.app.state, "direct_executor", None)
         if executor is None:
             decided = await store.transition(

@@ -248,6 +248,30 @@ class DirectOperationApproval(Base):
     decided_by = Column(Text, nullable=True)
 
 
+class DirectOperationRequest(Base):
+    """Exactly-once record for a state-changing operation subrequest."""
+
+    __tablename__ = "direct_operation_requests"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    operation_id = Column(
+        Text, ForeignKey("direct_operations.id", ondelete="CASCADE"), nullable=False
+    )
+    request_type = Column(Text, nullable=False)
+    idempotency_key = Column(Text, nullable=False)
+    request_digest = Column(Text, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "operation_id",
+            "request_type",
+            "idempotency_key",
+            name="uq_direct_operation_request_idempotency",
+        ),
+    )
+
+
 class WorkspaceOperationLease(Base):
     """A generalized fenced workspace mutation lease shared by monitors and direct operations."""
 

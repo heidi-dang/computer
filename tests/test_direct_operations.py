@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from cptr.models import Workspace
 from cptr.models.users import User
 from cptr.routers.coding import CommandRequest, start_workspace_command
+from cptr.services.control_store import SqlSupervisorStore
 from cptr.services.direct_executor import DirectExecutorManager, InvalidSshProfile
 from cptr.services.direct_operations import (
     DirectOperationStore,
@@ -106,6 +107,29 @@ class DurableDirectOperationStoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertGreater(second.fencing_token, first.fencing_token)
 
+    async def test_autonomous_monitor_and_direct_operation_leases_fence_each_other(self):
+        monitor_store = SqlSupervisorStore()
+        direct_lease = await self.store.acquire_workspace_lease(
+            workspace_id=self.workspace_id,
+            holder_type="DIRECT_OPERATION",
+            holder_id="direct-operation",
+        )
+        self.assertFalse(await monitor_store.claim_workspace(self.workspace_id, "monitor-one"))
+        await self.store.release_workspace_lease(
+            workspace_id=self.workspace_id,
+            holder_type="DIRECT_OPERATION",
+            holder_id="direct-operation",
+            fencing_token=direct_lease.fencing_token,
+        )
+        self.assertTrue(await monitor_store.claim_workspace(self.workspace_id, "monitor-one"))
+        with self.assertRaises(WorkspaceBusy):
+            await self.store.acquire_workspace_lease(
+                workspace_id=self.workspace_id,
+                holder_type="DIRECT_OPERATION",
+                holder_id="second-direct-operation",
+            )
+        await monitor_store.release_workspace(self.workspace_id, "monitor-one")
+
     async def test_restart_recovery_never_infers_success(self):
         operation, _ = await self.store.create_or_replay(
             user_id=self.user_id,
@@ -137,10 +161,89 @@ class DurableDirectOperationStoreTests(unittest.IsolatedAsyncioTestCase):
             idempotency_key="cancel-test",
             expected_revision="MISSING",
         )
-        requested = await self.store.request_cancel(operation.id, reason="user changed direction")
+        requested, applied = await self.store.request_cancel(
+            operation.id,
+            reason="user changed direction",
+            idempotency_key="cancel-request-1",
+        )
+        self.assertTrue(applied)
         self.assertEqual(requested.state, "CANCEL_REQUESTED")
+        replayed, replay_applied = await self.store.request_cancel(
+            operation.id,
+            reason="user changed direction",
+            idempotency_key="cancel-request-1",
+        )
+        self.assertFalse(replay_applied)
+        self.assertEqual(replayed.state, "CANCEL_REQUESTED")
+        with self.assertRaises(IdempotencyConflict):
+            await self.store.request_cancel(
+                operation.id,
+                reason="a different reason",
+                idempotency_key="cancel-request-1",
+            )
         cancelled = await self.store.complete_cancel(operation.id)
         self.assertEqual(cancelled.state, "CANCELLED")
+
+    async def test_approval_decision_is_durable_idempotent_and_replays_without_transition(self):
+        operation, _ = await self.store.create_or_replay(
+            user_id=self.user_id,
+            workspace_id=self.workspace_id,
+            kind="RUN_CODE_BLOCK",
+            request={"kind": "RUN_CODE_BLOCK", "language": "python", "code": "print(1)"},
+            idempotency_key="approval-operation",
+            expected_revision=None,
+        )
+        await self.store.create_approval(
+            operation.id,
+            request_digest=operation.request_digest,
+            reason="code execution requested",
+        )
+        first, first_applied = await self.store.decide_approval(
+            operation.id,
+            approved=True,
+            decided_by=self.user_id,
+            idempotency_key="approval-decision-1",
+        )
+        replayed, replay_applied = await self.store.decide_approval(
+            operation.id,
+            approved=True,
+            decided_by=self.user_id,
+            idempotency_key="approval-decision-1",
+        )
+        self.assertTrue(first_applied)
+        self.assertFalse(replay_applied)
+        self.assertEqual(first.state, "QUEUED")
+        self.assertEqual(replayed.state, "QUEUED")
+        events = await self.store.list_events(operation.id)
+        self.assertEqual(sum(item.event_type == "APPROVAL_DECIDED" for item in events), 1)
+
+    async def test_compound_event_cursor_does_not_skip_same_millisecond_events(self):
+        with patch("cptr.services.direct_operations.now_ms", return_value=42):
+            operation, _ = await self.store.create_or_replay(
+                user_id=self.user_id,
+                workspace_id=self.workspace_id,
+                kind="WRITE_FILE",
+                request={
+                    "kind": "WRITE_FILE",
+                    "path": "cursor.py",
+                    "content": "x",
+                    "expected_revision": "MISSING",
+                },
+                idempotency_key="event-cursor",
+                expected_revision="MISSING",
+            )
+            await self.store.transition(
+                operation.id,
+                expected_states={"REQUESTED"},
+                state="SUCCEEDED",
+                event_type="FILE_WRITTEN",
+            )
+        first_page = await self.store.list_events(operation.id, limit=1)
+        cursor = f"{first_page[0].created_at}:{first_page[0].id}"
+        second_page = await self.store.list_events(operation.id, cursor=cursor, limit=10)
+        self.assertEqual(len(first_page), 1)
+        self.assertEqual(len(second_page), 1)
+        self.assertNotEqual(first_page[0].id, second_page[0].id)
 
 
 class DirectSandboxRunnerTests(unittest.IsolatedAsyncioTestCase):

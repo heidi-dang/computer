@@ -17,8 +17,8 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from cptr.models import Workspace
-from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.control_auth import authenticate_control_request
+from cptr.services.workspace_availability import is_workspace_available
 from cptr.utils.db import get_db
 from cptr.utils.runtime import FileError, Runtime
 from cptr.utils.tools import (

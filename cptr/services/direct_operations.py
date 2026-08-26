@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from cptr.models import (
@@ -20,6 +20,7 @@ from cptr.models import (
     DirectOperation,
     DirectOperationApproval,
     DirectOperationEvent,
+    DirectOperationRequest,
     WorkspaceOperationLease,
 )
 from cptr.utils.db import get_db
@@ -157,17 +158,25 @@ class DirectOperationStore:
             return await db.get(DirectOperation, operation_id)
 
     async def list_events(
-        self, operation_id: str, *, cursor: int = 0, limit: int = 100
+        self, operation_id: str, *, cursor: str | None = None, limit: int = 100
     ) -> list[DirectOperationEvent]:
+        cursor_created_at, cursor_id = self._parse_event_cursor(cursor)
         async with await get_db() as db:
-            result = await db.execute(
-                select(DirectOperationEvent)
-                .where(
-                    DirectOperationEvent.operation_id == operation_id,
-                    DirectOperationEvent.created_at >= cursor,
+            statement = select(DirectOperationEvent).where(
+                DirectOperationEvent.operation_id == operation_id
+            )
+            if cursor_created_at is not None and cursor_id is not None:
+                statement = statement.where(
+                    or_(
+                        DirectOperationEvent.created_at > cursor_created_at,
+                        and_(
+                            DirectOperationEvent.created_at == cursor_created_at,
+                            DirectOperationEvent.id > cursor_id,
+                        ),
+                    )
                 )
-                .order_by(DirectOperationEvent.created_at, DirectOperationEvent.id)
-                .limit(limit)
+            result = await db.execute(
+                statement.order_by(DirectOperationEvent.created_at, DirectOperationEvent.id).limit(limit)
             )
             return list(result.scalars().all())
 
@@ -230,20 +239,50 @@ class DirectOperationStore:
             return await db.get(DirectOperation, operation_id)
 
     async def request_cancel(
-        self, operation_id: str, *, reason: str | None = None
-    ) -> DirectOperation | None:
-        operation = await self.transition(
-            operation_id,
-            expected_states={"REQUESTED", "WAITING_APPROVAL", "QUEUED", "DISPATCHING", "RUNNING"},
-            state="CANCEL_REQUESTED",
-            event_type="CANCEL_REQUESTED",
-            payload={"reason": reason or "cancel requested"},
-            cancel_reason=reason or "cancel requested",
-        )
-        if operation is not None:
-            return operation
+        self, operation_id: str, *, reason: str | None = None, idempotency_key: str
+    ) -> tuple[DirectOperation | None, bool]:
+        cancellation_reason = reason or "cancel requested"
+        digest = canonical_digest({"reason": cancellation_reason})
+        now = now_ms()
         async with await get_db() as db:
-            return await db.get(DirectOperation, operation_id)
+            operation = await db.get(DirectOperation, operation_id)
+            if operation is None:
+                return None, False
+            if not await self._record_subrequest(
+                db,
+                operation_id=operation_id,
+                request_type="CANCEL",
+                idempotency_key=idempotency_key,
+                request_digest=digest,
+                created_at=now,
+            ):
+                return operation, False
+            if operation.state not in {
+                "REQUESTED",
+                "WAITING_APPROVAL",
+                "QUEUED",
+                "DISPATCHING",
+                "RUNNING",
+            }:
+                await db.commit()
+                return operation, False
+            operation.state = "CANCEL_REQUESTED"
+            operation.updated_at = now
+            operation.cancel_requested_at = now
+            operation.cancel_reason = cancellation_reason
+            operation.version = int(operation.version or 0) + 1
+            db.add(
+                DirectOperationEvent(
+                    operation_id=operation_id,
+                    event_type="CANCEL_REQUESTED",
+                    state="CANCEL_REQUESTED",
+                    payload=event_payload({"reason": cancellation_reason}),
+                    created_at=now,
+                )
+            )
+            await db.commit()
+            await db.refresh(operation)
+            return operation, True
 
     async def complete_cancel(self, operation_id: str, *, detail: str = "cancelled") -> DirectOperation | None:
         return await self.transition(
@@ -310,48 +349,73 @@ class DirectOperationStore:
             return approval
 
     async def decide_approval(
-        self, operation_id: str, *, approved: bool, decided_by: str
-    ) -> DirectOperation | None:
+        self,
+        operation_id: str,
+        *,
+        approved: bool,
+        decided_by: str,
+        idempotency_key: str,
+    ) -> tuple[DirectOperation | None, bool]:
         now = now_ms()
+        digest = canonical_digest({"approved": approved})
         async with await get_db() as db:
+            operation = await db.get(DirectOperation, operation_id)
+            if operation is None:
+                return None, False
+            existing = await self._find_subrequest(
+                db,
+                operation_id=operation_id,
+                request_type="APPROVAL_DECISION",
+                idempotency_key=idempotency_key,
+            )
+            if existing is not None:
+                if existing.request_digest != digest:
+                    raise IdempotencyConflict(
+                        "idempotency key was already used for a different direct operation request"
+                    )
+                return operation, False
+            if operation.state != "WAITING_APPROVAL":
+                return None, False
+            recorded = await self._record_subrequest(
+                db,
+                operation_id=operation_id,
+                request_type="APPROVAL_DECISION",
+                idempotency_key=idempotency_key,
+                request_digest=digest,
+                created_at=now,
+            )
+            if not recorded:
+                return await db.get(DirectOperation, operation_id), False
             result = await db.execute(
-                select(DirectOperationApproval)
-                .join(DirectOperation)
-                .where(
+                select(DirectOperationApproval).where(
                     DirectOperationApproval.operation_id == operation_id,
-                    DirectOperation.state == "WAITING_APPROVAL",
                     DirectOperationApproval.status == "PENDING",
                 )
             )
             approval = result.scalar_one_or_none()
             if approval is None:
-                return None
+                await db.rollback()
+                return None, False
             approval.status = "APPROVED" if approved else "REJECTED"
             approval.decided_at = now
             approval.decided_by = decided_by
-            state = "QUEUED" if approved else "REJECTED"
-            await db.execute(
-                update(DirectOperation)
-                .where(DirectOperation.id == operation_id)
-                .values(
-                    state=state,
-                    updated_at=now,
-                    finished_at=None if approved else now,
-                    public_error_code=None if approved else "APPROVAL_REJECTED",
-                    version=DirectOperation.version + 1,
-                )
-            )
+            operation.state = "QUEUED" if approved else "REJECTED"
+            operation.updated_at = now
+            operation.finished_at = None if approved else now
+            operation.public_error_code = None if approved else "APPROVAL_REJECTED"
+            operation.version = int(operation.version or 0) + 1
             db.add(
                 DirectOperationEvent(
                     operation_id=operation_id,
                     event_type="APPROVAL_DECIDED",
-                    state=state,
+                    state=operation.state,
                     payload={"approved": approved, "decided_by": decided_by},
                     created_at=now,
                 )
             )
             await db.commit()
-            return await db.get(DirectOperation, operation_id)
+            await db.refresh(operation)
+            return operation, True
 
     async def acquire_workspace_lease(
         self,
@@ -460,6 +524,82 @@ class DirectOperationStore:
                     )
             await db.commit()
             return result.rowcount or 0
+
+    @staticmethod
+    def _parse_event_cursor(cursor: str | None) -> tuple[int | None, str | None]:
+        if cursor is None:
+            return None, None
+        try:
+            created_at, event_id = cursor.split(":", 1)
+            parsed_created_at = int(created_at)
+        except (TypeError, ValueError):
+            raise ValueError("invalid direct-operation event cursor") from None
+        if parsed_created_at < 0 or not event_id:
+            raise ValueError("invalid direct-operation event cursor")
+        return parsed_created_at, event_id
+
+    @staticmethod
+    async def _find_subrequest(
+        db, *, operation_id: str, request_type: str, idempotency_key: str
+    ) -> DirectOperationRequest | None:
+        existing = await db.execute(
+            select(DirectOperationRequest).where(
+                DirectOperationRequest.operation_id == operation_id,
+                DirectOperationRequest.request_type == request_type,
+                DirectOperationRequest.idempotency_key == idempotency_key,
+            )
+        )
+        return existing.scalar_one_or_none()
+
+    @staticmethod
+    async def _record_subrequest(
+        db,
+        *,
+        operation_id: str,
+        request_type: str,
+        idempotency_key: str,
+        request_digest: str,
+        created_at: int,
+    ) -> bool:
+        record = await DirectOperationStore._find_subrequest(
+            db,
+            operation_id=operation_id,
+            request_type=request_type,
+            idempotency_key=idempotency_key,
+        )
+        if record is not None:
+            if record.request_digest != request_digest:
+                raise IdempotencyConflict(
+                    "idempotency key was already used for a different direct operation request"
+                )
+            return False
+        db.add(
+            DirectOperationRequest(
+                operation_id=operation_id,
+                request_type=request_type,
+                idempotency_key=idempotency_key,
+                request_digest=request_digest,
+                created_at=created_at,
+            )
+        )
+        try:
+            await db.flush()
+        except IntegrityError:
+            await db.rollback()
+            raced_record = await DirectOperationStore._find_subrequest(
+                db,
+                operation_id=operation_id,
+                request_type=request_type,
+                idempotency_key=idempotency_key,
+            )
+            if raced_record is None:
+                raise
+            if raced_record.request_digest != request_digest:
+                raise IdempotencyConflict(
+                    "idempotency key was already used for a different direct operation request"
+                )
+            return False
+        return True
 
     @staticmethod
     async def _find_idempotency(db, user_id: str, workspace_id: str, kind: str, key: str):

@@ -1,19 +1,28 @@
 """Add durable direct-operation lifecycle records.
 
-Revision ID: 0008
-Revises: 0007
+Revision ID: 0013
+Revises: 0012
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0008"
-down_revision = "0007"
+revision = "0013"
+down_revision = "0012"
 branch_labels = None
 depends_on = None
 
 
+def _has_table(name: str) -> bool:
+    return name in sa.inspect(op.get_bind()).get_table_names()
+
+
 def upgrade() -> None:
+    # The final lineage is 0012 -> 0013. This guard only tolerates local or
+    # pre-release data directories created by the withdrawn draft migration;
+    # those drafts always created the full durable schema as one unit.
+    if _has_table("direct_operations"):
+        return
     op.create_table(
         "direct_operations",
         sa.Column("id", sa.Text(), primary_key=True),

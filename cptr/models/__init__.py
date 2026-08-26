@@ -24,6 +24,7 @@ from cptr.models.control import (
     DirectOperation,
     DirectOperationApproval,
     DirectOperationEvent,
+    DirectOperationRequest,
     WorkspaceOperationLease,
 )
 from cptr.models.files import File
@@ -50,11 +51,12 @@ __all__ = [
     "DirectOperation",
     "DirectOperationApproval",
     "DirectOperationEvent",
-    "WorkspaceOperationLease",
+    "DirectOperationRequest",
     "File",
     "User",
     "UserStates",
     "Workspace",
+    "WorkspaceOperationLease",
     "internal_status",
     "is_internal_chat",
     "is_pending_subagent_result_message",
