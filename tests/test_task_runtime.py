@@ -27,6 +27,19 @@ class TaskRuntimeLayoutTests(unittest.TestCase):
             )
             self.assertEqual(task_runtime_dir("task_abc123", root=root), runtime)
 
+    def test_all_runtime_categories_share_one_task_owned_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = ensure_task_runtime("task_grouped", root=root)
+            second = ensure_task_runtime("task_grouped", root=root)
+
+            self.assertEqual(first, second)
+            self.assertEqual(first.parent, Path(root).resolve())
+            for category in ("agent", "attachments", "browser", "command-output"):
+                category_path = first / category
+                self.assertTrue(category_path.is_dir())
+                self.assertTrue(category_path.is_relative_to(first))
+            self.assertEqual(sorted(path.name for path in Path(root).iterdir()), ["task_grouped"])
+
     def test_task_id_cannot_escape_runtime_root(self):
         with tempfile.TemporaryDirectory() as root:
             with self.assertRaises(ValueError):

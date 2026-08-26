@@ -23,7 +23,7 @@ CPTR_TASK_ROOT=~/.cptr/runs
 
 When both director settings are present, CPTR uses the provider-neutral `SupervisorDirector` interface with the OpenAI Responses implementation and structured JSON-schema decisions. Response IDs are persisted for continuation. Without those settings, the local conservative director is used for local development; production deployments should configure the director and independently verify the resulting evidence.
 
-`CPTR_TASK_ROOT` is the central location for task-owned transient runtime state. CPTR places provider caches/configuration, staged attachments, command output logs, and browser runtime state below one directory per task. The default is `$CPTR_DATA_DIR/runs`. The selected project workspace remains the agent's working directory, and the existing workspace-local `.cptr/` metadata layout is preserved for compatibility.
+`CPTR_TASK_ROOT` is the central location for task-owned transient runtime state. CPTR places provider caches/configuration, staged attachments, command output logs, and browser runtime state below one deterministic directory per task, with the categories `agent/`, `attachments/`, `browser/`, and `command-output/`. Reusing a task ID reuses that same runtime directory; it never creates a sibling run directory. The default is `$CPTR_DATA_DIR/runs`. The selected project workspace remains the agent's working directory, and the existing workspace-local `.cptr/` metadata layout is preserved for compatibility.
 
 ## Control API
 
