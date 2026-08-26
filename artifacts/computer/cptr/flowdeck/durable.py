@@ -255,6 +255,21 @@ class DurableFlowDeck:
             try:
                 async with self.session_factory() as db, db.begin():
                     return await operation(db)
+            except IntegrityError as exc:
+                # Concurrent event writers can observe the same max(sequence)
+                # before either transaction commits. The unique constraint is
+                # the durable arbitration point; retry the whole transaction so
+                # the next allocation observes the committed event.
+                error_text = str(exc)
+                if not (
+                    "uq_flowdeck_event_sequence" in error_text
+                    or "flowdeck_events.run_id, flowdeck_events.sequence" in error_text
+                ):
+                    raise
+                last_error = exc
+                if attempt >= self.busy_retries:
+                    raise
+                await asyncio.sleep(0.01 * (attempt + 1))
             except OperationalError as exc:
                 last_error = exc
                 if "locked" not in str(exc).lower() or attempt >= self.busy_retries:
@@ -1728,6 +1743,15 @@ class DurableFlowDeck:
         payload: dict[str, Any],
         now: int,
     ) -> FlowDeckEvent:
+        # Lock the run before reading max(sequence). The no-op update is
+        # intentional: SQLite does not implement SELECT FOR UPDATE, but an
+        # update acquires its database-backed write lock. The unique
+        # constraint/retry path remains necessary for cross-process races.
+        await db.execute(
+            update(FlowDeckRun)
+            .where(FlowDeckRun.id == run_id)
+            .values(updated_at=FlowDeckRun.updated_at)
+        )
         last = await db.scalar(
             select(func.max(FlowDeckEvent.sequence)).where(FlowDeckEvent.run_id == run_id)
         )

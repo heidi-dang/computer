@@ -1624,6 +1624,79 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(forbidden.status_code, 403)
 
+    async def test_simultaneous_evidence_report_downloads_are_individually_audited(self):
+        run_id = "concurrent-export-report-run"
+        async with self.session_factory() as session:
+            session.add(
+                FlowDeckRun(
+                    id=run_id,
+                    request_key="concurrent-export-report-key",
+                    workspace=str(self.root_a),
+                    owner="user-a",
+                    status="SUCCEEDED",
+                    created_at=1,
+                    updated_at=1,
+                    version=1,
+                )
+            )
+            session.add(
+                FlowDeckEvent(
+                    id="concurrent-export-report-event",
+                    run_id=run_id,
+                    sequence=1,
+                    kind="VERIFY",
+                    payload={
+                        "authoritative": True,
+                        "source": "verifier",
+                        "outcome": "succeeded",
+                        "reasoning": "private reasoning",
+                        "credential": "secret-value",
+                    },
+                    created_at=1,
+                )
+            )
+            await session.commit()
+
+        download_count = 8
+        responses = await asyncio.gather(
+            *(
+                self.client.get(
+                    f"/v1/flowdeck/orchestrations/{run_id}/evidence-report",
+                    params={"workspace": str(self.root_a)},
+                    headers=self.headers(),
+                )
+                for _ in range(download_count)
+            )
+        )
+
+        self.assertTrue(all(response.status_code == 200 for response in responses))
+        reports = [response.json() for response in responses]
+        self.assertEqual(
+            {json.dumps(report, sort_keys=True) for report in reports},
+            {json.dumps(reports[0], sort_keys=True)},
+        )
+        serialized = json.dumps(reports[0])
+        self.assertNotIn("private reasoning", serialized)
+        self.assertNotIn("secret-value", serialized)
+
+        async with self.session_factory() as session:
+            events = (
+                await session.execute(
+                    select(FlowDeckEvent)
+                    .where(FlowDeckEvent.run_id == run_id)
+                    .order_by(FlowDeckEvent.sequence)
+                )
+            ).scalars().all()
+        self.assertEqual(len(events), download_count + 1)
+        self.assertEqual(
+            [event.sequence for event in events],
+            list(range(1, download_count + 2)),
+        )
+        self.assertEqual(
+            sum(event.kind == "EVIDENCE_REPORT_EXPORTED" for event in events),
+            download_count,
+        )
+
     async def test_active_run_steering_is_durable_and_idempotent(self):
         async def submit(request, *, authenticated_request, store):
             return CoordinatorResult("pending", request.request_key, (), ())
