@@ -55,6 +55,7 @@ class FDXConfig:
         )
 
 
+
 @dataclass(frozen=True)
 class FDXResult:
     status: str
@@ -62,6 +63,48 @@ class FDXResult:
     authoritative: bool
     used_fdx: bool
     fallback_reason: str | None = None
+
+
+def _containment_failure_category(error: BaseException) -> str:
+    """Map an FDX failure to a bounded, non-sensitive diagnostic category."""
+    if isinstance(error, asyncio.TimeoutError):
+        return "timeout"
+    if isinstance(error, OSError):
+        return "process_failure"
+    if not isinstance(error, FDXPolicyError):
+        return "containment_failure"
+    message = str(error)
+    if message == "workspace changed during FDX cleanup":
+        return "workspace_cleanup_race"
+    if message == "FDX produced a workspace side effect":
+        return "workspace_side_effect"
+    if message in {
+        "FDX returned invalid structured output",
+        "FDX response protocol mismatch",
+    }:
+        return "protocol_violation"
+    if message in {
+        "FDX workspace is already owned",
+        "FDX requires a durable workspace lease",
+    }:
+        return "workspace_lease"
+    if message in {
+        "FDX protocol is incompatible",
+        "FDX executable is required when enabled",
+        "FDX timeout is outside the safe bound",
+        "FDX output bound is outside the safe limit",
+        "FDX input bound is outside the safe limit",
+        "FDX read-only parity is not verified",
+        "FDX workspace is not a directory",
+        "FDX workspace escapes configured jail",
+        "FDX requires an explicit configured jail",
+        "FDX executable must be an absolute path",
+        "FDX executable escapes configured jail",
+        "FDX payload is not structured JSON",
+        "FDX input exceeded configured bound",
+    }:
+        return "configuration_violation"
+    return "containment_failure"
 
 
 def _snapshot_files(root: Path) -> dict[str, bytes]:
@@ -287,12 +330,29 @@ async def run_optional_fdx(
             run_id=run_id,
             owner=owner,
         )
-    except (FDXPolicyError, OSError, asyncio.TimeoutError):
+    except (FDXPolicyError, OSError, asyncio.TimeoutError) as error:
+        category = _containment_failure_category(error)
+        if store is not None and run_id:
+            # Persist only a fixed category and fallback marker. Never persist
+            # exception text, process output, paths, or credentials.
+            try:
+                await store.record_event(
+                    run_id,
+                    "FDX_CONTAINMENT_FAILURE",
+                    {
+                        "category": category,
+                        "fallback": "native",
+                        "source": "lifecycle",
+                    },
+                )
+            except Exception:
+                # Diagnostics must not prevent the safe native fallback.
+                pass
         fallback_result = await fallback()
         return FDXResult(
             status=fallback_result.status,
             output=fallback_result.output,
             authoritative=fallback_result.authoritative,
             used_fdx=False,
-            fallback_reason="fdx_unavailable_or_failed",
+            fallback_reason=f"fdx_{category}",
         )

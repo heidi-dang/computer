@@ -82,6 +82,7 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         )
         if run.status == "PENDING":
             await self.store.start_run(run.id)
+        self.last_run_id = run.id
         return await run_optional_fdx(
             payload,
             workspace=str(self.workspace),
@@ -189,6 +190,12 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.used_fdx)
         self.assertTrue(result.authoritative)
         self.assertEqual(result.output, {"native": True})
+        events = await self.store.list_events(self.last_run_id)
+        diagnostic = events[-1]
+        self.assertEqual(diagnostic.kind, "FDX_CONTAINMENT_FAILURE")
+        self.assertEqual(diagnostic.payload["category"], "timeout")
+        self.assertEqual(diagnostic.payload["fallback"], "native")
+        self.assertNotIn("sleep", diagnostic.payload)
 
     async def test_enabled_fdx_failure_falls_back_to_native_result(self):
         async def fallback():
@@ -213,6 +220,8 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.authoritative)
         self.assertEqual(result.output, {"native": True})
         self.assertIsNotNone(result.fallback_reason)
+        events = await self.store.list_events(self.last_run_id)
+        self.assertEqual(events[-1].payload["category"], "process_failure")
 
     async def test_fdx_rejects_workspace_side_effect_and_falls_back(self):
         self.executable.write_text(
@@ -243,6 +252,8 @@ class FDXTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.used_fdx)
         self.assertTrue(result.authoritative)
         self.assertFalse((self.workspace / "created.txt").exists())
+        events = await self.store.list_events(self.last_run_id)
+        self.assertEqual(events[-1].payload["category"], "workspace_side_effect")
 
     async def test_fdx_cleans_workspace_before_releasing_lease(self):
         self.executable.write_text(

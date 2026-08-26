@@ -139,6 +139,8 @@ _AUDIT_SAFE_PAYLOAD_KEYS = frozenset(
         "attempt_id",
         "source",
         "authoritative",
+        "category",
+        "fallback",
     }
 )
 
