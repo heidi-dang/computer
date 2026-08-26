@@ -38,6 +38,8 @@
 	let hydrated = $state(false);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let requestInFlight = false;
+	let diagnosticsRefreshTimer: ReturnType<typeof setInterval> | null = null;
+	let diagnosticsRequestInFlight = false;
 	let diagnostics = $state<FdxContainmentDiagnostic[]>([]);
 	let diagnosticCategories = $state<string[]>([...FDX_CONTAINMENT_CATEGORIES]);
 	let diagnosticCategory = $state('');
@@ -47,6 +49,7 @@
 
 	const DIAGNOSTICS_MAX_RETRIES = 3;
 	const DIAGNOSTICS_RETRY_DELAYS_MS = [250, 500, 1000] as const;
+	const DIAGNOSTICS_REFRESH_INTERVAL_MS = 30_000;
 
 	const STORAGE_KEY = 'flowdeck:owned-run';
 	const terminalStatuses = new Set([
@@ -257,37 +260,56 @@
 	}
 
 	async function refreshDiagnostics() {
+		if (diagnosticsRequestInFlight) return;
+		diagnosticsRequestInFlight = true;
 		const requestId = ++diagnosticsRequestId;
 		diagnosticsLoading = true;
 		diagnosticsError = '';
 
-		for (let retry = 0; retry <= DIAGNOSTICS_MAX_RETRIES; retry += 1) {
-			if (retry > 0) {
-				await waitForDiagnosticsRetry(DIAGNOSTICS_RETRY_DELAYS_MS[retry - 1]);
-			}
-			if (requestId !== diagnosticsRequestId) return;
-
-			try {
-				const result = await getFdxContainmentDiagnostics(diagnosticCategory);
+		try {
+			for (let retry = 0; retry <= DIAGNOSTICS_MAX_RETRIES; retry += 1) {
+				if (retry > 0) {
+					await waitForDiagnosticsRetry(DIAGNOSTICS_RETRY_DELAYS_MS[retry - 1]);
+				}
 				if (requestId !== diagnosticsRequestId) return;
-				diagnostics = result.diagnostics;
-				diagnosticCategories = result.categories.filter((category) =>
-					FDX_CONTAINMENT_CATEGORIES.includes(
-						category as (typeof FDX_CONTAINMENT_CATEGORIES)[number]
-					)
-				);
-				diagnosticsLoading = false;
-				return;
-			} catch {
-				if (retry === DIAGNOSTICS_MAX_RETRIES) {
-					// Do not put server exception text, paths, process output, or credentials
-					// into this operator-facing surface.
-					diagnosticsError = 'Containment diagnostics are temporarily unavailable.';
+
+				try {
+					const result = await getFdxContainmentDiagnostics(diagnosticCategory);
+					if (requestId !== diagnosticsRequestId) return;
+					diagnostics = result.diagnostics;
+					diagnosticCategories = result.categories.filter((category) =>
+						FDX_CONTAINMENT_CATEGORIES.includes(
+							category as (typeof FDX_CONTAINMENT_CATEGORIES)[number]
+						)
+					);
 					diagnosticsLoading = false;
 					return;
+				} catch {
+					if (retry === DIAGNOSTICS_MAX_RETRIES) {
+						// Do not put server exception text, paths, process output, or credentials
+						// into this operator-facing surface.
+						diagnosticsError = 'Containment diagnostics are temporarily unavailable.';
+						diagnosticsLoading = false;
+						return;
+					}
 				}
 			}
+		} finally {
+			diagnosticsRequestInFlight = false;
 		}
+	}
+
+	function stopDiagnosticsRefresh() {
+		if (diagnosticsRefreshTimer) clearInterval(diagnosticsRefreshTimer);
+		diagnosticsRefreshTimer = null;
+	}
+
+	function startDiagnosticsRefresh() {
+		stopDiagnosticsRefresh();
+		diagnosticsRefreshTimer = setInterval(
+			() => void refreshDiagnostics(),
+			DIAGNOSTICS_REFRESH_INTERVAL_MS
+		);
 	}
 
 	function eventTitle(item: unknown): string {
@@ -504,6 +526,7 @@
 	onMount(() => {
 		hydrateOwnedRun();
 		void refreshDiagnostics();
+		startDiagnosticsRefresh();
 		const onOnline = () => {
 			if (runId) {
 				connectionState = 'reconnecting';
@@ -517,6 +540,7 @@
 		window.addEventListener('offline', onOffline);
 		return () => {
 			stopPolling();
+			stopDiagnosticsRefresh();
 			diagnosticsRequestId += 1;
 			window.removeEventListener('online', onOnline);
 			window.removeEventListener('offline', onOffline);

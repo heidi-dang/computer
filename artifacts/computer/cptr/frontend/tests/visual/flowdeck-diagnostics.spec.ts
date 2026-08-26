@@ -295,6 +295,76 @@ test('FlowDeck diagnostics automatic retries stop at the configured bound', asyn
 	await expectDocumentToStaySafe(page);
 });
 
+test('FlowDeck diagnostics refresh periodically without overlapping and stops on unmount', async ({
+	page
+}) => {
+	await page.clock.install();
+	const diagnosticsResponse = {
+		categories: ['process_failure', 'workspace_lease'],
+		diagnostics: [
+			{
+				id: 'diag-periodic-process',
+				run_id: 'run-periodic-process',
+				sequence: 4,
+				category: 'process_failure',
+				fallback: 'native',
+				run_status: 'failed',
+				run_outcome: 'native_fallback',
+				created_at: 1_735_689_600_000
+			}
+		],
+		total: 1
+	};
+	let diagnosticsRequestCount = 0;
+	let periodicRequestUrl = '';
+	let releasePeriodicRequest = () => {};
+
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', async (route) => {
+		diagnosticsRequestCount += 1;
+		const category = new URL(route.request().url()).searchParams.get('category');
+		if (diagnosticsRequestCount === 3) {
+			periodicRequestUrl = route.request().url();
+			await new Promise<void>((resolve) => {
+				releasePeriodicRequest = resolve;
+			});
+		}
+		const diagnostics = category
+			? diagnosticsResponse.diagnostics.filter((diagnostic) => diagnostic.category === category)
+			: diagnosticsResponse.diagnostics;
+		await route.fulfill({
+			json: {
+				...diagnosticsResponse,
+				diagnostics,
+				total: diagnostics.length
+			}
+		});
+	});
+
+	await page.goto('/flowdeck');
+	const panel = page.getByTestId('fdx-diagnostics-panel');
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+
+	await panel.locator('select').selectOption('process_failure');
+	await expect(panel.locator('select')).toHaveValue('process_failure');
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+	expect(diagnosticsRequestCount).toBe(2);
+
+	await page.clock.fastForward(30_000);
+	await expect.poll(() => diagnosticsRequestCount).toBe(3);
+	expect(periodicRequestUrl).toContain('category=process_failure');
+
+	await page.clock.fastForward(30_000);
+	expect(diagnosticsRequestCount).toBe(3);
+
+	releasePeriodicRequest();
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+	await expect(panel.locator('select')).toHaveValue('process_failure');
+
+	await page.goto('/__visual-regression');
+	await page.clock.fastForward(60_000);
+	expect(diagnosticsRequestCount).toBe(3);
+});
+
 test('FlowDeck orchestration errors use bounded copy', async ({ page }) => {
 	await page.route('**/v1/flowdeck/orchestrations', (route) =>
 		route.fulfill({
