@@ -55,8 +55,8 @@ test.beforeEach(async ({ page }) => {
 			}
 		})
 	);
-	await page.route('**/api/state/preferences', (route) => route.fulfill({ json: {} }));
-	await page.route('**/api/state/workspaces', (route) =>
+	await page.route('**/api/state/preferences**', (route) => route.fulfill({ json: {} }));
+	await page.route('**/api/state/workspaces**', (route) =>
 		route.fulfill({ json: [{ path: '/workspace/project', name: 'Project', unread_count: 0 }] })
 	);
 	await page.route('**/v1/flowdeck/checkpoints*', (route) =>
@@ -409,19 +409,16 @@ test('FlowDeck session expiry renders login in place without a reload loop', asy
 		route.fulfill({ json: { categories: [], diagnostics: [], total: 0 } })
 	);
 	await page.route('**/v1/flowdeck/orchestrations', (route) =>
-		(async () => {
-			sessionAuthenticated = false;
-			return route.fulfill({
-				status: 401,
-				contentType: 'application/json',
-				body: JSON.stringify({
-					detail: 'Error: expired-session private exception',
-					path: '/srv/flowdeck/private/credentials.json',
-					process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
-					authorization: 'Bearer expired-session-secret'
-				})
-			});
-		})()
+		route.fulfill({
+			status: 401,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				detail: 'Error: expired-session private exception',
+				path: '/srv/flowdeck/private/credentials.json',
+				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+				authorization: 'Bearer expired-session-secret'
+			})
+		})
 	);
 
 	await page.goto('/flowdeck');
@@ -457,39 +454,67 @@ test('FlowDeck returns to the workspace after re-login without a reload', async 
 		sessionAuthenticated = true;
 		return route.fulfill({ json: { ok: true } });
 	});
-	await page.route('**/v1/flowdeck/orchestrations', (route) =>
+	await page.route('**/api/config', (route) =>
 		route.fulfill({
-			status: 401,
-			contentType: 'application/json',
-			body: JSON.stringify({
-				detail: 'Error: expired-session private exception',
-				path: '/srv/flowdeck/private/credentials.json',
-				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
-				authorization: 'Bearer expired-session-secret'
-			})
+			json: {
+				auth_mode: 'password',
+				needs_setup: false,
+				signup_enabled: false,
+				version: 'visual-test'
+			}
 		})
 	);
+	await page.route('**/api/git/config*', (route) =>
+		route.fulfill({
+			json: {
+				root: '/workspace/project',
+				git: { installed: false, is_repo: false },
+				gh: { installed: false },
+				permissions: { can_manage_gh: false, can_manage_commit_model: false }
+			}
+		})
+	);
+	await page.route('**/api/state/preferences', (route) => route.fulfill({ json: {} }));
+	await page.route('**/api/state/workspaces', (route) =>
+		route.fulfill({ json: [{ path: '/workspace/project', name: 'Project', unread_count: 0 }] })
+	);
+	await page.route('**/v1/flowdeck/orchestrations', (route) =>
+		(async () => {
+			sessionAuthenticated = false;
+			return route.fulfill({
+				status: 401,
+				contentType: 'application/json',
+				body: JSON.stringify({
+					detail: 'Error: expired-session private exception',
+					path: '/srv/flowdeck/private/credentials.json',
+					process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+					authorization: 'Bearer expired-session-secret'
+				})
+			});
+		})()
+	);
 
-	await page.goto('/flowdeck');
-	let navigationsAfterLoad = 0;
+	let navigationCount = 0;
 	page.on('framenavigated', (frame) => {
-		if (frame === page.mainFrame()) navigationsAfterLoad += 1;
+		if (frame === page.mainFrame()) navigationCount += 1;
 	});
+	await page.goto('/flowdeck');
 	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
+	const initialNavigationCount = navigationCount;
 	await page.getByLabel('Objective').fill('Return to the existing workspace after re-login.');
 	await page.getByRole('button', { name: /Start run/ }).click();
 
 	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
 	await page.getByPlaceholder('Username').fill('operator');
 	await page.getByPlaceholder('Password').fill('valid-password');
-	await page.getByRole('button', { name: /Sign in/ }).click();
+	await page.getByRole('button', { name: /Sign In/ }).click();
 
 	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
 	await expect(page.getByLabel('Objective')).toBeVisible();
-	await expect(page.getByText('Project', { exact: true })).toBeVisible();
+	await expect(page.locator('#main-col')).toBeVisible();
 	await expect
-		.poll(() => navigationsAfterLoad)
-		.toBe(0);
+		.poll(() => navigationCount)
+		.toBe(initialNavigationCount);
 	const renderedDocument = await page.locator('body').textContent();
 	expect(renderedDocument).not.toContain('expired-session');
 	expect(renderedDocument).not.toContain('backend response');

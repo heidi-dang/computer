@@ -33,6 +33,11 @@ CPTR_FLOWDECK_MODE = "controlled"
 CPTR_FLOWDECK_MUTATING_AGENTS = "true"
 
 [[ports]]
+localPort = 4175
+externalPort = 3001
+exposeLocalhost = true
+
+[[ports]]
 localPort = 8080
 externalPort = 8080
 
