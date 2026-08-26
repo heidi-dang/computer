@@ -192,6 +192,8 @@ title,
 detail:
 interruption === 'timed_out' || interruption === 'cancelled'
 ? 'PTY discarded · the next command starts fresh'
+ : frame?.frame_kind === 'command_start' && command
+ ? command
 : stream
 ? stringify(stream)
 : safeSummary || identity || '',

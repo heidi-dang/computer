@@ -28,9 +28,51 @@ import LiveTerminal from '$lib/components/chat/LiveTerminal.svelte';
 const liveTerminalEvents = [
 { sequence: 1, kind: 'HEIDI_VALIDATION_PASSED', payload: { summary: 'qualified CPTR path' } },
 { sequence: 2, kind: 'SPECIALIST_DISPATCHED', payload: { specialist_id: 'build-agent', attempt_id: 'attempt-42' } },
-{ sequence: 3, kind: 'TOOL_STARTED', payload: { tool_name: 'run_command', command: 'npm test -- --runInBand' } },
-{ sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } },
-{ sequence: 4, kind: 'TOOL_OUTPUT', payload: { stdout: '276 passed, 4 skipped' } },
+{
+sequence: 3,
+kind: 'terminal_frame',
+frame_kind: 'command_start',
+payload: {
+tool_name: 'agent_terminal_command',
+command: 'npm test -- --runInBand',
+status: 'running',
+specialist_id: 'build-agent',
+attempt_id: 'attempt-42'
+}
+},
+{
+sequence: 4,
+kind: 'terminal_frame',
+frame_kind: 'command_output',
+payload: {
+stream: 'stdout',
+text: '276 passed, 4 skipped',
+specialist_id: 'build-agent',
+attempt_id: 'attempt-42'
+}
+},
+{
+sequence: 4,
+kind: 'terminal_frame',
+frame_kind: 'command_output',
+payload: {
+stream: 'stdout',
+text: '276 passed, 4 skipped',
+specialist_id: 'build-agent',
+attempt_id: 'attempt-42'
+}
+},
+{
+sequence: 5,
+kind: 'terminal_frame',
+frame_kind: 'command_exit',
+payload: {
+exit_code: 0,
+status: 'succeeded',
+specialist_id: 'build-agent',
+attempt_id: 'attempt-42'
+}
+},
 {
 sequence: 6,
 kind: 'terminal_frame',

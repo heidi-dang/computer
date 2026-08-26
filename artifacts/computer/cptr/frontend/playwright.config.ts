@@ -1,14 +1,27 @@
+import { execFileSync } from 'node:child_process';
 import { defineConfig, devices } from '@playwright/test';
+
+function resolveChromiumPath(): string | undefined {
+	if (process.env.CHROMIUM_PATH) return process.env.CHROMIUM_PATH;
+	try {
+		return execFileSync('sh', ['-lc', 'command -v chromium || command -v chromium-browser'], {
+			encoding: 'utf8'
+		}).trim() || undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 export default defineConfig({
 	testDir: './tests/visual',
 	timeout: 30_000,
+	expect: { timeout: 15_000 },
 	fullyParallel: true,
 	use: {
 		baseURL: 'http://127.0.0.1:4175',
 		trace: 'retain-on-failure',
 		launchOptions: {
-			executablePath: process.env.CHROMIUM_PATH
+			executablePath: resolveChromiumPath()
 		}
 	},
 	webServer: {
