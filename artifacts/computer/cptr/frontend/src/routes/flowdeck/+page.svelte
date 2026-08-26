@@ -486,7 +486,17 @@ void refreshDiagnostics();
 </label>
 </div>
 {#if diagnosticsError}
-<div class="diagnostics-message error">{diagnosticsError}</div>
+	<div class="diagnostics-message error diagnostics-error" role="alert">
+		<span>{diagnosticsError}</span>
+		<button
+			type="button"
+			class="quiet-button diagnostics-retry"
+			onclick={() => void refreshDiagnostics()}
+			disabled={diagnosticsLoading}
+		>
+			Retry diagnostics
+		</button>
+	</div>
 {:else if diagnosticsLoading}
 <div class="diagnostics-message">Loading containment events…</div>
 {:else if diagnostics.length === 0}
@@ -862,6 +872,9 @@ background: color-mix(in oklab, var(--fd-panel) 60%, transparent);
 .diagnostic-filter select { width: 180px; height: 34px; padding: 0 0.5rem; border: 1px solid var(--fd-line); border-radius: 8px; background: var(--fd-panel); font-size: 0.68rem; }
 .diagnostics-message { padding: 0.9rem 0 0.25rem; color: var(--fd-faint); font-size: 0.68rem; }
 .diagnostics-message.error { color: var(--fd-coral); }
+	.diagnostics-error { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+	.diagnostics-retry { flex: 0 0 auto; color: var(--fd-coral); }
+	.diagnostics-retry:hover:not(:disabled) { border-color: color-mix(in oklab, var(--fd-coral) 45%, transparent); background: color-mix(in oklab, var(--fd-coral) 8%, transparent); }
 .diagnostics-list { display: grid; gap: 0.45rem; margin-top: 0.9rem; }
 .diagnostic-row { display: grid; grid-template-columns: 1.2fr 1fr 1.5fr auto; align-items: center; gap: 0.75rem; padding: 0.65rem 0.75rem; border: 1px solid var(--fd-line); border-radius: 9px; color: var(--fd-ink); text-decoration: none; font-size: 0.66rem; }
 .diagnostic-row:hover { border-color: color-mix(in oklab, var(--fd-teal) 50%, transparent); background: color-mix(in oklab, var(--fd-teal) 6%, transparent); }

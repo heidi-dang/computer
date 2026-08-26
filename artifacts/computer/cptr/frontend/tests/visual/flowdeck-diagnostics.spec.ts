@@ -184,6 +184,7 @@ test('FlowDeck diagnostics outage stays safe and leaves the run composer usable'
 	await expect(
 		panel.getByText('Containment diagnostics are temporarily unavailable.', { exact: true })
 	).toBeVisible();
+	await expect(panel.getByRole('button', { name: 'Retry diagnostics' })).toBeVisible();
 	await expect(panel.locator('.diagnostic-row')).toHaveCount(0);
 
 	const renderedDocument = await page.locator('body').textContent();
@@ -198,4 +199,70 @@ test('FlowDeck diagnostics outage stays safe and leaves the run composer usable'
 	await expect(objective).toBeVisible();
 	await objective.fill('Keep the workspace ready after a diagnostics outage.');
 	await expect(page.getByRole('button', { name: /Start run/ })).toBeEnabled();
+});
+
+test('FlowDeck diagnostics retry recovers without changing the selected category', async ({ page }) => {
+	const diagnosticsResponse = {
+		categories: ['process_failure', 'workspace_lease'],
+		diagnostics: [
+			{
+				id: 'diag-retry-process',
+				run_id: 'run-retry-process',
+				sequence: 3,
+				category: 'process_failure',
+				fallback: 'native',
+				run_status: 'failed',
+				run_outcome: 'native_fallback',
+				created_at: 1_735_689_600_000
+			}
+		],
+		total: 1
+	};
+	let diagnosticsRequestCount = 0;
+
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) => {
+		diagnosticsRequestCount += 1;
+		if (diagnosticsRequestCount === 2) {
+			return route.fulfill({
+				status: 503,
+				contentType: 'application/json',
+				body: JSON.stringify({ detail: 'temporary diagnostics outage' })
+			});
+		}
+
+		const category = new URL(route.request().url()).searchParams.get('category');
+		const diagnostics = category
+			? diagnosticsResponse.diagnostics.filter((diagnostic) => diagnostic.category === category)
+			: diagnosticsResponse.diagnostics;
+		return route.fulfill({
+			json: {
+				...diagnosticsResponse,
+				diagnostics,
+				total: diagnostics.length
+			}
+		});
+	});
+
+	await page.goto('/flowdeck');
+	const panel = page.getByTestId('fdx-diagnostics-panel');
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+
+	await panel.locator('select').selectOption('process_failure');
+	await expect(
+		panel.getByText('Containment diagnostics are temporarily unavailable.', { exact: true })
+	).toBeVisible();
+
+	const retryRequest = page.waitForRequest(
+		(request) =>
+			request.url().includes('/v1/flowdeck/diagnostics/fdx-containment') &&
+			new URL(request.url()).searchParams.get('category') === 'process_failure'
+	);
+	await panel.getByRole('button', { name: 'Retry diagnostics' }).click();
+	await retryRequest;
+
+	await expect(
+		panel.getByText('Containment diagnostics are temporarily unavailable.', { exact: true })
+	).toHaveCount(0);
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+	await expect(panel.locator('.diagnostic-category')).toHaveText('Process Failure');
 });
