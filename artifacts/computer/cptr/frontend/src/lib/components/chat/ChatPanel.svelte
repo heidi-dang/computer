@@ -2474,6 +2474,7 @@ if (flowdeckRunId) {
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
+workspace={workspace}
 						{sending}
 						isAudit={flowdeckIsAudit}
 						events={flowdeckEvents}
@@ -2623,6 +2624,7 @@ class="shrink-0 px-4 py-3 {selectedAgent === 'heidi' ? 'heidi-lower-interaction'
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
 						runId={flowdeckRunId}
+workspace={workspace}
 						{sending}
 						isAudit={flowdeckIsAudit}
 						events={flowdeckEvents}

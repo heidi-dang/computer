@@ -1422,6 +1422,61 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 "succeeded" if state != "succeeded" else "failed",
             )
 
+    async def test_evidence_report_is_owned_bounded_and_redacted(self):
+        run_id = "export-report-run"
+        async with self.session_factory() as session:
+            session.add(
+                FlowDeckRun(
+                    id=run_id,
+                    request_key="export-report-key",
+                    workspace=str(self.root_a),
+                    owner="user-a",
+                    status="SUCCEEDED",
+                    created_at=1,
+                    updated_at=1,
+                    version=1,
+                )
+            )
+            session.add(
+                FlowDeckEvent(
+                    id="export-report-event",
+                    run_id=run_id,
+                    sequence=1,
+                    kind="VERIFY",
+                    payload={
+                        "authoritative": True,
+                        "source": "verifier",
+                        "outcome": "succeeded",
+                        "reasoning": "private reasoning",
+                        "credential": "secret-value",
+                    },
+                    created_at=1,
+                )
+            )
+            await session.commit()
+
+        response = await self.client.get(
+            f"/v1/flowdeck/orchestrations/{run_id}/evidence-report",
+            params={"workspace": str(self.root_a)},
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertIn("attachment", response.headers["content-disposition"])
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        report = response.json()
+        self.assertEqual(report["run_id"], run_id)
+        self.assertEqual(report["entries"][0]["payload"]["outcome"], "succeeded")
+        serialized = json.dumps(report)
+        self.assertNotIn("private reasoning", serialized)
+        self.assertNotIn("secret-value", serialized)
+
+        forbidden = await self.client.get(
+            f"/v1/flowdeck/orchestrations/{run_id}/evidence-report",
+            params={"workspace": str(self.root_a)},
+            headers=self.headers("user-b"),
+        )
+        self.assertEqual(forbidden.status_code, 403)
+
     async def test_active_run_steering_is_durable_and_idempotent(self):
         async def submit(request, *, authenticated_request, store):
             return CoordinatorResult("pending", request.request_key, (), ())

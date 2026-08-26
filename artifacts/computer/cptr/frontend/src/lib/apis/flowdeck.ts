@@ -112,6 +112,23 @@ export async function getAudit(runId: string, workspace: string): Promise<FlowDe
 	);
 }
 
+export async function downloadFlowDeckEvidenceReport(
+runId: string,
+workspace: string
+): Promise<Blob> {
+const query = new URLSearchParams({ workspace });
+const response = await fetchHandler(
+`/v1/flowdeck/orchestrations/${encodeURIComponent(runId)}/evidence-report?${query.toString()}`
+);
+if (!response.ok) {
+const data = await response.json().catch(() => ({}));
+throw new Error(
+data.detail || data.error || data.message || response.statusText || 'Unable to export evidence'
+);
+}
+return response.blob();
+}
+
 export async function cancelFlowDeckOrchestration(
 	runId: string,
 	workspace: string

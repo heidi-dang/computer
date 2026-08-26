@@ -1255,6 +1255,53 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
     return response
 
 
+@router.get("/orchestrations/{run_id}/evidence-report")
+async def export_evidence_report(request: Request, run_id: str, workspace: str):
+    """Download the bounded, redacted evidence summary for an owned run."""
+    _, _, run = await _owned_run(request, run_id, workspace)
+    store = DurableFlowDeck(get_session_factory())
+    events = await store.list_events(run.id)
+    from cptr.flowdeck.terminal_observer import recent_terminal_frames
+
+    events = [
+        {
+            "id": event.id,
+            "run_id": event.run_id,
+            "sequence": event.sequence,
+            "kind": event.kind,
+            "payload": event.payload,
+            "created_at": event.created_at,
+        }
+        for event in events
+    ]
+    events.extend(
+        {
+            "id": f"{run.id}:terminal:{frame['sequence']}",
+            "run_id": run.id,
+            "sequence": frame["sequence"],
+            "kind": "terminal_frame",
+            "payload": frame,
+            "created_at": frame["created_at"],
+        }
+        for frame in recent_terminal_frames(run.id)
+    )
+    summary = build_audit_summary(
+        events,
+        run_id=run.id,
+        owner=run.owner,
+    )
+    return Response(
+        content=json.dumps(summary, sort_keys=True, separators=(",", ":")),
+        media_type="application/json",
+        headers={
+            "Content-Disposition": (
+                f'attachment; filename="flowdeck-evidence-{run.id[:8]}.json"'
+            ),
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.get("/generated-auth/config")
 async def generated_auth_config(request: Request, workspace: str):
     _same_origin(request)

@@ -1,9 +1,11 @@
 <script lang="ts">
 	import DesignerResults, { type DesignerAction } from './DesignerResults.svelte';
+import { downloadFlowDeckEvidenceReport } from '$lib/apis/flowdeck';
 
 	interface Props {
 		status?: string;
 		runId?: string;
+workspace?: string;
 		nativeMessageId?: string | null;
 		sending?: boolean;
 		isAudit?: boolean;
@@ -35,6 +37,7 @@ truncated?: boolean;
 	let {
 		status = '',
 		runId = '',
+workspace = '',
 		nativeMessageId = '',
 		sending = false,
 		isAudit = false,
@@ -108,6 +111,29 @@ normalizedStatus === 'manual_review_required' || normalizedStatus === 'manual_re
 	let evidenceOpen = $state<Record<string, boolean>>({});
 let auditTrailOpen = $state(false);
 	let preservedEvidenceOpen = $state(false);
+let exportingEvidence = $state(false);
+let exportError = $state('');
+
+async function exportEvidence() {
+if (!runId || !workspace || exportingEvidence) return;
+exportingEvidence = true;
+exportError = '';
+try {
+const blob = await downloadFlowDeckEvidenceReport(runId, workspace);
+const url = URL.createObjectURL(blob);
+const link = document.createElement('a');
+link.href = url;
+link.download = `flowdeck-evidence-${runId.slice(0, 8)}.json`;
+document.body.appendChild(link);
+link.click();
+link.remove();
+URL.revokeObjectURL(url);
+} catch (error) {
+exportError = error instanceof Error ? error.message : 'Unable to export evidence';
+} finally {
+exportingEvidence = false;
+}
+}
 
 	const label = $derived.by(() => {
 		switch (status.toLowerCase()) {
@@ -260,6 +286,7 @@ Reconnect &amp; rehydrate
 	{/if}
 {#if evidenceSummary?.entries?.length}
 <section class="flowdeck-audit-trail" aria-label="FlowDeck evidence summary">
+<div class="flowdeck-audit-header">
 <button
 type="button"
 class="flowdeck-report-toggle"
@@ -275,6 +302,20 @@ onclick={() => (auditTrailOpen = !auditTrailOpen)}
 </span>
 <span aria-hidden="true">{auditTrailOpen ? '−' : '+'}</span>
 </button>
+<button
+type="button"
+class="flowdeck-export-button"
+data-testid="button-flowdeck-export-evidence"
+disabled={!workspace || exportingEvidence}
+aria-label="Download safe FlowDeck evidence report"
+onclick={exportEvidence}
+>
+{exportingEvidence ? 'Preparing…' : 'Download report'}
+</button>
+</div>
+{#if exportError}
+<p class="flowdeck-export-error" role="alert">{exportError}</p>
+{/if}
 {#if auditTrailOpen}
 <ol class="flowdeck-audit-list">
 {#each evidenceSummary.entries as entry (entry.id)}
@@ -492,7 +533,67 @@ onclick={() => (auditTrailOpen = !auditTrailOpen)}
 		color: color-mix(in oklab, var(--app-fg) 34%, transparent);
 		font-family: ui-monospace, SFMono-Regular, monospace;
 		font-size: 0.57rem;
-	}
+}
+.flowdeck-audit-header {
+display: flex;
+align-items: stretch;
+gap: 0.35rem;
+}
+.flowdeck-audit-header .flowdeck-report-toggle {
+flex: 1 1 auto;
+}
+.flowdeck-export-button {
+align-self: center;
+margin-right: 0.55rem;
+border: 1px solid color-mix(in oklab, var(--app-fg) 18%, transparent);
+border-radius: 0.35rem;
+padding: 0.3rem 0.45rem;
+background: transparent;
+color: color-mix(in oklab, var(--app-fg) 72%, transparent);
+font-size: 0.58rem;
+white-space: nowrap;
+}
+.flowdeck-export-button:hover:not(:disabled) {
+background: color-mix(in oklab, var(--app-fg) 8%, transparent);
+}
+.flowdeck-export-button:disabled {
+cursor: not-allowed;
+opacity: 0.55;
+}
+.flowdeck-export-error {
+margin: 0 0.7rem 0.45rem;
+color: #fca5a5;
+font-size: 0.62rem;
+}
+.flowdeck-audit-entry {
+display: flex;
+align-items: center;
+gap: 0.4rem;
+min-width: 0;
+}
+.flowdeck-audit-badge {
+flex: 0 0 auto;
+border-radius: 0.25rem;
+padding: 0.12rem 0.28rem;
+background: color-mix(in oklab, #f59e0b 18%, transparent);
+color: color-mix(in oklab, #f59e0b 80%, var(--app-fg));
+font-size: 0.55rem;
+}
+.flowdeck-audit-badge.authoritative {
+background: color-mix(in oklab, #34d399 18%, transparent);
+color: color-mix(in oklab, #34d399 80%, var(--app-fg));
+}
+.flowdeck-audit-kind {
+overflow: hidden;
+text-overflow: ellipsis;
+white-space: nowrap;
+color: color-mix(in oklab, var(--app-fg) 70%, transparent);
+}
+.flowdeck-audit-sequence {
+margin-left: auto;
+color: color-mix(in oklab, var(--app-fg) 42%, transparent);
+font-family: ui-monospace, SFMono-Regular, monospace;
+}
 	.flowdeck-report-toggle {
 		display: flex;
 		align-items: center;
