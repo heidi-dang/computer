@@ -1736,36 +1736,64 @@ async def run_chat_task(
                 item_type = item.get("type")
                 if item_type == "function_call":
                     call_id = str(item.get("call_id") or item.get("id") or "")
+                    tool_name = str(item.get("name") or "tool")
                     if call_id:
-                        active_tool_names[call_id] = str(item.get("name") or "tool")
+                        active_tool_names[call_id] = tool_name
+                    is_terminal_tool = tool_name in {"run_command", "terminal"}
                     await safe_publish_task_event(
                         user_id=user_id,
                         task_id=control_task_id,
-                        event_type="tool.started",
-                        payload={
-                            "name": str(item.get("name") or "tool"),
-                            "status": item.get("status", "in_progress"),
-                        },
+                        event_type="command.started" if is_terminal_tool else "tool.started",
+                        payload=(
+                            {
+                                "command_id": call_id or None,
+                                "tool_name": tool_name,
+                                "summary": f"Running {tool_name}",
+                                "status": item.get("status", "in_progress"),
+                            }
+                            if is_terminal_tool
+                            else {
+                                "name": tool_name,
+                                "status": item.get("status", "in_progress"),
+                            }
+                        ),
                     )
                 elif item_type == "function_call_output":
                     raw_output = item.get("output")
                     call_id = str(item.get("call_id") or "")
                     tool_name = active_tool_names.get(call_id, "tool")
-                    event_type = (
-                        "shell.stdout"
-                        if tool_name in {"run_command", "terminal"}
-                        else "tool.output"
-                    )
+                    is_terminal_tool = tool_name in {"run_command", "terminal"}
                     await safe_publish_task_event(
                         user_id=user_id,
                         task_id=control_task_id,
-                        event_type=event_type,
-                        payload={
-                            "status": "completed",
-                            "tool": tool_name,
-                            "output": str(raw_output)[:4000],
-                        },
+                        event_type="terminal.chunk" if is_terminal_tool else "tool.output",
+                        payload=(
+                            {
+                                "command_id": call_id or None,
+                                "stream": "stdout",
+                                "text": str(raw_output),
+                                "tool_name": tool_name,
+                                "status": "completed",
+                            }
+                            if is_terminal_tool
+                            else {
+                                "status": "completed",
+                                "tool": tool_name,
+                                "output": str(raw_output),
+                            }
+                        ),
                     )
+                    if is_terminal_tool:
+                        await safe_publish_task_event(
+                            user_id=user_id,
+                            task_id=control_task_id,
+                            event_type="command.completed",
+                            payload={
+                                "command_id": call_id or None,
+                                "tool_name": tool_name,
+                                "status": "COMPLETE",
+                            },
+                        )
 
     async def _emit_done(*, terminal_status: str | None = None):
         """Emit done=True enriched with chat title and content preview."""

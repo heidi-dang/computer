@@ -102,6 +102,32 @@ def _after_sequence(request: Request) -> int:
         raise HTTPException(status_code=400, detail="invalid live-event cursor") from exc
 
 
+async def _recovery_snapshot(*, target_key: str, target: str, snapshot: dict[str, Any], after: int):
+    replay = await live_event_hub.store.snapshot(target_key, after_sequence=after)
+    return {
+        "version": 1,
+        "target": target,
+        "snapshot": snapshot,
+        "replay": replay,
+    }
+
+
+@router.get("/tasks/{task_id}/stream/snapshot")
+async def task_stream_snapshot(request: Request, task_id: str):
+    user_id = await _user(request, "task:read")
+    agent, _ = _services(request)
+    try:
+        task = await agent.get_task(task_id, user_id=user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    return await _recovery_snapshot(
+        target_key=f"task:{task_id}",
+        target="task",
+        snapshot=_task_snapshot(task),
+        after=_after_sequence(request),
+    )
+
+
 @router.get("/tasks/{task_id}/stream")
 async def task_stream(request: Request, task_id: str):
     user_id = await _user(request, "task:read")
@@ -123,6 +149,21 @@ async def task_stream(request: Request, task_id: str):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no",
         },
+    )
+
+
+@router.get("/autonomous/{monitor_id}/stream/snapshot")
+async def monitor_stream_snapshot(request: Request, monitor_id: str):
+    user_id = await _user(request, "autonomous:run")
+    _, supervisor = _services(request)
+    monitor = await supervisor.store.get_monitor(monitor_id)
+    if monitor is None or monitor.user_id != user_id:
+        raise HTTPException(status_code=404, detail="monitor not found")
+    return await _recovery_snapshot(
+        target_key=f"monitor:{monitor_id}",
+        target="monitor",
+        snapshot=_monitor_snapshot(monitor),
+        after=_after_sequence(request),
     )
 
 

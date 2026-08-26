@@ -95,5 +95,28 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("<workspace-path>", snapshot)
 
 
+    async def test_task_recovery_snapshot_returns_authorized_replay(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        await hub.publish(
+            user_id="user-1",
+            target_key="task:task-1",
+            task_id="task-1",
+            event_type="terminal.chunk",
+            payload={"text": "safe output", "stream": "stdout"},
+        )
+        request = SimpleNamespace(headers={}, query_params={"after": "0"})
+        agent = SimpleNamespace(get_task=AsyncMock(return_value={"id": "task-1", "status": "RUNNING"}))
+        with (
+            patch.object(control_stream, "live_event_hub", hub),
+            patch.object(control_stream, "_user", new=AsyncMock(return_value="user-1")),
+            patch.object(control_stream, "_services", return_value=(agent, SimpleNamespace())),
+        ):
+            snapshot = await control_stream.task_stream_snapshot(request, "task-1")
+        self.assertEqual(snapshot["target"], "task")
+        self.assertEqual(snapshot["snapshot"]["status"], "RUNNING")
+        self.assertEqual(snapshot["replay"]["last_sequence"], 1)
+        self.assertEqual(snapshot["replay"]["events"][0]["type"], "terminal.chunk")
+
+
 if __name__ == "__main__":
     unittest.main()
