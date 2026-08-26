@@ -320,6 +320,50 @@ test('FlowDeck orchestration errors use bounded copy', async ({ page }) => {
 	await expectDocumentToStaySafe(page);
 });
 
+test('FlowDeck session expiry renders login in place without a reload loop', async ({ page }) => {
+	let authRequestCount = 0;
+	await page.unroute('**/api/auth');
+	await page.route('**/api/auth', (route) => {
+		authRequestCount += 1;
+		return route.fulfill({
+			json: {
+				authenticated: true,
+				user_id: 'visual-user',
+				username: 'operator',
+				display_name: 'Operator',
+				role: 'user'
+			}
+		});
+	});
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) =>
+		route.fulfill({ json: { categories: [], diagnostics: [], total: 0 } })
+	);
+	await page.route('**/v1/flowdeck/orchestrations', (route) =>
+		route.fulfill({
+			status: 401,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				detail: 'Error: expired-session private exception',
+				path: '/srv/flowdeck/private/credentials.json',
+				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+				authorization: 'Bearer expired-session-secret'
+			})
+		})
+	);
+
+	await page.goto('/flowdeck');
+	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
+	await page.getByLabel('Objective').fill('Coordinate a safe session expiry transition.');
+	await page.getByRole('button', { name: /Start run/ }).click();
+
+	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+	await expect(page.getByPlaceholder('Username')).toBeVisible();
+	await expect(page).toHaveURL(/\/flowdeck$/);
+	await page.waitForTimeout(500);
+	expect(authRequestCount).toBe(1);
+	await expectDocumentToStaySafe(page);
+});
+
 test('FlowDeck cancellation errors use bounded copy', async ({ page }) => {
 	await page.route('**/v1/flowdeck/orchestrations', (route) =>
 		route.fulfill({

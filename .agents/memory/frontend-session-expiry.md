@@ -7,4 +7,4 @@ When a protected request returns 401, the frontend should clear session state an
 
 **Why:** The preview became a blank page after a protected preferences request failed, even though the backend and auth endpoints were healthy.
 
-**How to apply:** Keep session-expiry handling state-driven; verify both an unauthenticated first load and an expired-session transition in the proxied preview.
+**How to apply:** Keep session-expiry handling state-driven, register the shell listener before startup state loads, and verify both unauthenticated first load and expired-session transition in the proxied preview.

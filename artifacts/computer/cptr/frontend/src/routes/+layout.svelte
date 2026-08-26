@@ -76,25 +76,15 @@
 	onMount(() => {
 		if (isFixtureRoute) return () => {};
 
-		void (async () => {
-		// Check auth first
-		await checkAuth();
+		const handleSessionExpired = () => {
+			authState = 'needs_login';
+			stateLoaded.set(false);
+		};
+		// Register before startup auth/state loading so a protected request made
+		// by the first authenticated page cannot lose the expiry transition.
+		window.addEventListener('cptr:session-expired', handleSessionExpired);
 
-		// Periodic session health check (every 30 min).
-		// This triggers the backend's sliding session refresh and
-		// proactively catches expired sessions before a 401 mid-action.
-		const healthCheck = setInterval(
-			() => {
-				if (authState === 'authenticated') {
-					getSession()
-						.then((auth) => {
-							if (!auth.authenticated) clearSession();
-						})
-						.catch(() => {});
-				}
-			},
-			30 * 60 * 1000
-		);
+		let healthCheck: ReturnType<typeof setInterval> | null = null;
 		// iOS Safari keeps 100vh/100dvh at the layout viewport height when
 		// the keyboard opens. visualViewport tells us how much of the bottom
 		// of that layout viewport is covered, so reserve that space inside the
@@ -115,11 +105,6 @@
 		vv?.addEventListener('resize', syncKeyboardInset);
 		vv?.addEventListener('scroll', syncKeyboardInset);
 
-		if (isInstalledPwa()) {
-			registerServiceWorker().catch(() => {});
-		} else {
-			cleanBrowserServiceWorker().catch(() => {});
-		}
 		window.addEventListener('offline', showOfflineToast);
 		window.addEventListener('online', showOnlineToast);
 		const openSettings = (event: Event) => {
@@ -127,15 +112,37 @@
 			settingsTab = detail?.tab || 'general';
 			showSettings = true;
 		};
-		const handleSessionExpired = () => {
-			authState = 'needs_login';
-			stateLoaded.set(false);
-		};
 		window.addEventListener('cptr:open-settings', openSettings as EventListener);
-		window.addEventListener('cptr:session-expired', handleSessionExpired);
+
+		void (async () => {
+			// Check auth first
+			await checkAuth();
+
+			// Periodic session health check (every 30 min).
+			// This triggers the backend's sliding session refresh and
+			// proactively catches expired sessions before a 401 mid-action.
+			healthCheck = setInterval(
+				() => {
+					if (authState === 'authenticated') {
+						getSession()
+							.then((auth) => {
+								if (!auth.authenticated) clearSession();
+							})
+							.catch(() => {});
+					}
+				},
+				30 * 60 * 1000
+			);
+
+			if (isInstalledPwa()) {
+				registerServiceWorker().catch(() => {});
+			} else {
+				cleanBrowserServiceWorker().catch(() => {});
+			}
+		})();
 
 		return () => {
-			clearInterval(healthCheck);
+			if (healthCheck) clearInterval(healthCheck);
 			document.documentElement.style.removeProperty('--keyboard-inset-bottom');
 			window.removeEventListener('resize', syncKeyboardInset);
 			vv?.removeEventListener('resize', syncKeyboardInset);
@@ -145,8 +152,6 @@
 			window.removeEventListener('cptr:open-settings', openSettings as EventListener);
 			window.removeEventListener('cptr:session-expired', handleSessionExpired);
 		};
-		})();
-		return () => {};
 	});
 
 	let startupToken = $state('');

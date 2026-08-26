@@ -2,7 +2,7 @@
  * Session management: user state + 401 handling.
  *
  * No client-side expiry timers; the server is the source of truth.
- * If any API call returns 401, we clear the session and reload.
+ * If any API call returns 401, we clear the session and notify the shell.
  */
 
 import { writable } from 'svelte/store';
@@ -25,7 +25,7 @@ export function setSession(s: Session | null) {
 }
 
 /**
- * Clear session: delete cookie, reload to login screen.
+ * Clear session: delete the server cookie and notify the shell to render login.
  */
 export function clearSession() {
 	session.set(null);
