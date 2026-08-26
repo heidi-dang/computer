@@ -206,7 +206,9 @@ test('FlowDeck diagnostics outage stays safe and leaves the run composer usable'
 	await expect(page.getByRole('button', { name: /Start run/ })).toBeEnabled();
 });
 
-test('FlowDeck diagnostics retry recovers without changing the selected category', async ({ page }) => {
+test('FlowDeck diagnostics retry recovers without changing the selected category', async ({
+	page
+}) => {
 	const diagnosticsResponse = {
 		categories: ['process_failure', 'workspace_lease'],
 		diagnostics: [
@@ -253,23 +255,44 @@ test('FlowDeck diagnostics retry recovers without changing the selected category
 	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
 
 	await panel.locator('select').selectOption('process_failure');
-	await expect(
-		panel.getByText('Containment diagnostics are temporarily unavailable.', { exact: true })
-	).toBeVisible();
-
-	const retryRequest = page.waitForRequest(
-		(request) =>
-			request.url().includes('/v1/flowdeck/diagnostics/fdx-containment') &&
-			new URL(request.url()).searchParams.get('category') === 'process_failure'
-	);
-	await panel.getByRole('button', { name: 'Retry diagnostics' }).click();
-	await retryRequest;
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
 
 	await expect(
 		panel.getByText('Containment diagnostics are temporarily unavailable.', { exact: true })
 	).toHaveCount(0);
 	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
 	await expect(panel.locator('.diagnostic-category')).toHaveText('Process Failure');
+	expect(diagnosticsRequestCount).toBe(3);
+});
+
+test('FlowDeck diagnostics automatic retries stop at the configured bound', async ({ page }) => {
+	let diagnosticsRequestCount = 0;
+
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) => {
+		diagnosticsRequestCount += 1;
+		return route.fulfill({
+			status: 503,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				detail: 'Error: private exception text',
+				path: '/srv/flowdeck/private/credentials.json',
+				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER'
+			})
+		});
+	});
+
+	await page.goto('/flowdeck');
+	const panel = page.getByTestId('fdx-diagnostics-panel');
+	await expect(
+		panel.getByText('Containment diagnostics are temporarily unavailable.', { exact: true })
+	).toBeVisible();
+	expect(diagnosticsRequestCount).toBe(4);
+
+	await page.waitForTimeout(1_500);
+	expect(diagnosticsRequestCount).toBe(4);
+	await expect(panel.getByRole('button', { name: 'Retry diagnostics' })).toBeEnabled();
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(0);
+	await expectDocumentToStaySafe(page);
 });
 
 test('FlowDeck orchestration errors use bounded copy', async ({ page }) => {
