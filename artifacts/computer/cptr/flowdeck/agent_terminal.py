@@ -21,6 +21,7 @@ from typing import Any
 
 from cptr.flowdeck.config import FlowDeckConfig
 from cptr.flowdeck.contracts import FlowDeckMode
+from cptr.flowdeck.durable import RunStatus
 from cptr.flowdeck.terminal_observer import redact_terminal_text
 from cptr.utils.identity import identity_for_context
 from cptr.utils.terminal import TerminalSession, manager
@@ -105,6 +106,29 @@ def _validate_command(command: Any, config: FlowDeckConfig) -> str:
     if any(pattern.search(value) for pattern in _DANGEROUS_COMMANDS):
         raise AgentTerminalPolicyError("command rejected by the server safety policy")
     return value
+
+
+async def _run_allows_terminal(context: dict[str, Any]) -> bool:
+    """Keep terminal calls fenced to the active authenticated FlowDeck run."""
+    store = context.get("flowdeck_store")
+    if store is None:
+        # Direct unit callers do not have durable lifecycle state. The coding
+        # execution path always supplies the store and therefore gets the
+        # stronger finalized-run fence below.
+        return True
+    run_id = str(context.get("flowdeck_run_id") or "")
+    user_id = str(context.get("user_id") or "")
+    if not run_id or not user_id:
+        return False
+    try:
+        run = await store.get_run(run_id)
+    except Exception:
+        return False
+    return bool(
+        run
+        and run.owner == user_id
+        and run.status in {RunStatus.RUNNING.value, RunStatus.RECOVERING.value}
+    )
 
 
 async def _durable_event(owned: _OwnedSession, kind: str, payload: dict[str, Any]) -> None:
@@ -337,6 +361,8 @@ async def execute_agent_terminal_command(
     except (TypeError, ValueError):
         return "Error: timeout_seconds must be a number."
     key = (str(__context__.get("user_id") or ""), str(__context__.get("flowdeck_run_id") or ""))
+    if not await _run_allows_terminal(__context__):
+        return "Error: FlowDeck run is no longer active; terminal session is closed."
     try:
         owned = await _get_session(__context__, cwd)
     except AgentTerminalPolicyError as exc:

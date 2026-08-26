@@ -12,6 +12,7 @@ from cptr.flowdeck.authenticated_gateway import (
     SpecialistDispatchRequest,
     dispatch_authenticated_specialist,
 )
+from cptr.flowdeck.terminal_observer import recent_terminal_frames
 from cptr.flowdeck.coding import CodingRequest, run_browser_debugger, run_coding_specialist
 from cptr.flowdeck.config import FlowDeckMode
 from cptr.flowdeck.durable import DurableFlowDeck
@@ -19,6 +20,7 @@ from cptr.flowdeck.execution import MapperRequest, run_read_only_specialist
 from cptr.models.base import Base
 from cptr.models.workspaces import Workspace
 from cptr.utils.config import AuthResult
+from cptr.utils.tools import execute_tool
 
 
 def auth_request(user_id=None):
@@ -226,6 +228,146 @@ class AuthenticatedGatewayTests(unittest.IsolatedAsyncioTestCase):
                 ),
                 store=self.store,
             )
+
+    async def test_authenticated_coding_child_streams_terminal_frames_until_finalization(self):
+        request = auth_request("owner")
+        fake_chat = type("Chat", (), {"id": "terminal-coding-chat"})()
+        fake_message = type("Message", (), {"id": "terminal-coding-message"})()
+        child_kwargs = {}
+
+        async def native_loop(*_args, **kwargs):
+            child_kwargs.update(kwargs)
+            emitted = []
+
+            async def emit(**data):
+                emitted.append(data)
+
+            async def observe(kind, payload):
+                from cptr.flowdeck.terminal_observer import emit_terminal_frame
+
+                await emit_terminal_frame(
+                    user_id="owner",
+                    emit=emit,
+                    kind=kind,
+                    payload=payload,
+                    run_id=kwargs["flowdeck_run_id"],
+                )
+
+            context = {
+                "workspace": kwargs["workspace"],
+                "user_id": "owner",
+                "request": kwargs["request"],
+                "specialist_role": kwargs["specialist_role"],
+                "allowed_tool_names": kwargs["allowed_tool_names"],
+                "tool_guard": kwargs["tool_guard"],
+                "before_mutation": kwargs["before_mutation"],
+                "after_mutation": kwargs["after_mutation"],
+                "flowdeck_run_id": kwargs["flowdeck_run_id"],
+                "flowdeck_attempt_id": kwargs["flowdeck_attempt_id"],
+                "flowdeck_store": self.store,
+                "terminal_observer": observe,
+            }
+            result = await execute_tool(
+                "agent_terminal_command",
+                {"command": "printf 'coding terminal\\n'"},
+                context,
+            )
+            self.assertIn('"status": "succeeded"', result)
+            self.assertTrue(emitted)
+            return result
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "CPTR_FLOWDECK_ENABLED": "true",
+                    "CPTR_FLOWDECK_MODE": "controlled",
+                    "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                    "CPTR_FLOWDECK_MUTATING_AGENTS": "true",
+                    "CPTR_FLOWDECK_AGENT_TERMINAL_ENABLED": "true",
+                    "CPTR_FLOWDECK_CODING_ROLE": "backend-coder",
+                },
+                clear=False,
+            ),
+            patch(
+                "cptr.utils.tools._create_subagent_chat",
+                new=AsyncMock(return_value=(fake_chat, None, fake_message)),
+            ),
+            patch(
+                "cptr.utils.tools._run_existing_subagent_chat",
+                new=native_loop,
+            ),
+        ):
+            result = await dispatch_authenticated_specialist(
+                request,
+                self.dispatch(role="backend-coder"),
+                store=self.store,
+            )
+
+        self.assertIn('"status": "succeeded"', result)
+        self.assertIs(child_kwargs["request"], request)
+        run = await self.store.get_run_by_request_key("gateway-backend-coder")
+        self.assertIsNotNone(run)
+        self.assertEqual(run.status, "SUCCEEDED")
+
+        frames = recent_terminal_frames(run.id)
+        command_frames = [
+            frame
+            for frame in frames
+            if frame["frame_kind"] in {"command_start", "command_output", "command_exit"}
+        ]
+        self.assertGreaterEqual(len(command_frames), 3)
+        frame_kinds = [frame["frame_kind"] for frame in command_frames]
+        start_index = frame_kinds.index("command_start")
+        output_index = frame_kinds.index("command_output")
+        exit_index = len(frame_kinds) - 1 - frame_kinds[::-1].index("command_exit")
+        self.assertEqual(start_index, 0)
+        self.assertLess(start_index, output_index)
+        self.assertLess(output_index, exit_index)
+        self.assertEqual(exit_index, len(frame_kinds) - 1)
+        self.assertEqual(
+            command_frames[0]["payload"]["tool_name"],
+            "agent_terminal_command",
+        )
+        self.assertEqual(
+            command_frames[-1]["payload"]["exit_code"],
+            0,
+        )
+        self.assertIn(
+            "coding terminal",
+            next(
+                frame["payload"]["text"]
+                for frame in command_frames
+                if frame["frame_kind"] == "command_output"
+            ),
+        )
+
+        with patch.dict(
+            os.environ,
+            {
+                "CPTR_FLOWDECK_ENABLED": "true",
+                "CPTR_FLOWDECK_MODE": "controlled",
+                "CPTR_FLOWDECK_GOVERNANCE": "strict",
+                "CPTR_FLOWDECK_MUTATING_AGENTS": "true",
+                "CPTR_FLOWDECK_AGENT_TERMINAL_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            after_finalize = await execute_tool(
+                "agent_terminal_command",
+                {"command": "printf should-not-run"},
+                {
+                    "workspace": str(self.root),
+                    "user_id": "owner",
+                    "request": request,
+                    "specialist_role": "backend-coder",
+                    "allowed_tool_names": frozenset({"agent_terminal_command"}),
+                    "tool_guard": lambda name, args, context: True,
+                    "flowdeck_run_id": run.id,
+                    "flowdeck_store": self.store,
+                },
+            )
+        self.assertIn("no longer active", after_finalize.lower())
 
     async def test_compatibility_boundaries_reject_missing_authenticated_context(self):
         coding = CodingRequest(
