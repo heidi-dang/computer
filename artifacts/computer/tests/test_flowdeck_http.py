@@ -640,6 +640,193 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["has_more"])
         self.assertEqual(result["total"], 1)
 
+    async def test_fdx_containment_cursor_pages_equal_timestamps_without_skips(self):
+        store = DurableFlowDeck(self.session_factory)
+        run, _ = await store.create_run(
+            request_key="fdx-diagnostics-cursor-ties",
+            owner="user-a",
+            workspace=str(self.root_a),
+        )
+        other_run, _ = await store.create_run(
+            request_key="fdx-diagnostics-cursor-ties-other",
+            owner="user-b",
+            workspace=str(self.root_b),
+        )
+        async with self.session_factory() as session:
+            session.add_all(
+                [
+                    FlowDeckEvent(
+                        id=event_id,
+                        run_id=run.id,
+                        sequence=sequence,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": category,
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=500,
+                    )
+                    for sequence, (event_id, category) in enumerate(
+                        (
+                            ("diag-tie-a", "timeout"),
+                            ("diag-tie-m", "timeout"),
+                            ("diag-tie-z", "timeout"),
+                            ("diag-tie-between", "process_failure"),
+                        ),
+                        start=20,
+                    )
+                ]
+                + [
+                    FlowDeckEvent(
+                        id="diag-other-newer",
+                        run_id=other_run.id,
+                        sequence=20,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=501,
+                    )
+                ]
+            )
+            await session.commit()
+
+        cursor = None
+        pages = []
+        for _ in range(4):
+            params = {"category": "timeout", "limit": 1}
+            if cursor:
+                params["cursor"] = cursor
+            response = await self.client.get(
+                "/v1/flowdeck/diagnostics/fdx-containment",
+                params=params,
+                headers=self.headers(),
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            result = response.json()
+            self.assertEqual(result["total"], len(result["diagnostics"]))
+            pages.extend(result["diagnostics"])
+            if not result["has_more"]:
+                self.assertIsNone(result["next_cursor"])
+                break
+            self.assertIsNotNone(result["next_cursor"])
+            cursor = result["next_cursor"]
+        else:
+            self.fail("containment cursor did not terminate")
+
+        self.assertEqual(
+            [diagnostic["id"] for diagnostic in pages],
+            ["diag-tie-z", "diag-tie-m", "diag-tie-a"],
+        )
+        self.assertEqual(len({diagnostic["id"] for diagnostic in pages}), 3)
+        self.assertTrue(all(diagnostic["category"] == "timeout" for diagnostic in pages))
+
+    async def test_fdx_containment_cursor_keeps_owner_scope_and_rejects_invalid_values(self):
+        store = DurableFlowDeck(self.session_factory)
+        owned_run, _ = await store.create_run(
+            request_key="fdx-diagnostics-cursor-owner-a",
+            owner="user-a",
+            workspace=str(self.root_a),
+        )
+        other_run, _ = await store.create_run(
+            request_key="fdx-diagnostics-cursor-owner-b",
+            owner="user-b",
+            workspace=str(self.root_b),
+        )
+        async with self.session_factory() as session:
+            session.add_all(
+                [
+                    FlowDeckEvent(
+                        id="diag-owner-a-new",
+                        run_id=owned_run.id,
+                        sequence=30,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=700,
+                    ),
+                    FlowDeckEvent(
+                        id="diag-owner-a-old",
+                        run_id=owned_run.id,
+                        sequence=31,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=699,
+                    ),
+                    FlowDeckEvent(
+                        id="diag-owner-b-old",
+                        run_id=other_run.id,
+                        sequence=30,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=699,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        initial = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            params={"category": "timeout", "limit": 1},
+            headers=self.headers(),
+        )
+        self.assertEqual(initial.status_code, 200, initial.text)
+        initial_result = initial.json()
+        self.assertEqual(
+            [diagnostic["id"] for diagnostic in initial_result["diagnostics"]],
+            ["diag-owner-a-new"],
+        )
+        self.assertTrue(initial_result["has_more"])
+        cursor = initial_result["next_cursor"]
+        self.assertIsInstance(cursor, str)
+
+        owner_page = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            params={"category": "timeout", "limit": 1, "cursor": cursor},
+            headers=self.headers(),
+        )
+        self.assertEqual(owner_page.status_code, 200, owner_page.text)
+        self.assertEqual(
+            [diagnostic["id"] for diagnostic in owner_page.json()["diagnostics"]],
+            ["diag-owner-a-old"],
+        )
+
+        other_owner_page = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            params={"category": "timeout", "limit": 10, "cursor": cursor},
+            headers=self.headers("user-b"),
+        )
+        self.assertEqual(other_owner_page.status_code, 200, other_owner_page.text)
+        self.assertEqual(
+            [diagnostic["id"] for diagnostic in other_owner_page.json()["diagnostics"]],
+            ["diag-owner-b-old"],
+        )
+        self.assertNotIn("diag-owner-a-new", json.dumps(other_owner_page.json()))
+        self.assertNotIn("diag-owner-a-old", json.dumps(other_owner_page.json()))
+
+        invalid = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            params={"cursor": "A" * 513},
+            headers=self.headers(),
+        )
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertEqual(invalid.json(), {"detail": "invalid containment cursor"})
+        self.assertLess(len(invalid.content), 100)
+
     async def test_retry_and_reconnect_key_reuse_persists_one_run(self):
         calls = []
         created_flags = []
