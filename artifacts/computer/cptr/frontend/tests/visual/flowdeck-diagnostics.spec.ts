@@ -4,7 +4,10 @@ const forbiddenDetails = [
 	'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
 	'/srv/flowdeck/private/credentials.json',
 	'Bearer super-secret-token',
-	'Error: private exception text'
+	'Error: private exception text',
+	'future_category',
+	'another-operator',
+	'run-owned-by-someone-else'
 ];
 
 test.beforeEach(async ({ page }) => {
@@ -49,70 +52,80 @@ test.beforeEach(async ({ page }) => {
 	);
 });
 
-test('FlowDeck diagnostics panel redacts unsafe containment details', async ({ page }) => {
-	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) =>
-		route.fulfill({
-			json: {
-				categories: [
-					'process_failure',
-					'workspace_lease',
-					'future_category',
-					'/srv/flowdeck/private/credentials.json'
-				],
-				diagnostics: [
-					{
-						id: 'diag-safe-process',
-						run_id: 'run-safe-process',
-						sequence: 7,
-						category: 'process_failure',
-						fallback: 'native',
-						run_status: 'failed',
-						run_outcome: 'native_fallback',
-						created_at: 1_735_689_600_000,
-						process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
-						path: '/srv/flowdeck/private/credentials.json',
-						credential: 'Bearer super-secret-token',
-						exception: 'Error: private exception text'
-					},
-					{
-						id: 'diag-safe-lease',
-						run_id: 'run-safe-lease',
-						sequence: 8,
-						category: 'workspace_lease',
-						fallback: 'native',
-						run_status: 'recovering',
-						run_outcome: 'native_fallback',
-						created_at: 1_735_689_601_000,
-						owner: 'another-operator',
-						owner_run_id: 'run-owned-by-someone-else',
-						detail: 'Error: private exception text'
-					},
-					{
-						id: 'diag-future-category',
-						run_id: 'run-future-category',
-						sequence: 9,
-						category: 'future_category',
-						fallback: 'native',
-						run_status: 'failed',
-						run_outcome: 'native_fallback',
-						created_at: 1_735_689_602_000
-					},
-					{
-						id: 'diag-malformed',
-						run_id: 'run-malformed',
-						sequence: 'not-a-sequence',
-						category: 'timeout',
-						fallback: 'native',
-						run_status: 'failed',
-						run_outcome: 'native_fallback',
-						created_at: 1_735_689_603_000
-					}
-				],
-				total: 4,
-				server_exception: 'Error: private exception text'
+test('FlowDeck diagnostics category filters keep unsafe details redacted', async ({ page }) => {
+	const diagnosticsResponse = {
+		categories: [
+			'process_failure',
+			'workspace_lease',
+			'future_category',
+			'/srv/flowdeck/private/credentials.json'
+		],
+		diagnostics: [
+			{
+				id: 'diag-safe-process',
+				run_id: 'run-safe-process',
+				sequence: 7,
+				category: 'process_failure',
+				fallback: 'native',
+				run_status: 'failed',
+				run_outcome: 'native_fallback',
+				created_at: 1_735_689_600_000,
+				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+				path: '/srv/flowdeck/private/credentials.json',
+				credential: 'Bearer super-secret-token',
+				exception: 'Error: private exception text'
+			},
+			{
+				id: 'diag-safe-lease',
+				run_id: 'run-safe-lease',
+				sequence: 8,
+				category: 'workspace_lease',
+				fallback: 'native',
+				run_status: 'recovering',
+				run_outcome: 'native_fallback',
+				created_at: 1_735_689_601_000,
+				owner: 'another-operator',
+				owner_run_id: 'run-owned-by-someone-else',
+				detail: 'Error: private exception text'
+			},
+			{
+				id: 'diag-future-category',
+				run_id: 'run-future-category',
+				sequence: 9,
+				category: 'future_category',
+				fallback: 'native',
+				run_status: 'failed',
+				run_outcome: 'native_fallback',
+				created_at: 1_735_689_602_000
+			},
+			{
+				id: 'diag-malformed',
+				run_id: 'run-malformed',
+				sequence: 'not-a-sequence',
+				category: 'timeout',
+				fallback: 'native',
+				run_status: 'failed',
+				run_outcome: 'native_fallback',
+				created_at: 1_735_689_603_000
 			}
-		})
-	);
+		],
+		total: 4,
+		server_exception: 'Error: private exception text'
+	};
+
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) => {
+		const category = new URL(route.request().url()).searchParams.get('category');
+		const diagnostics = category
+			? diagnosticsResponse.diagnostics.filter((diagnostic) => diagnostic.category === category)
+			: diagnosticsResponse.diagnostics;
+		return route.fulfill({
+			json: {
+				...diagnosticsResponse,
+				diagnostics,
+				total: diagnostics.length
+			}
+		});
+	});
 
 	await page.goto('/flowdeck');
 	const panel = page.getByTestId('fdx-diagnostics-panel');
@@ -127,6 +140,19 @@ test('FlowDeck diagnostics panel redacts unsafe containment details', async ({ p
 	await expect(rows.nth(0)).toContainText('Native fallback · Failed');
 	await expect(rows.nth(1)).toContainText('Run run-safe');
 	await expect(rows.nth(1)).toContainText('Native fallback · Recovering');
+
+	const filteredRequest = page.waitForRequest(
+		(request) =>
+			request.url().includes('/v1/flowdeck/diagnostics/fdx-containment') &&
+			new URL(request.url()).searchParams.get('category') === 'process_failure'
+	);
+	await panel.locator('select').selectOption('process_failure');
+	await filteredRequest;
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+	await expect(panel.locator('.diagnostic-category')).toHaveText('Process Failure');
+	await expect(panel.locator('.diagnostic-row')).toContainText('Run run-safe');
+	await expect(panel.locator('.diagnostic-row')).toContainText('Native fallback · Failed');
+	await expect(panel.getByRole('option', { name: 'Future Category' })).toHaveCount(0);
 
 	const renderedDocument = await page.locator('body').textContent();
 	const renderedMarkup = await page.content();
