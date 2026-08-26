@@ -179,6 +179,42 @@ class FlowDeckAgentTerminalTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("text", timeout_events[0])
         self.assertTrue(result["session_discarded"])
         self.assertTrue(result["next_command_starts_fresh"])
+        self.assertTrue(result["retryable"])
+
+    async def test_retry_after_timeout_uses_a_fresh_session_and_keeps_policy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            context = {
+                "user_id": "terminal-test-user",
+                "flowdeck_run_id": "terminal-test-run",
+                "workspace": temp,
+                "request": None,
+                "terminal_observer": self.observe_noop,
+            }
+            with patch.dict(os.environ, self.enabled_env(), clear=False):
+                interrupted = json.loads(
+                    await execute_agent_terminal_command(
+                        "sleep 10",
+                        timeout_seconds=1,
+                        __context__=context,
+                    )
+                )
+                retried = json.loads(
+                    await execute_agent_terminal_command(
+                        "printf retried",
+                        __context__=context,
+                    )
+                )
+                rejected = await execute_agent_terminal_command(
+                    "rm -rf /",
+                    __context__=context,
+                )
+
+        self.assertEqual(interrupted["status"], "timed_out")
+        self.assertTrue(interrupted["retryable"])
+        self.assertEqual(retried["status"], "succeeded")
+        self.assertNotEqual(interrupted.get("session_id"), retried["session_id"])
+        self.assertEqual(retried["output"].strip(), "retried")
+        self.assertIn("rejected", rejected.lower())
 
     async def test_cancellation_discards_the_session_and_emits_safe_state(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -477,8 +477,10 @@ async def execute_agent_terminal_command(
                     "status": "timed_out",
                     "output": "",
                     "truncated": False,
+                    "session_id": owned.session.session_id,
                     "session_discarded": True,
                     "next_command_starts_fresh": True,
+                    "retryable": True,
                 }
             )
         except asyncio.CancelledError:

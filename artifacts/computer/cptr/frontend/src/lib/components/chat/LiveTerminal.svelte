@@ -7,9 +7,10 @@ events?: any[];
 status?: string;
 runId?: string;
 isAudit?: boolean;
+onretry?: (command: string) => void;
 }
 
-let { events = [], status = '', runId = '', isAudit = false }: Props = $props();
+let { events = [], status = '', runId = '', isAudit = false, onretry }: Props = $props();
 let open = $state(true);
 let follow = $state(true);
 let auditReportOpen = $state(false);
@@ -88,6 +89,26 @@ if (frame) {
 return ['command_start', 'command_output', 'command_exit'].includes(frame.frame_kind);
 }
 return String(event?.kind || event?.type || '').startsWith('AGENT_TERMINAL_');
+}
+
+function isCommandExitEvent(event: any) {
+const frame = terminalFrameFor(event);
+if (frame) return frame.frame_kind === 'command_exit';
+return String(event?.kind || event?.type || '').toUpperCase().startsWith('AGENT_TERMINAL_COMMAND_');
+}
+
+function retryCommandFor(event: any): string | null {
+const interruption = interruptionFor(event);
+if (!interruption) return null;
+const frame = terminalFrameFor(event);
+const payload = frame?.payload || event?.payload || {};
+if (payload.session_discarded !== true || payload.next_command_starts_fresh !== true) return null;
+const command = firstValue(payload.command, event?.command);
+if (!command) return null;
+const value = String(command).trim();
+// A redacted command is not the original command and must not be replayed.
+if (!value || value.includes('[REDACTED]')) return null;
+return value;
 }
 
 function eventLine(event: any, index: number) {
@@ -192,8 +213,16 @@ const terminalEvents = $derived(uniqueEvents.filter(isTerminalEvent));
 
 const latestInterruption = $derived.by(() => {
 for (const event of [...terminalEvents].reverse()) {
-const interruption = interruptionFor(event);
-if (interruption) return interruption;
+if (!isCommandExitEvent(event)) continue;
+return interruptionFor(event);
+}
+return null;
+});
+
+const retryCommand = $derived.by(() => {
+for (const event of [...terminalEvents].reverse()) {
+if (!isCommandExitEvent(event)) continue;
+return retryCommandFor(event);
 }
 return null;
 });
@@ -288,6 +317,16 @@ data-testid={`heidi-terminal-${latestInterruption}`}
 ? 'The command exceeded its time limit. The PTY was discarded; the next command starts fresh.'
 : 'The command was intentionally stopped. The PTY was discarded; the next command starts fresh.'}
 </span>
+{#if retryCommand && onretry}
+<button
+type="button"
+class="terminal-retry"
+data-testid="heidi-terminal-retry"
+onclick={() => onretry?.(retryCommand)}
+>
+Retry command
+</button>
+{/if}
 </div>
 {/if}
 
@@ -408,6 +447,21 @@ background: color-mix(in oklab, #451a03 42%, transparent);
 color: #fde68a;
 }
 .terminal-interruption.is-cancelled strong { color: #fcd34d; }
+.terminal-retry {
+align-self: flex-start;
+margin-top: .25rem;
+border: 1px solid color-mix(in oklab, #fda4af 48%, transparent);
+border-radius: .45rem;
+padding: .28rem .5rem;
+background: color-mix(in oklab, #881337 32%, transparent);
+color: #ffe4e6;
+font: 700 .63rem ui-sans-serif, system-ui, sans-serif;
+}
+.terminal-retry:hover {
+border-color: #fda4af;
+background: color-mix(in oklab, #be123c 38%, transparent);
+color: #fff1f2;
+}
 .terminal-empty { padding: 1.25rem .25rem; color: #71909a; font: .7rem ui-monospace, SFMono-Regular, monospace; }
 .prompt-mark { margin-right: .5rem; color: #34d399; }
 @keyframes terminal-pulse { 50% { opacity: .5; box-shadow: 0 0 0 6px color-mix(in oklab, #22d3ee 0%, transparent); } }

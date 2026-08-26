@@ -192,6 +192,7 @@ let flowdeckEvidenceSummary = $state<any>(null);
 	let preservedFlowDeckEvidence = $state<any>(null);
 	let flowdeckClarification = $state('');
 	let flowdeckMessageId = $state<string | null>(null);
+	let terminalRetryCommand = $state<string | null>(null);
 	const FLOWDECK_EVENT_LIMIT = 200;
 	const FLOWDECK_TERMINAL_STATUSES = new Set([
 		'succeeded',
@@ -1057,6 +1058,21 @@ applyNativeTranscriptEvent(event, message, true);
 		if (chatId) loadChat(chatId);
 	}
 
+	function handleRetryTerminalCommand(command: string) {
+		const value = command.trim();
+		if (!value || value.includes('[REDACTED]')) {
+			toast.error('The original terminal command is not safely available for retry.');
+			return;
+		}
+		if (sending) return;
+		// Keep this on the normal Heidi path. The marker tells send() not to steer
+		// an active run: a retry must create a distinct FlowDeck run and therefore
+		// a distinct terminal session.
+		terminalRetryCommand = value;
+		inputText = value;
+		void send();
+	}
+
 	function handleNewFlowDeckRun() {
 		if (!flowdeckRunId) return;
 		const assistant = allMessages.find((message) => message.id === flowdeckMessageId);
@@ -1288,25 +1304,27 @@ flowdeckEvidenceSummary = null;
 		let text = inputText.trim();
 		if (!text || (selectedAgent !== 'heidi' && !selectedModel)) return;
 		if (sending) return;
-		if (hasChatContent && text === '/compact') {
+		const isTerminalRetry =
+			selectedAgent === 'heidi' && terminalRetryCommand !== null && text === terminalRetryCommand;
+		if (!isTerminalRetry && hasChatContent && text === '/compact') {
 			await handleManualCompact();
 			return;
 		}
-		if (hasChatContent && text === '/fork') {
+		if (!isTerminalRetry && hasChatContent && text === '/fork') {
 			await handleForkChat();
 			return;
 		}
-		if (text === '/plan') {
+		if (!isTerminalRetry && text === '/plan') {
 			handlePlanCommand();
 			inputText = '';
 			return;
 		}
-		if (hasChatContent && text === '/status') {
+		if (!isTerminalRetry && hasChatContent && text === '/status') {
 			handleStatusCommand();
 			inputText = '';
 			return;
 		}
-		if (hasChatContent && text === '/skills:list') {
+		if (!isTerminalRetry && hasChatContent && text === '/skills:list') {
 			await handleSkillsListCommand();
 			inputText = '';
 			return;
@@ -1316,12 +1334,15 @@ flowdeckEvidenceSummary = null;
 			chatId &&
 			flowdeckRunId &&
 			!isFlowDeckTerminal(flowdeckStatus)
+			&& !isTerminalRetry
 		) {
 			await steerActiveFlowDeck(text);
 			return;
 		}
 		if (selectedAgent === 'heidi') {
-			await sendToFlowDeck(text);
+			const retryOfRun = isTerminalRetry ? flowdeckRunId : undefined;
+			terminalRetryCommand = null;
+			await sendToFlowDeck(text, undefined, retryOfRun);
 			return;
 		}
 		stopTtsPlayback();
@@ -1551,7 +1572,11 @@ void poll();
 flowdeckPoller = setInterval(poll, 2500);
 	}
 
-	async function sendToFlowDeck(text: string, freshRunOf?: string) {
+	async function sendToFlowDeck(
+		text: string,
+		freshRunOf?: string,
+		terminalRetryOf?: string
+	) {
 		if (!workspace) {
 			toast.error('Choose a workspace before using Heidi.');
 			return;
@@ -1573,6 +1598,12 @@ flowdeckPoller = setInterval(poll, 2500);
 		const wasNewChat = !chatId;
 		const userId = `heidi-user-${Date.now()}`;
 		const assistantId = `heidi-assistant-${Date.now()}`;
+		const requestMetadata = {
+			source: terminalRetryOf ? 'terminal-retry' : 'chat-composer',
+			chat_id: chatId,
+			model: selectedModel,
+			...(terminalRetryOf ? { terminal_retry_of_run_id: terminalRetryOf } : {})
+		};
 		flowdeckMessageId = assistantId;
 		flowdeckEventBuffer = [
 			{
@@ -1627,7 +1658,7 @@ flowdeckPoller = setInterval(poll, 2500);
 							workspace,
 							objective: text,
 							original_run_id: freshRunOf,
-							metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
+							metadata: requestMetadata
 						},
 						`chat-flowdeck-new-run-${crypto.randomUUID()}`
 					)
@@ -1657,7 +1688,7 @@ flowdeckPoller = setInterval(poll, 2500);
 								'unknowns_preserved',
 								'authoritative_readiness'
 							],
-							metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
+							metadata: requestMetadata
 						},
 						`chat-flowdeck-audit-${crypto.randomUUID()}`
 					)
@@ -1665,7 +1696,7 @@ flowdeckPoller = setInterval(poll, 2500);
 						{
 							workspace,
 							objective: text,
-							metadata: { source: 'chat-composer', chat_id: chatId, model: selectedModel }
+							metadata: requestMetadata
 						},
 						`chat-flowdeck-${crypto.randomUUID()}`
 					);
@@ -2481,6 +2512,7 @@ events={flowdeckEvents}
 status={flowdeckStatus}
 runId={flowdeckRunId}
 isAudit={flowdeckIsAudit}
+onretry={handleRetryTerminalCommand}
 />
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
@@ -2636,6 +2668,7 @@ events={flowdeckEvents}
 status={flowdeckStatus}
 runId={flowdeckRunId}
 isAudit={flowdeckIsAudit}
+onretry={handleRetryTerminalCommand}
 />
 					<FlowDeckStatusStrip
 						status={flowdeckStatus}
