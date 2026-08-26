@@ -339,6 +339,55 @@ test('FlowDeck session expiry renders login in place without a reload loop', asy
 		route.fulfill({ json: { categories: [], diagnostics: [], total: 0 } })
 	);
 	await page.route('**/v1/flowdeck/orchestrations', (route) =>
+		(async () => {
+			sessionAuthenticated = false;
+			return route.fulfill({
+				status: 401,
+				contentType: 'application/json',
+				body: JSON.stringify({
+					detail: 'Error: expired-session private exception',
+					path: '/srv/flowdeck/private/credentials.json',
+					process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+					authorization: 'Bearer expired-session-secret'
+				})
+			});
+		})()
+	);
+
+	await page.goto('/flowdeck');
+	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
+	await page.getByLabel('Objective').fill('Coordinate a safe session expiry transition.');
+	await page.getByRole('button', { name: /Start run/ }).click();
+
+	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
+	await expect(page.getByPlaceholder('Username')).toBeVisible();
+	await expect(page).toHaveURL(/\/flowdeck$/);
+	await page.waitForTimeout(500);
+	expect(authRequestCount).toBe(1);
+	await expectDocumentToStaySafe(page);
+});
+
+test('FlowDeck returns to the workspace after re-login without a reload', async ({ page }) => {
+	let sessionAuthenticated = true;
+	await page.unroute('**/api/auth');
+	await page.route('**/api/auth', (route) =>
+		route.fulfill({
+			json: sessionAuthenticated
+				? {
+						authenticated: true,
+						user_id: 'visual-user',
+						username: 'operator',
+						display_name: 'Operator',
+						role: 'user'
+					}
+				: { authenticated: false }
+		})
+	);
+	await page.route('**/api/auth/login', (route) => {
+		sessionAuthenticated = true;
+		return route.fulfill({ json: { ok: true } });
+	});
+	await page.route('**/v1/flowdeck/orchestrations', (route) =>
 		route.fulfill({
 			status: 401,
 			contentType: 'application/json',
@@ -352,15 +401,28 @@ test('FlowDeck session expiry renders login in place without a reload loop', asy
 	);
 
 	await page.goto('/flowdeck');
+	let navigationsAfterLoad = 0;
+	page.on('framenavigated', (frame) => {
+		if (frame === page.mainFrame()) navigationsAfterLoad += 1;
+	});
 	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
-	await page.getByLabel('Objective').fill('Coordinate a safe session expiry transition.');
+	await page.getByLabel('Objective').fill('Return to the existing workspace after re-login.');
 	await page.getByRole('button', { name: /Start run/ }).click();
 
 	await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
-	await expect(page.getByPlaceholder('Username')).toBeVisible();
-	await expect(page).toHaveURL(/\/flowdeck$/);
-	await page.waitForTimeout(500);
-	expect(authRequestCount).toBe(1);
+	await page.getByPlaceholder('Username').fill('operator');
+	await page.getByPlaceholder('Password').fill('valid-password');
+	await page.getByRole('button', { name: /Sign in/ }).click();
+
+	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
+	await expect(page.getByLabel('Objective')).toBeVisible();
+	await expect(page.getByText('Project', { exact: true })).toBeVisible();
+	await expect
+		.poll(() => navigationsAfterLoad)
+		.toBe(0);
+	const renderedDocument = await page.locator('body').textContent();
+	expect(renderedDocument).not.toContain('expired-session');
+	expect(renderedDocument).not.toContain('backend response');
 	await expectDocumentToStaySafe(page);
 });
 
