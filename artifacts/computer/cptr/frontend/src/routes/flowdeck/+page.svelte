@@ -18,7 +18,13 @@ FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 	import CheckpointPanel from '$lib/components/CheckpointPanel.svelte';
 	import { currentWorkspace, workspaceList } from '$lib/stores';
 	import { chatModels, defaultModel } from '$lib/stores/chat';
-	import { SESSION_EXPIRED_EVENT } from '$lib/session';
+import {
+clearRetainedFlowDeckDraft,
+FLOWDECK_DRAFT_TTL_MS,
+readRetainedFlowDeckDraft,
+SESSION_EXPIRED_EVENT,
+writeRetainedFlowDeckDraft
+} from '$lib/session';
 
 	type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'error';
 	type RunKind = 'success' | 'failure' | 'cancelled' | 'manual' | 'active' | 'unknown';
@@ -40,6 +46,8 @@ FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 	let isCancelling = $state(false);
 	let confirmCancel = $state(false);
 	let hydrated = $state(false);
+let retainDraft = $state(false);
+let retainedDraftExpiresAt = $state<number | null>(null);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let requestInFlight = false;
 	let diagnosticsRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -518,10 +526,16 @@ void refreshDiagnostics();
 		if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(DRAFT_STORAGE_KEY);
 	}
 
+function clearRetainedDraft() {
+clearRetainedFlowDeckDraft();
+retainedDraftExpiresAt = null;
+}
+
 	function persistComposerDraft() {
 		if (typeof sessionStorage === 'undefined') return;
 		if (flowdeckMode === 'run' || runId) {
 			clearComposerDraft();
+clearRetainedDraft();
 			return;
 		}
 		const draft = {
@@ -531,9 +545,16 @@ void refreshDiagnostics();
 		};
 		if (!draft.workspace && !draft.objective) {
 			clearComposerDraft();
+clearRetainedDraft();
 			return;
 		}
 		sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
+if (retainDraft) {
+const retained = writeRetainedFlowDeckDraft(draft);
+retainedDraftExpiresAt = retained?.expiresAt ?? null;
+} else {
+clearRetainedDraft();
+}
 	}
 
 	function persistOwnedRun() {
@@ -543,6 +564,7 @@ void refreshDiagnostics();
 			return;
 		}
 		clearComposerDraft();
+clearRetainedDraft();
 		sessionStorage.setItem(
 			STORAGE_KEY,
 			JSON.stringify({
@@ -612,6 +634,7 @@ void refreshDiagnostics();
 		stopPolling();
 		persistOwnedRun();
 		clearComposerDraft();
+clearRetainedDraft();
 		updateRunUrl();
 	}
 
@@ -679,6 +702,7 @@ void refreshDiagnostics();
 		const queryWorkspace = safeWorkspace(params.get('workspace'));
 		const stored = readStoredRecoveryState(STORAGE_KEY);
 		const draft = readStoredRecoveryState(DRAFT_STORAGE_KEY);
+const retainedDraft = readRetainedFlowDeckDraft();
 		const ownedId = safeRunId(queryRunId || stored.runId);
 		const ownedWorkspace = queryWorkspace || stored.workspace;
 		if (ownedId && ownedWorkspace) {
@@ -692,12 +716,24 @@ void refreshDiagnostics();
 			void refreshRun();
 		} else {
 			flowdeckMode = 'composer';
-			workspace = queryWorkspace || draft.workspace || '';
-			objective = draft.objective || '';
+retainDraft = Boolean(retainedDraft);
+retainedDraftExpiresAt = retainedDraft?.expiresAt ?? null;
+workspace = queryWorkspace || retainedDraft?.workspace || draft.workspace || '';
+objective = retainedDraft?.objective || draft.objective || '';
 			connectionState = 'connected';
 		}
 		hydrated = true;
 	}
+
+function discardRetainedDraft() {
+retainDraft = false;
+clearRetainedDraft();
+}
+
+function draftExpiryLabel(expiresAt: number): string {
+const remainingDays = Math.max(1, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
+return `${remainingDays} day${remainingDays === 1 ? '' : 's'}`;
+}
 
 	onMount(() => {
 		diagnosticsMounted = true;
@@ -923,6 +959,31 @@ disabled={diagnosticsLoadingOlder || diagnosticsLoading || !diagnosticsNextCurso
 						rows="5"
 						required
 					></textarea>
+<div class="draft-retention">
+<label class="draft-retention-toggle" for="flowdeck-retain-draft">
+<input
+id="flowdeck-retain-draft"
+type="checkbox"
+aria-label="Save this draft on this device"
+bind:checked={retainDraft}
+/>
+<span>
+<strong>Save this draft on this device</strong>
+<small>
+Keep only the workspace and objective for {FLOWDECK_DRAFT_TTL_MS / (24 * 60 * 60 * 1000)} days.
+Runs, responses, credentials, and session details are never saved.
+</small>
+</span>
+</label>
+{#if retainedDraftExpiresAt}
+<div class="draft-retention-status" role="status">
+<span>Saved draft expires in {draftExpiryLabel(retainedDraftExpiresAt)}.</span>
+<button type="button" class="quiet-button" onclick={discardRetainedDraft}>
+Discard saved draft
+</button>
+</div>
+{/if}
+</div>
 					<div class="composer-foot">
 						<div class="context-note">
 							<Icon name="cube" size={14} />
@@ -1634,6 +1695,52 @@ background: color-mix(in oklab, var(--fd-teal) 8%, transparent);
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
+.draft-retention {
+display: grid;
+gap: 0.7rem;
+margin-top: 1rem;
+padding-top: 0.9rem;
+border-top: 1px solid color-mix(in oklab, var(--fd-line) 72%, transparent);
+}
+.draft-retention-toggle {
+display: flex;
+align-items: flex-start;
+gap: 0.65rem;
+margin: 0;
+color: var(--fd-ink);
+font-size: 0.72rem;
+font-weight: 650;
+cursor: pointer;
+}
+.draft-retention-toggle input {
+width: 1rem;
+height: 1rem;
+margin: 0.1rem 0 0;
+accent-color: var(--fd-teal);
+}
+.draft-retention-toggle span {
+display: grid;
+gap: 0.25rem;
+}
+.draft-retention-toggle small {
+max-width: 480px;
+color: var(--fd-muted);
+font-size: 0.65rem;
+font-weight: 400;
+line-height: 1.45;
+}
+.draft-retention-status {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 0.8rem;
+color: var(--fd-muted);
+font-size: 0.65rem;
+}
+.draft-retention-status .quiet-button {
+padding: 0.35rem 0.55rem;
+font-size: 0.62rem;
+}
 	.start-button {
 		display: inline-flex;
 		align-items: center;

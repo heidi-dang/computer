@@ -673,6 +673,89 @@ test('FlowDeck returns to the workspace after re-login without a reload', async 
 	await expectDocumentToStaySafe(page);
 });
 
+test('FlowDeck retains an opted-in draft across a new browser tab and supports discard', async ({
+page
+}) => {
+await page.goto('/flowdeck');
+const objective = page.getByRole('textbox', { name: 'Objective' });
+const retainDraft = page.getByRole('checkbox', {
+name: 'Save this draft on this device'
+});
+
+await expect(retainDraft).not.toBeChecked();
+await objective.fill('Recover this unfinished objective after reopening FlowDeck.');
+await expect
+  .poll(() =>
+    page.evaluate(() => localStorage.getItem('flowdeck:composer-draft:retained'))
+  )
+  .toBeNull();
+
+await retainDraft.check();
+await expect
+  .poll(async () => {
+    const raw = await page.evaluate(() =>
+      localStorage.getItem('flowdeck:composer-draft:retained')
+    );
+    return raw ? JSON.parse(raw) : null;
+  })
+  .toMatchObject({
+    mode: 'composer',
+    workspace: '/workspace/project',
+    objective: 'Recover this unfinished objective after reopening FlowDeck.'
+  });
+const storedDraft = await page.evaluate(() => {
+const raw = localStorage.getItem('flowdeck:composer-draft:retained');
+return raw ? JSON.parse(raw) : null;
+});
+expect(typeof storedDraft.expiresAt).toBe('number');
+expect(storedDraft.expiresAt).toBeGreaterThan(Date.now());
+expect(Object.keys(storedDraft).sort()).toEqual([
+'expiresAt',
+'mode',
+'objective',
+'workspace'
+]);
+
+await page.evaluate(() => sessionStorage.clear());
+await page.reload();
+await expect(objective).toHaveValue(
+'Recover this unfinished objective after reopening FlowDeck.'
+);
+await expect(page.getByLabel('Workspace', { exact: true })).toHaveValue('/workspace/project');
+await expect(retainDraft).toBeChecked();
+await expect(page.locator('.draft-retention-status')).toContainText('Saved draft expires in');
+
+await page.getByRole('button', { name: 'Discard saved draft' }).click();
+await expect(retainDraft).not.toBeChecked();
+await expect(page.getByRole('button', { name: 'Discard saved draft' })).toHaveCount(0);
+await expect
+  .poll(() =>
+    page.evaluate(() => localStorage.getItem('flowdeck:composer-draft:retained'))
+  )
+  .toBeNull();
+
+await page.evaluate(() => {
+sessionStorage.clear();
+localStorage.setItem(
+'flowdeck:composer-draft:retained',
+JSON.stringify({
+mode: 'composer',
+workspace: '/workspace/project',
+objective: 'This expired draft must not return.',
+expiresAt: Date.now() - 1
+})
+);
+});
+await page.reload();
+await expect(objective).toHaveValue('');
+await expect(retainDraft).not.toBeChecked();
+await expect
+  .poll(() =>
+    page.evaluate(() => localStorage.getItem('flowdeck:composer-draft:retained'))
+  )
+  .toBeNull();
+});
+
 test('FlowDeck cancellation errors use bounded copy', async ({ page }) => {
 	await page.route('**/v1/flowdeck/orchestrations', (route) =>
 		route.fulfill({
