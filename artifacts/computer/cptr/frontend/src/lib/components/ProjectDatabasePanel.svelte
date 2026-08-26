@@ -13,14 +13,14 @@ let result = $state<any>(null);
 async function inspect() {
   loading = true; error = '';
   try { inspection = await inspectProjectDatabase({ workspace, engine, database } satisfies DatabaseRequest); }
-  catch (cause) { error = cause instanceof Error ? cause.message : 'Database inspection failed'; }
+  catch (cause) { error = 'Database inspection failed. Review the request and try again.'; }
   finally { loading = false; }
 }
 
 async function query() {
   loading = true; error = '';
   try { result = await queryProjectDatabase({ workspace, engine, database, sql }); }
-  catch (cause) { error = cause instanceof Error ? cause.message : 'Database query failed'; }
+  catch (cause) { error = 'Database query failed. Review the request and try again.'; }
   finally { loading = false; }
 }
 </script>

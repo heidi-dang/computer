@@ -87,7 +87,7 @@ let diagnosticsError = $state('');
 
 	function getRunId(value: FlowDeckOrchestration | null): string {
 		if (!value) return '';
-		return typeof value.run_id === 'string' ? value.run_id : typeof value.id === 'string' ? value.id : '';
+		return safeRunId(typeof value.run_id === 'string' ? value.run_id : value.id);
 	}
 
 	function getStatus(value: FlowDeckOrchestration | null): string {
@@ -117,7 +117,7 @@ let diagnosticsError = $state('');
 		if (kind === 'failure') return 'Failed';
 		if (kind === 'cancelled') return 'Cancelled';
 		if (kind === 'manual') return 'Manual review';
-		if (kind === 'active') return value?.status ?? value?.state ?? 'In progress';
+		if (kind === 'active') return safeStatusLabel(getStatus(value));
 		return value ? 'State not reported' : 'Ready to coordinate';
 	}
 
@@ -130,13 +130,74 @@ let diagnosticsError = $state('');
 		return 'Waiting for a truthful state from the orchestration service.';
 	}
 
+	const safeRunIdentifier = /^[A-Za-z0-9_-]{1,128}$/;
+	const sensitiveKey = /(?:credential|password|secret|token|authorization|cookie|process[_ -]?output|stderr|stdout|stack|exception|traceback|filesystem|path|command|environment|owner|run[_ -]?id|api[_ -]?key)/i;
+	const sensitiveText =
+		/\b(?:error|exception|traceback|stack trace|stderr|stdout|process[_ -]?output|credential|password|secret|token|authorization|bearer)\b|(?:^|[\s="'(])\/(?:[^/\s"'<>]+\/)+[^/\s"'<>]+|[A-Za-z]:[\\/]|(?:sk|ghp|xox[bpoa])-[A-Za-z0-9_-]{12,}/i;
+	const safeStatuses: Record<string, string> = {
+		pending: 'Pending',
+		running: 'Running',
+		orphaned: 'Orphaned',
+		recovering: 'Recovering',
+		succeeded: 'Succeeded',
+		success: 'Succeeded',
+		completed: 'Completed',
+		failed: 'Failed',
+		error: 'Failed',
+		manual_review: 'Manual review',
+		manual_review_required: 'Manual review',
+		approval_required: 'Manual review',
+		review_required: 'Manual review',
+		cancelled: 'Cancelled',
+		canceled: 'Cancelled',
+		outcome_unknown: 'Outcome unavailable',
+		unknown: 'State not reported'
+	};
+
+	function safeStatusLabel(status: string): string {
+		return safeStatuses[status] ?? 'In progress';
+	}
+
+	function safeRunId(value: unknown): string {
+		return typeof value === 'string' && safeRunIdentifier.test(value) ? value : '';
+	}
+
+	function safeText(value: unknown, fallback = 'Details unavailable'): string {
+		if (typeof value !== 'string') return fallback;
+		const text = value.trim();
+		if (!text || sensitiveText.test(text)) return fallback;
+		return text.length > 240 ? `${text.slice(0, 237)}…` : text;
+	}
+
+	function sanitizeDisplayValue(value: unknown, depth = 0): unknown {
+		if (depth > 3) return 'Additional details unavailable';
+		if (value === undefined || value === null || value === '') return undefined;
+		if (typeof value === 'string') return safeText(value);
+		if (typeof value === 'number' || typeof value === 'boolean') return value;
+		if (Array.isArray(value)) {
+			return value
+				.slice(0, 40)
+				.map((item) => sanitizeDisplayValue(item, depth + 1))
+				.filter((item) => item !== undefined);
+		}
+		if (typeof value !== 'object') return undefined;
+		const sanitized: Record<string, unknown> = {};
+		for (const [key, item] of Object.entries(value as Record<string, unknown>).slice(0, 40)) {
+			if (sensitiveKey.test(key)) continue;
+			const next = sanitizeDisplayValue(item, depth + 1);
+			if (next !== undefined) sanitized[key] = next;
+		}
+		return sanitized;
+	}
+
 	function safeStringify(value: unknown): string {
-		if (value === undefined || value === null || value === '') return 'Not reported';
-		if (typeof value === 'string') return value;
+		const sanitized = sanitizeDisplayValue(value);
+		if (sanitized === undefined) return 'Not reported';
 		try {
-			return JSON.stringify(value, null, 2) ?? 'Not reported';
+			const result = JSON.stringify(sanitized, null, 2) ?? 'Not reported';
+			return result.length > 4000 ? `${result.slice(0, 3997)}…` : result;
 		} catch {
-			return String(value);
+			return 'Details unavailable';
 		}
 	}
 
@@ -171,7 +232,7 @@ let diagnosticsError = $state('');
 	function formatTime(value: unknown): string {
 		if (typeof value !== 'string' && typeof value !== 'number') return 'Not reported';
 		const date = new Date(value);
-		return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+		return Number.isNaN(date.getTime()) ? 'Not reported' : date.toLocaleString();
 	}
 
 function categoryLabel(category: string): string {
@@ -200,10 +261,11 @@ diagnosticsLoading = false;
 }
 
 	function eventTitle(item: unknown): string {
-		if (!item || typeof item !== 'object') return String(item);
+		if (!item || typeof item !== 'object') return 'Observed activity';
 		const record = item as Record<string, unknown>;
-		for (const key of ['title', 'name', 'type', 'event', 'message']) {
-			if (typeof record[key] === 'string' && record[key]) return record[key] as string;
+		for (const key of ['title', 'name', 'type', 'event']) {
+			const title = safeText(record[key], '');
+			if (title) return title;
 		}
 		return 'Observed activity';
 	}
@@ -212,15 +274,15 @@ diagnosticsLoading = false;
 		if (!item || typeof item !== 'object') return '';
 		const record = item as Record<string, unknown>;
 		for (const key of ['message', 'detail', 'description', 'status']) {
-			if (typeof record[key] === 'string' && record[key]) return record[key] as string;
+			const detail = safeText(record[key], '');
+			if (detail) return detail;
 		}
 		return '';
 	}
 
 	function objectiveText(): string {
 		if (runObjective) return runObjective;
-		const reported = field('objective');
-		return typeof reported === 'string' ? reported : 'Objective not reported';
+		return 'Objective not reported';
 	}
 
 	function reportedNumber(keys: string[]): number | null {
@@ -250,7 +312,8 @@ diagnosticsLoading = false;
 	function currentAgent(): string {
 		for (const key of ['current_agent', 'current_specialist', 'active_specialist', 'agent']) {
 			const value = field(key);
-			if (typeof value === 'string' && value.trim()) return value;
+			const label = safeText(value, '');
+			if (label) return label;
 		}
 		return 'Not reported';
 	}
@@ -304,7 +367,7 @@ diagnosticsLoading = false;
 			if (classifyRun(next) !== 'active') stopPolling();
 			persistOwnedRun();
 		} catch (error) {
-			pollError = error instanceof Error ? error.message : 'Unable to read the current run state.';
+			pollError = 'Unable to read the current run state. Try again shortly.';
 			connectionState = navigator.onLine === false ? 'offline' : 'error';
 		} finally {
 			requestInFlight = false;
@@ -357,9 +420,7 @@ diagnosticsLoading = false;
 				orchestrationDisabled = true;
 			}
 			startError =
-				error instanceof Error
-					? error.message
-					: 'Controlled orchestration could not be started. Nothing was launched.';
+				'Controlled orchestration could not be started. Nothing was launched.';
 		} finally {
 			isStarting = false;
 		}
@@ -378,7 +439,7 @@ diagnosticsLoading = false;
 			if (classifyRun(run) === 'cancelled') stopPolling();
 			persistOwnedRun();
 		} catch (error) {
-			pollError = error instanceof Error ? error.message : 'The cancellation request was not accepted.';
+			pollError = 'The cancellation request was not accepted. Try again shortly.';
 		} finally {
 			isCancelling = false;
 		}
@@ -395,7 +456,7 @@ diagnosticsLoading = false;
 		} catch {
 			stored = {};
 		}
-		const ownedId = queryRunId || stored.runId;
+		const ownedId = safeRunId(queryRunId || stored.runId);
 		const ownedWorkspace = queryWorkspace || stored.workspace;
 		if (ownedId && ownedWorkspace) {
 			runId = ownedId;
@@ -664,7 +725,7 @@ void refreshDiagnostics();
 						<div class="state-meta">
 							<div><span>Workspace</span><strong>{runWorkspace || 'Not reported'}</strong></div>
 							<div><span>Last checked</span><strong>{lastCheckedAt ? formatTime(lastCheckedAt) : 'Awaiting first read'}</strong></div>
-							<div><span>Backend status</span><strong>{typeof run?.status === 'string' ? run.status : typeof run?.state === 'string' ? run.state : 'Not reported'}</strong></div>
+							<div><span>Backend status</span><strong>{safeStatusLabel(getStatus(run))}</strong></div>
 						</div>
 					</div>
 

@@ -23,7 +23,7 @@ runtime = await getManagedRuntime(runtime.run_id, workspace);
 if (['running', 'crashed', 'unknown', 'stopped'].includes(runtime.state) && timer) {
 clearInterval(timer); timer = null;
 }
-} catch (e) { error = e instanceof Error ? e.message : 'Preview state unavailable'; }
+		} catch (e) { error = 'Preview state unavailable. Try again shortly.'; }
 }, 500);
 }
 
@@ -33,14 +33,14 @@ loading = true; error = '';
 try {
 runtime = await startManagedRuntime(workspace, `runtime-${crypto.randomUUID()}`);
 beginPolling();
-} catch (e) { error = e instanceof Error ? e.message : 'Unable to start preview'; }
+	} catch (e) { error = 'Unable to start preview. Try again shortly.'; }
 finally { loading = false; }
 }
 
 async function stop() {
 if (!runtime?.run_id) return;
 try { runtime = await stopManagedRuntime(runtime.run_id, workspace); }
-catch (e) { error = e instanceof Error ? e.message : 'Unable to stop preview'; }
+	catch (e) { error = 'Unable to stop preview. Try again shortly.'; }
 }
 
 onDestroy(() => { if (timer) clearInterval(timer); });
@@ -63,7 +63,7 @@ onDestroy(() => { if (timer) clearInterval(timer); });
 {:else if runtime?.state === 'crashed'}
 <div role="alert" class="notice error">The managed process crashed. Review runtime logs before restarting.</div>
 {/if}
-{#if runtime?.logs}<details><summary>Runtime logs</summary><pre>{runtime.logs}</pre></details>{/if}
+	{#if runtime?.logs}<div class="runtime-log-note" role="status">Runtime logs are available in the project runtime view.</div>{/if}
 {#if error}<div role="alert" class="error">{error}</div>{/if}
 </section>
 

@@ -5,10 +5,22 @@ const forbiddenDetails = [
 	'/srv/flowdeck/private/credentials.json',
 	'Bearer super-secret-token',
 	'Error: private exception text',
+	'Error: provider private stack',
+	'/var/lib/flowdeck/runtime/private.env',
+	'Bearer flowdeck-secret',
 	'future_category',
 	'another-operator',
 	'run-owned-by-someone-else'
 ];
+
+async function expectDocumentToStaySafe(page: import('@playwright/test').Page) {
+	const renderedDocument = await page.locator('body').textContent();
+	const renderedMarkup = await page.content();
+	for (const detail of forbiddenDetails) {
+		expect(renderedDocument).not.toContain(detail);
+		expect(renderedMarkup).not.toContain(detail);
+	}
+}
 
 test.beforeEach(async ({ page }) => {
 	await page.route('**/api/**', (route) => route.fulfill({ json: {} }));
@@ -49,6 +61,9 @@ test.beforeEach(async ({ page }) => {
 	);
 	await page.route('**/v1/flowdeck/checkpoints*', (route) =>
 		route.fulfill({ json: { checkpoints: [] } })
+	);
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) =>
+		route.fulfill({ json: { categories: [], diagnostics: [], total: 0 } })
 	);
 });
 
@@ -154,12 +169,7 @@ test('FlowDeck diagnostics category filters keep unsafe details redacted', async
 	await expect(panel.locator('.diagnostic-row')).toContainText('Native fallback · Failed');
 	await expect(panel.getByRole('option', { name: 'Future Category' })).toHaveCount(0);
 
-	const renderedDocument = await page.locator('body').textContent();
-	const renderedMarkup = await page.content();
-	for (const detail of forbiddenDetails) {
-		expect(renderedDocument).not.toContain(detail);
-		expect(renderedMarkup).not.toContain(detail);
-	}
+	await expectDocumentToStaySafe(page);
 });
 
 test('FlowDeck diagnostics outage stays safe and leaves the run composer usable', async ({
@@ -187,12 +197,7 @@ test('FlowDeck diagnostics outage stays safe and leaves the run composer usable'
 	await expect(panel.getByRole('button', { name: 'Retry diagnostics' })).toBeVisible();
 	await expect(panel.locator('.diagnostic-row')).toHaveCount(0);
 
-	const renderedDocument = await page.locator('body').textContent();
-	const renderedMarkup = await page.content();
-	for (const detail of forbiddenDetails) {
-		expect(renderedDocument).not.toContain(detail);
-		expect(renderedMarkup).not.toContain(detail);
-	}
+	await expectDocumentToStaySafe(page);
 
 	const objective = page.getByLabel('Objective');
 	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
@@ -265,4 +270,115 @@ test('FlowDeck diagnostics retry recovers without changing the selected category
 	).toHaveCount(0);
 	await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
 	await expect(panel.locator('.diagnostic-category')).toHaveText('Process Failure');
+});
+
+test('FlowDeck orchestration errors use bounded copy', async ({ page }) => {
+	await page.route('**/v1/flowdeck/orchestrations', (route) =>
+		route.fulfill({
+			status: 502,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				detail: 'Error: provider private stack',
+				path: '/var/lib/flowdeck/runtime/private.env',
+				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+				authorization: 'Bearer flowdeck-secret'
+			})
+		})
+	);
+
+	await page.goto('/flowdeck');
+	await page.getByLabel('Objective').fill('Coordinate a safe failure test.');
+	await page.getByRole('button', { name: /Start run/ }).click();
+	await expect(
+		page.getByText('Controlled orchestration could not be started. Nothing was launched.', {
+			exact: true
+		})
+	).toBeVisible();
+	await expectDocumentToStaySafe(page);
+});
+
+test('FlowDeck cancellation errors use bounded copy', async ({ page }) => {
+	await page.route('**/v1/flowdeck/orchestrations', (route) =>
+		route.fulfill({
+			json: {
+				run_id: 'run-cancel',
+				status: 'running',
+				workspace: '/workspace/project'
+			}
+		})
+	);
+	await page.route('**/v1/flowdeck/orchestrations/run-cancel/cancel*', (route) =>
+		route.fulfill({
+			status: 409,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				detail: 'Error: provider private stack',
+				path: '/var/lib/flowdeck/runtime/private.env',
+				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+				authorization: 'Bearer flowdeck-secret'
+			})
+		})
+	);
+
+	await page.goto('/flowdeck');
+	await page.getByLabel('Objective').fill('Coordinate a safe cancellation test.');
+	await page.getByRole('button', { name: /Start run/ }).click();
+	await expect(page.getByRole('heading', { name: 'Running' }).first()).toBeVisible();
+	await page.getByRole('button', { name: /^Cancel$/ }).click();
+	const cancellationRequest = page.waitForRequest((request) =>
+		request.url().includes('/v1/flowdeck/orchestrations/run-cancel/cancel')
+	);
+	await page.getByRole('button', { name: 'Confirm' }).click();
+	await cancellationRequest;
+	await expect(page.getByRole('alert')).toContainText(
+		'The cancellation request was not accepted. Try again shortly.'
+	);
+	await expectDocumentToStaySafe(page);
+});
+
+test('FlowDeck run state, activity, and evidence stay safe with malformed backend fields', async ({
+	page
+}) => {
+	await page.route('**/v1/flowdeck/orchestrations/run-sensitive*', (route) =>
+		route.fulfill({
+			json: {
+				run_id: 'run-sensitive',
+				workspace: '/var/lib/flowdeck/runtime/private.env',
+				objective: 'Error: provider private stack',
+				status: 'failed',
+				message: 'Bearer flowdeck-secret',
+				plan: {
+					steps: ['Review the bounded run'],
+					process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+					path: '/var/lib/flowdeck/runtime/private.env'
+				},
+				scopes: {
+					workspace: 'read-only',
+					authorization: 'Bearer flowdeck-secret'
+				},
+				events: [
+					{
+						title: 'Run started',
+						detail: 'Error: provider private stack',
+						owner: 'another-operator',
+						owner_run_id: 'run-owned-by-someone-else',
+						created_at: 'not-a-timestamp'
+					}
+				],
+				evidence: [
+					{
+						kind: 'verification',
+						path: '/var/lib/flowdeck/runtime/private.env',
+						exception: 'Error: private exception text'
+					}
+				]
+			}
+		})
+	);
+
+	await page.goto('/flowdeck?run_id=run-sensitive&workspace=%2Fworkspace%2Fproject');
+	await expect(page.getByRole('heading', { name: 'Failed' }).first()).toBeVisible();
+	await expect(page.getByText('Run started', { exact: true })).toBeVisible();
+	await expect(page.getByText('Observed activity', { exact: true })).toBeVisible();
+	await expectDocumentToStaySafe(page);
 });

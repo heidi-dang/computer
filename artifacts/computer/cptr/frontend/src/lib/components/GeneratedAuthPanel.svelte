@@ -32,7 +32,7 @@
 				session = null;
 			}
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : 'Auth inspection failed';
+			error = 'Auth inspection failed. Review the generated app configuration and try again.';
 		} finally {
 			loading = false;
 		}
@@ -46,7 +46,7 @@
 			session = await getGeneratedAuthSession(workspace);
 			password = '';
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : 'Sign in failed';
+			error = 'Sign in failed. Check the submitted details and try again.';
 		} finally {
 			loading = false;
 		}
@@ -59,7 +59,7 @@
 			await signUpGeneratedAuth(workspace, email, password, csrf);
 			await signIn();
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : 'Sign up failed';
+			error = 'Sign up failed. Check the submitted details and try again.';
 			loading = false;
 		}
 	}
@@ -70,7 +70,7 @@
 			await signOutGeneratedAuth(workspace);
 			session = null;
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : 'Sign out failed';
+			error = 'Sign out failed. Try again shortly.';
 		} finally {
 			loading = false;
 		}

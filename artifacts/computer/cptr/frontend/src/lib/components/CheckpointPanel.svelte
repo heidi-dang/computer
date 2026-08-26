@@ -21,7 +21,7 @@
 			checkpoints = (await listCheckpoints(workspace)).checkpoints;
 			if (!selected && checkpoints[0]) selected = checkpoints[0].checkpoint_id;
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : 'Checkpoint state is unavailable.';
+			error = 'Checkpoint state is unavailable. Try again shortly.';
 		}
 	}
 
@@ -37,7 +37,7 @@
 			await refresh();
 			selected = result.checkpoint_id;
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : 'Capture was not completed.';
+			error = 'Capture was not completed. Review the worktree and try again.';
 		} finally { busy = false; }
 	}
 
@@ -49,7 +49,7 @@
 			message = `Restored ${result.revision.slice(0, 10)}.`;
 			await refresh();
 		} catch (cause) {
-			error = cause instanceof Error ? cause.message : 'Restore requires review.';
+			error = 'Restore requires review. No changes were applied.';
 		} finally { busy = false; }
 	}
 
