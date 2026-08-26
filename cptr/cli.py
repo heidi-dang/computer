@@ -17,8 +17,9 @@ def cli():
 )
 @click.option("--port", default=8000, type=int, help="Port to bind to.")
 @click.option("--reload", is_flag=True, default=False, help="Enable auto-reload.")
-@click.option("--headless", is_flag=True, default=False, help="Don't open browser.")
-def run(host: str, port: int, reload: bool, headless: bool):
+@click.option("--open-browser", is_flag=True, default=False, help="Open the CPTR dashboard in a browser after startup.")
+@click.option("--headless", is_flag=True, default=False, help="Compatibility override: never open the dashboard browser.")
+def run(host: str, port: int, reload: bool, open_browser: bool, headless: bool):
     """Start the cptr server."""
     import os
     import secrets
@@ -31,7 +32,7 @@ def run(host: str, port: int, reload: bool, headless: bool):
     url = f"http://{display_host}:{port}/?token={token}"
 
     print(f"\n  ➜  {url}\n")
-    if not headless:
+    if should_open_dashboard(open_browser=open_browser, headless=headless):
         import threading
         import webbrowser
 
@@ -42,6 +43,11 @@ def run(host: str, port: int, reload: bool, headless: bool):
         port=port,
         reload=reload,
     )
+
+
+def should_open_dashboard(*, open_browser: bool, headless: bool) -> bool:
+    """Only a deliberate interactive invocation may launch a dashboard tab."""
+    return open_browser and not headless
 
 
 def main():

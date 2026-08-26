@@ -33,7 +33,24 @@ Or with [uv](https://docs.astral.sh/uv/): `uvx cptr@latest run`
 
 On Windows, if opening a terminal reports a missing `VCRUNTIME140.dll` or Universal CRT DLL, install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and restart `cptr`.
 
-Opens in your browser at `http://localhost:8000`.
+After startup, open `http://localhost:8000` in a browser. To have a local interactive launch open it automatically, run `cptr run --open-browser`. Managed services should not use `--open-browser`.
+
+### Managed systemd service
+
+For a user-level systemd service, start CPTR non-interactively and bound restart storms. Do not place API keys or JWT secrets directly in the unit; load them from an owner-readable environment file instead.
+
+```ini
+[Unit]
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+ExecStart=/path/to/.venv/bin/cptr run --host 0.0.0.0 --port 8000 --headless
+Restart=on-failure
+RestartSec=15
+```
+
+If startup logs report that an API key cannot be decrypted because the JWT secret changed, stop the service, restore the prior stable JWT secret **or** re-enter the affected provider key through CPTR settings, then start the service again. Do not paste either secret into logs or chat.
 
 ### Access from your phone
 

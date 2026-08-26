@@ -278,7 +278,13 @@ async def warm_model_cache(app_state) -> None:
     from cptr.utils.agents.detection import get_available_agent_model_entries
 
     tasks.append(get_available_agent_model_entries(app_state))
-    await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    failures = sum(isinstance(result, Exception) for result in results)
+    app_state.model_warmup_failure_count = failures
+    if failures:
+        # Startup discovery is best-effort. A stale encrypted provider key must
+        # be repaired by its owner, but must not make the service unavailable.
+        log.warning("Skipped %d model-cache warmup task(s) after provider discovery errors", failures)
 
 
 def invalidate_model_cache(app_state):

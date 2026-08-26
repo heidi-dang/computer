@@ -215,6 +215,26 @@ async def _personal_keep_alive() -> bool:
     return await Config.get("browser.personal_keep_alive") is not False
 
 
+def resolve_create_session_mode(
+    payload: object, *, configured_default: object, personal_chrome_configured: bool
+) -> str:
+    """Choose a safe browser mode for a newly created session.
+
+    A persisted Personal Chrome default must not create tabs in a user's browser
+    during preview restoration or other automatic session creation. Personal
+    Chrome is therefore available only when the request explicitly chooses it.
+    """
+    explicit_mode = isinstance(payload, dict) and "mode" in payload
+    mode = payload.get("mode") if explicit_mode else configured_default
+    if mode not in {"proxy", "chrome"}:
+        if explicit_mode:
+            raise HTTPException(status_code=400, detail="Invalid Browser mode")
+        mode = "proxy"
+    if personal_chrome_configured and not explicit_mode:
+        return "proxy"
+    return mode
+
+
 def _initial_url(value: object) -> str:
     url = str(value or "").strip()
     if not url:
@@ -231,16 +251,12 @@ async def create_session(request: Request):
         payload = await request.json()
     except Exception:
         payload = {}
-    explicit_mode = isinstance(payload, dict) and "mode" in payload
-    mode = (
-        payload.get("mode")
-        if explicit_mode
-        else "chrome"
-        if await Config.get("browser.tab_default_mode") == "chrome"
-        else "proxy"
+    chrome_cdp_url = await _chrome_cdp_url()
+    mode = resolve_create_session_mode(
+        payload,
+        configured_default=await Config.get("browser.tab_default_mode"),
+        personal_chrome_configured=bool(chrome_cdp_url),
     )
-    if mode not in {"proxy", "chrome"}:
-        raise HTTPException(status_code=400, detail="Invalid Browser mode")
     initial_url = _initial_url(payload.get("url") if isinstance(payload, dict) else None)
     auth = _auth(request)
     session = await manager.create(_owner(auth))
@@ -248,12 +264,11 @@ async def create_session(request: Request):
         await manager.update(session.session_id, session.owner, url=initial_url)
     if mode == "chrome":
         try:
-            cdp_url = await _chrome_cdp_url()
-            if cdp_url:
+            if chrome_cdp_url:
                 if auth.role != "admin":
                     raise RuntimeError("Personal Chrome is available to administrators only")
                 await chrome_viewer_manager.attach_personal(
-                    session, local_origin(str(request.base_url)), cdp_url
+                    session, local_origin(str(request.base_url)), chrome_cdp_url
                 )
             else:
                 await chrome_viewer_manager.start(session, local_origin(str(request.base_url)))
