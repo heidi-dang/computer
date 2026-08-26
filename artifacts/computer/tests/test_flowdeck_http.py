@@ -2,8 +2,13 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
+import urllib.request
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -294,6 +299,52 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             "CPTR_FLOWDECK_MODE": "controlled",
             "CPTR_FLOWDECK_GOVERNANCE": "strict",
         }
+
+    @staticmethod
+    def free_port():
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    @staticmethod
+    def start_worker(data_dir, port):
+        env = {
+            **os.environ,
+            "CPTR_DATA_DIR": str(data_dir),
+            "ENABLE_CHAT_RECONCILE_ON_STARTUP": "false",
+            "CPTR_CONTROL_PLANE_ENABLED": "false",
+            "CPTR_LOG_LEVEL": "ERROR",
+        }
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "cptr.cli",
+                "run",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+                "--headless",
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    @staticmethod
+    def wait_for_health(port):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/health", timeout=1
+                ) as response:
+                    if response.status == 200:
+                        return
+            except OSError:
+                time.sleep(0.1)
+        raise AssertionError(f"CPTR worker on port {port} did not start")
 
     async def test_bearer_auth_covers_submit_status_and_cancel(self):
         async def submit(request, *, authenticated_request, store):
@@ -1696,6 +1747,130 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             sum(event.kind == "EVIDENCE_REPORT_EXPORTED" for event in events),
             download_count,
         )
+
+    async def test_evidence_report_downloads_are_ordered_across_api_workers(self):
+        shared_data_dir = Path(self.temp.name, "api-workers")
+        shared_data_dir.mkdir()
+        first_port = self.free_port()
+        second_port = self.free_port()
+        while second_port == first_port:
+            second_port = self.free_port()
+        first_worker = self.start_worker(shared_data_dir, first_port)
+        second_worker = None
+        shared_engine = None
+        try:
+            await asyncio.to_thread(self.wait_for_health, first_port)
+
+            shared_engine = create_async_engine(
+                f"sqlite+aiosqlite:///{shared_data_dir / 'app.db'}",
+                connect_args={"timeout": 10},
+            )
+            shared_sessions = async_sessionmaker(shared_engine, expire_on_commit=False)
+            async with shared_sessions() as session:
+                session.add_all(
+                    [
+                        User(id="worker-user", role="user", created_at=1),
+                        Auth(user_id="worker-user", username="worker", password=None),
+                        Workspace(
+                            user_id="worker-user",
+                            path=str(self.root_a),
+                            name="workspace-a",
+                            data={},
+                            created_at=1,
+                        ),
+                        Config(
+                            key="api_keys",
+                            value=[
+                                {
+                                    "key_hash": hashlib.sha256(
+                                        b"worker-download-token"
+                                    ).hexdigest(),
+                                    "user_id": "worker-user",
+                                }
+                            ],
+                        ),
+                        FlowDeckRun(
+                            id="multi-worker-export-run",
+                            request_key="multi-worker-export-key",
+                            workspace=str(self.root_a),
+                            owner="worker-user",
+                            status="SUCCEEDED",
+                            created_at=1,
+                            updated_at=1,
+                            version=1,
+                        ),
+                        FlowDeckEvent(
+                            id="multi-worker-export-event",
+                            run_id="multi-worker-export-run",
+                            sequence=1,
+                            kind="VERIFY",
+                            payload={
+                                "authoritative": True,
+                                "source": "verifier",
+                                "outcome": "succeeded",
+                                "reasoning": "private reasoning",
+                                "credential": "secret-value",
+                            },
+                            created_at=1,
+                        ),
+                    ]
+                )
+                await session.commit()
+
+            second_worker = self.start_worker(shared_data_dir, second_port)
+            await asyncio.to_thread(self.wait_for_health, second_port)
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                responses = await asyncio.gather(
+                    *(
+                        client.get(
+                            f"http://127.0.0.1:{port}/v1/flowdeck/orchestrations/"
+                            "multi-worker-export-run/evidence-report",
+                            params={"workspace": str(self.root_a)},
+                            headers={"Authorization": "Bearer worker-download-token"},
+                        )
+                        for port in (first_port, second_port) * 4
+                    )
+                )
+
+            self.assertTrue(all(response.status_code == 200 for response in responses))
+            reports = [response.json() for response in responses]
+            self.assertEqual(
+                {json.dumps(report, sort_keys=True) for report in reports},
+                {json.dumps(reports[0], sort_keys=True)},
+            )
+            serialized = json.dumps(reports[0])
+            self.assertNotIn("private reasoning", serialized)
+            self.assertNotIn("secret-value", serialized)
+
+            async with shared_sessions() as session:
+                events = (
+                    await session.execute(
+                        select(FlowDeckEvent)
+                        .where(FlowDeckEvent.run_id == "multi-worker-export-run")
+                        .order_by(FlowDeckEvent.sequence)
+                    )
+                ).scalars().all()
+            self.assertEqual(len(events), 9)
+            self.assertEqual(
+                [event.sequence for event in events],
+                list(range(1, 10)),
+            )
+            self.assertEqual(
+                sum(event.kind == "EVIDENCE_REPORT_EXPORTED" for event in events),
+                8,
+            )
+        finally:
+            for worker in (first_worker, second_worker):
+                if worker and worker.poll() is None:
+                    worker.terminate()
+                    try:
+                        worker.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        worker.kill()
+                        worker.wait(timeout=10)
+            if shared_engine is not None:
+                await shared_engine.dispose()
 
     async def test_active_run_steering_is_durable_and_idempotent(self):
         async def submit(request, *, authenticated_request, store):
