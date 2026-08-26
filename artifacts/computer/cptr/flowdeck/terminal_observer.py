@@ -53,6 +53,8 @@ def safe_terminal_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         "step_id",
         "session_id",
         "terminal_id",
+        "session_discarded",
+        "next_command_starts_fresh",
     ):
         if key in payload and payload[key] is not None:
             safe[key] = (

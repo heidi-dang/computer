@@ -161,6 +161,46 @@ async def _durable_event(owned: _OwnedSession, kind: str, payload: dict[str, Any
         return
 
 
+async def _command_interrupted(
+    owned: _OwnedSession,
+    command: str,
+    status: str,
+) -> None:
+    """Publish a safe interruption frame before discarding the command PTY."""
+    try:
+        await owned.observer(
+            "command_exit",
+            {
+                "tool_name": "agent_terminal_command",
+                "command": command,
+                "status": status,
+                "session_id": owned.session.session_id,
+                "terminal_id": owned.session.session_id,
+                "attempt_id": owned.attempt_id,
+                "session_discarded": True,
+                "next_command_starts_fresh": True,
+            },
+        )
+    except Exception:
+        # Interruption cleanup must still discard the PTY if realtime delivery
+        # is unavailable. The durable lifecycle record is best effort too.
+        pass
+    await _durable_event(
+        owned,
+        (
+            "AGENT_TERMINAL_COMMAND_TIMED_OUT"
+            if status == "timed_out"
+            else "AGENT_TERMINAL_COMMAND_CANCELLED"
+        ),
+        {
+            "command": command,
+            "status": status,
+            "session_discarded": True,
+            "next_command_starts_fresh": True,
+        },
+    )
+
+
 async def _read_loop(owned: _OwnedSession) -> None:
     try:
         while not owned.closed:
@@ -430,21 +470,19 @@ async def execute_agent_terminal_command(
             )
             return json.dumps(result, ensure_ascii=False)
         except asyncio.TimeoutError:
-            await _durable_event(
-                owned,
-                "AGENT_TERMINAL_COMMAND_TIMED_OUT",
-                {"command": value, "status": "timed_out"},
-            )
+            await _command_interrupted(owned, value, "timed_out")
             await _close_owned(key, owned)
             return json.dumps(
-                {"status": "timed_out", "output": "", "truncated": False}
+                {
+                    "status": "timed_out",
+                    "output": "",
+                    "truncated": False,
+                    "session_discarded": True,
+                    "next_command_starts_fresh": True,
+                }
             )
         except asyncio.CancelledError:
-            await _durable_event(
-                owned,
-                "AGENT_TERMINAL_COMMAND_CANCELLED",
-                {"command": value, "status": "cancelled"},
-            )
+            await _command_interrupted(owned, value, "cancelled")
             await _close_owned(key, owned)
             raise
         except (BrokenPipeError, OSError) as exc:

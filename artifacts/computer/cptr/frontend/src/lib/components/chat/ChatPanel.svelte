@@ -956,6 +956,12 @@ event?.flowdeck_parent_run_id || !event?.run_id
 	function flowDeckActivityText(event: any): string | null {
 		const kind = String(event?.kind || event?.type || '').toUpperCase();
 		const payload = event?.payload || {};
+if (kind === 'AGENT_TERMINAL_COMMAND_TIMED_OUT') {
+return 'Terminal · command timed out. PTY discarded; the next command starts fresh.';
+}
+if (kind === 'AGENT_TERMINAL_COMMAND_CANCELLED') {
+return 'Terminal · command cancelled. PTY discarded; the next command starts fresh.';
+}
 		if (kind === 'BUILD_BRIEF_CREATED') return 'Build · product brief created';
 		if (kind === 'BUILD_COMPLETION_CONTRACT_CREATED')
 			return 'Build · completion contract ready for review';

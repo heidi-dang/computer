@@ -1,8 +1,10 @@
+import asyncio
 import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from cptr.flowdeck.agent_terminal import (
@@ -10,7 +12,7 @@ from cptr.flowdeck.agent_terminal import (
     execute_agent_terminal_command,
 )
 from cptr.flowdeck.config import FlowDeckConfig
-from cptr.flowdeck.contracts import FlowDeckMode
+from cptr.flowdeck.durable import RunStatus
 
 
 class FlowDeckAgentTerminalTests(unittest.IsolatedAsyncioTestCase):
@@ -126,12 +128,29 @@ class FlowDeckAgentTerminalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_timeout_discards_the_session(self):
         with tempfile.TemporaryDirectory() as temp:
+            events = []
+            durable_events = []
+
+            class Store:
+                async def get_run(self, _run_id):
+                    return SimpleNamespace(
+                        owner="terminal-test-user",
+                        status=RunStatus.RUNNING.value,
+                    )
+
+                async def record_event(self, _run_id, kind, payload):
+                    durable_events.append((kind, payload))
+
+            async def observe(kind, payload):
+                events.append((kind, payload))
+
             context = {
                 "user_id": "terminal-test-user",
                 "flowdeck_run_id": "terminal-test-run",
                 "workspace": temp,
                 "request": None,
-                "terminal_observer": self.observe_noop,
+                "terminal_observer": observe,
+                "flowdeck_store": Store(),
             }
             with patch.dict(os.environ, self.enabled_env(), clear=False):
                 result = json.loads(
@@ -142,3 +161,76 @@ class FlowDeckAgentTerminalTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
         self.assertEqual(result["status"], "timed_out")
+        timeout_frames = [
+            payload
+            for kind, payload in events
+            if kind == "command_exit" and payload.get("status") == "timed_out"
+        ]
+        self.assertEqual(len(timeout_frames), 1)
+        self.assertTrue(timeout_frames[0]["session_discarded"])
+        self.assertTrue(timeout_frames[0]["next_command_starts_fresh"])
+        timeout_events = [
+            payload
+            for kind, payload in durable_events
+            if kind == "AGENT_TERMINAL_COMMAND_TIMED_OUT"
+        ]
+        self.assertEqual(len(timeout_events), 1)
+        self.assertNotIn("output", timeout_events[0])
+        self.assertNotIn("text", timeout_events[0])
+        self.assertTrue(result["session_discarded"])
+        self.assertTrue(result["next_command_starts_fresh"])
+
+    async def test_cancellation_discards_the_session_and_emits_safe_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            events = []
+            durable_events = []
+            command_started = asyncio.Event()
+
+            class Store:
+                async def get_run(self, _run_id):
+                    return SimpleNamespace(
+                        owner="terminal-test-user",
+                        status=RunStatus.RUNNING.value,
+                    )
+
+                async def record_event(self, _run_id, kind, payload):
+                    durable_events.append((kind, payload))
+
+            async def observe(kind, payload):
+                events.append((kind, payload))
+                if kind == "command_start":
+                    command_started.set()
+
+            context = {
+                "user_id": "terminal-test-user",
+                "flowdeck_run_id": "terminal-test-run",
+                "workspace": temp,
+                "request": None,
+                "terminal_observer": observe,
+                "flowdeck_store": Store(),
+            }
+            with patch.dict(os.environ, self.enabled_env(), clear=False):
+                task = asyncio.create_task(
+                    execute_agent_terminal_command("sleep 10", __context__=context)
+                )
+                await asyncio.wait_for(command_started.wait(), timeout=5)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        cancellation_frames = [
+            payload
+            for kind, payload in events
+            if kind == "command_exit" and payload.get("status") == "cancelled"
+        ]
+        self.assertEqual(len(cancellation_frames), 1)
+        self.assertTrue(cancellation_frames[0]["session_discarded"])
+        self.assertTrue(cancellation_frames[0]["next_command_starts_fresh"])
+        cancellation_events = [
+            payload
+            for kind, payload in durable_events
+            if kind == "AGENT_TERMINAL_COMMAND_CANCELLED"
+        ]
+        self.assertEqual(len(cancellation_events), 1)
+        self.assertNotIn("output", cancellation_events[0])
+        self.assertNotIn("text", cancellation_events[0])

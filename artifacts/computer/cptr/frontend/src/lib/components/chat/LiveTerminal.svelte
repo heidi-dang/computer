@@ -28,13 +28,27 @@ const terminalStatuses = new Set([
 
 const normalizedStatus = $derived(String(status || 'queued').toLowerCase().replaceAll('-', '_'));
 const isTerminal = $derived(terminalStatuses.has(normalizedStatus));
-const statusLabel = $derived(
-normalizedStatus === 'manual_review_required' || normalizedStatus === 'manual_review'
-? 'manual review'
-: normalizedStatus === 'unknown'
-? 'reconnecting'
-: normalizedStatus
-);
+
+type TerminalInterruption = 'timed_out' | 'cancelled';
+
+function interruptionFor(event: any): TerminalInterruption | null {
+const frame = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
+const kind = String(frame?.frame_kind || event?.kind || event?.type || '').toLowerCase();
+const payload = frame?.payload || event?.payload || {};
+const reportedStatus = String(payload.status || event?.status || '').toLowerCase();
+if (reportedStatus === 'timed_out' || kind.includes('timed_out') || kind.includes('timeout')) {
+return 'timed_out';
+}
+if (
+reportedStatus === 'cancelled' ||
+reportedStatus === 'canceled' ||
+kind.includes('cancelled') ||
+kind.includes('canceled')
+) {
+return 'cancelled';
+}
+return null;
+}
 
 function eventKey(event: any, index: number) {
 const frame = event?.payload?.kind === 'terminal_frame' ? event.payload : null;
@@ -118,6 +132,9 @@ if (frame?.frame_kind === 'command_output') title = `shell · ${payload.stream |
 if (frame?.frame_kind === 'command_exit') title = `shell · exited (${payload.exit_code ?? 'unknown'})`;
 if (frame?.frame_kind === 'action_start') title = `action · ${payload.tool_name || 'started'}`;
 if (frame?.frame_kind === 'action_exit') title = `action · ${payload.tool_name || 'completed'}`;
+const interruption = interruptionFor(event);
+if (interruption === 'timed_out') title = 'terminal · command timed out';
+if (interruption === 'cancelled') title = 'terminal · command cancelled';
 if (event?.delta) title = 'agent update · native transcript activity';
 if (item?.type === 'reasoning') title = `agent activity · ${safeOutputSummary || 'safe summary'}`;
 if (item?.type === 'message') title = `agent update · ${safeOutputSummary || 'native transcript activity'}`;
@@ -128,10 +145,20 @@ return {
 key: eventKey(event, index),
 sequence: event?.sequence ?? index + 1,
 title,
-detail: stream ? stringify(stream) : safeSummary || identity || '',
+detail:
+interruption === 'timed_out' || interruption === 'cancelled'
+? 'PTY discarded · the next command starts fresh'
+: stream
+? stringify(stream)
+: safeSummary || identity || '',
 identity,
-isError: Boolean(payload.stderr) || payload.status === 'failed' || /failed|error|rejected/i.test(`${kind} ${safeSummary || ''}`),
-isLifecycle: Boolean(frame) || (!tool && !command && !path && !output)
+isError:
+interruption === 'timed_out' ||
+Boolean(payload.stderr) ||
+payload.status === 'failed' ||
+/failed|error|rejected/i.test(`${kind} ${safeSummary || ''}`),
+isLifecycle: Boolean(frame) || Boolean(interruption) || (!tool && !command && !path && !output),
+interruption
 };
 }
 
@@ -145,6 +172,26 @@ if (Number.isFinite(left) && Number.isFinite(right)) return left - right;
 return 0;
 });
 });
+
+const latestInterruption = $derived.by(() => {
+for (const event of [...uniqueEvents].reverse()) {
+const interruption = interruptionFor(event);
+if (interruption) return interruption;
+}
+return null;
+});
+
+const statusLabel = $derived(
+latestInterruption === 'timed_out'
+? 'command timed out'
+: latestInterruption === 'cancelled'
+? 'command cancelled'
+: normalizedStatus === 'manual_review_required' || normalizedStatus === 'manual_review'
+? 'manual review'
+: normalizedStatus === 'unknown'
+? 'reconnecting'
+: normalizedStatus
+);
 
 const lines = $derived(
 uniqueEvents
@@ -209,6 +256,22 @@ aria-expanded={open}
 </button>
 </div>
 </header>
+
+{#if latestInterruption}
+<div
+class="terminal-interruption"
+class:is-cancelled={latestInterruption === 'cancelled'}
+role="alert"
+data-testid={`heidi-terminal-${latestInterruption}`}
+>
+<strong>{latestInterruption === 'timed_out' ? 'Command timed out' : 'Command cancelled'}</strong>
+<span>
+{latestInterruption === 'timed_out'
+? 'The command exceeded its time limit. The PTY was discarded; the next command starts fresh.'
+: 'The command was intentionally stopped. The PTY was discarded; the next command starts fresh.'}
+</span>
+</div>
+{/if}
 
 {#if open}
 <div class="terminal-output" role="log" aria-live="polite" bind:this={outputEl} onscroll={() => {
@@ -299,6 +362,29 @@ color: #ede9fe;
 .error-line .line-title { color: #fca5a5; }
 .error-line .line-detail { color: #fda4af; }
 .lifecycle-line .line-title { color: #c4b5fd; }
+.terminal-interruption {
+display: flex;
+flex-direction: column;
+gap: .2rem;
+margin: .65rem .75rem .1rem;
+padding: .65rem .7rem;
+border: 1px solid color-mix(in oklab, #fb7185 48%, transparent);
+border-radius: .6rem;
+background: color-mix(in oklab, #4c0519 48%, transparent);
+color: #fecdd3;
+font: .67rem/1.4 ui-sans-serif, system-ui, sans-serif;
+}
+.terminal-interruption strong {
+color: #fda4af;
+font-weight: 750;
+letter-spacing: .02em;
+}
+.terminal-interruption.is-cancelled {
+border-color: color-mix(in oklab, #fbbf24 44%, transparent);
+background: color-mix(in oklab, #451a03 42%, transparent);
+color: #fde68a;
+}
+.terminal-interruption.is-cancelled strong { color: #fcd34d; }
 .terminal-empty { padding: 1.25rem .25rem; color: #71909a; font: .7rem ui-monospace, SFMono-Regular, monospace; }
 .prompt-mark { margin-right: .5rem; color: #34d399; }
 @keyframes terminal-pulse { 50% { opacity: .5; box-shadow: 0 0 0 6px color-mix(in oklab, #22d3ee 0%, transparent); } }
