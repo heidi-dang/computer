@@ -9,7 +9,15 @@
 	} from '$lib/stores';
 	import type { StreamingBehavior } from '$lib/stores';
 	import { t, locale, changeLocale, supportedLocales } from '$lib/i18n';
-	import { session } from '$lib/session';
+	import { onMount } from 'svelte';
+	import {
+		clearRetainedFlowDeckDraft,
+		FLOWDECK_DRAFT_CHANGED_EVENT,
+FLOWDECK_DRAFT_STORAGE_KEY,
+		readRetainedFlowDeckDraft,
+		type RetainedFlowDeckDraft,
+		session
+	} from '$lib/session';
 	import ToggleSwitch from '../common/ToggleSwitch.svelte';
 
 	interface Props {
@@ -38,6 +46,16 @@
 
 	let copied = $state(false);
 	let resetting = $state(false);
+	let retainedDraft = $state<RetainedFlowDeckDraft | null>(null);
+
+	function refreshRetainedDraft() {
+		retainedDraft = readRetainedFlowDeckDraft();
+	}
+
+	function clearSavedFlowDeckDraft() {
+		clearRetainedFlowDeckDraft();
+		refreshRetainedDraft();
+	}
 
 	function copyLink() {
 		navigator.clipboard.writeText(REPO_URL);
@@ -64,6 +82,20 @@
 			location.reload();
 		}
 	}
+
+	onMount(() => {
+		refreshRetainedDraft();
+const onStorage = (event: StorageEvent) => {
+if (event.key === FLOWDECK_DRAFT_STORAGE_KEY) refreshRetainedDraft();
+};
+window.addEventListener('storage', onStorage);
+		window.addEventListener(FLOWDECK_DRAFT_CHANGED_EVENT, refreshRetainedDraft);
+
+		return () => {
+window.removeEventListener('storage', onStorage);
+			window.removeEventListener(FLOWDECK_DRAFT_CHANGED_EVENT, refreshRetainedDraft);
+		};
+	});
 </script>
 
 <div class="flex flex-col h-full">
@@ -166,6 +198,46 @@
 		<p class="text-[0.6875rem] text-gray-400 dark:text-gray-600 mt-1">
 			{$streamingBehavior === 'queue' ? $t('general.queueDesc') : $t('general.interruptDesc')}
 		</p>
+
+		<section class="mt-5" aria-labelledby="flowdeck-storage-heading">
+			<h3 id="flowdeck-storage-heading" class="text-xs text-gray-400 dark:text-gray-600 mb-2">
+				Privacy &amp; storage
+			</h3>
+			<div
+				class="flex items-start justify-between gap-3 rounded-lg border border-gray-200/70 dark:border-white/8 px-3 py-2.5"
+			>
+				<div class="min-w-0">
+					<p class="text-xs font-medium text-gray-700 dark:text-gray-300">Saved FlowDeck draft</p>
+					{#if retainedDraft}
+						{@const remainingDays = Math.max(
+							1,
+							Math.ceil((retainedDraft.expiresAt - Date.now()) / (24 * 60 * 60 * 1000))
+						)}
+						<p class="text-[0.6875rem] text-gray-400 dark:text-gray-500 mt-1">
+							A draft is saved on this device and expires in {remainingDays}
+							{remainingDays === 1 ? 'day' : 'days'}.
+						</p>
+					{:else}
+						<p class="text-[0.6875rem] text-gray-400 dark:text-gray-500 mt-1">
+							No saved FlowDeck draft on this device.
+						</p>
+					{/if}
+					<p class="text-[0.6875rem] text-gray-400 dark:text-gray-600 mt-1">
+						Only the workspace and objective are retained. Sessions, runs, credentials, and
+						responses are not affected.
+					</p>
+				</div>
+				<button
+					type="button"
+					class="shrink-0 rounded-md px-2 py-1 text-[0.6875rem] text-gray-500 hover:text-red-600 dark:text-gray-500 dark:hover:text-red-400 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+					onclick={clearSavedFlowDeckDraft}
+					disabled={!retainedDraft}
+					aria-label="Clear saved FlowDeck draft"
+				>
+					Clear draft
+				</button>
+			</div>
+		</section>
 
 		<div class="pt-5">
 			<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-1">

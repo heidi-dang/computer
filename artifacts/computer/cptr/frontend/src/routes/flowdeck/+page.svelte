@@ -5,7 +5,7 @@
 		cancelFlowDeckOrchestration,
 		createFlowDeckOrchestration,
 		FDX_CONTAINMENT_CATEGORIES,
-FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
+		FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 		getFlowDeckOrchestration,
 		getFdxContainmentDiagnostics,
 		type FdxContainmentDiagnostic,
@@ -18,13 +18,15 @@ FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 	import CheckpointPanel from '$lib/components/CheckpointPanel.svelte';
 	import { currentWorkspace, workspaceList } from '$lib/stores';
 	import { chatModels, defaultModel } from '$lib/stores/chat';
-import {
-clearRetainedFlowDeckDraft,
-FLOWDECK_DRAFT_TTL_MS,
-readRetainedFlowDeckDraft,
-SESSION_EXPIRED_EVENT,
-writeRetainedFlowDeckDraft
-} from '$lib/session';
+	import {
+		clearRetainedFlowDeckDraft,
+		FLOWDECK_DRAFT_CHANGED_EVENT,
+FLOWDECK_DRAFT_STORAGE_KEY,
+		FLOWDECK_DRAFT_TTL_MS,
+		readRetainedFlowDeckDraft,
+		SESSION_EXPIRED_EVENT,
+		writeRetainedFlowDeckDraft
+	} from '$lib/session';
 
 	type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'error';
 	type RunKind = 'success' | 'failure' | 'cancelled' | 'manual' | 'active' | 'unknown';
@@ -46,8 +48,8 @@ writeRetainedFlowDeckDraft
 	let isCancelling = $state(false);
 	let confirmCancel = $state(false);
 	let hydrated = $state(false);
-let retainDraft = $state(false);
-let retainedDraftExpiresAt = $state<number | null>(null);
+	let retainDraft = $state(false);
+	let retainedDraftExpiresAt = $state<number | null>(null);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let requestInFlight = false;
 	let diagnosticsRefreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -56,15 +58,15 @@ let retainedDraftExpiresAt = $state<number | null>(null);
 	let diagnosticCategories = $state<string[]>([...FDX_CONTAINMENT_CATEGORIES]);
 	let diagnosticCategory = $state('');
 	let diagnosticsLoading = $state(false);
-let diagnosticsLoadingOlder = $state(false);
+	let diagnosticsLoadingOlder = $state(false);
 	let diagnosticsError = $state('');
-let diagnosticsOlderError = $state('');
-let diagnosticsNextCursor = $state<string | null>(null);
-let diagnosticsHasLoadedOlderPage = $state(false);
+	let diagnosticsOlderError = $state('');
+	let diagnosticsNextCursor = $state<string | null>(null);
+	let diagnosticsHasLoadedOlderPage = $state(false);
 	let diagnosticsRequestId = 0;
-let diagnosticsInFlightCategory = '';
-let diagnosticsRefreshQueued = false;
-let diagnosticsMounted = false;
+	let diagnosticsInFlightCategory = '';
+	let diagnosticsRefreshQueued = false;
+	let diagnosticsMounted = false;
 
 	const DIAGNOSTICS_MAX_RETRIES = 3;
 	const DIAGNOSTICS_RETRY_DELAYS_MS = [250, 500, 1000] as const;
@@ -281,137 +283,133 @@ let diagnosticsMounted = false;
 		return new Promise((resolve) => setTimeout(resolve, milliseconds));
 	}
 
-function mergeDiagnostics(
-current: FdxContainmentDiagnostic[],
-incoming: FdxContainmentDiagnostic[],
-position: 'newest' | 'older'
-): FdxContainmentDiagnostic[] {
-const incomingById = new Map(incoming.map((diagnostic) => [diagnostic.id, diagnostic]));
-const currentIds = new Set(current.map((diagnostic) => diagnostic.id));
-const refreshedCurrent = current.map(
-(diagnostic) => incomingById.get(diagnostic.id) ?? diagnostic
-);
-const newDiagnostics = incoming.filter((diagnostic) => !currentIds.has(diagnostic.id));
-return position === 'older'
-? [...refreshedCurrent, ...newDiagnostics]
-: [...newDiagnostics, ...refreshedCurrent];
-}
+	function mergeDiagnostics(
+		current: FdxContainmentDiagnostic[],
+		incoming: FdxContainmentDiagnostic[],
+		position: 'newest' | 'older'
+	): FdxContainmentDiagnostic[] {
+		const incomingById = new Map(incoming.map((diagnostic) => [diagnostic.id, diagnostic]));
+		const currentIds = new Set(current.map((diagnostic) => diagnostic.id));
+		const refreshedCurrent = current.map(
+			(diagnostic) => incomingById.get(diagnostic.id) ?? diagnostic
+		);
+		const newDiagnostics = incoming.filter((diagnostic) => !currentIds.has(diagnostic.id));
+		return position === 'older'
+			? [...refreshedCurrent, ...newDiagnostics]
+			: [...newDiagnostics, ...refreshedCurrent];
+	}
 
-async function fetchDiagnosticsPage(
-requestedCategory: string,
-requestedCursor: string | null,
-requestId: number
-) {
-for (let retry = 0; retry <= DIAGNOSTICS_MAX_RETRIES; retry += 1) {
-if (retry > 0) {
-await waitForDiagnosticsRetry(DIAGNOSTICS_RETRY_DELAYS_MS[retry - 1]);
-}
-if (requestId !== diagnosticsRequestId) return null;
-try {
-return await getFdxContainmentDiagnostics(
-requestedCategory,
-FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
-requestedCursor
-);
-} catch {
-if (retry === DIAGNOSTICS_MAX_RETRIES) throw new Error('diagnostics unavailable');
-}
-}
-return null;
-}
+	async function fetchDiagnosticsPage(
+		requestedCategory: string,
+		requestedCursor: string | null,
+		requestId: number
+	) {
+		for (let retry = 0; retry <= DIAGNOSTICS_MAX_RETRIES; retry += 1) {
+			if (retry > 0) {
+				await waitForDiagnosticsRetry(DIAGNOSTICS_RETRY_DELAYS_MS[retry - 1]);
+			}
+			if (requestId !== diagnosticsRequestId) return null;
+			try {
+				return await getFdxContainmentDiagnostics(
+					requestedCategory,
+					FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
+					requestedCursor
+				);
+			} catch {
+				if (retry === DIAGNOSTICS_MAX_RETRIES) throw new Error('diagnostics unavailable');
+			}
+		}
+		return null;
+	}
 
 	async function refreshDiagnostics() {
-if (diagnosticsRequestInFlight) {
-// Periodic refreshes for the same category can safely be skipped. A
-// category change must get its own request after the current one settles.
-if (diagnosticCategory !== diagnosticsInFlightCategory) {
-diagnosticsRefreshQueued = true;
-}
-return;
-}
+		if (diagnosticsRequestInFlight) {
+			// Periodic refreshes for the same category can safely be skipped. A
+			// category change must get its own request after the current one settles.
+			if (diagnosticCategory !== diagnosticsInFlightCategory) {
+				diagnosticsRefreshQueued = true;
+			}
+			return;
+		}
 		diagnosticsRequestInFlight = true;
 		const requestId = ++diagnosticsRequestId;
-const requestedCategory = diagnosticCategory;
-const requestedCursor = null;
-diagnosticsInFlightCategory = requestedCategory;
+		const requestedCategory = diagnosticCategory;
+		const requestedCursor = null;
+		diagnosticsInFlightCategory = requestedCategory;
 		diagnosticsLoading = true;
 		diagnosticsError = '';
 
 		try {
-const result = await fetchDiagnosticsPage(requestedCategory, requestedCursor, requestId);
-if (result) {
-if (requestId !== diagnosticsRequestId || diagnosticCategory !== requestedCategory) return;
-diagnostics = mergeDiagnostics(diagnostics, result.diagnostics, 'newest');
-if (!diagnosticsHasLoadedOlderPage) diagnosticsNextCursor = result.next_cursor;
-					diagnosticCategories = result.categories.filter((category) =>
-						FDX_CONTAINMENT_CATEGORIES.includes(
-							category as (typeof FDX_CONTAINMENT_CATEGORIES)[number]
-						)
-					);
-					diagnosticsLoading = false;
-					return;
-				}
-} catch {
-// Do not put server exception text, paths, process output, or credentials
-// into this operator-facing surface.
-if (requestId === diagnosticsRequestId) {
-diagnosticsError = 'Containment diagnostics are temporarily unavailable.';
-diagnosticsLoading = false;
+			const result = await fetchDiagnosticsPage(requestedCategory, requestedCursor, requestId);
+			if (result) {
+				if (requestId !== diagnosticsRequestId || diagnosticCategory !== requestedCategory) return;
+				diagnostics = mergeDiagnostics(diagnostics, result.diagnostics, 'newest');
+				if (!diagnosticsHasLoadedOlderPage) diagnosticsNextCursor = result.next_cursor;
+				diagnosticCategories = result.categories.filter((category) =>
+					FDX_CONTAINMENT_CATEGORIES.includes(
+						category as (typeof FDX_CONTAINMENT_CATEGORIES)[number]
+					)
+				);
+				diagnosticsLoading = false;
+				return;
 			}
-return;
+		} catch {
+			// Do not put server exception text, paths, process output, or credentials
+			// into this operator-facing surface.
+			if (requestId === diagnosticsRequestId) {
+				diagnosticsError = 'Containment diagnostics are temporarily unavailable.';
+				diagnosticsLoading = false;
+			}
+			return;
 		} finally {
 			diagnosticsRequestInFlight = false;
-diagnosticsInFlightCategory = '';
-if (diagnosticsMounted && diagnosticsRefreshQueued) {
-diagnosticsRefreshQueued = false;
-void refreshDiagnostics();
-}
+			diagnosticsInFlightCategory = '';
+			if (diagnosticsMounted && diagnosticsRefreshQueued) {
+				diagnosticsRefreshQueued = false;
+				void refreshDiagnostics();
+			}
 		}
 	}
 
-async function loadOlderDiagnostics() {
-if (
-diagnosticsRequestInFlight ||
-diagnosticsLoadingOlder ||
-!diagnosticsNextCursor
-) {
-return;
-}
-const requestedCategory = diagnosticCategory;
-const requestedCursor = diagnosticsNextCursor;
-const requestId = ++diagnosticsRequestId;
-diagnosticsRequestInFlight = true;
-diagnosticsInFlightCategory = requestedCategory;
-diagnosticsLoadingOlder = true;
-diagnosticsOlderError = '';
+	async function loadOlderDiagnostics() {
+		if (diagnosticsRequestInFlight || diagnosticsLoadingOlder || !diagnosticsNextCursor) {
+			return;
+		}
+		const requestedCategory = diagnosticCategory;
+		const requestedCursor = diagnosticsNextCursor;
+		const requestId = ++diagnosticsRequestId;
+		diagnosticsRequestInFlight = true;
+		diagnosticsInFlightCategory = requestedCategory;
+		diagnosticsLoadingOlder = true;
+		diagnosticsOlderError = '';
 
-try {
-const result = await fetchDiagnosticsPage(requestedCategory, requestedCursor, requestId);
-if (
-!result ||
-requestId !== diagnosticsRequestId ||
-diagnosticCategory !== requestedCategory ||
-diagnosticsNextCursor !== requestedCursor
-) {
-return;
-}
-diagnostics = mergeDiagnostics(diagnostics, result.diagnostics, 'older');
-diagnosticsNextCursor = result.next_cursor;
-diagnosticsHasLoadedOlderPage = true;
-} catch {
-if (requestId === diagnosticsRequestId) {
-diagnosticsOlderError = 'Older containment events are temporarily unavailable.';
-}
-} finally {
-diagnosticsRequestInFlight = false;
-diagnosticsInFlightCategory = '';
-diagnosticsLoadingOlder = false;
-if (diagnosticsMounted && diagnosticsRefreshQueued) {
-diagnosticsRefreshQueued = false;
-void refreshDiagnostics();
-}
-}
-}
+		try {
+			const result = await fetchDiagnosticsPage(requestedCategory, requestedCursor, requestId);
+			if (
+				!result ||
+				requestId !== diagnosticsRequestId ||
+				diagnosticCategory !== requestedCategory ||
+				diagnosticsNextCursor !== requestedCursor
+			) {
+				return;
+			}
+			diagnostics = mergeDiagnostics(diagnostics, result.diagnostics, 'older');
+			diagnosticsNextCursor = result.next_cursor;
+			diagnosticsHasLoadedOlderPage = true;
+		} catch {
+			if (requestId === diagnosticsRequestId) {
+				diagnosticsOlderError = 'Older containment events are temporarily unavailable.';
+			}
+		} finally {
+			diagnosticsRequestInFlight = false;
+			diagnosticsInFlightCategory = '';
+			diagnosticsLoadingOlder = false;
+			if (diagnosticsMounted && diagnosticsRefreshQueued) {
+				diagnosticsRefreshQueued = false;
+				void refreshDiagnostics();
+			}
+		}
+	}
 
 	function stopDiagnosticsRefresh() {
 		if (diagnosticsRefreshTimer) clearInterval(diagnosticsRefreshTimer);
@@ -526,16 +524,16 @@ void refreshDiagnostics();
 		if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(DRAFT_STORAGE_KEY);
 	}
 
-function clearRetainedDraft() {
-clearRetainedFlowDeckDraft();
-retainedDraftExpiresAt = null;
-}
+	function clearRetainedDraft() {
+		clearRetainedFlowDeckDraft();
+		retainedDraftExpiresAt = null;
+	}
 
 	function persistComposerDraft() {
 		if (typeof sessionStorage === 'undefined') return;
 		if (flowdeckMode === 'run' || runId) {
 			clearComposerDraft();
-clearRetainedDraft();
+			clearRetainedDraft();
 			return;
 		}
 		const draft = {
@@ -545,16 +543,16 @@ clearRetainedDraft();
 		};
 		if (!draft.workspace && !draft.objective) {
 			clearComposerDraft();
-clearRetainedDraft();
+			clearRetainedDraft();
 			return;
 		}
 		sessionStorage.setItem(DRAFT_STORAGE_KEY, JSON.stringify(draft));
-if (retainDraft) {
-const retained = writeRetainedFlowDeckDraft(draft);
-retainedDraftExpiresAt = retained?.expiresAt ?? null;
-} else {
-clearRetainedDraft();
-}
+		if (retainDraft) {
+			const retained = writeRetainedFlowDeckDraft(draft);
+			retainedDraftExpiresAt = retained?.expiresAt ?? null;
+		} else {
+			clearRetainedDraft();
+		}
 	}
 
 	function persistOwnedRun() {
@@ -564,7 +562,7 @@ clearRetainedDraft();
 			return;
 		}
 		clearComposerDraft();
-clearRetainedDraft();
+		clearRetainedDraft();
 		sessionStorage.setItem(
 			STORAGE_KEY,
 			JSON.stringify({
@@ -634,7 +632,7 @@ clearRetainedDraft();
 		stopPolling();
 		persistOwnedRun();
 		clearComposerDraft();
-clearRetainedDraft();
+		clearRetainedDraft();
 		updateRunUrl();
 	}
 
@@ -702,7 +700,7 @@ clearRetainedDraft();
 		const queryWorkspace = safeWorkspace(params.get('workspace'));
 		const stored = readStoredRecoveryState(STORAGE_KEY);
 		const draft = readStoredRecoveryState(DRAFT_STORAGE_KEY);
-const retainedDraft = readRetainedFlowDeckDraft();
+		const retainedDraft = readRetainedFlowDeckDraft();
 		const ownedId = safeRunId(queryRunId || stored.runId);
 		const ownedWorkspace = queryWorkspace || stored.workspace;
 		if (ownedId && ownedWorkspace) {
@@ -716,24 +714,24 @@ const retainedDraft = readRetainedFlowDeckDraft();
 			void refreshRun();
 		} else {
 			flowdeckMode = 'composer';
-retainDraft = Boolean(retainedDraft);
-retainedDraftExpiresAt = retainedDraft?.expiresAt ?? null;
-workspace = queryWorkspace || retainedDraft?.workspace || draft.workspace || '';
-objective = retainedDraft?.objective || draft.objective || '';
+			retainDraft = Boolean(retainedDraft);
+			retainedDraftExpiresAt = retainedDraft?.expiresAt ?? null;
+			workspace = queryWorkspace || retainedDraft?.workspace || draft.workspace || '';
+			objective = retainedDraft?.objective || draft.objective || '';
 			connectionState = 'connected';
 		}
 		hydrated = true;
 	}
 
-function discardRetainedDraft() {
-retainDraft = false;
-clearRetainedDraft();
-}
+	function discardRetainedDraft() {
+		retainDraft = false;
+		clearRetainedDraft();
+	}
 
-function draftExpiryLabel(expiresAt: number): string {
-const remainingDays = Math.max(1, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
-return `${remainingDays} day${remainingDays === 1 ? '' : 's'}`;
-}
+	function draftExpiryLabel(expiresAt: number): string {
+		const remainingDays = Math.max(1, Math.ceil((expiresAt - Date.now()) / (24 * 60 * 60 * 1000)));
+		return `${remainingDays} day${remainingDays === 1 ? '' : 's'}`;
+	}
 
 	onMount(() => {
 		diagnosticsMounted = true;
@@ -748,6 +746,16 @@ return `${remainingDays} day${remainingDays === 1 ? '' : 's'}`;
 			else persistComposerDraft();
 		};
 		window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+		const onRetainedDraftChanged = () => {
+			const retainedDraft = readRetainedFlowDeckDraft();
+			retainDraft = Boolean(retainedDraft);
+			retainedDraftExpiresAt = retainedDraft?.expiresAt ?? null;
+		};
+const onRetainedDraftStorage = (event: StorageEvent) => {
+if (event.key === FLOWDECK_DRAFT_STORAGE_KEY) onRetainedDraftChanged();
+};
+		window.addEventListener(FLOWDECK_DRAFT_CHANGED_EVENT, onRetainedDraftChanged);
+window.addEventListener('storage', onRetainedDraftStorage);
 		const onOnline = () => {
 			if (runId) {
 				connectionState = 'reconnecting';
@@ -766,6 +774,8 @@ return `${remainingDays} day${remainingDays === 1 ? '' : 's'}`;
 			stopDiagnosticsRefresh();
 			diagnosticsRequestId += 1;
 			window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+			window.removeEventListener(FLOWDECK_DRAFT_CHANGED_EVENT, onRetainedDraftChanged);
+window.removeEventListener('storage', onRetainedDraftStorage);
 			window.removeEventListener('online', onOnline);
 			window.removeEventListener('offline', onOffline);
 		};
@@ -830,17 +840,17 @@ return `${remainingDays} day${remainingDays === 1 ? '' : 's'}`;
 			</div>
 			<label class="diagnostic-filter">
 				<span>Category</span>
-<select
-bind:value={diagnosticCategory}
-onchange={() => {
-diagnosticsRequestId += 1;
-diagnostics = [];
-diagnosticsNextCursor = null;
-diagnosticsHasLoadedOlderPage = false;
-diagnosticsOlderError = '';
-void refreshDiagnostics();
-}}
->
+				<select
+					bind:value={diagnosticCategory}
+					onchange={() => {
+						diagnosticsRequestId += 1;
+						diagnostics = [];
+						diagnosticsNextCursor = null;
+						diagnosticsHasLoadedOlderPage = false;
+						diagnosticsOlderError = '';
+						void refreshDiagnostics();
+					}}
+				>
 					<option value="">All categories</option>
 					{#each diagnosticCategories as category}
 						<option value={category}>{categoryLabel(category)}</option>
@@ -860,7 +870,7 @@ void refreshDiagnostics();
 					Retry diagnostics
 				</button>
 			</div>
-{:else if diagnosticsLoading && diagnostics.length === 0}
+		{:else if diagnosticsLoading && diagnostics.length === 0}
 			<div class="diagnostics-message">Loading containment events…</div>
 		{:else if diagnostics.length === 0}
 			<div class="diagnostics-message">No containment events match this category.</div>
@@ -882,25 +892,25 @@ void refreshDiagnostics();
 					</a>
 				{/each}
 			</div>
-{#if diagnosticsNextCursor || diagnosticsOlderError}
-<div class="diagnostics-pagination">
-<div>
-{#if diagnosticsOlderError}
-<span class="diagnostics-message error" role="alert">{diagnosticsOlderError}</span>
-{:else}
-<span class="diagnostics-page-note">Showing newest events first.</span>
-{/if}
-</div>
-<button
-type="button"
-class="quiet-button diagnostics-older"
-onclick={() => void loadOlderDiagnostics()}
-disabled={diagnosticsLoadingOlder || diagnosticsLoading || !diagnosticsNextCursor}
->
-{diagnosticsLoadingOlder ? 'Loading older events…' : 'Load older events'}
-</button>
-</div>
-{/if}
+			{#if diagnosticsNextCursor || diagnosticsOlderError}
+				<div class="diagnostics-pagination">
+					<div>
+						{#if diagnosticsOlderError}
+							<span class="diagnostics-message error" role="alert">{diagnosticsOlderError}</span>
+						{:else}
+							<span class="diagnostics-page-note">Showing newest events first.</span>
+						{/if}
+					</div>
+					<button
+						type="button"
+						class="quiet-button diagnostics-older"
+						onclick={() => void loadOlderDiagnostics()}
+						disabled={diagnosticsLoadingOlder || diagnosticsLoading || !diagnosticsNextCursor}
+					>
+						{diagnosticsLoadingOlder ? 'Loading older events…' : 'Load older events'}
+					</button>
+				</div>
+			{/if}
 		{/if}
 	</section>
 
@@ -959,31 +969,32 @@ disabled={diagnosticsLoadingOlder || diagnosticsLoading || !diagnosticsNextCurso
 						rows="5"
 						required
 					></textarea>
-<div class="draft-retention">
-<label class="draft-retention-toggle" for="flowdeck-retain-draft">
-<input
-id="flowdeck-retain-draft"
-type="checkbox"
-aria-label="Save this draft on this device"
-bind:checked={retainDraft}
-/>
-<span>
-<strong>Save this draft on this device</strong>
-<small>
-Keep only the workspace and objective for {FLOWDECK_DRAFT_TTL_MS / (24 * 60 * 60 * 1000)} days.
-Runs, responses, credentials, and session details are never saved.
-</small>
-</span>
-</label>
-{#if retainedDraftExpiresAt}
-<div class="draft-retention-status" role="status">
-<span>Saved draft expires in {draftExpiryLabel(retainedDraftExpiresAt)}.</span>
-<button type="button" class="quiet-button" onclick={discardRetainedDraft}>
-Discard saved draft
-</button>
-</div>
-{/if}
-</div>
+					<div class="draft-retention">
+						<label class="draft-retention-toggle" for="flowdeck-retain-draft">
+							<input
+								id="flowdeck-retain-draft"
+								type="checkbox"
+								aria-label="Save this draft on this device"
+								bind:checked={retainDraft}
+							/>
+							<span>
+								<strong>Save this draft on this device</strong>
+								<small>
+									Keep only the workspace and objective for {FLOWDECK_DRAFT_TTL_MS /
+										(24 * 60 * 60 * 1000)} days. Runs, responses, credentials, and session details are
+									never saved.
+								</small>
+							</span>
+						</label>
+						{#if retainedDraftExpiresAt}
+							<div class="draft-retention-status" role="status">
+								<span>Saved draft expires in {draftExpiryLabel(retainedDraftExpiresAt)}.</span>
+								<button type="button" class="quiet-button" onclick={discardRetainedDraft}>
+									Discard saved draft
+								</button>
+							</div>
+						{/if}
+					</div>
 					<div class="composer-foot">
 						<div class="context-note">
 							<Icon name="cube" size={14} />
@@ -1438,28 +1449,28 @@ Discard saved draft
 		gap: 0.45rem;
 		margin-top: 0.9rem;
 	}
-.diagnostics-pagination {
-display: flex;
-align-items: center;
-justify-content: space-between;
-gap: 1rem;
-margin-top: 0.85rem;
-}
-.diagnostics-page-note {
-color: var(--fd-faint);
-font-size: 0.64rem;
-}
-.diagnostics-pagination .diagnostics-message {
-padding: 0;
-}
-.diagnostics-older {
-flex: 0 0 auto;
-color: var(--fd-teal);
-}
-.diagnostics-older:hover:not(:disabled) {
-border-color: color-mix(in oklab, var(--fd-teal) 45%, transparent);
-background: color-mix(in oklab, var(--fd-teal) 8%, transparent);
-}
+	.diagnostics-pagination {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+		margin-top: 0.85rem;
+	}
+	.diagnostics-page-note {
+		color: var(--fd-faint);
+		font-size: 0.64rem;
+	}
+	.diagnostics-pagination .diagnostics-message {
+		padding: 0;
+	}
+	.diagnostics-older {
+		flex: 0 0 auto;
+		color: var(--fd-teal);
+	}
+	.diagnostics-older:hover:not(:disabled) {
+		border-color: color-mix(in oklab, var(--fd-teal) 45%, transparent);
+		background: color-mix(in oklab, var(--fd-teal) 8%, transparent);
+	}
 	.diagnostic-row {
 		display: grid;
 		grid-template-columns: 1.2fr 1fr 1.5fr auto;
@@ -1695,52 +1706,52 @@ background: color-mix(in oklab, var(--fd-teal) 8%, transparent);
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-.draft-retention {
-display: grid;
-gap: 0.7rem;
-margin-top: 1rem;
-padding-top: 0.9rem;
-border-top: 1px solid color-mix(in oklab, var(--fd-line) 72%, transparent);
-}
-.draft-retention-toggle {
-display: flex;
-align-items: flex-start;
-gap: 0.65rem;
-margin: 0;
-color: var(--fd-ink);
-font-size: 0.72rem;
-font-weight: 650;
-cursor: pointer;
-}
-.draft-retention-toggle input {
-width: 1rem;
-height: 1rem;
-margin: 0.1rem 0 0;
-accent-color: var(--fd-teal);
-}
-.draft-retention-toggle span {
-display: grid;
-gap: 0.25rem;
-}
-.draft-retention-toggle small {
-max-width: 480px;
-color: var(--fd-muted);
-font-size: 0.65rem;
-font-weight: 400;
-line-height: 1.45;
-}
-.draft-retention-status {
-display: flex;
-align-items: center;
-justify-content: space-between;
-gap: 0.8rem;
-color: var(--fd-muted);
-font-size: 0.65rem;
-}
-.draft-retention-status .quiet-button {
-padding: 0.35rem 0.55rem;
-font-size: 0.62rem;
-}
+	.draft-retention {
+		display: grid;
+		gap: 0.7rem;
+		margin-top: 1rem;
+		padding-top: 0.9rem;
+		border-top: 1px solid color-mix(in oklab, var(--fd-line) 72%, transparent);
+	}
+	.draft-retention-toggle {
+		display: flex;
+		align-items: flex-start;
+		gap: 0.65rem;
+		margin: 0;
+		color: var(--fd-ink);
+		font-size: 0.72rem;
+		font-weight: 650;
+		cursor: pointer;
+	}
+	.draft-retention-toggle input {
+		width: 1rem;
+		height: 1rem;
+		margin: 0.1rem 0 0;
+		accent-color: var(--fd-teal);
+	}
+	.draft-retention-toggle span {
+		display: grid;
+		gap: 0.25rem;
+	}
+	.draft-retention-toggle small {
+		max-width: 480px;
+		color: var(--fd-muted);
+		font-size: 0.65rem;
+		font-weight: 400;
+		line-height: 1.45;
+	}
+	.draft-retention-status {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.8rem;
+		color: var(--fd-muted);
+		font-size: 0.65rem;
+	}
+	.draft-retention-status .quiet-button {
+		padding: 0.35rem 0.55rem;
+		font-size: 0.62rem;
+	}
 	.start-button {
 		display: inline-flex;
 		align-items: center;
@@ -2261,10 +2272,10 @@ font-size: 0.62rem;
 		.diagnostic-row time {
 			grid-column: 2;
 		}
-.diagnostics-pagination {
-align-items: stretch;
-flex-direction: column;
-}
+		.diagnostics-pagination {
+			align-items: stretch;
+			flex-direction: column;
+		}
 		.header-context,
 		.status-divider {
 			display: none;
