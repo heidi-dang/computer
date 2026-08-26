@@ -1,0 +1,133 @@
+I inspected the live Manus page again. The visible implementation is consistent with this model:
+Agent task loop
+    │
+    ├─ chooses a shell command
+    ├─ starts it in a task workspace
+    ├─ receives streaming stdout/stderr and exit status
+    ├─ interprets the result
+    └─ starts the next command
+          │
+          ▼
+Local terminal session / PTY
+          │
+          ▼
+heidi-dang/computer working tree
+For your heidi-dang/computer repo, the key difference is that the execution backend should be local. The browser UI and agent orchestration can resemble Manus, but commands should run through a local daemon on your machine rather than through a cloud sandbox.
+The implementation should have five parts:
+A local terminal daemon
+The daemon owns the actual shell process. It should:
+create a PTY-backed process;
+choose a working directory inside the authorized repository;
+launch the user’s shell;
+stream terminal output;
+accept terminal input;
+resize the PTY;
+report exit, signal, timeout, and disconnect events;
+clean up child processes and PTY resources.
+A session should have a stable identifier and metadata such as:
+session_id
+repository_root
+working_directory
+shell
+pid
+created_at
+last_activity_at
+status
+The daemon should reject paths outside the configured repository root. It should not accept an arbitrary working directory from the browser without resolving and validating it first.
+A local control API
+The browser should not spawn processes directly. It should connect to a local API exposed by the daemon.
+A minimal API could provide:
+POST /terminal/sessions
+GET  /terminal/sessions/:id/events
+POST /terminal/sessions/:id/input
+POST /terminal/sessions/:id/resize
+POST /terminal/sessions/:id/interrupt
+DELETE /terminal/sessions/:id
+For the live event stream, use either WebSocket or Server-Sent Events. A WebSocket is more natural if the same connection carries both terminal output and user input. SSE plus a separate POST input endpoint is also workable.
+Events should be structured rather than sending only raw text:
+session.started
+terminal.output
+terminal.resize
+process.exited
+process.signaled
+session.interrupted
+session.closed
+terminal.error
+Each event should contain a monotonically increasing sequence number. That gives the frontend a way to detect missed output and recover or request a snapshot.
+A terminal computer frontend
+The browser-side “Manus’s computer” panel should render:
+the terminal viewport;
+connection state;
+current working directory;
+running/exited status;
+command execution duration;
+stop/restart controls;
+optional task progress;
+reconnect state.
+A terminal emulator such as xterm.js would be appropriate. The frontend should not infer completion by looking for a shell prompt. It should use explicit process lifecycle events from the daemon.
+A useful state model is:
+idle
+starting
+running
+exited
+failed
+disconnected
+closed
+The frontend should append output only once. On reconnect, it should use the last acknowledged event sequence to request replay or a fresh terminal snapshot.
+An agent execution layer
+Manus appears to combine terminal execution with an agent loop. For your local implementation, the agent layer should invoke a terminal session through a narrow tool interface such as:
+terminal.create
+terminal.exec
+terminal.write
+terminal.read
+terminal.resize
+terminal.interrupt
+terminal.close
+For simple noninteractive commands, terminal.exec can start a command and wait for its terminal event sequence to finish.
+For interactive commands, the agent should use a persistent session:
+create session
+write command
+observe streamed output
+write response when needed
+wait for explicit exit event
+The agent must receive both:
+the human-readable terminal output;
+machine-readable execution metadata such as exit code, signal, duration, and truncation state.
+This is important because the visible Manus run did not just display output. It used the output and the formatting failure to decide what to inspect or do next.
+Security and lifecycle controls
+The local version needs stronger safeguards than a simple “run shell command” endpoint.
+At minimum:
+bind the daemon to loopback by default;
+require an authentication token even on loopback;
+validate the repository root using canonical paths;
+prevent .. traversal and symlink escape;
+restrict environment-variable exposure;
+avoid sending secrets into the browser event stream;
+cap output size and per-session history;
+limit concurrent sessions;
+enforce idle and maximum execution timeouts;
+kill the complete process group on interruption;
+clean up orphaned PTYs and child processes;
+log session creation, command start, exit, and termination;
+require explicit confirmation for destructive commands.
+The terminal output should be treated as untrusted data. A command’s output must not be able to modify the agent’s instructions or override safety policy.
+One important detail from the Manus page is that its visible terminal is not merely a screenshot. It exposes live shell state: command text, incremental output, diagnostics, and the returned prompt. Your implementation should therefore preserve terminal byte streams and control sequences rather than converting output into periodic text snapshots. That is what allows full-screen programs, colors, progress indicators, cursor movement, and interactive prompts to work correctly.
+I also checked the available Replit Apps, but no app matching computer was found. Therefore I could not send an update to a specific Replit project: the Replit integration requires an existing app identifier and cannot directly modify an arbitrary GitHub repository from this chat.
+Here is the implementation brief to give Replit Agent once the relevant Replit app is connected:
+Implement a Manus-style live terminal computer for the heidi-dang/computer project. Use a local terminal daemon as the execution backend instead of cloud execution. The daemon must create PTY-backed shell sessions inside a configured canonical repository root, stream structured terminal events to the browser, accept input and resize events, report explicit process lifecycle events, support reconnect/replay with sequence numbers, and cleanly terminate process groups. Add a browser terminal panel with live output, input, resize, connection state, session status, stop, interrupt, reconnect, and working-directory display. Keep the browser isolated from direct process creation: all command execution must go through the authenticated loopback daemon API. Enforce repository-root containment, symlink/traversal protection, output limits, timeouts, session cleanup, secret-safe event handling, and explicit confirmation for destructive operations. Add tests for PTY lifecycle, streaming output, interactive input, resize, reconnect/replay, exit and signal handling, process-group cleanup, path containment, authentication, output truncation, and concurrent-session limits. Verify the feature with local integration tests using the real daemon and local terminal, clearly separating tests that pass from browser/manual validation that remains unverified.
+
+Before implementation begins, Replit should inspect the repository’s existing architecture and identify:
+the current daemon or server entry point;
+the current browser/UI entry point;
+existing SSE, WebSocket, MCP, or control-plane abstractions;
+the current repository-root and security helpers;
+existing process-execution and test utilities;
+the appropriate local development and integration-test commands.
+The safest first milestone is a local vertical slice:
+create local PTY session
+    → stream output
+    → type input
+    → resize terminal
+    → receive explicit exit event
+    → close and clean up session
+After that works, add reconnect/replay and agent-tool integration. Do not start with broad supervisor or cloud-runtime changes, because the local PTY contract is the foundation that the rest of the live terminal computer depends on.
