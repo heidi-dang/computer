@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -18,8 +19,26 @@ from cptr.utils.db import get_db
 from cptr.utils.redaction import redact_external, redact_sensitive
 
 MAX_EVENT_PAYLOAD_CHARS = 12_000
+MAX_TERMINAL_CHUNK_CHARS = 4_096
 MAX_REPLAY_EVENTS = 500
 logger = logging.getLogger(__name__)
+
+# Terminal output is untrusted text. Remove control sequences that can influence
+# terminal emulators, clipboards, titles, or rendering before the event is stored.
+_OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+_CSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+_UNSAFE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+
+def sanitize_terminal_text(value: str, *, limit: int = MAX_TERMINAL_CHUNK_CHARS) -> str:
+    """Return redacted, display-safe terminal text with bounded output."""
+    text = _OSC_ESCAPE_RE.sub("", value)
+    text = _CSI_ESCAPE_RE.sub("", text)
+    text = _UNSAFE_CONTROL_RE.sub("", text)
+    text = redact_external(text)
+    if len(text) > limit:
+        return f"{text[:limit]}… [truncated]"
+    return text
 
 
 def _cap(value: Any, *, limit: int = MAX_EVENT_PAYLOAD_CHARS) -> Any:
@@ -29,7 +48,7 @@ def _cap(value: Any, *, limit: int = MAX_EVENT_PAYLOAD_CHARS) -> Any:
     if isinstance(value, list):
         return [_cap(item, limit=limit) for item in value[:200]]
     if isinstance(value, str):
-        return redact_external(value[:limit])
+        return sanitize_terminal_text(value, limit=limit)
     return value
 
 
@@ -47,15 +66,19 @@ class LiveEventEnvelope:
     payload: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
+        target_type, _, target_id = self.target_key.partition(":")
         return {
+            "version": 1,
             "event_id": self.event_id,
             "sequence": self.sequence,
             "timestamp": self.timestamp,
+            "target": {"type": target_type, "id": target_id},
             "task_id": self.task_id,
             "monitor_id": self.monitor_id,
             "worker_task_id": self.worker_task_id,
             "type": self.event_type,
             "payload": self.payload,
+            "redaction_applied": True,
         }
 
 
@@ -177,6 +200,22 @@ class LiveEventStore:
                 if event.sequence > after_sequence
             ][:limit]
 
+    async def snapshot(
+        self,
+        target_key: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        """Return a bounded, redacted replay snapshot for stream recovery."""
+        events = await self.replay(target_key, after_sequence=after_sequence, limit=limit)
+        return {
+            "target_key": target_key,
+            "after_sequence": after_sequence,
+            "last_sequence": events[-1].sequence if events else after_sequence,
+            "events": [event.to_dict() for event in events],
+        }
+
     @staticmethod
     def _from_row(row: ControlLiveEvent) -> LiveEventEnvelope:
         return LiveEventEnvelope(
@@ -276,6 +315,43 @@ async def safe_publish_task_event(**kwargs: Any) -> LiveEventEnvelope | None:
         return await publish_task_event(**kwargs)
     except Exception:
         logger.debug("live task event unavailable", exc_info=True)
+        return None
+
+
+async def publish_terminal_event(
+    *,
+    user_id: str,
+    target_type: str,
+    target_id: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    worker_task_id: str | None = None,
+) -> LiveEventEnvelope:
+    """Publish a normalized terminal event to the already-authorized target stream."""
+    if target_type == "task":
+        return await publish_task_event(
+            user_id=user_id,
+            task_id=target_id,
+            event_type=event_type,
+            payload=payload,
+            worker_task_id=worker_task_id,
+        )
+    if target_type == "monitor":
+        return await publish_monitor_event(
+            user_id=user_id,
+            monitor_id=target_id,
+            event_type=event_type,
+            payload=payload,
+            task_id=worker_task_id,
+        )
+    raise ValueError("unsupported live terminal target")
+
+
+async def safe_publish_terminal_event(**kwargs: Any) -> LiveEventEnvelope | None:
+    try:
+        return await publish_terminal_event(**kwargs)
+    except Exception:
+        logger.debug("live terminal event unavailable", exc_info=True)
         return None
 
 

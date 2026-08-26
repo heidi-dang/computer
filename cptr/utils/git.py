@@ -38,6 +38,8 @@ async def _run(
             "git",
             "-c",
             "core.quotePath=false",
+            "-c",
+            "color.ui=false",
             *args,
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
