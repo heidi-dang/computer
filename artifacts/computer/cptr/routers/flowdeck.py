@@ -1348,12 +1348,16 @@ async def list_fdx_containment_diagnostics(
 
 @router.get("/orchestrations/{run_id}/evidence-report")
 async def export_evidence_report(request: Request, run_id: str, workspace: str):
-    """Download the bounded, redacted evidence summary for an owned run."""
+    """Download the bounded, redacted durable evidence summary for an owned run.
+
+    Unlike the orchestration status response, an exported report must be
+    reproducible by any API worker. Terminal observer frames are intentionally
+    process-local and are therefore not part of this durable export.
+    """
     owner, _, run = await _owned_run(request, run_id, workspace)
     store = DurableFlowDeck(get_session_factory())
     await store.record_evidence_report_export(run_id=run.id, owner=owner)
     events = await store.list_events(run.id)
-    from cptr.flowdeck.terminal_observer import recent_terminal_frames
 
     events = [
         {
@@ -1366,17 +1370,6 @@ async def export_evidence_report(request: Request, run_id: str, workspace: str):
         }
         for event in events
     ]
-    events.extend(
-        {
-            "id": f"{run.id}:terminal:{frame['sequence']}",
-            "run_id": run.id,
-            "sequence": frame["sequence"],
-            "kind": "terminal_frame",
-            "payload": frame,
-            "created_at": frame["created_at"],
-        }
-        for frame in recent_terminal_frames(run.id)
-    )
     summary = build_audit_summary(
         events,
         run_id=run.id,

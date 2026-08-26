@@ -1872,7 +1872,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             if shared_engine is not None:
                 await shared_engine.dispose()
 
-    async def test_evidence_report_download_recovers_after_api_worker_stops(self):
+    async def test_evidence_report_download_recovers_after_all_api_workers_stop(self):
         shared_data_dir = Path(self.temp.name, "api-worker-restart")
         shared_data_dir.mkdir()
         first_port = self.free_port()
@@ -1881,6 +1881,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             second_port = self.free_port()
         first_worker = self.start_worker(shared_data_dir, first_port)
         second_worker = None
+        fresh_worker = None
         shared_engine = None
         try:
             await asyncio.to_thread(self.wait_for_health, first_port)
@@ -1966,8 +1967,19 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                     first_worker.wait(timeout=10)
                 first_worker = None
 
+                second_worker.terminate()
+                try:
+                    second_worker.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    second_worker.kill()
+                    second_worker.wait(timeout=10)
+                second_worker = None
+
+                fresh_port = self.free_port()
+                fresh_worker = self.start_worker(shared_data_dir, fresh_port)
+                await asyncio.to_thread(self.wait_for_health, fresh_port)
                 after_stop = await client.get(
-                    f"http://127.0.0.1:{second_port}{report_url}",
+                    f"http://127.0.0.1:{fresh_port}{report_url}",
                     params={"workspace": str(self.root_a)},
                     headers=headers,
                 )
@@ -1996,7 +2008,7 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
                 2,
             )
         finally:
-            for worker in (first_worker, second_worker):
+            for worker in (first_worker, second_worker, fresh_worker):
                 if worker and worker.poll() is None:
                     worker.terminate()
                     try:
