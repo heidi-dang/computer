@@ -7,7 +7,7 @@ const forbiddenDetails = [
 	'Error: private exception text'
 ];
 
-test('FlowDeck diagnostics panel redacts unsafe containment details', async ({ page }) => {
+test.beforeEach(async ({ page }) => {
 	await page.route('**/api/**', (route) => route.fulfill({ json: {} }));
 	await page.route('**/api/auth', (route) =>
 		route.fulfill({
@@ -47,6 +47,9 @@ test('FlowDeck diagnostics panel redacts unsafe containment details', async ({ p
 	await page.route('**/v1/flowdeck/checkpoints*', (route) =>
 		route.fulfill({ json: { checkpoints: [] } })
 	);
+});
+
+test('FlowDeck diagnostics panel redacts unsafe containment details', async ({ page }) => {
 	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) =>
 		route.fulfill({
 			json: {
@@ -131,4 +134,42 @@ test('FlowDeck diagnostics panel redacts unsafe containment details', async ({ p
 		expect(renderedDocument).not.toContain(detail);
 		expect(renderedMarkup).not.toContain(detail);
 	}
+});
+
+test('FlowDeck diagnostics outage stays safe and leaves the run composer usable', async ({
+	page
+}) => {
+	await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) =>
+		route.fulfill({
+			status: 503,
+			contentType: 'application/json',
+			body: JSON.stringify({
+				detail: 'Error: private exception text',
+				path: '/srv/flowdeck/private/credentials.json',
+				process_output: 'PROCESS_OUTPUT_SHOULD_NOT_RENDER',
+				credential: 'Bearer super-secret-token'
+			})
+		})
+	);
+
+	await page.goto('/flowdeck');
+	const panel = page.getByTestId('fdx-diagnostics-panel');
+	await expect(panel).toBeVisible({ timeout: 15_000 });
+	await expect(
+		panel.getByText('Containment diagnostics are temporarily unavailable.', { exact: true })
+	).toBeVisible();
+	await expect(panel.locator('.diagnostic-row')).toHaveCount(0);
+
+	const renderedDocument = await page.locator('body').textContent();
+	const renderedMarkup = await page.content();
+	for (const detail of forbiddenDetails) {
+		expect(renderedDocument).not.toContain(detail);
+		expect(renderedMarkup).not.toContain(detail);
+	}
+
+	const objective = page.getByLabel('Objective');
+	await expect(page.getByRole('heading', { name: /Give the work/ })).toBeVisible();
+	await expect(objective).toBeVisible();
+	await objective.fill('Keep the workspace ready after a diagnostics outage.');
+	await expect(page.getByRole('button', { name: /Start run/ })).toBeEnabled();
 });
