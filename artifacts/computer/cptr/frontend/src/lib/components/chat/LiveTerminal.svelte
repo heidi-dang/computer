@@ -86,7 +86,14 @@ return null;
 function isTerminalEvent(event: any) {
 const frame = terminalFrameFor(event);
 if (frame) {
-return ['command_start', 'command_output', 'command_exit'].includes(frame.frame_kind);
+return [
+'command_start',
+'command_output',
+'command_exit',
+'action_start',
+'action_output',
+'action_exit'
+].includes(frame.frame_kind);
 }
 return String(event?.kind || event?.type || '').startsWith('AGENT_TERMINAL_');
 }
@@ -167,6 +174,7 @@ if (frame?.frame_kind === 'command_start') title = 'shell · command started';
 if (frame?.frame_kind === 'command_output') title = `shell · ${payload.stream || 'output'}`;
 if (frame?.frame_kind === 'command_exit') title = `shell · exited (${payload.exit_code ?? 'unknown'})`;
 if (frame?.frame_kind === 'action_start') title = `action · ${payload.tool_name || 'started'}`;
+if (frame?.frame_kind === 'action_output') title = `action · ${payload.tool_name || 'output'}`;
 if (frame?.frame_kind === 'action_exit') title = `action · ${payload.tool_name || 'completed'}`;
 const interruption = interruptionFor(event);
 if (interruption === 'timed_out') title = 'terminal · command timed out';
