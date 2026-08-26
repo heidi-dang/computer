@@ -87,6 +87,8 @@ _SAFE_RUN_STATUSES = frozenset(
 )
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _FDX_DIAGNOSTIC_SCAN_MULTIPLIER = 10
+_FDX_DIAGNOSTIC_DEFAULT_LIMIT = 50
+_FDX_DIAGNOSTIC_MAX_LIMIT = 100
 
 
 class OrchestrationRequest(BaseModel):
@@ -1280,13 +1282,13 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
 async def list_fdx_containment_diagnostics(
     request: Request,
     category: str | None = None,
-    limit: int = 100,
+    limit: int = _FDX_DIAGNOSTIC_DEFAULT_LIMIT,
 ):
     """List safe FDX containment diagnostics for the authenticated operator."""
     owner = await _authenticate_flowdeck(request)
     if category and category not in FDX_CONTAINMENT_CATEGORIES:
         raise HTTPException(400, "unsupported containment category")
-    limit = max(1, min(limit, 200))
+    limit = max(1, min(limit, _FDX_DIAGNOSTIC_MAX_LIMIT))
     async with get_session_factory()() as db:
         query = (
             select(FlowDeckEvent, FlowDeckRun)
@@ -1295,17 +1297,21 @@ async def list_fdx_containment_diagnostics(
                 FlowDeckRun.owner == owner,
                 FlowDeckEvent.kind == FDX_CONTAINMENT_EVENT_KIND,
             )
-            .order_by(FlowDeckEvent.created_at.desc())
+            # The secondary key makes a page stable when several events share
+            # the same millisecond timestamp.
+            .order_by(FlowDeckEvent.created_at.desc(), FlowDeckEvent.id.desc())
         )
         # Apply the requested category in SQL when possible, but keep the
         # exact payload validation below for both unfiltered and future data.
         if category:
             query = query.where(FlowDeckEvent.payload["category"].as_string() == category)
-        query = query.limit(limit * _FDX_DIAGNOSTIC_SCAN_MULTIPLIER)
+        scan_limit = limit * _FDX_DIAGNOSTIC_SCAN_MULTIPLIER
+        query = query.limit(scan_limit + 1)
         rows = (await db.execute(query)).all()
 
     diagnostics = []
-    for event, run in rows:
+    has_more = len(rows) > scan_limit
+    for event, run in rows[:scan_limit]:
         event_category = safe_containment_category(event.payload)
         if event_category is None:
             continue
@@ -1343,6 +1349,7 @@ async def list_fdx_containment_diagnostics(
         "categories": list(FDX_CONTAINMENT_CATEGORIES),
         "diagnostics": diagnostics,
         "total": len(diagnostics),
+        "has_more": has_more,
     }
 
 

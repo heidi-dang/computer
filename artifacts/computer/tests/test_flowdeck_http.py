@@ -575,6 +575,71 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(unsupported.status_code, 400)
 
+    async def test_fdx_containment_diagnostics_use_newest_stable_bounded_window(self):
+        store = DurableFlowDeck(self.session_factory)
+        run, _ = await store.create_run(
+            request_key="fdx-diagnostics-window",
+            owner="user-a",
+            workspace=str(self.root_a),
+        )
+        async with self.session_factory() as session:
+            session.add_all(
+                [
+                    FlowDeckEvent(
+                        id=f"diag-window-{index}",
+                        run_id=run.id,
+                        sequence=100 + index,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=1000 + index,
+                    )
+                    for index in range(12)
+                ]
+                + [
+                    FlowDeckEvent(
+                        id="diag-window-tie-a",
+                        run_id=run.id,
+                        sequence=112,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=2000,
+                    ),
+                    FlowDeckEvent(
+                        id="diag-window-tie-z",
+                        run_id=run.id,
+                        sequence=113,
+                        kind="FDX_CONTAINMENT_FAILURE",
+                        payload={
+                            "category": "timeout",
+                            "fallback": "native",
+                            "source": "lifecycle",
+                        },
+                        created_at=2000,
+                    ),
+                ]
+            )
+            await session.commit()
+
+        response = await self.client.get(
+            "/v1/flowdeck/diagnostics/fdx-containment",
+            params={"limit": 1},
+            headers=self.headers(),
+        )
+        self.assertEqual(response.status_code, 200, response.text)
+        result = response.json()
+        self.assertEqual(len(result["diagnostics"]), 1)
+        self.assertEqual(result["diagnostics"][0]["id"], "diag-window-tie-z")
+        self.assertTrue(result["has_more"])
+        self.assertEqual(result["total"], 1)
+
     async def test_retry_and_reconnect_key_reuse_persists_one_run(self):
         calls = []
         created_flags = []

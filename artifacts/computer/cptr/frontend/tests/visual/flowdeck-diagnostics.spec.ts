@@ -365,6 +365,78 @@ test('FlowDeck diagnostics refresh periodically without overlapping and stops on
 	expect(diagnosticsRequestCount).toBe(3);
 });
 
+test('FlowDeck diagnostics stay newest-first and preserve a category change in flight', async ({
+page
+}) => {
+const diagnosticsResponse = {
+categories: ['process_failure', 'workspace_lease'],
+diagnostics: [
+{
+id: 'diag-new-process',
+run_id: 'run-new-process',
+sequence: 2,
+category: 'process_failure',
+fallback: 'native',
+run_status: 'failed',
+run_outcome: 'native_fallback',
+created_at: 1_735_689_601_000
+},
+{
+id: 'diag-old-lease',
+run_id: 'run-old-lease',
+sequence: 1,
+category: 'workspace_lease',
+fallback: 'native',
+run_status: 'recovering',
+run_outcome: 'native_fallback',
+created_at: 1_735_689_600_000
+}
+],
+total: 2,
+has_more: false
+};
+let diagnosticsRequestCount = 0;
+let diagnosticsRequestUrls: string[] = [];
+let releaseProcessRequest = () => {};
+
+await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', async (route) => {
+diagnosticsRequestCount += 1;
+diagnosticsRequestUrls = [...diagnosticsRequestUrls, route.request().url()];
+const category = new URL(route.request().url()).searchParams.get('category');
+if (diagnosticsRequestCount === 2) {
+await new Promise<void>((resolve) => {
+releaseProcessRequest = resolve;
+});
+}
+const diagnostics = category
+? diagnosticsResponse.diagnostics.filter((diagnostic) => diagnostic.category === category)
+: diagnosticsResponse.diagnostics;
+await route.fulfill({
+json: {
+...diagnosticsResponse,
+diagnostics,
+total: diagnostics.length
+}
+});
+});
+
+await page.goto('/flowdeck');
+const panel = page.getByTestId('fdx-diagnostics-panel');
+await expect(panel.locator('.diagnostic-row').first()).toContainText('Run run-new-');
+expect(diagnosticsRequestUrls[0]).toContain('limit=50');
+
+await panel.locator('select').selectOption('process_failure');
+await expect.poll(() => diagnosticsRequestCount).toBe(2);
+await panel.locator('select').selectOption('workspace_lease');
+expect(diagnosticsRequestCount).toBe(2);
+releaseProcessRequest();
+
+await expect.poll(() => diagnosticsRequestCount).toBe(3);
+await expect(panel.locator('select')).toHaveValue('workspace_lease');
+await expect(panel.locator('.diagnostic-category')).toHaveText('Workspace Lease');
+await expect(panel.locator('.diagnostic-row')).toHaveCount(1);
+});
+
 test('FlowDeck orchestration errors use bounded copy', async ({ page }) => {
 	await page.route('**/v1/flowdeck/orchestrations', (route) =>
 		route.fulfill({

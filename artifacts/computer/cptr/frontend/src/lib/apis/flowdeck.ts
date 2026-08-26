@@ -92,7 +92,10 @@ export interface FdxContainmentDiagnosticsResponse {
 categories: string[];
 diagnostics: FdxContainmentDiagnostic[];
 total: number;
+has_more: boolean;
 }
+
+export const FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE = 50;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -155,25 +158,39 @@ export function sanitizeFdxContainmentDiagnostics(
 	value: unknown
 ): FdxContainmentDiagnosticsResponse {
 	if (!isRecord(value)) {
-		return { categories: [], diagnostics: [], total: 0 };
+return { categories: [], diagnostics: [], total: 0, has_more: false };
 	}
 	const categories = Array.isArray(value.categories)
 		? value.categories.filter(isContainmentCategory)
 		: [];
-	const diagnostics = Array.isArray(value.diagnostics)
+const diagnostics = Array.isArray(value.diagnostics)
 		? value.diagnostics.map(sanitizeDiagnostic).filter(
 				(item): item is FdxContainmentDiagnostic => item !== null
 			)
 		: [];
-	return { categories, diagnostics, total: diagnostics.length };
+const total =
+typeof value.total === 'number' &&
+Number.isSafeInteger(value.total) &&
+value.total >= diagnostics.length
+? value.total
+: diagnostics.length;
+return {
+categories,
+diagnostics,
+total,
+has_more: value.has_more === true
+};
 }
 
 export async function getFdxContainmentDiagnostics(
-category = ''
+category = '',
+limit = FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE
 ): Promise<FdxContainmentDiagnosticsResponse> {
-const query = category
-? `?${new URLSearchParams({ category }).toString()}`
-: '';
+const params = new URLSearchParams({
+limit: String(Math.max(1, Math.min(limit, FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE)))
+});
+if (category) params.set('category', category);
+const query = `?${params.toString()}`;
 	const response = await fetchJSON<unknown>(`/v1/flowdeck/diagnostics/fdx-containment${query}`);
 	return sanitizeFdxContainmentDiagnostics(response);
 }

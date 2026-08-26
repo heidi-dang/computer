@@ -5,6 +5,7 @@
 		cancelFlowDeckOrchestration,
 		createFlowDeckOrchestration,
 		FDX_CONTAINMENT_CATEGORIES,
+FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 		getFlowDeckOrchestration,
 		getFdxContainmentDiagnostics,
 		type FdxContainmentDiagnostic,
@@ -46,6 +47,9 @@
 	let diagnosticsLoading = $state(false);
 	let diagnosticsError = $state('');
 	let diagnosticsRequestId = 0;
+let diagnosticsInFlightCategory = '';
+let diagnosticsRefreshQueued = false;
+let diagnosticsMounted = false;
 
 	const DIAGNOSTICS_MAX_RETRIES = 3;
 	const DIAGNOSTICS_RETRY_DELAYS_MS = [250, 500, 1000] as const;
@@ -260,9 +264,18 @@
 	}
 
 	async function refreshDiagnostics() {
-		if (diagnosticsRequestInFlight) return;
+if (diagnosticsRequestInFlight) {
+// Periodic refreshes for the same category can safely be skipped. A
+// category change must get its own request after the current one settles.
+if (diagnosticCategory !== diagnosticsInFlightCategory) {
+diagnosticsRefreshQueued = true;
+}
+return;
+}
 		diagnosticsRequestInFlight = true;
 		const requestId = ++diagnosticsRequestId;
+const requestedCategory = diagnosticCategory;
+diagnosticsInFlightCategory = requestedCategory;
 		diagnosticsLoading = true;
 		diagnosticsError = '';
 
@@ -274,8 +287,11 @@
 				if (requestId !== diagnosticsRequestId) return;
 
 				try {
-					const result = await getFdxContainmentDiagnostics(diagnosticCategory);
-					if (requestId !== diagnosticsRequestId) return;
+const result = await getFdxContainmentDiagnostics(
+requestedCategory,
+FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE
+);
+if (requestId !== diagnosticsRequestId || diagnosticCategory !== requestedCategory) return;
 					diagnostics = result.diagnostics;
 					diagnosticCategories = result.categories.filter((category) =>
 						FDX_CONTAINMENT_CATEGORIES.includes(
@@ -296,6 +312,11 @@
 			}
 		} finally {
 			diagnosticsRequestInFlight = false;
+diagnosticsInFlightCategory = '';
+if (diagnosticsMounted && diagnosticsRefreshQueued) {
+diagnosticsRefreshQueued = false;
+void refreshDiagnostics();
+}
 		}
 	}
 
@@ -524,6 +545,7 @@
 	}
 
 	onMount(() => {
+diagnosticsMounted = true;
 		hydrateOwnedRun();
 		void refreshDiagnostics();
 		startDiagnosticsRefresh();
@@ -539,6 +561,8 @@
 		window.addEventListener('online', onOnline);
 		window.addEventListener('offline', onOffline);
 		return () => {
+diagnosticsMounted = false;
+diagnosticsRefreshQueued = false;
 			stopPolling();
 			stopDiagnosticsRefresh();
 			diagnosticsRequestId += 1;
@@ -602,7 +626,13 @@
 			</div>
 			<label class="diagnostic-filter">
 				<span>Category</span>
-				<select bind:value={diagnosticCategory} onchange={() => void refreshDiagnostics()}>
+<select
+bind:value={diagnosticCategory}
+onchange={() => {
+diagnosticsRequestId += 1;
+void refreshDiagnostics();
+}}
+>
 					<option value="">All categories</option>
 					{#each diagnosticCategories as category}
 						<option value={category}>{categoryLabel(category)}</option>
