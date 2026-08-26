@@ -468,7 +468,7 @@ void refreshDiagnostics();
 		</div>
 	</header>
 
-<section class="diagnostics-panel" aria-labelledby="diagnostics-title">
+<section class="diagnostics-panel" data-testid="fdx-diagnostics-panel" aria-labelledby="diagnostics-title">
 <div class="diagnostics-heading">
 <div>
 <span class="section-kicker">Operator view</span>
