@@ -7,8 +7,6 @@ import uuid
 
 from sqlalchemy import BigInteger, Column, ForeignKey, Text, UniqueConstraint, select, delete
 from sqlalchemy.dialects.sqlite import JSON
-from sqlalchemy.orm import relationship
-
 from cptr.models.base import Base
 from cptr.utils.db import get_db
 

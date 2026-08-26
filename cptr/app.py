@@ -185,8 +185,8 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-from cptr.env import AUDIT_EXCLUDED_PATHS, AUDIT_MAX_BODY_SIZE
-from cptr.utils.audit import AuditLevel, AuditLoggingMiddleware, get_audit_level
+from cptr.env import AUDIT_EXCLUDED_PATHS, AUDIT_MAX_BODY_SIZE  # noqa: E402 - middleware is configured after app creation
+from cptr.utils.audit import AuditLevel, AuditLoggingMiddleware, get_audit_level  # noqa: E402 - middleware is configured after app creation
 
 audit_level = get_audit_level()
 if audit_level != AuditLevel.NONE:
@@ -199,8 +199,8 @@ if audit_level != AuditLevel.NONE:
 
 
 # CORS middleware: uses CPTR_CORS_ALLOWED_ORIGINS env var (default "*").
-from fastapi.middleware.cors import CORSMiddleware
-from cptr.env import CORS_ALLOWED_ORIGINS
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402 - middleware is configured after app creation
+from cptr.env import CORS_ALLOWED_ORIGINS  # noqa: E402 - middleware is configured after app creation
 
 app.add_middleware(
     CORSMiddleware,
@@ -212,7 +212,7 @@ app.add_middleware(
 
 
 # Path normalization middleware (Windows: \ → / in JSON responses)
-import platform
+import platform  # noqa: E402 - platform-specific middleware is declared after app creation
 
 if platform.system() == "Windows":
     import json as _json
@@ -528,6 +528,6 @@ if FRONTEND_BUILD_DIR.exists():
 
 
 # Socket.IO: wraps the entire ASGI app
-from cptr.socket.main import get_asgi_app
+from cptr.socket.main import get_asgi_app  # noqa: E402 - Socket.IO wraps the fully configured ASGI app
 
 application = get_asgi_app(app)
