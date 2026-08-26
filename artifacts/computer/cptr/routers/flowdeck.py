@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import hmac
 import inspect
@@ -13,7 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from starlette.responses import StreamingResponse
 
 from cptr.flowdeck.authenticated_gateway import (
@@ -90,6 +92,45 @@ _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _FDX_DIAGNOSTIC_SCAN_MULTIPLIER = 10
 _FDX_DIAGNOSTIC_DEFAULT_LIMIT = 50
 _FDX_DIAGNOSTIC_MAX_LIMIT = 100
+_FDX_DIAGNOSTIC_CURSOR_MAX_LENGTH = 512
+_FDX_DIAGNOSTIC_TIMESTAMP_MAX = 8_640_000_000_000_000
+_FDX_DIAGNOSTIC_CURSOR_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
+
+
+def _encode_fdx_diagnostic_cursor(created_at: int, event_id: str) -> str:
+    payload = json.dumps(
+        {"created_at": created_at, "id": event_id},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_fdx_diagnostic_cursor(cursor: str | None) -> tuple[int, str] | None:
+    if cursor is None:
+        return None
+    if (
+        not isinstance(cursor, str)
+        or len(cursor) > _FDX_DIAGNOSTIC_CURSOR_MAX_LENGTH
+        or not _FDX_DIAGNOSTIC_CURSOR_PATTERN.fullmatch(cursor)
+    ):
+        raise HTTPException(400, "invalid containment cursor")
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        decoded = json.loads(
+            base64.urlsafe_b64decode(f"{cursor}{padding}").decode("utf-8")
+        )
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(400, "invalid containment cursor") from None
+    if (
+        not isinstance(decoded, dict)
+        or type(decoded.get("created_at")) is not int
+        or decoded["created_at"] < 0
+        or decoded["created_at"] > _FDX_DIAGNOSTIC_TIMESTAMP_MAX
+        or not isinstance(decoded.get("id"), str)
+        or not _SAFE_IDENTIFIER.fullmatch(decoded["id"])
+    ):
+        raise HTTPException(400, "invalid containment cursor")
+    return decoded["created_at"], decoded["id"]
 
 
 class OrchestrationRequest(BaseModel):
@@ -1284,12 +1325,14 @@ async def list_fdx_containment_diagnostics(
     request: Request,
     category: str | None = None,
     limit: int = _FDX_DIAGNOSTIC_DEFAULT_LIMIT,
+    cursor: str | None = None,
 ):
     """List safe FDX containment diagnostics for the authenticated operator."""
     owner = await _authenticate_flowdeck(request)
     if category and category not in FDX_CONTAINMENT_CATEGORIES:
         raise HTTPException(400, "unsupported containment category")
     limit = max(1, min(limit, _FDX_DIAGNOSTIC_MAX_LIMIT))
+    cursor_position = _decode_fdx_diagnostic_cursor(cursor)
     async with get_session_factory()() as db:
         query = (
             select(FlowDeckEvent, FlowDeckRun)
@@ -1306,13 +1349,32 @@ async def list_fdx_containment_diagnostics(
         # exact payload validation below for both unfiltered and future data.
         if category:
             query = query.where(FlowDeckEvent.payload["category"].as_string() == category)
+        if cursor_position:
+            cursor_created_at, cursor_id = cursor_position
+            query = query.where(
+                or_(
+                    FlowDeckEvent.created_at < cursor_created_at,
+                    and_(
+                        FlowDeckEvent.created_at == cursor_created_at,
+                        FlowDeckEvent.id < cursor_id,
+                    ),
+                )
+            )
         scan_limit = limit * _FDX_DIAGNOSTIC_SCAN_MULTIPLIER
         query = query.limit(scan_limit + 1)
         rows = (await db.execute(query)).all()
 
     diagnostics = []
-    has_more = len(rows) > scan_limit
-    for event, run in rows[:scan_limit]:
+    last_scanned_key: tuple[int, str] | None = None
+    has_more = False
+    for index, (event, run) in enumerate(rows[:scan_limit]):
+        if (
+            type(event.created_at) is int
+            and 0 <= event.created_at <= _FDX_DIAGNOSTIC_TIMESTAMP_MAX
+            and isinstance(event.id, str)
+            and _SAFE_IDENTIFIER.fullmatch(event.id)
+        ):
+            last_scanned_key = (event.created_at, event.id)
         event_category = safe_containment_category(event.payload)
         if event_category is None:
             continue
@@ -1345,12 +1407,21 @@ async def list_fdx_containment_diagnostics(
             }
         )
         if len(diagnostics) >= limit:
+            has_more = index + 1 < len(rows)
             break
+    else:
+        has_more = len(rows) > scan_limit
+    next_cursor = (
+        _encode_fdx_diagnostic_cursor(*last_scanned_key)
+        if has_more and last_scanned_key
+        else None
+    )
     return {
         "categories": list(FDX_CONTAINMENT_CATEGORIES),
         "diagnostics": diagnostics,
         "total": len(diagnostics),
         "has_more": has_more,
+        "next_cursor": next_cursor,
     }
 
 

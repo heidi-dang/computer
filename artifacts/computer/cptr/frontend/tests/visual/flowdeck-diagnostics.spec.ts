@@ -172,6 +172,70 @@ test('FlowDeck diagnostics category filters keep unsafe details redacted', async
 	await expectDocumentToStaySafe(page);
 });
 
+test('FlowDeck diagnostics load older events without duplicating visible rows', async ({ page }) => {
+const newestDiagnostics = [
+{
+id: 'diag-newest',
+run_id: 'run-newest',
+sequence: 3,
+category: 'process_failure',
+fallback: 'native',
+run_status: 'failed',
+run_outcome: 'native_fallback',
+created_at: 1_735_689_602_000
+},
+{
+id: 'diag-middle',
+run_id: 'run-middle',
+sequence: 2,
+category: 'process_failure',
+fallback: 'native',
+run_status: 'recovering',
+run_outcome: 'native_fallback',
+created_at: 1_735_689_601_000
+}
+];
+const olderDiagnostics = {
+id: 'diag-oldest',
+run_id: 'run-oldest',
+sequence: 1,
+category: 'process_failure',
+fallback: 'native',
+run_status: 'failed',
+run_outcome: 'native_fallback',
+created_at: 1_735_689_600_000
+};
+let olderRequestUrl = '';
+
+await page.route('**/v1/flowdeck/diagnostics/fdx-containment*', (route) => {
+const cursor = new URL(route.request().url()).searchParams.get('cursor');
+if (cursor) olderRequestUrl = route.request().url();
+return route.fulfill({
+json: {
+categories: ['process_failure'],
+diagnostics: cursor ? [olderDiagnostics] : newestDiagnostics,
+total: cursor ? 1 : 2,
+has_more: !cursor,
+next_cursor: cursor ? null : 'older-page-1'
+}
+});
+});
+
+await page.goto('/flowdeck');
+const panel = page.getByTestId('fdx-diagnostics-panel');
+await expect(panel.locator('.diagnostic-row')).toHaveCount(2);
+await expect(panel.locator('.diagnostic-row').nth(0)).toContainText('Run run-newe');
+await expect(panel.getByRole('button', { name: 'Load older events' })).toBeVisible();
+
+await panel.getByRole('button', { name: 'Load older events' }).click();
+await expect.poll(() => olderRequestUrl).toContain('cursor=older-page-1');
+await expect(panel.locator('.diagnostic-row')).toHaveCount(3);
+await expect(panel.locator('.diagnostic-row').nth(0)).toContainText('Run run-newe');
+await expect(panel.locator('.diagnostic-row').nth(1)).toContainText('Run run-midd');
+await expect(panel.locator('.diagnostic-row').nth(2)).toContainText('Run run-old');
+await expect(panel.getByRole('button', { name: 'Load older events' })).toHaveCount(0);
+});
+
 test('FlowDeck diagnostics outage stays safe and leaves the run composer usable', async ({
 	page
 }) => {

@@ -29,3 +29,4 @@
 - [Terminal execution observer](terminal-execution-observer.md) — Live Terminal should observe safe CPTR execution frames directly, not use transcript output as its primary data source.
 - [Durable evidence exports](durable-evidence-exports.md) — downloadable evidence reports must be derived only from shared durable events, never worker-local observer buffers.
 - [Disposable qualification runtime](disposable-qualification-runtime.md) — isolated CPTR runs must own data/config, reject ambient provider credentials, and retain the generated SPA build.
+- [Containment diagnostics pagination](containment-diagnostics-pagination.md) — older pages use a timestamp-plus-ID cursor; the UI preserves loaded order and deduplicates refreshes.

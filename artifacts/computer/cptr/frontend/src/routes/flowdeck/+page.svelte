@@ -48,7 +48,11 @@ FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
 	let diagnosticCategories = $state<string[]>([...FDX_CONTAINMENT_CATEGORIES]);
 	let diagnosticCategory = $state('');
 	let diagnosticsLoading = $state(false);
+let diagnosticsLoadingOlder = $state(false);
 	let diagnosticsError = $state('');
+let diagnosticsOlderError = $state('');
+let diagnosticsNextCursor = $state<string | null>(null);
+let diagnosticsHasLoadedOlderPage = $state(false);
 	let diagnosticsRequestId = 0;
 let diagnosticsInFlightCategory = '';
 let diagnosticsRefreshQueued = false;
@@ -269,6 +273,45 @@ let diagnosticsMounted = false;
 		return new Promise((resolve) => setTimeout(resolve, milliseconds));
 	}
 
+function mergeDiagnostics(
+current: FdxContainmentDiagnostic[],
+incoming: FdxContainmentDiagnostic[],
+position: 'newest' | 'older'
+): FdxContainmentDiagnostic[] {
+const incomingById = new Map(incoming.map((diagnostic) => [diagnostic.id, diagnostic]));
+const currentIds = new Set(current.map((diagnostic) => diagnostic.id));
+const refreshedCurrent = current.map(
+(diagnostic) => incomingById.get(diagnostic.id) ?? diagnostic
+);
+const newDiagnostics = incoming.filter((diagnostic) => !currentIds.has(diagnostic.id));
+return position === 'older'
+? [...refreshedCurrent, ...newDiagnostics]
+: [...newDiagnostics, ...refreshedCurrent];
+}
+
+async function fetchDiagnosticsPage(
+requestedCategory: string,
+requestedCursor: string | null,
+requestId: number
+) {
+for (let retry = 0; retry <= DIAGNOSTICS_MAX_RETRIES; retry += 1) {
+if (retry > 0) {
+await waitForDiagnosticsRetry(DIAGNOSTICS_RETRY_DELAYS_MS[retry - 1]);
+}
+if (requestId !== diagnosticsRequestId) return null;
+try {
+return await getFdxContainmentDiagnostics(
+requestedCategory,
+FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE,
+requestedCursor
+);
+} catch {
+if (retry === DIAGNOSTICS_MAX_RETRIES) throw new Error('diagnostics unavailable');
+}
+}
+return null;
+}
+
 	async function refreshDiagnostics() {
 if (diagnosticsRequestInFlight) {
 // Periodic refreshes for the same category can safely be skipped. A
@@ -281,24 +324,17 @@ return;
 		diagnosticsRequestInFlight = true;
 		const requestId = ++diagnosticsRequestId;
 const requestedCategory = diagnosticCategory;
+const requestedCursor = null;
 diagnosticsInFlightCategory = requestedCategory;
 		diagnosticsLoading = true;
 		diagnosticsError = '';
 
 		try {
-			for (let retry = 0; retry <= DIAGNOSTICS_MAX_RETRIES; retry += 1) {
-				if (retry > 0) {
-					await waitForDiagnosticsRetry(DIAGNOSTICS_RETRY_DELAYS_MS[retry - 1]);
-				}
-				if (requestId !== diagnosticsRequestId) return;
-
-				try {
-const result = await getFdxContainmentDiagnostics(
-requestedCategory,
-FDX_CONTAINMENT_DIAGNOSTICS_PAGE_SIZE
-);
+const result = await fetchDiagnosticsPage(requestedCategory, requestedCursor, requestId);
+if (result) {
 if (requestId !== diagnosticsRequestId || diagnosticCategory !== requestedCategory) return;
-					diagnostics = result.diagnostics;
+diagnostics = mergeDiagnostics(diagnostics, result.diagnostics, 'newest');
+if (!diagnosticsHasLoadedOlderPage) diagnosticsNextCursor = result.next_cursor;
 					diagnosticCategories = result.categories.filter((category) =>
 						FDX_CONTAINMENT_CATEGORIES.includes(
 							category as (typeof FDX_CONTAINMENT_CATEGORIES)[number]
@@ -306,16 +342,15 @@ if (requestId !== diagnosticsRequestId || diagnosticCategory !== requestedCatego
 					);
 					diagnosticsLoading = false;
 					return;
-				} catch {
-					if (retry === DIAGNOSTICS_MAX_RETRIES) {
-						// Do not put server exception text, paths, process output, or credentials
-						// into this operator-facing surface.
-						diagnosticsError = 'Containment diagnostics are temporarily unavailable.';
-						diagnosticsLoading = false;
-						return;
-					}
 				}
+} catch {
+// Do not put server exception text, paths, process output, or credentials
+// into this operator-facing surface.
+if (requestId === diagnosticsRequestId) {
+diagnosticsError = 'Containment diagnostics are temporarily unavailable.';
+diagnosticsLoading = false;
 			}
+return;
 		} finally {
 			diagnosticsRequestInFlight = false;
 diagnosticsInFlightCategory = '';
@@ -325,6 +360,50 @@ void refreshDiagnostics();
 }
 		}
 	}
+
+async function loadOlderDiagnostics() {
+if (
+diagnosticsRequestInFlight ||
+diagnosticsLoadingOlder ||
+!diagnosticsNextCursor
+) {
+return;
+}
+const requestedCategory = diagnosticCategory;
+const requestedCursor = diagnosticsNextCursor;
+const requestId = ++diagnosticsRequestId;
+diagnosticsRequestInFlight = true;
+diagnosticsInFlightCategory = requestedCategory;
+diagnosticsLoadingOlder = true;
+diagnosticsOlderError = '';
+
+try {
+const result = await fetchDiagnosticsPage(requestedCategory, requestedCursor, requestId);
+if (
+!result ||
+requestId !== diagnosticsRequestId ||
+diagnosticCategory !== requestedCategory ||
+diagnosticsNextCursor !== requestedCursor
+) {
+return;
+}
+diagnostics = mergeDiagnostics(diagnostics, result.diagnostics, 'older');
+diagnosticsNextCursor = result.next_cursor;
+diagnosticsHasLoadedOlderPage = true;
+} catch {
+if (requestId === diagnosticsRequestId) {
+diagnosticsOlderError = 'Older containment events are temporarily unavailable.';
+}
+} finally {
+diagnosticsRequestInFlight = false;
+diagnosticsInFlightCategory = '';
+diagnosticsLoadingOlder = false;
+if (diagnosticsMounted && diagnosticsRefreshQueued) {
+diagnosticsRefreshQueued = false;
+void refreshDiagnostics();
+}
+}
+}
 
 	function stopDiagnosticsRefresh() {
 		if (diagnosticsRefreshTimer) clearInterval(diagnosticsRefreshTimer);
@@ -719,6 +798,10 @@ void refreshDiagnostics();
 bind:value={diagnosticCategory}
 onchange={() => {
 diagnosticsRequestId += 1;
+diagnostics = [];
+diagnosticsNextCursor = null;
+diagnosticsHasLoadedOlderPage = false;
+diagnosticsOlderError = '';
 void refreshDiagnostics();
 }}
 >
@@ -741,7 +824,7 @@ void refreshDiagnostics();
 					Retry diagnostics
 				</button>
 			</div>
-		{:else if diagnosticsLoading}
+{:else if diagnosticsLoading && diagnostics.length === 0}
 			<div class="diagnostics-message">Loading containment events…</div>
 		{:else if diagnostics.length === 0}
 			<div class="diagnostics-message">No containment events match this category.</div>
@@ -763,6 +846,25 @@ void refreshDiagnostics();
 					</a>
 				{/each}
 			</div>
+{#if diagnosticsNextCursor || diagnosticsOlderError}
+<div class="diagnostics-pagination">
+<div>
+{#if diagnosticsOlderError}
+<span class="diagnostics-message error" role="alert">{diagnosticsOlderError}</span>
+{:else}
+<span class="diagnostics-page-note">Showing newest events first.</span>
+{/if}
+</div>
+<button
+type="button"
+class="quiet-button diagnostics-older"
+onclick={() => void loadOlderDiagnostics()}
+disabled={diagnosticsLoadingOlder || diagnosticsLoading || !diagnosticsNextCursor}
+>
+{diagnosticsLoadingOlder ? 'Loading older events…' : 'Load older events'}
+</button>
+</div>
+{/if}
 		{/if}
 	</section>
 
@@ -1275,6 +1377,28 @@ void refreshDiagnostics();
 		gap: 0.45rem;
 		margin-top: 0.9rem;
 	}
+.diagnostics-pagination {
+display: flex;
+align-items: center;
+justify-content: space-between;
+gap: 1rem;
+margin-top: 0.85rem;
+}
+.diagnostics-page-note {
+color: var(--fd-faint);
+font-size: 0.64rem;
+}
+.diagnostics-pagination .diagnostics-message {
+padding: 0;
+}
+.diagnostics-older {
+flex: 0 0 auto;
+color: var(--fd-teal);
+}
+.diagnostics-older:hover:not(:disabled) {
+border-color: color-mix(in oklab, var(--fd-teal) 45%, transparent);
+background: color-mix(in oklab, var(--fd-teal) 8%, transparent);
+}
 	.diagnostic-row {
 		display: grid;
 		grid-template-columns: 1.2fr 1fr 1.5fr auto;
@@ -2030,6 +2154,10 @@ void refreshDiagnostics();
 		.diagnostic-row time {
 			grid-column: 2;
 		}
+.diagnostics-pagination {
+align-items: stretch;
+flex-direction: column;
+}
 		.header-context,
 		.status-divider {
 			display: none;
