@@ -594,6 +594,153 @@ class FlowDeckProductionHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertNotEqual(retry_id, original.id)
 
+    async def test_concurrent_fresh_runs_preserve_orphaned_unknown_evidence(self):
+        store = DurableFlowDeck(self.session_factory)
+        original, created = await store.create_run(
+            request_key="orphaned-original-123",
+            owner="user-a",
+            workspace=str(self.root_a),
+            step_name="heidi-audit",
+        )
+        self.assertTrue(created)
+        await store.start_run(original.id, now=10)
+        step = await store.get_step(original.id)
+        await store.start_step(step.id, now=11)
+        await store.record_event(
+            original.id,
+            "AUDIT_SCOPE_CREATED",
+            {
+                "scope": {"areas": ["architecture"]},
+                "completion_contract": ["evidence_backed_findings"],
+                "fingerprint": "preserved-orphaned-unknown-evidence",
+            },
+        )
+        operation, created = await store.record_intent(
+            run_id=original.id,
+            step_id=step.id,
+            idempotency_key="orphaned-operation-123",
+            capability="audit.repository",
+            target="workspace",
+            reconcile_kind="audit",
+            now=11,
+        )
+        self.assertTrue(created)
+        attempt = await store.prepare_attempt(
+            operation_id=operation.id,
+            owner="user-a",
+            now=11,
+        )
+        await store.mark_attempt_unknown(
+            attempt.id,
+            error="verifier interrupted",
+            now=12,
+        )
+        await store.orphan_run(original.id, now=13)
+        before_events = [
+            (event.sequence, event.kind, event.payload)
+            for event in await store.list_events(original.id)
+        ]
+        before_status = (await store.get_run(original.id)).status
+        self.assertEqual(before_status, RunStatus.ORPHANED.value)
+
+        coordinator_started = asyncio.Event()
+        coordinator_count = 0
+
+        async def submit(request, *, authenticated_request, store):
+            nonlocal coordinator_count
+            coordinator_count += 1
+            coordinator_started.set()
+            run, _ = await store.create_run(
+                request_key=request.request_key,
+                owner=authenticated_request.state.auth.user_id,
+                workspace=request.workspace,
+            )
+            return CoordinatorResult("pending", run.id, (), ())
+
+        async def fresh_run(key):
+            return await self.client.post(
+                f"/v1/flowdeck/orchestrations/{original.id}/new-run",
+                headers={**self.headers(), "Idempotency-Key": key},
+                json={
+                    "workspace": str(self.root_a),
+                    "objective": "repeat the orphaned audit",
+                    "original_run_id": original.id,
+                },
+            )
+
+        with (
+            patch.dict(os.environ, self.enabled_environment(), clear=False),
+            patch(
+                "cptr.routers.flowdeck._resolve_model",
+                new=AsyncMock(
+                    return_value=(
+                        SimpleNamespace(
+                            kind="api", runtime_model="test-model", connection={}
+                        ),
+                        "test-model",
+                    )
+                ),
+            ),
+            patch("cptr.routers.flowdeck.run_heidi_coordinator", new=submit),
+        ):
+            first, second = await asyncio.gather(
+                fresh_run("orphaned-fresh-retry-one-123"),
+                fresh_run("orphaned-fresh-retry-two-123"),
+            )
+            await asyncio.wait_for(coordinator_started.wait(), timeout=2)
+            for _ in range(20):
+                if coordinator_count == 2:
+                    break
+                await asyncio.sleep(0)
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        first_payload = first.json()
+        second_payload = second.json()
+        fresh_ids = {first_payload["run_id"], second_payload["run_id"]}
+        self.assertEqual(len(fresh_ids), 2)
+        self.assertEqual(first_payload["original_run_id"], original.id)
+        self.assertEqual(second_payload["original_run_id"], original.id)
+        self.assertTrue(first_payload["fresh_run"])
+        self.assertTrue(second_payload["fresh_run"])
+
+        original_after = await self.client.get(
+            f"/v1/flowdeck/orchestrations/{original.id}",
+            params={"workspace": str(self.root_a)},
+            headers=self.headers(),
+        )
+        self.assertEqual(original_after.status_code, 200, original_after.text)
+        original_payload = original_after.json()
+        self.assertEqual(original_payload["status"], before_status.lower())
+        self.assertEqual(
+            [
+                (event["sequence"], event["kind"], event["payload"])
+                for event in original_payload["events"]
+            ],
+            before_events,
+        )
+        self.assertTrue(all(event["run_id"] == original.id for event in original_payload["events"]))
+        original_event_kinds = [event["kind"] for event in original_payload["events"]]
+        self.assertIn("OUTCOME_UNKNOWN", original_event_kinds)
+        self.assertIn("RUN_ORPHANED", original_event_kinds)
+
+        for retry_id in fresh_ids:
+            retry_status = await self.client.get(
+                f"/v1/flowdeck/orchestrations/{retry_id}",
+                params={"workspace": str(self.root_a)},
+                headers=self.headers(),
+            )
+            self.assertEqual(retry_status.status_code, 200, retry_status.text)
+            retry_payload = retry_status.json()
+            retry_event_kinds = [event["kind"] for event in retry_payload["events"]]
+            self.assertIn("RUN_CREATED", retry_event_kinds)
+            self.assertIn("RUN_FRESH_ATTEMPT_STARTED", retry_event_kinds)
+            self.assertIn("ADAPTIVE_ROUTE_SELECTED", retry_event_kinds)
+            self.assertTrue(
+                all(event["run_id"] == retry_id for event in retry_payload["events"])
+            )
+            self.assertNotEqual(retry_id, original.id)
+
     async def test_audit_creates_one_durable_run_with_contract_and_reconnects(self):
         async def submit(request, *, authenticated_request, store):
             run, _ = await store.create_run(
