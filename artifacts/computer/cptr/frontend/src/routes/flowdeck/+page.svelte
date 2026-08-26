@@ -5,6 +5,8 @@
 		cancelFlowDeckOrchestration,
 		createFlowDeckOrchestration,
 		getFlowDeckOrchestration,
+getFdxContainmentDiagnostics,
+type FdxContainmentDiagnostic,
 		type FlowDeckOrchestration
 	} from '$lib/apis/flowdeck';
 	import Icon from '$lib/components/Icon.svelte';
@@ -35,6 +37,11 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 	let hydrated = $state(false);
 	let pollTimer: ReturnType<typeof setInterval> | null = null;
 	let requestInFlight = false;
+let diagnostics = $state<FdxContainmentDiagnostic[]>([]);
+let diagnosticCategories = $state<string[]>([]);
+let diagnosticCategory = $state('');
+let diagnosticsLoading = $state(false);
+let diagnosticsError = $state('');
 
 	const STORAGE_KEY = 'flowdeck:owned-run';
 	const terminalStatuses = new Set([
@@ -165,6 +172,27 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 		const date = new Date(value);
 		return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
 	}
+
+function categoryLabel(category: string): string {
+return category
+.split('_')
+.map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+.join(' ');
+}
+
+async function refreshDiagnostics() {
+diagnosticsLoading = true;
+diagnosticsError = '';
+try {
+const result = await getFdxContainmentDiagnostics(diagnosticCategory);
+diagnostics = result.diagnostics;
+diagnosticCategories = result.categories;
+} catch (error) {
+diagnosticsError = error instanceof Error ? error.message : 'Unable to load diagnostics.';
+} finally {
+diagnosticsLoading = false;
+}
+}
 
 	function eventTitle(item: unknown): string {
 		if (!item || typeof item !== 'object') return String(item);
@@ -380,6 +408,7 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 
 	onMount(() => {
 		hydrateOwnedRun();
+void refreshDiagnostics();
 		const onOnline = () => {
 			if (runId) {
 				connectionState = 'reconnecting';
@@ -433,6 +462,43 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 			<span class="header-context">{selectedWorkspaceName}</span>
 		</div>
 	</header>
+
+<section class="diagnostics-panel" aria-labelledby="diagnostics-title">
+<div class="diagnostics-heading">
+<div>
+<span class="section-kicker">Operator view</span>
+<h2 id="diagnostics-title">FDX containment diagnostics</h2>
+<p>Safe lifecycle categories across your FlowDeck runs. All listed failures used native fallback.</p>
+</div>
+<label class="diagnostic-filter">
+<span>Category</span>
+<select bind:value={diagnosticCategory} onchange={() => void refreshDiagnostics()}>
+<option value="">All categories</option>
+{#each diagnosticCategories as category}
+<option value={category}>{categoryLabel(category)}</option>
+{/each}
+</select>
+</label>
+</div>
+{#if diagnosticsError}
+<div class="diagnostics-message error">{diagnosticsError}</div>
+{:else if diagnosticsLoading}
+<div class="diagnostics-message">Loading containment events…</div>
+{:else if diagnostics.length === 0}
+<div class="diagnostics-message">No containment events match this category.</div>
+{:else}
+<div class="diagnostics-list">
+{#each diagnostics as diagnostic}
+<a class="diagnostic-row" href={`/flowdeck?run_id=${encodeURIComponent(diagnostic.run_id)}`}>
+<span class="diagnostic-category">{categoryLabel(diagnostic.category)}</span>
+<span class="diagnostic-run">Run <code>{diagnostic.run_id.slice(0, 8)}</code></span>
+<span class="diagnostic-outcome">Native fallback · {categoryLabel(diagnostic.run_status)}</span>
+<time datetime={new Date(diagnostic.created_at).toISOString()}>{formatTime(diagnostic.created_at)}</time>
+</a>
+{/each}
+</div>
+{/if}
+</section>
 
 	<main class="flowdeck-main">
 		{#if !hasRun}
@@ -775,6 +841,30 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 	}
 	.status-pulse { background: var(--fd-teal); box-shadow: 0 0 0 4px color-mix(in oklab, var(--fd-teal) 15%, transparent); }
 
+.diagnostics-panel {
+width: min(1280px, 100%);
+margin: 0 auto;
+padding: 1.15rem clamp(1rem, 4vw, 3.5rem);
+border-bottom: 1px solid var(--fd-line);
+background: color-mix(in oklab, var(--fd-panel) 60%, transparent);
+}
+.diagnostics-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; }
+.diagnostics-heading h2 { margin-top: 0.25rem; color: var(--fd-ink); font-size: 1rem; letter-spacing: -0.025em; }
+.diagnostics-heading p { margin-top: 0.35rem; color: var(--fd-muted); font-size: 0.68rem; }
+.section-kicker { color: var(--fd-teal); font-size: 0.56rem; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; }
+.diagnostic-filter { display: flex; align-items: center; gap: 0.55rem; margin: 0; white-space: nowrap; }
+.diagnostic-filter span { color: var(--fd-muted); font-size: 0.66rem; }
+.diagnostic-filter select { width: 180px; height: 34px; padding: 0 0.5rem; border: 1px solid var(--fd-line); border-radius: 8px; background: var(--fd-panel); font-size: 0.68rem; }
+.diagnostics-message { padding: 0.9rem 0 0.25rem; color: var(--fd-faint); font-size: 0.68rem; }
+.diagnostics-message.error { color: var(--fd-coral); }
+.diagnostics-list { display: grid; gap: 0.45rem; margin-top: 0.9rem; }
+.diagnostic-row { display: grid; grid-template-columns: 1.2fr 1fr 1.5fr auto; align-items: center; gap: 0.75rem; padding: 0.65rem 0.75rem; border: 1px solid var(--fd-line); border-radius: 9px; color: var(--fd-ink); text-decoration: none; font-size: 0.66rem; }
+.diagnostic-row:hover { border-color: color-mix(in oklab, var(--fd-teal) 50%, transparent); background: color-mix(in oklab, var(--fd-teal) 6%, transparent); }
+.diagnostic-category { color: var(--fd-coral); font-weight: 700; }
+.diagnostic-run, .diagnostic-outcome, .diagnostic-row time { color: var(--fd-muted); }
+.diagnostic-row code { display: inline; max-width: none; color: var(--fd-ink); font-size: 0.62rem; }
+.diagnostic-row time { white-space: nowrap; }
+
 	.flowdeck-main { width: min(1280px, 100%); margin: 0 auto; padding: clamp(2rem, 6vw, 5rem) clamp(1rem, 4vw, 3.5rem) 5rem; }
 	.welcome-grid { display: grid; grid-template-columns: minmax(0, 0.82fr) minmax(320px, 1.18fr); align-items: center; gap: clamp(2rem, 8vw, 8rem); min-height: calc(100dvh - 180px); }
 	.welcome-copy { padding: 1rem 0; }
@@ -895,6 +985,11 @@ import ProjectDatabasePanel from '$lib/components/ProjectDatabasePanel.svelte';
 	}
 	@media (max-width: 560px) {
 		.flowdeck-header { min-height: 58px; padding: 0.65rem 0.9rem; }
+.diagnostics-heading { align-items: stretch; flex-direction: column; }
+.diagnostic-filter { justify-content: space-between; }
+.diagnostic-filter select { width: 210px; }
+.diagnostic-row { grid-template-columns: 1fr 1fr; }
+.diagnostic-row time { grid-column: 2; }
 		.header-context, .status-divider { display: none; }
 		.flowdeck-main { padding: 2.2rem 0.9rem 3rem; }
 		.welcome-copy h1, .run-heading h1 { font-size: clamp(2.5rem, 14vw, 4rem); }

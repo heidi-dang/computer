@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import select
 
 from cptr.flowdeck.authenticated_gateway import (
     AuthenticatedGatewayError,
@@ -57,6 +58,7 @@ from cptr.flowdeck.generated_auth import (
 from cptr.flowdeck.checkpoints import CheckpointError, CheckpointService
 from cptr.flowdeck.adaptive import adaptive_route
 from cptr.models import Chat, ChatMessage
+from cptr.models.flowdeck import FlowDeckEvent, FlowDeckRun
 from cptr.utils.chat_export import export_chat_to_file
 from cptr.utils.config import now_ms
 from cptr.routers.gateway import _authenticate, _resolve_model
@@ -66,6 +68,16 @@ from cptr.utils.db import get_session_factory
 router = APIRouter(prefix="/v1/flowdeck", tags=["flowdeck"])
 logger = logging.getLogger(__name__)
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{8,200}$")
+FDX_CONTAINMENT_CATEGORIES = (
+    "containment_failure",
+    "configuration_violation",
+    "process_failure",
+    "protocol_violation",
+    "timeout",
+    "workspace_cleanup_race",
+    "workspace_lease",
+    "workspace_side_effect",
+)
 
 
 class OrchestrationRequest(BaseModel):
@@ -1253,6 +1265,57 @@ async def get_orchestration(request: Request, run_id: str, workspace: str):
         owner=run.owner,
     )
     return response
+
+
+@router.get("/diagnostics/fdx-containment")
+async def list_fdx_containment_diagnostics(
+    request: Request,
+    category: str | None = None,
+    limit: int = 100,
+):
+    """List safe FDX containment diagnostics for the authenticated operator."""
+    owner = await _authenticate_flowdeck(request)
+    if category and category not in FDX_CONTAINMENT_CATEGORIES:
+        raise HTTPException(400, "unsupported containment category")
+    limit = max(1, min(limit, 200))
+    async with get_session_factory()() as db:
+        query = (
+            select(FlowDeckEvent, FlowDeckRun)
+            .join(FlowDeckRun, FlowDeckRun.id == FlowDeckEvent.run_id)
+            .where(
+                FlowDeckRun.owner == owner,
+                FlowDeckEvent.kind == "FDX_CONTAINMENT_FAILURE",
+            )
+            .order_by(FlowDeckEvent.created_at.desc())
+            .limit(limit)
+        )
+        rows = (await db.execute(query)).all()
+
+    diagnostics = []
+    for event, run in rows:
+        payload = event.payload if isinstance(event.payload, dict) else {}
+        event_category = payload.get("category")
+        if event_category not in FDX_CONTAINMENT_CATEGORIES:
+            continue
+        if category and event_category != category:
+            continue
+        diagnostics.append(
+            {
+                "id": event.id,
+                "run_id": run.id,
+                "sequence": event.sequence,
+                "category": event_category,
+                "fallback": "native",
+                "run_status": str(run.status).lower(),
+                "run_outcome": "native_fallback",
+                "created_at": event.created_at,
+            }
+        )
+    return {
+        "categories": list(FDX_CONTAINMENT_CATEGORIES),
+        "diagnostics": diagnostics,
+        "total": len(diagnostics),
+    }
 
 
 @router.get("/orchestrations/{run_id}/evidence-report")

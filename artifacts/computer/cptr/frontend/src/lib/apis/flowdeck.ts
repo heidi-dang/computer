@@ -53,6 +53,34 @@ export interface NewFlowDeckRunInput extends CreateOrchestrationInput {
 	original_run_id: string;
 }
 
+export interface FdxContainmentDiagnostic {
+id: string;
+run_id: string;
+sequence: number;
+category: string;
+fallback: 'native';
+run_status: string;
+run_outcome: string | null;
+created_at: number;
+}
+
+export interface FdxContainmentDiagnosticsResponse {
+categories: string[];
+diagnostics: FdxContainmentDiagnostic[];
+total: number;
+}
+
+export async function getFdxContainmentDiagnostics(
+category = ''
+): Promise<FdxContainmentDiagnosticsResponse> {
+const query = category
+? `?${new URLSearchParams({ category }).toString()}`
+: '';
+return fetchJSON<FdxContainmentDiagnosticsResponse>(
+`/v1/flowdeck/diagnostics/fdx-containment${query}`
+);
+}
+
 export async function createAudit(
 	input: CreateAuditInput,
 	idempotencyKey: string
