@@ -10,8 +10,9 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from cptr.routers.coding import _command_snapshot, _workspace
 from cptr.routers.control import _services, _user
-from cptr.services.live_events import LiveEventEnvelope, live_event_hub
+from cptr.services.live_events import LiveEventEnvelope, command_target_key, live_event_hub
 from cptr.utils.redaction import redact_external_text
 
 router = APIRouter(prefix="/api/control/v1", tags=["control-live"])
@@ -149,6 +150,76 @@ async def task_stream(request: Request, task_id: str):
             request,
             target_key=f"task:{task_id}",
             snapshot={"target": "task", "snapshot": _task_snapshot(snapshot)},
+            after_sequence=_after_sequence(request),
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+async def _direct_command_live_snapshot(
+    request: Request,
+    *,
+    workspace_id: str,
+    command_id: str,
+) -> dict[str, Any]:
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    command = await _command_snapshot(
+        request,
+        workspace_path=workspace.path,
+        command_id=command_id,
+    )
+    # The replay stream is the authoritative terminal-output surface. Keep the
+    # point-in-time snapshot to lifecycle fields so raw command output cannot
+    # bypass live-event redaction/sanitization.
+    return {
+        "command_id": command_id,
+        "workspace_id": workspace_id,
+        "status": command.get("status", "RUNNING"),
+        "exit_code": command.get("exit_code"),
+    }
+
+
+@router.get("/workspaces/{workspace_id}/coding/commands/{command_id}/stream/snapshot")
+async def command_stream_snapshot(
+    request: Request,
+    workspace_id: str,
+    command_id: str,
+):
+    snapshot = await _direct_command_live_snapshot(
+        request,
+        workspace_id=workspace_id,
+        command_id=command_id,
+    )
+    return await _recovery_snapshot(
+        target_key=command_target_key(workspace_id, command_id),
+        target="command",
+        snapshot=snapshot,
+        after=_after_sequence(request),
+    )
+
+
+@router.get("/workspaces/{workspace_id}/coding/commands/{command_id}/stream")
+async def command_stream(
+    request: Request,
+    workspace_id: str,
+    command_id: str,
+):
+    snapshot = await _direct_command_live_snapshot(
+        request,
+        workspace_id=workspace_id,
+        command_id=command_id,
+    )
+    return StreamingResponse(
+        _stream(
+            request,
+            target_key=command_target_key(workspace_id, command_id),
+            snapshot={"target": "command", "snapshot": snapshot},
             after_sequence=_after_sequence(request),
         ),
         media_type="text/event-stream",

@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import tempfile
 import unittest
@@ -20,6 +21,8 @@ from cptr.routers.coding import (
 )
 from cptr.routers.coding import router as coding_router
 from cptr.routers.gateway import CreateApiKeyRequest, create_api_key
+from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
+from cptr.utils.tools import command_sessions, run_command, stop_command_session
 
 
 class DirectCodingAppRegistrationTests(unittest.TestCase):
@@ -169,10 +172,172 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             5,
             __context__={
                 "workspace": "/tmp/cptr-direct-coding",
+                "workspace_id": "ws_1",
                 "request": request,
                 "user_id": "user_1",
             },
         )
+
+
+    async def test_run_command_publishes_real_incremental_live_terminal_events(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace()
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+            ):
+                result = await run_command(
+                    "printf first; sleep 0.05; printf second",
+                    ".",
+                    2,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws_1",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                )
+
+        command_id = result.split(":", 1)[0].removeprefix("Task ")
+        try:
+            events = await hub.store.replay(command_target_key("ws_1", command_id))
+            types = [event.event_type for event in events]
+            self.assertEqual(types[0], "command.started")
+            self.assertEqual(types[-1], "command.completed")
+            self.assertEqual(types.count("command.started"), 1)
+            self.assertEqual(types.count("command.completed"), 1)
+            self.assertIn("terminal.chunk", types)
+            combined = "".join(
+                str(event.payload.get("text") or "")
+                for event in events
+                if event.event_type == "terminal.chunk"
+            )
+            self.assertIn("first", combined)
+            self.assertIn("second", combined)
+            self.assertEqual(events[-1].payload["status"], "COMPLETE")
+            self.assertEqual(events[-1].payload["exit_code"], 0)
+        finally:
+            command_sessions.pop(command_id, None)
+
+
+    async def test_run_command_projects_runtime_bytes_into_parent_task_stream(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace()
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+            ):
+                result = await run_command(
+                    "printf agent-output",
+                    ".",
+                    2,
+                    __context__={
+                        "workspace": workspace_root,
+                        "control_task_id": "task-1",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                )
+
+        command_id = result.split(":", 1)[0].removeprefix("Task ")
+        try:
+            events = await hub.store.replay("task:task-1")
+            self.assertEqual([event.event_type for event in events][0], "command.started")
+            self.assertEqual([event.event_type for event in events][-1], "command.completed")
+            self.assertIn(
+                "agent-output",
+                "".join(
+                    str(event.payload.get("text") or "")
+                    for event in events
+                    if event.event_type == "terminal.chunk"
+                ),
+            )
+            self.assertTrue(all(event.target_key == "task:task-1" for event in events))
+        finally:
+            command_sessions.pop(command_id, None)
+
+    async def test_run_command_publishes_truthful_nonzero_exit_status(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace()
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+            ):
+                result = await run_command(
+                    "printf failing-output; exit 7",
+                    ".",
+                    2,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws_1",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                )
+
+        command_id = result.split(":", 1)[0].removeprefix("Task ")
+        try:
+            events = await hub.store.replay(command_target_key("ws_1", command_id))
+            completed = [event for event in events if event.event_type == "command.completed"]
+            self.assertEqual(len(completed), 1)
+            self.assertEqual(completed[0].payload["status"], "FAILED")
+            self.assertEqual(completed[0].payload["exit_code"], 7)
+            self.assertIn(
+                "failing-output",
+                "".join(
+                    str(event.payload.get("text") or "")
+                    for event in events
+                    if event.event_type == "terminal.chunk"
+                ),
+            )
+        finally:
+            command_sessions.pop(command_id, None)
+
+    async def test_cancelled_command_finishes_live_stream_with_real_process_exit(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace()
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+            ):
+                result = await run_command(
+                    "printf cancellation-started; sleep 5",
+                    ".",
+                    0,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws_1",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                )
+                command_id = result.split(":", 1)[0].removeprefix("Task ")
+                self.assertIsNone(stop_command_session(request, command_id))
+                log_task = command_sessions[command_id]["log_task"]
+                await asyncio.wait_for(asyncio.shield(log_task), timeout=2)
+
+        try:
+            events = await hub.store.replay(command_target_key("ws_1", command_id))
+            types = [event.event_type for event in events]
+            self.assertEqual(types.count("command.started"), 1)
+            self.assertEqual(types.count("command.completed"), 1)
+            completed = next(event for event in events if event.event_type == "command.completed")
+            self.assertEqual(completed.payload["status"], "FAILED")
+            self.assertNotEqual(completed.payload["exit_code"], 0)
+        finally:
+            command_sessions.pop(command_id, None)
 
 
 class DirectCodingHttpFlowTests(unittest.TestCase):

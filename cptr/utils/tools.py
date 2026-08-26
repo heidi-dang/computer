@@ -139,8 +139,43 @@ def _rotate_log(log_path: str, log_file) -> tuple:
     return new_file, new_size
 
 
+async def _publish_command_session_event(
+    session: dict[str, Any] | None,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    """Project genuine command-session lifecycle/output into its authorized live target."""
+    if not session:
+        return
+    live_target = session.get("live_target")
+    user_id = session.get("user_id")
+    if not isinstance(live_target, dict) or not isinstance(user_id, str) or not user_id:
+        return
+    target_type = str(live_target.get("target_type") or "")
+    target_id = str(live_target.get("target_id") or "")
+    if not target_type or not target_id:
+        return
+    from cptr.services.live_events import safe_publish_terminal_event
+
+    await safe_publish_terminal_event(
+        user_id=user_id,
+        target_type=target_type,
+        target_id=target_id,
+        workspace_id=(
+            str(live_target.get("workspace_id"))
+            if live_target.get("workspace_id") is not None
+            else None
+        ),
+        event_type=event_type,
+        payload=payload,
+        worker_task_id=(
+            str(session.get("message_id")) if session.get("message_id") is not None else None
+        ),
+    )
+
+
 async def stream_command_session_output(command_session_id: str):
-    """Read output from a command process into memory + JSONL log."""
+    """Read output from a command process into memory + JSONL log and the live terminal."""
     session = command_sessions.get(command_session_id)
     if not session:
         return
@@ -193,6 +228,15 @@ async def stream_command_session_output(command_session_id: str):
                     session["output"] = session["output"][-256 * 1024 :]
                 async with session["condition"]:
                     session["condition"].notify_all()
+                await _publish_command_session_event(
+                    session,
+                    "terminal.chunk",
+                    {
+                        "command_id": command_session_id,
+                        "stream": "stdout",
+                        "text": chunk.decode(errors="replace"),
+                    },
+                )
 
             if log_file:
                 entry = (
@@ -232,6 +276,15 @@ async def stream_command_session_output(command_session_id: str):
             session["master_fd"] = None  # fd is closed
             async with session["condition"]:
                 session["condition"].notify_all()
+            await _publish_command_session_event(
+                session,
+                "command.completed",
+                {
+                    "command_id": command_session_id,
+                    "status": "COMPLETE" if exit_code == 0 else "FAILED",
+                    "exit_code": exit_code,
+                },
+            )
 
         if log_file:
             log_file.write(
@@ -1434,6 +1487,21 @@ async def run_command(
             pass
         return f"Error: {e}"
 
+    live_target: dict[str, str] | None = None
+    control_task_id = __context__.get("control_task_id")
+    workspace_id = __context__.get("workspace_id")
+    if control_task_id:
+        live_target = {
+            "target_type": "task",
+            "target_id": str(control_task_id),
+        }
+    elif workspace_id:
+        live_target = {
+            "target_type": "command",
+            "target_id": command_session_id,
+            "workspace_id": str(workspace_id),
+        }
+
     command_sessions[command_session_id] = {
         "command_session_id": command_session_id,
         "master_fd": master_fd,
@@ -1447,6 +1515,7 @@ async def run_command(
         "chat_id": __context__.get("chat_id"),
         "message_id": __context__.get("message_id"),
         "call_id": __context__.get("call_id"),
+        "live_target": live_target,
         "created_at": time.time(),
         "done": False,
         "exit_code": None,
@@ -1454,6 +1523,15 @@ async def run_command(
         "log_task": None,
         "condition": asyncio.Condition(),
     }
+    await _publish_command_session_event(
+        command_sessions[command_session_id],
+        "command.started",
+        {
+            "command_id": command_session_id,
+            "summary": command,
+            "status": "RUNNING",
+        },
+    )
     log_task = asyncio.create_task(stream_command_session_output(command_session_id))
     command_sessions[command_session_id]["log_task"] = log_task
 

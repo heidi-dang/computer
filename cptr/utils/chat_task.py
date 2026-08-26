@@ -1862,61 +1862,34 @@ async def run_chat_task(
                     tool_name = str(item.get("name") or "tool")
                     if call_id:
                         active_tool_names[call_id] = tool_name
-                    is_terminal_tool = tool_name in {"run_command", "terminal"}
+                    # Command lifecycle/output is published by run_command at the
+                    # process reader so the terminal never fabricates or duplicates
+                    # rows from model-level function call envelopes.
                     await safe_publish_task_event(
                         user_id=user_id,
                         task_id=control_task_id,
-                        event_type="command.started" if is_terminal_tool else "tool.started",
-                        payload=(
-                            {
-                                "command_id": call_id or None,
-                                "tool_name": tool_name,
-                                "summary": f"Running {tool_name}",
-                                "status": item.get("status", "in_progress"),
-                            }
-                            if is_terminal_tool
-                            else {
-                                "name": tool_name,
-                                "status": item.get("status", "in_progress"),
-                            }
-                        ),
+                        event_type="tool.started",
+                        payload={
+                            "name": tool_name,
+                            "call_id": call_id or None,
+                            "status": item.get("status", "in_progress"),
+                        },
                     )
                 elif item_type == "function_call_output":
                     raw_output = item.get("output")
                     call_id = str(item.get("call_id") or "")
                     tool_name = active_tool_names.get(call_id, "tool")
-                    is_terminal_tool = tool_name in {"run_command", "terminal"}
                     await safe_publish_task_event(
                         user_id=user_id,
                         task_id=control_task_id,
-                        event_type="terminal.chunk" if is_terminal_tool else "tool.output",
-                        payload=(
-                            {
-                                "command_id": call_id or None,
-                                "stream": "stdout",
-                                "text": str(raw_output),
-                                "tool_name": tool_name,
-                                "status": "completed",
-                            }
-                            if is_terminal_tool
-                            else {
-                                "status": "completed",
-                                "tool": tool_name,
-                                "output": str(raw_output),
-                            }
-                        ),
+                        event_type="tool.output",
+                        payload={
+                            "status": "completed",
+                            "tool": tool_name,
+                            "call_id": call_id or None,
+                            "output": str(raw_output),
+                        },
                     )
-                    if is_terminal_tool:
-                        await safe_publish_task_event(
-                            user_id=user_id,
-                            task_id=control_task_id,
-                            event_type="command.completed",
-                            payload={
-                                "command_id": call_id or None,
-                                "tool_name": tool_name,
-                                "status": "COMPLETE",
-                            },
-                        )
 
     async def _emit_done(*, terminal_status: str | None = None):
         """Emit done=True enriched with chat title and content preview."""
@@ -2682,6 +2655,7 @@ async def run_chat_task(
             or model,
             "chat_id": chat_id,
             "message_id": message_id,
+            "control_task_id": control_task_id,
             "connection": connection,
             "builtin_tools": builtin_tools,
             "inspection_scope": inspection_scope,

@@ -318,6 +318,35 @@ async def safe_publish_task_event(**kwargs: Any) -> LiveEventEnvelope | None:
         return None
 
 
+def command_target_key(workspace_id: str, command_id: str) -> str:
+    """Return the collision-safe live-event key for one workspace-owned command."""
+    return f"command:{workspace_id}:{command_id}"
+
+
+async def publish_command_event(
+    *,
+    user_id: str,
+    workspace_id: str,
+    command_id: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+) -> LiveEventEnvelope:
+    return await live_event_hub.publish(
+        user_id=user_id,
+        target_key=command_target_key(workspace_id, command_id),
+        event_type=event_type,
+        payload=payload,
+    )
+
+
+async def safe_publish_command_event(**kwargs: Any) -> LiveEventEnvelope | None:
+    try:
+        return await publish_command_event(**kwargs)
+    except Exception:
+        logger.debug("live command event unavailable", exc_info=True)
+        return None
+
+
 async def publish_terminal_event(
     *,
     user_id: str,
@@ -326,6 +355,7 @@ async def publish_terminal_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
     worker_task_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> LiveEventEnvelope:
     """Publish a normalized terminal event to the already-authorized target stream."""
     if target_type == "task":
@@ -343,6 +373,16 @@ async def publish_terminal_event(
             event_type=event_type,
             payload=payload,
             task_id=worker_task_id,
+        )
+    if target_type == "command":
+        if not workspace_id:
+            raise ValueError("workspace_id is required for a command live target")
+        return await publish_command_event(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            command_id=target_id,
+            event_type=event_type,
+            payload=payload,
         )
     raise ValueError("unsupported live terminal target")
 

@@ -403,7 +403,12 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         body.command,
         relative_cwd,
         body.wait_seconds,
-        __context__={"workspace": workspace.path, "request": request, "user_id": user_id},
+        __context__={
+            "workspace": workspace.path,
+            "workspace_id": workspace_id,
+            "request": request,
+            "user_id": user_id,
+        },
     )
     match = re.match(r"^Task ([0-9a-f]{8}):", response)
     if match is None:
