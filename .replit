@@ -56,7 +56,7 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
-packages = ["cargo", "chromium", "libiconv", "libxcrypt", "openssl", "pkg-config", "postgresql", "rustc", "glib", "nspr", "nss", "atk", "at-spi2-atk", "cups", "libdrm", "libxkbcommon", "pango", "cairo", "alsa-lib", "mesa", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "libglvnd"]
+packages = ["cargo", "chromium", "libiconv", "libxcrypt", "openssl", "pkg-config", "postgresql", "rustc", "glib", "nspr", "nss", "atk", "at-spi2-atk", "cups", "libdrm", "libgbm", "libxkbcommon", "pango", "cairo", "alsa-lib", "mesa", "xorg.libX11", "xorg.libXcomposite", "xorg.libXdamage", "xorg.libXext", "xorg.libXfixes", "xorg.libXrandr", "libglvnd"]
 
 [userenv]
 
