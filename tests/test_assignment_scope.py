@@ -1,6 +1,6 @@
 import unittest
 
-from cptr.utils.tools import _assignment_scope_violation, execute_tool
+from cptr.utils.tools import _assignment_scope_violation, execute_tool, get_tool_list
 
 
 class AssignmentScopeTests(unittest.IsolatedAsyncioTestCase):
@@ -110,6 +110,53 @@ class AssignmentScopeTests(unittest.IsolatedAsyncioTestCase):
                 context,
             ),
         )
+
+    async def test_assignment_scope_denies_chat_history_search_before_execution(self):
+        context = {
+            "workspace": "/tmp/disposable-workspace",
+            "inspection_scope": "assignment",
+            "assignment_paths": ["fresh-target.txt"],
+        }
+        result = await execute_tool(
+            "search_chats",
+            {"query": "historical", "workspace_scope": "all"},
+            context,
+        )
+        self.assertIn("inspection scope violation", result)
+        self.assertIn("capability is not available", result)
+        self.assertEqual(context["assignment_scope_violations"], 1)
+
+    def test_assignment_scope_locks_authority_after_repeated_denials(self):
+        context = {
+            "workspace": "/tmp/disposable-workspace",
+            "inspection_scope": "assignment",
+            "assignment_paths": ["fresh-target.txt"],
+        }
+        first = _assignment_scope_violation(
+            "search_chats", {"query": "first", "workspace_scope": "all"}, context
+        )
+        second = _assignment_scope_violation(
+            "web_search", {"query": "second"}, context
+        )
+        locked = _assignment_scope_violation(
+            "read_file", {"path": "fresh-target.txt"}, context
+        )
+        self.assertIn("capability is not available", first)
+        self.assertIn("worker authority is locked", second)
+        self.assertTrue(context["assignment_scope_locked"])
+        self.assertIn("authority is locked", locked)
+
+    async def test_assignment_scope_advertises_only_path_scoped_capabilities(self):
+        tools = await get_tool_list(
+            workspace="/tmp/disposable-workspace", inspection_scope="assignment"
+        )
+        names = {tool["name"] for tool in tools}
+        self.assertIn("read_file", names)
+        self.assertIn("edit_file", names)
+        self.assertNotIn("search_chats", names)
+        self.assertNotIn("web_search", names)
+        self.assertNotIn("read_url", names)
+        self.assertNotIn("browser_navigate", names)
 
     def test_assignment_scope_rejects_shell_escape_syntax(self):
         context = {

@@ -65,6 +65,85 @@ async def main():
 asyncio.run(main())
 """
 
+EFFECT_OUTCOME_SCRIPT = r"""
+import asyncio
+import os
+from cptr.models import Chat, ControlTask, User, Workspace
+from cptr.services.control_store import ControlTaskStore
+from cptr.utils.db import init_db, get_db
+
+async def main():
+    await init_db()
+    user_id = await User.create("effect-test", "password-hash", role="user", created_at=1)
+    workspace = await Workspace.upsert(user_id, os.environ["DELIVERY_WORKSPACE"], "delivery", {})
+    chat = await Chat.create(user_id=user_id, title="delivery", meta={}, created_at=1)
+    async with await get_db() as db:
+        db.add(ControlTask(
+            id="task_effect",
+            user_id=user_id,
+            workspace_id=workspace.id,
+            chat_id=chat.id,
+            message_id="worker-effect-1",
+            status="RUNNING",
+            prompt="worker",
+            model_id="model",
+            created_at=1,
+            updated_at=1,
+        ))
+        await db.commit()
+    store = ControlTaskStore()
+    message = await store.enqueue_message(
+        task_id="task_effect",
+        user_id=user_id,
+        chat_id=chat.id,
+        content="ADD_EFFECT_MARKER",
+        dedupe_key="effect-1",
+        chat_message_id="chat-effect-1",
+        now=2,
+    )
+    current = await store.get_message(message.id)
+    assert current.effect_status == "PENDING_DELIVERY"
+    assert await store.update_message(
+        message.id, status="DELIVERED", target_message_id="worker-effect-1", delivered_at=3, updated_at=3
+    )
+    assert await store.consume_message(
+        message.id, task_id="task_effect", message_id_for_run="worker-effect-1", now=4
+    )
+    current = await store.get_message(message.id)
+    assert current.status == "CONSUMED"
+    assert current.effect_status == "PENDING_EFFECT"
+    assert not await store.finalize_message_effect(
+        message.id,
+        task_id="task_effect",
+        continuation_message_id="wrong-worker",
+        effect_status="EFFECT_NOT_OBSERVED",
+        effect_evidence=[{"kind": "wrong"}],
+        now=5,
+    )
+    assert await store.finalize_message_effect(
+        message.id,
+        task_id="task_effect",
+        continuation_message_id="worker-effect-1",
+        effect_status="EFFECT_NOT_OBSERVED",
+        effect_evidence=[{"kind": "continuation_terminal", "terminal_status": "COMPLETE"}],
+        now=6,
+    )
+    assert not await store.finalize_message_effect(
+        message.id,
+        task_id="task_effect",
+        continuation_message_id="worker-effect-1",
+        effect_status="EFFECT_NOT_OBSERVED",
+        effect_evidence=[],
+        now=7,
+    )
+    current = await store.get_message(message.id)
+    assert current.effect_status == "EFFECT_NOT_OBSERVED"
+    assert current.effect_observed_at == 6
+    assert current.effect_evidence[0]["terminal_status"] == "COMPLETE"
+
+asyncio.run(main())
+"""
+
 GENERATION_FENCE_SCRIPT = r"""
 import asyncio
 import os
@@ -156,6 +235,21 @@ class ControlMessageDeliveryTests(unittest.TestCase):
             self.assertEqual(status, "CONSUMED")
             self.assertEqual(target, "worker-message")
             self.assertEqual(consumed_at, 5)
+
+    def test_consumed_task_control_requires_one_target_bound_effect_outcome(self):
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            tempfile.TemporaryDirectory() as workspace_dir,
+        ):
+            env = {**os.environ, "CPTR_DATA_DIR": data_dir, "DELIVERY_WORKSPACE": workspace_dir}
+            result = subprocess.run(
+                [sys.executable, "-c", EFFECT_OUTCOME_SCRIPT],
+                check=False,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_control_message_can_only_be_consumed_by_delivered_generation(self):
         with (

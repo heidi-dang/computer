@@ -15,7 +15,14 @@ from cptr.services.live_events import LiveEventEnvelope, live_event_hub
 from cptr.utils.redaction import redact_external_text
 
 router = APIRouter(prefix="/api/control/v1", tags=["control-live"])
-TERMINAL_STATUSES = {"COMPLETE", "FAILED", "BLOCKED", "CANCELLED"}
+TERMINAL_STATUSES = {
+    "COMPLETE",
+    "FAILED",
+    "BLOCKED",
+    "CANCELLED",
+    "REVIEW_REQUIRED",
+    "REJECTED",
+}
 
 
 def _task_snapshot(task: dict[str, Any]) -> dict[str, Any]:

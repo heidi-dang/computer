@@ -1659,7 +1659,9 @@ async def run_chat_task(
             )
 
     control_task_id: str | None = None
+    review_required = True
     active_tool_names: dict[str, str] = {}
+    consumed_control_message_ids: list[str] = []
     try:
         chat_for_live = await Chat.get_by_id(chat_id)
         chat_meta = chat_for_live.meta if chat_for_live else {}
@@ -1667,10 +1669,58 @@ async def run_chat_task(
             candidate = chat_meta.get("control_task_id")
             if candidate:
                 control_task_id = str(candidate)
+            review_required = bool(chat_meta.get("review_required", True))
     except Exception:
         logger.debug("[task %s] live task identity lookup failed", message_id[:8], exc_info=True)
 
+    async def _finalize_consumed_control_effects(terminal_status: str) -> None:
+        """Close consumed task steering with an explicit, fail-closed outcome."""
+        if not control_task_id or not consumed_control_message_ids:
+            return
+        from cptr.services.control_store import ControlTaskStore
+        from cptr.services.live_events import safe_publish_task_event
+
+        effect_status = (
+            "EFFECT_NOT_OBSERVED"
+            if terminal_status in {"COMPLETE", "REVIEW_REQUIRED"}
+            else "DELIVERY_FAILED"
+        )
+        evidence = [
+            {
+                "kind": "continuation_terminal",
+                "message_id": message_id,
+                "terminal_status": terminal_status,
+                "reason": (
+                    "No target-bound effect assertion is available for normal task steering"
+                    if effect_status == "EFFECT_NOT_OBSERVED"
+                    else "The continuation reached a non-success terminal state"
+                ),
+            }
+        ]
+        store = ControlTaskStore()
+        for control_message_id in consumed_control_message_ids:
+            finalized = await store.finalize_message_effect(
+                control_message_id,
+                task_id=control_task_id,
+                continuation_message_id=message_id,
+                effect_status=effect_status,
+                effect_evidence=evidence,
+                now=now_ms(),
+            )
+            if finalized:
+                await safe_publish_task_event(
+                    user_id=user_id,
+                    task_id=control_task_id,
+                    event_type="control.effect",
+                    payload={
+                        "control_message_id": control_message_id,
+                        "effect_status": effect_status,
+                        "message_id": message_id,
+                    },
+                )
+
     async def _finalize_control_terminal(status: str, error: str | None = None) -> None:
+        await _finalize_consumed_control_effects(status)
         if not control_task_id:
             return
         from cptr.services.control_store import ControlTaskStore
@@ -1692,6 +1742,70 @@ async def run_chat_task(
                 payload={
                     "status": current.status if current is not None else status,
                     "error": error,
+                },
+            )
+
+    async def _request_control_review() -> None:
+        """Pause a successful direct task until its scoped diff is explicitly reviewed."""
+        if not control_task_id:
+            return
+        if not review_required:
+            await _finalize_control_terminal("COMPLETE")
+            return
+        from cptr.services.control_store import ControlTaskStore
+        from cptr.services.live_events import safe_publish_task_event
+        from cptr.utils.git import diff, is_repo
+        from cptr.utils.identity import identity_for_user_id
+        from cptr.utils.redaction import redact_external
+
+        store = ControlTaskStore()
+        task = await store.get(control_task_id)
+        if task is None:
+            return
+        summary: dict[str, Any] = {
+            "workspace_id": task.workspace_id,
+            "diff_available": False,
+            "file_count": 0,
+            "files": [],
+        }
+        try:
+            identity = await identity_for_user_id(user_id)
+            if await is_repo(workspace, identity):
+                review_diff = await diff(workspace, None, False, True, False, identity)
+                files = list(review_diff.get("files") or [])
+                summary = {
+                    "workspace_id": task.workspace_id,
+                    "diff_available": True,
+                    "file_count": len(files),
+                    "files": [
+                        redact_external({
+                            "path": item.get("path"),
+                            "status": item.get("status"),
+                            "additions": item.get("additions"),
+                            "deletions": item.get("deletions"),
+                        })
+                        for item in files[:100]
+                    ],
+                    "files_truncated": len(files) > 100,
+                }
+        except Exception:
+            logger.debug("[task %s] review diff summary failed", message_id[:8], exc_info=True)
+        requested = await store.request_review(
+            control_task_id,
+            summary=summary,
+            ready_at=now_ms(),
+        )
+        current = await store.get(control_task_id)
+        if requested or (current is not None and current.status == "REVIEW_REQUIRED"):
+            await _finalize_consumed_control_effects("REVIEW_REQUIRED")
+            await safe_publish_task_event(
+                user_id=user_id,
+                task_id=control_task_id,
+                event_type="task.review_ready",
+                payload={
+                    "status": "REVIEW_REQUIRED",
+                    "review_status": "REQUIRED",
+                    "summary": summary,
                 },
             )
 
@@ -1845,6 +1959,7 @@ async def run_chat_task(
                             now=consumed_at,
                         )
                         if consumed:
+                            consumed_control_message_ids.append(str(control_message_id))
                             from cptr.services.live_events import safe_publish_task_event
 
                             await safe_publish_task_event(
@@ -2254,7 +2369,7 @@ async def run_chat_task(
                     usage=event.usage,
                     done=True,
                 )
-                await _finalize_control_terminal("COMPLETE")
+                await _request_control_review()
                 _task_state.pop(message_id, None)
                 await _emit_done()
                 preview = content[:300] if content else ""
@@ -2338,7 +2453,16 @@ async def run_chat_task(
             system += f"\n\n[CONVERSATION SUMMARY]\n{loaded_summary}"
         if regeneration_prompt:
             messages.append({"role": "user", "content": regeneration_prompt})
-        tools = await get_tool_list(builtin_tools=builtin_tools, workspace=workspace)
+        inspection_scope = (
+            (chat_obj.meta or {}).get("inspection_scope")
+            if isinstance((chat_obj.meta or {}).get("inspection_scope"), str)
+            else ("assignment" if "inspection_scope=assignment" in content else "workspace")
+        )
+        tools = await get_tool_list(
+            builtin_tools=builtin_tools,
+            workspace=workspace,
+            inspection_scope=inspection_scope,
+        )
         if not skill_authoring_allowed:
             tools = [t for t in tools if t["name"] != "manage_skill"]
 
@@ -2551,11 +2675,7 @@ async def run_chat_task(
             "message_id": message_id,
             "connection": connection,
             "builtin_tools": builtin_tools,
-            "inspection_scope": (
-                (chat_obj.meta or {}).get("inspection_scope")
-                if isinstance((chat_obj.meta or {}).get("inspection_scope"), str)
-                else ("assignment" if "inspection_scope=assignment" in content else "workspace")
-            ),
+            "inspection_scope": inspection_scope,
             "assignment_paths": (
                 (chat_obj.meta or {}).get("assignment_paths")
                 if isinstance((chat_obj.meta or {}).get("assignment_paths"), list)

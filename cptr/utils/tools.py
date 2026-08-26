@@ -1638,7 +1638,10 @@ def _resolve_path(path: str, workspace: str) -> Path:
     return full
 
 
-_ASSIGNMENT_SCOPED_TOOLS = {
+# A narrow assignment worker may only inspect and edit its named workspace paths.
+# Everything else, including chat history, browser/web access, scheduling, memory,
+# notifications, subagents, and external tool servers, fails closed.
+_ASSIGNMENT_ALLOWED_TOOLS = {
     "read_file",
     "list_directory",
     "search_files",
@@ -1649,6 +1652,8 @@ _ASSIGNMENT_SCOPED_TOOLS = {
     "display_file",
     "run_command",
 }
+_ASSIGNMENT_SCOPED_TOOLS = _ASSIGNMENT_ALLOWED_TOOLS
+_ASSIGNMENT_SCOPE_VIOLATION_LIMIT = 2
 
 
 def _relative_assignment_path(path: str) -> str:
@@ -1706,10 +1711,35 @@ def _assignment_command_scope_violation(args: dict, allowed: set[str]) -> str | 
     return "Error: inspection scope violation: command cannot be proven assignment-scoped"
 
 
+def _assignment_scope_denial(context: dict, detail: str) -> str:
+    """Persist one assignment-scope strike and lock authority on the final strike."""
+    violations = int(context.get("assignment_scope_violations") or 0) + 1
+    context["assignment_scope_violations"] = violations
+    if violations >= _ASSIGNMENT_SCOPE_VIOLATION_LIMIT:
+        context["assignment_scope_locked"] = True
+        return (
+            "Error: inspection scope violation: "
+            f"{detail}; worker authority is locked after repeated violations"
+        )
+    return f"Error: inspection scope violation: {detail}"
+
+
 def _assignment_scope_violation(name: str, args: dict, context: dict) -> str | None:
-    """Return a bounded denial when a narrow assignment accesses another path."""
-    if context.get("inspection_scope") != "assignment" or name not in _ASSIGNMENT_SCOPED_TOOLS:
+    """Return a fail-closed denial for an assignment-scoped worker.
+
+    Capability filtering is enforced here as well as in schema generation so a
+    model cannot recover from a denied path access by probing chat history,
+    browser/web tools, external servers, or another unrelated builtin. After
+    repeated denials the worker context is locked for the remainder of the run.
+    """
+    if context.get("inspection_scope") != "assignment":
         return None
+    if context.get("assignment_scope_locked"):
+        return "Error: inspection scope authority is locked after repeated violations"
+    if name not in _ASSIGNMENT_ALLOWED_TOOLS:
+        return _assignment_scope_denial(
+            context, "capability is not available to a narrow assignment"
+        )
     allowed = {
         _relative_assignment_path(item)
         for item in (context.get("assignment_paths") or [])
@@ -1722,19 +1752,20 @@ def _assignment_scope_violation(name: str, args: dict, context: dict) -> str | N
     }
     allowed |= created
     if not allowed:
-        return "Error: assignment scope has no allowed paths"
+        return _assignment_scope_denial(context, "assignment scope has no allowed paths")
 
     if name == "run_command":
         command_violation = _assignment_command_scope_violation(args, allowed)
         if command_violation:
-            return command_violation
+            detail = command_violation.removeprefix("Error: inspection scope violation: ")
+            return _assignment_scope_denial(context, detail)
 
     candidate = args.get("path") or args.get("cwd") or "."
     candidate = _relative_assignment_path(str(candidate))
     if candidate == ".":
         # A root listing/search is not narrow: it can reveal historical files.
         if name in {"list_directory", "search_files"}:
-            return "Error: inspection scope violation: workspace-wide access is not allowed"
+            return _assignment_scope_denial(context, "workspace-wide access is not allowed")
         return None
     if candidate in allowed:
         return None
@@ -1742,12 +1773,16 @@ def _assignment_scope_violation(name: str, args: dict, context: dict) -> str | N
         # Parent traversal is useful for resolving one named file, but a
         # directory listing/search would expose every sibling historical
         # fixture. Require the directory itself to be explicitly assigned.
-        return f"Error: inspection scope violation: directory is not named by this assignment: {candidate}"
+        return _assignment_scope_denial(
+            context, f"directory is not named by this assignment: {candidate}"
+        )
     # Allow only the parent directories needed to reach an explicitly named
     # file. The operation itself still filters/validates the concrete file.
     if any(item.startswith(f"{candidate}/") for item in allowed):
         return None
-    return f"Error: inspection scope violation: path is not named by this assignment: {candidate}"
+    return _assignment_scope_denial(
+        context, f"path is not named by this assignment: {candidate}"
+    )
 
 
 async def create_automation(
@@ -3415,7 +3450,11 @@ def _without_background_param(schema: dict) -> dict:
     return schema
 
 
-async def get_tool_list(builtin_tools: dict | None = None, workspace: str = "") -> list[dict]:
+async def get_tool_list(
+    builtin_tools: dict | None = None,
+    workspace: str = "",
+    inspection_scope: str = "workspace",
+) -> list[dict]:
     """Return tool schemas for the LLM.
 
     Automatically includes browser tools when browser.enabled is true,
@@ -3466,33 +3505,39 @@ async def get_tool_list(builtin_tools: dict | None = None, workspace: str = "") 
         disabled_tools |= GLOBAL_CHAT_DISABLED_TOOLS
     if disabled_tools:
         tools = {name: tool for name, tool in tools.items() if name not in disabled_tools}
+    if inspection_scope == "assignment":
+        tools = {
+            name: tool for name, tool in tools.items() if name in _ASSIGNMENT_ALLOWED_TOOLS
+        }
 
     schemas = [_fn_to_schema(name, t["fn"]) for name, t in tools.items()]
     if not background_subagents_enabled:
         schemas = [_without_background_param(s) for s in schemas]
 
-    # Add external tool server schemas
-    try:
-        cache = await _load_tool_servers()
-        for tool_info in cache["tools"].values():
-            schemas.append(tool_info["spec"])
-    except Exception:
-        pass
+    # Assignment workers never receive external schemas: a remote connector
+    # cannot be proven to respect the assignment path boundary.
+    if inspection_scope != "assignment":
+        try:
+            cache = await _load_tool_servers()
+            for tool_info in cache["tools"].values():
+                schemas.append(tool_info["spec"])
+        except Exception:
+            pass
 
     return schemas
 
 
 async def execute_tool(name: str, args: dict, __context__: dict) -> str:
     """Execute a tool by name, injecting execution context."""
+    scope_error = _assignment_scope_violation(name, args, __context__)
+    if scope_error:
+        return scope_error
     info = ALL_TOOLS.get(name)
     if info:
         if not __context__.get("workspace") and name in GLOBAL_CHAT_DISABLED_TOOLS:
             return f"Error: tool requires an open workspace: {name}"
         if not is_builtin_tool_enabled(name, __context__.get("builtin_tools")):
             return f"Error: tool disabled: {name}"
-        scope_error = _assignment_scope_violation(name, args, __context__)
-        if scope_error:
-            return scope_error
         fn = info["fn"]
         args = dict(args)
         args.pop("workspace", None)

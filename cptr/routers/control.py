@@ -35,6 +35,12 @@ class MessageRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class ReviewDecisionRequest(BaseModel):
+    decision: str = Field(min_length=1, max_length=32)
+    note: str | None = Field(default=None, max_length=50_000)
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+
 class AutonomousCreateRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
     goal: str = Field(min_length=1, max_length=100_000)
@@ -275,6 +281,34 @@ async def send_task_message(request: Request, task_id: str, body: MessageRequest
         raise HTTPException(status_code=404, detail="task not found") from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/tasks/{task_id}/review")
+async def get_task_review(request: Request, task_id: str):
+    user_id = await _user(request, "task:read")
+    agent, _ = _services(request)
+    try:
+        return await agent.get_task_review(task_id, user_id=user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+
+
+@router.post("/tasks/{task_id}/review")
+async def decide_task_review(request: Request, task_id: str, body: ReviewDecisionRequest):
+    user_id = await _user(request, "task:write")
+    agent, _ = _services(request)
+    try:
+        return await agent.decide_review(
+            task_id,
+            user_id=user_id,
+            decision=body.decision,
+            note=body.note,
+            idempotency_key=body.idempotency_key,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/tasks/{task_id}/cancel")

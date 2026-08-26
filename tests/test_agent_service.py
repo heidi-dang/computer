@@ -630,5 +630,71 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         diff.assert_not_awaited()
 
 
+    async def test_review_acceptance_records_durable_decision_and_event(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-review",
+            user_id="user-1",
+            status="REVIEW_REQUIRED",
+            review_status="REQUIRED",
+        )
+        accepted = {
+            "id": "task-review",
+            "status": "COMPLETE",
+            "review": {"status": "ACCEPTED", "decision": {"decision": "ACCEPT"}},
+        }
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch.object(service.store, "decide_review", new=AsyncMock(return_value=True)) as decide,
+            patch.object(service, "get_task", new=AsyncMock(return_value=accepted)),
+            patch("cptr.services.live_events.safe_publish_task_event", new=AsyncMock()) as publish,
+        ):
+            result = await service.decide_review(
+                "task-review", user_id="user-1", decision="ACCEPT", note="looks good"
+            )
+
+        self.assertEqual(result["status"], "COMPLETE")
+        decide.assert_awaited_once()
+        self.assertEqual(decide.call_args.kwargs["decision"], "ACCEPT")
+        publish.assert_awaited_once()
+        self.assertEqual(publish.call_args.kwargs["event_type"], "task.review_accepted")
+
+    async def test_request_changes_queues_scoped_follow_up_and_records_evidence(self):
+        service = AgentService()
+        task = SimpleNamespace(
+            id="task-review",
+            user_id="user-1",
+            status="REVIEW_REQUIRED",
+            review_status="REQUIRED",
+        )
+        continued = {
+            "id": "task-review",
+            "status": "RUNNING",
+            "review": {"status": "CHANGES_REQUESTED"},
+        }
+        with (
+            patch.object(service.store, "get", new=AsyncMock(return_value=task)),
+            patch.object(
+                service,
+                "send_message",
+                new=AsyncMock(return_value={"control_message_id": "control-1"}),
+            ) as send_message,
+            patch.object(service.store, "record_changes_requested", new=AsyncMock(return_value=True)) as record,
+            patch.object(service, "get_task", new=AsyncMock(return_value=continued)),
+            patch("cptr.services.live_events.safe_publish_task_event", new=AsyncMock()) as publish,
+        ):
+            result = await service.decide_review(
+                "task-review",
+                user_id="user-1",
+                decision="REQUEST_CHANGES",
+                note="Please add a regression test.",
+            )
+
+        self.assertEqual(result["review"]["status"], "CHANGES_REQUESTED")
+        self.assertIn("Please add a regression test.", send_message.call_args.kwargs["content"])
+        record.assert_awaited_once()
+        self.assertEqual(publish.call_args.kwargs["event_type"], "task.review_changes_requested")
+
+
 if __name__ == "__main__":
     unittest.main()

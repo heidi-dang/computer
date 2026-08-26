@@ -1103,6 +1103,7 @@ class AutonomousSupervisor:
             prompt=scoped_assignment,
             model_id=monitor.model_id,
             idempotency_key=key,
+            review_required=False,
         )
         if str(task.get("status") or "").upper() in {"FAILED", "ERROR", "CANCELLED"}:
             raise RuntimeError("idempotent worker task is already terminal and unsuccessful")

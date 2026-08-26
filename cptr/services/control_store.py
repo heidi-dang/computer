@@ -575,10 +575,108 @@ class ControlTaskStore:
                 .where(
                     ControlTask.id == task_id,
                     ControlTask.status.not_in(
-                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED")
+                        (
+                            "COMPLETE",
+                            "FAILED",
+                            "CANCELLED",
+                            "CANCEL_REQUESTED",
+                            "REVIEW_REQUIRED",
+                            "REJECTED",
+                        )
                     ),
                 )
                 .values(**values)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def request_review(
+        self,
+        task_id: str,
+        *,
+        summary: dict[str, Any],
+        ready_at: int,
+    ) -> bool:
+        """Atomically pause a successful worker turn for user diff review."""
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.status.not_in(
+                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED", "REJECTED")
+                    ),
+                )
+                .values(
+                    status="REVIEW_REQUIRED",
+                    review_status="REQUIRED",
+                    review_summary=summary,
+                    review_decision=None,
+                    review_ready_at=ready_at,
+                    reviewed_at=None,
+                    updated_at=ready_at,
+                )
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def decide_review(
+        self,
+        task_id: str,
+        *,
+        decision: str,
+        note: str | None,
+        decided_at: int,
+    ) -> bool:
+        """Record an accept or reject decision exactly once."""
+        decision_value = decision.upper()
+        status = "COMPLETE" if decision_value == "ACCEPT" else "REJECTED"
+        review_status = "ACCEPTED" if decision_value == "ACCEPT" else "REJECTED"
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.status == "REVIEW_REQUIRED",
+                    ControlTask.review_status == "REQUIRED",
+                )
+                .values(
+                    status=status,
+                    review_status=review_status,
+                    review_decision={"decision": decision_value, "note": note, "decided_at": decided_at},
+                    reviewed_at=decided_at,
+                    updated_at=decided_at,
+                )
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def record_changes_requested(
+        self,
+        task_id: str,
+        *,
+        note: str,
+        decided_at: int,
+    ) -> bool:
+        """Keep durable evidence for a review-driven scoped follow-up."""
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlTask)
+                .where(
+                    ControlTask.id == task_id,
+                    ControlTask.review_status == "REQUIRED",
+                    ControlTask.status.in_(("REVIEW_REQUIRED", "RUNNING")),
+                )
+                .values(
+                    review_status="CHANGES_REQUESTED",
+                    review_decision={
+                        "decision": "REQUEST_CHANGES",
+                        "note": note,
+                        "decided_at": decided_at,
+                    },
+                    reviewed_at=decided_at,
+                    updated_at=decided_at,
+                )
             )
             await db.commit()
             return result.rowcount == 1
@@ -591,7 +689,7 @@ class ControlTaskStore:
                 .where(
                     ControlTask.id == task_id,
                     ControlTask.status.not_in(
-                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED")
+                        ("COMPLETE", "FAILED", "CANCELLED", "CANCEL_REQUESTED", "REJECTED")
                     ),
                 )
                 .values(status="CANCEL_REQUESTED", updated_at=requested_at)
@@ -716,6 +814,8 @@ class ControlTaskStore:
                 monitor_id=monitor_id,
                 scope_id=scope_id,
                 intended_message_id=intended_message_id,
+                effect_status="PENDING_DELIVERY",
+                effect_evidence=[],
                 created_at=now,
                 updated_at=now,
             )
@@ -779,6 +879,53 @@ class ControlTaskStore:
                     consumed_at=now,
                     consumed_task_id=task_id,
                     consumed_message_id=message_id_for_run,
+                    effect_status="PENDING_EFFECT",
+                    effect_evidence=[
+                        {
+                            "kind": "continuation_started",
+                            "message_id": message_id_for_run,
+                            "observed_at": now,
+                        }
+                    ],
+                    updated_at=now,
+                )
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def finalize_message_effect(
+        self,
+        message_id: str,
+        *,
+        task_id: str,
+        continuation_message_id: str,
+        effect_status: str,
+        effect_evidence: list[dict[str, Any]],
+        now: int,
+    ) -> bool:
+        """Record a fail-closed outcome for one consumed task control message.
+
+        Normal-task delivery and consumption prove only that a continuation was
+        started. Without target-bound effect verification, a terminal
+        continuation is explicitly recorded as not observed rather than
+        reported as an applied steering instruction.
+        """
+        if effect_status not in {"EFFECT_NOT_OBSERVED", "DELIVERY_FAILED"}:
+            raise ValueError("invalid task steering effect status")
+        async with await get_db() as db:
+            result = await db.execute(
+                update(ControlMessage)
+                .where(
+                    ControlMessage.id == message_id,
+                    ControlMessage.task_id == task_id,
+                    ControlMessage.status == "CONSUMED",
+                    ControlMessage.consumed_message_id == continuation_message_id,
+                    ControlMessage.effect_status == "PENDING_EFFECT",
+                )
+                .values(
+                    effect_status=effect_status,
+                    effect_evidence=effect_evidence,
+                    effect_observed_at=now,
                     updated_at=now,
                 )
             )
@@ -793,7 +940,7 @@ class ControlTaskStore:
         async with await get_db() as db:
             result = await db.execute(
                 update(ControlTask)
-                .where(ControlTask.id == task_id, ControlTask.status.not_in(("CANCELLED",)))
+                .where(ControlTask.id == task_id, ControlTask.status.not_in(("CANCELLED", "REJECTED")))
                 .values(message_id=message_id, status="RUNNING", updated_at=now)
             )
             await db.commit()

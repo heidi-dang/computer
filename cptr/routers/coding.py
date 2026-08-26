@@ -94,6 +94,19 @@ class CommandRequest(BaseModel):
     allow_network: bool = False
 
 
+class CreateDirectoryRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1_000)
+
+
+class MoveRequest(BaseModel):
+    source: str = Field(min_length=1, max_length=1_000)
+    destination: str = Field(min_length=1, max_length=1_000)
+
+
+class DeleteRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=1_000)
+
+
 def _raise_auth(exc: PermissionError) -> None:
     if str(exc).startswith("missing required scope"):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
@@ -313,6 +326,61 @@ async def edit_workspace_file(request: Request, workspace_id: str, body: EditReq
         "replaced_characters": len(body.target),
         "inserted_characters": len(body.replacement),
     }
+
+
+@router.post("/workspaces/{workspace_id}/coding/directories")
+async def create_workspace_directory(
+    request: Request, workspace_id: str, body: CreateDirectoryRequest
+):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    root = Path(workspace.path).resolve()
+    full, relative = _relative_path(body.path, root)
+    try:
+        await Runtime.create_item(request, str(full), type="directory")
+    except FileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"workspace_id": workspace_id, "path": relative, "type": "directory"}
+
+
+@router.post("/workspaces/{workspace_id}/coding/move")
+async def move_workspace_file(request: Request, workspace_id: str, body: MoveRequest):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    root = Path(workspace.path).resolve()
+    source, source_relative = _relative_path(body.source, root)
+    destination, destination_relative = _relative_path(body.destination, root)
+    try:
+        source_stat = await Runtime.stat(request, str(source))
+        if source_stat.get("type") != "file":
+            raise HTTPException(status_code=422, detail="only files may be moved through direct coding")
+        try:
+            await Runtime.stat(request, str(destination))
+        except FileError as exc:
+            if exc.status_code != 404:
+                raise
+        else:
+            raise HTTPException(status_code=409, detail="destination already exists")
+        await Runtime.move_item(request, str(source), str(destination))
+    except FileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"workspace_id": workspace_id, "source": source_relative, "destination": destination_relative}
+
+
+@router.post("/workspaces/{workspace_id}/coding/delete")
+async def delete_workspace_file(request: Request, workspace_id: str, body: DeleteRequest):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    root = Path(workspace.path).resolve()
+    full, relative = _relative_path(body.path, root)
+    try:
+        file_stat = await Runtime.stat(request, str(full))
+        if file_stat.get("type") != "file":
+            raise HTTPException(status_code=422, detail="only files may be deleted through direct coding")
+        await Runtime.delete_item(request, str(full))
+    except FileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"workspace_id": workspace_id, "path": relative, "deleted": True}
 
 
 @router.post("/workspaces/{workspace_id}/coding/commands")

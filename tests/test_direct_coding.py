@@ -227,6 +227,21 @@ class DirectCodingHttpFlowTests(unittest.TestCase):
                     headers=headers,
                     json={"path": "src/example.py", "target": "1", "replacement": "2"},
                 )
+                directory = client.post(
+                    "/api/control/v1/workspaces/ws_1/coding/directories",
+                    headers=headers,
+                    json={"path": "generated"},
+                )
+                moved = client.post(
+                    "/api/control/v1/workspaces/ws_1/coding/move",
+                    headers=headers,
+                    json={"source": "src/example.py", "destination": "generated/example.py"},
+                )
+                deleted = client.post(
+                    "/api/control/v1/workspaces/ws_1/coding/delete",
+                    headers=headers,
+                    json={"path": "generated/example.py"},
+                )
                 command = client.post(
                     "/api/control/v1/workspaces/ws_1/coding/commands",
                     headers=headers,
@@ -258,6 +273,12 @@ class DirectCodingHttpFlowTests(unittest.TestCase):
         self.assertEqual(read.status_code, 200)
         self.assertEqual(read.json()["content"], "value = 1\n")
         self.assertEqual(edit.status_code, 200)
+        self.assertEqual(directory.status_code, 200)
+        self.assertEqual(directory.json()["type"], "directory")
+        self.assertEqual(moved.status_code, 200)
+        self.assertEqual(moved.json()["destination"], "generated/example.py")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertTrue(deleted.json()["deleted"])
         self.assertEqual(command.status_code, 200)
         self.assertEqual(command.json()["status"], "COMPLETE")
         self.assertIn("direct-coding", command.json()["output"])

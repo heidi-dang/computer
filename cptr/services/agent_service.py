@@ -38,6 +38,7 @@ class AgentService:
         model_id: str,
         idempotency_key: str | None = None,
         request: Any | None = None,
+        review_required: bool = True,
     ) -> dict[str, Any]:
         prompt = prompt.strip()
         if not prompt:
@@ -73,6 +74,7 @@ class AgentService:
                 "control_task_id": task_id,
                 "internal": True,
                 "control_plane": True,
+                "review_required": review_required,
                 **assignment_meta,
             },
             created_at=now,
@@ -197,7 +199,13 @@ class AgentService:
         if message.done:
             desired_status = (
                 status
-                if status in {"CANCEL_REQUESTED", "CANCELLED"}
+                if status in {
+                    "CANCEL_REQUESTED",
+                    "CANCELLED",
+                    "COMPLETE",
+                    "REVIEW_REQUIRED",
+                    "REJECTED",
+                }
                 else ("FAILED" if error else "COMPLETE")
             )
             if desired_status != status:
@@ -219,7 +227,7 @@ class AgentService:
         else:
             from cptr.utils.chat_task import is_running
 
-            if status in {"CANCELLED", "COMPLETE", "FAILED"}:
+            if status in {"CANCELLED", "COMPLETE", "FAILED", "REVIEW_REQUIRED", "REJECTED"}:
                 # A durable terminal transition wins over a late worker
                 # heartbeat or a message row that has not flushed yet.
                 pass
@@ -274,6 +282,13 @@ class AgentService:
                 updated_at=int(time.time() * 1000),
             )
         control_messages, control_messages_truncated = await self._control_delivery_records(task.id)
+        review = {
+            "status": getattr(task, "review_status", "NOT_REQUIRED"),
+            "summary": redact_sensitive(getattr(task, "review_summary", None)),
+            "decision": redact_sensitive(getattr(task, "review_decision", None)),
+            "ready_at": getattr(task, "review_ready_at", None),
+            "reviewed_at": getattr(task, "reviewed_at", None),
+        }
         return {
             "id": task.id,
             "workspace_id": task.workspace_id,
@@ -285,6 +300,7 @@ class AgentService:
             "output": safe_output,
             "raw_output": redact_external(message.output or []),
             "error": redact_text(error) if error else None,
+            "review": review,
             "control_messages": control_messages,
             "control_messages_truncated": control_messages_truncated,
             "created_at": task.created_at,
@@ -298,9 +314,88 @@ class AgentService:
             "status": task["status"],
             "content": redact_text(task["output"]),
             "raw_output": redact_sensitive(task["raw_output"]),
+            "review": task.get("review"),
             "control_messages": task.get("control_messages", []),
             "control_messages_truncated": bool(task.get("control_messages_truncated", False)),
         }
+
+    async def get_task_review(self, task_id: str, *, user_id: str) -> dict[str, Any]:
+        """Return a task's review state and its user-authorized workspace diff."""
+        task = await self.get_task(task_id, user_id=user_id)
+        review = task.get("review") or {"status": "NOT_REQUIRED"}
+        review_status = str(review.get("status") or "NOT_REQUIRED")
+        diff = await self.get_diff(task["workspace_id"], user_id=user_id)
+        return {
+            "task_id": task["id"],
+            "workspace_id": task["workspace_id"],
+            "status": task["status"],
+            "review": review,
+            "diff": redact_sensitive(diff),
+            "review_available": review_status != "NOT_REQUIRED",
+        }
+
+    async def decide_review(
+        self,
+        task_id: str,
+        *,
+        user_id: str,
+        decision: str,
+        note: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Apply one explicit user decision to a task awaiting diff review."""
+        task = await self.store.get(task_id)
+        if task is None or task.user_id != user_id:
+            raise KeyError("task not found")
+        decision_value = decision.strip().upper()
+        if decision_value not in {"ACCEPT", "REJECT", "REQUEST_CHANGES"}:
+            raise ValueError("unsupported review decision")
+        if task.status != "REVIEW_REQUIRED" or getattr(task, "review_status", None) != "REQUIRED":
+            raise ValueError("task is not awaiting review")
+        safe_note = redact_external_text((note or "").strip())
+        now = int(time.time() * 1000)
+        from cptr.services.live_events import safe_publish_task_event
+
+        if decision_value == "REQUEST_CHANGES":
+            if not safe_note:
+                raise ValueError("request-changes decision requires a note")
+            message = await self.send_message(
+                task_id,
+                user_id=user_id,
+                content=f"Review requested changes:\n{safe_note}",
+                idempotency_key=idempotency_key,
+                provenance={"review_task_id": task_id},
+            )
+            record = getattr(self.store, "record_changes_requested", None)
+            recorded = await record(task_id, note=safe_note, decided_at=now) if callable(record) else False
+            if not recorded:
+                raise ValueError("review decision could not be recorded")
+            result = await self.get_task(task_id, user_id=user_id)
+            await safe_publish_task_event(
+                user_id=user_id,
+                task_id=task_id,
+                event_type="task.review_changes_requested",
+                payload={"status": result["status"], "review_status": "CHANGES_REQUESTED"},
+            )
+            return {**result, "review_message": message}
+
+        decide = getattr(self.store, "decide_review", None)
+        accepted = await decide(
+            task_id,
+            decision=decision_value,
+            note=safe_note or None,
+            decided_at=now,
+        ) if callable(decide) else False
+        if not accepted:
+            raise ValueError("review decision could not be applied")
+        result = await self.get_task(task_id, user_id=user_id)
+        await safe_publish_task_event(
+            user_id=user_id,
+            task_id=task_id,
+            event_type="task.review_accepted" if decision_value == "ACCEPT" else "task.review_rejected",
+            payload={"status": result["status"], "review_status": result.get("review", {}).get("status")},
+        )
+        return result
 
     async def _control_delivery_records(self, task_id: str) -> tuple[list[dict[str, Any]], bool]:
         async with await get_db() as db:
@@ -329,6 +424,9 @@ class AgentService:
             "intended_message_id": row.intended_message_id,
             "consumed_task_id": row.consumed_task_id,
             "consumed_message_id": row.consumed_message_id,
+            "effect_status": getattr(row, "effect_status", None),
+            "effect_evidence": getattr(row, "effect_evidence", None),
+            "effect_observed_at": getattr(row, "effect_observed_at", None),
             "created_at": row.created_at,
             "updated_at": row.updated_at,
             "delivered_at": row.delivered_at,

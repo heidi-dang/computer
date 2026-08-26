@@ -6,10 +6,13 @@ from cptr.routers.control import (
     ApprovalRequest,
     AutonomousCreateRequest,
     TaskCreateRequest,
+    ReviewDecisionRequest,
     _monitor_summary,
     approve_autonomous,
     create_autonomous,
     create_task,
+    decide_task_review,
+    get_task_review,
     get_autonomous_evidence,
 )
 from cptr.services.supervisor import (
@@ -55,6 +58,59 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             model_id="model_1",
             idempotency_key="request_1",
             request=request,
+        )
+
+    async def test_task_review_endpoint_forwards_read_authorized_lookup(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(
+            get_task_review=AsyncMock(
+                return_value={
+                    "task_id": "task_1",
+                    "status": "REVIEW_REQUIRED",
+                    "review": {"status": "REQUIRED"},
+                    "diff": {"files": []},
+                }
+            )
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")) as user,
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+        ):
+            result = await get_task_review(request, "task_1")
+
+        self.assertEqual(result["review"]["status"], "REQUIRED")
+        user.assert_awaited_once_with(request, "task:read")
+        agent.get_task_review.assert_awaited_once_with("task_1", user_id="user_1")
+
+    async def test_review_decision_endpoint_forwards_scoped_user_action(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(
+            decide_review=AsyncMock(
+                return_value={
+                    "id": "task_1",
+                    "status": "COMPLETE",
+                    "review": {"status": "ACCEPTED"},
+                }
+            )
+        )
+        body = ReviewDecisionRequest(
+            decision="ACCEPT",
+            note="Reviewed the diff",
+            idempotency_key="review_1",
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+        ):
+            result = await decide_task_review(request, "task_1", body)
+
+        self.assertEqual(result["review"]["status"], "ACCEPTED")
+        agent.decide_review.assert_awaited_once_with(
+            "task_1",
+            user_id="user_1",
+            decision="ACCEPT",
+            note="Reviewed the diff",
+            idempotency_key="review_1",
         )
 
     async def test_monitor_summary_keeps_original_goal_and_counts_verified_scopes(self):

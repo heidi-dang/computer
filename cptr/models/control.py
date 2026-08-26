@@ -31,6 +31,11 @@ class ControlTask(Base):
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
     cancelled_at = Column(BigInteger, nullable=True)
+    review_status = Column(Text, nullable=False, default="NOT_REQUIRED")
+    review_summary = Column(JSON, nullable=True)
+    review_decision = Column(JSON, nullable=True)
+    review_ready_at = Column(BigInteger, nullable=True)
+    reviewed_at = Column(BigInteger, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("user_id", "idempotency_key", name="uq_control_task_user_idempotency"),
@@ -58,6 +63,12 @@ class ControlMessage(Base):
     intended_message_id = Column(Text, nullable=True)
     consumed_task_id = Column(Text, nullable=True)
     consumed_message_id = Column(Text, nullable=True)
+    # Delivery/consumption only prove handoff. A normal task steering request
+    # must retain a separate, fail-closed outcome until the continuation can
+    # provide target-bound evidence of the requested effect.
+    effect_status = Column(Text, nullable=True)
+    effect_evidence = Column(JSON, nullable=True)
+    effect_observed_at = Column(BigInteger, nullable=True)
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
     delivered_at = Column(BigInteger, nullable=True)
