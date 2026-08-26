@@ -53,7 +53,9 @@
 	import SetupWizard from '$lib/components/SetupWizard.svelte';
 
 	let { children } = $props();
-const isVisualRegressionRoute = import.meta.env.DEV && $page.url.pathname === '/__visual-regression';
+	const isFixtureRoute =
+		import.meta.env.DEV &&
+		['/__visual-regression', '/__recovery-regression'].includes($page.url.pathname);
 	let showSettings = $state(false);
 	let settingsTab = $state('general');
 	let showUpdateToast = $state(false);
@@ -72,6 +74,8 @@ const isVisualRegressionRoute = import.meta.env.DEV && $page.url.pathname === '/
 	let signupEnabled = $state(false);
 
 	onMount(() => {
+		if (isFixtureRoute) return () => {};
+
 		void (async () => {
 		// Check auth first
 		await checkAuth();
@@ -465,7 +469,9 @@ const isVisualRegressionRoute = import.meta.env.DEV && $page.url.pathname === '/
 
 <svelte:window onkeydown={handleKeydown} />
 
-{#if authState === 'checking'}
+{#if isFixtureRoute}
+	{@render children()}
+{:else if authState === 'checking'}
 	<!-- Loading spinner while checking auth -->
 	<div
 		class="app-theme flex items-center justify-center h-dvh bg-white dark:bg-black"
@@ -482,8 +488,6 @@ const isVisualRegressionRoute = import.meta.env.DEV && $page.url.pathname === '/
 		token={startupToken}
 		onauth={handleAuth}
 	/>
-{:else if isVisualRegressionRoute}
-{@render children()}
 {:else if $stateLoaded && showSetup}
 	<SetupWizard
 		oncomplete={() => {

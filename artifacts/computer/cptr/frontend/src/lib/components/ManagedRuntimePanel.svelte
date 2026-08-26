@@ -46,7 +46,7 @@ try { runtime = await stopManagedRuntime(runtime.run_id, workspace); }
 onDestroy(() => { if (timer) clearInterval(timer); });
 </script>
 
-<section class="runtime-panel" aria-labelledby="runtime-title">
+<section class="runtime-panel" data-testid="managed-runtime-panel" aria-labelledby="runtime-title">
 <div class="runtime-heading">
 <div><span class="eyebrow">MANAGED PREVIEW</span><h2 id="runtime-title">Project runtime</h2></div>
 <span class:live={runtime?.state === 'running'} class="state">{runtime?.state ?? 'idle'}</span>
