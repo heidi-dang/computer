@@ -436,62 +436,87 @@ onclick={() => (auditTrailOpen = !auditTrailOpen)}
 	.flowdeck-report {
 		margin: 0.35rem 0 0.65rem 1.1rem;
 		max-width: 42rem;
-		border: 1px solid color-mix(in oklab, #a78bfa 28%, transparent);
-		border-radius: 0.75rem;
-		background: color-mix(in oklab, var(--app-surface) 95%, #312e81);
+		border: 1px solid color-mix(in oklab, #a78bfa 20%, transparent);
+		border-radius: 0.65rem;
+		background: color-mix(in oklab, var(--app-surface) 98%, #312e81);
 	}
 .flowdeck-audit-trail {
-margin: 0.35rem 0 0.65rem 1.1rem;
-max-width: 42rem;
-border: 1px solid color-mix(in oklab, var(--app-fg) 16%, transparent);
-border-radius: 0.75rem;
-background: color-mix(in oklab, var(--app-surface) 96%, transparent);
-}
-.flowdeck-audit-list {
-display: grid;
-gap: 0.35rem;
-border-top: 1px solid color-mix(in oklab, var(--app-fg) 10%, transparent);
-padding: 0.6rem 0.7rem 0.65rem 1.8rem;
-font-size: 0.62rem;
-}
-.flowdeck-audit-entry {
-display: flex;
-align-items: center;
-gap: 0.4rem;
-min-width: 0;
-}
-.flowdeck-audit-badge {
-flex: 0 0 auto;
-border-radius: 0.25rem;
-padding: 0.12rem 0.28rem;
-background: color-mix(in oklab, #f59e0b 18%, transparent);
-color: color-mix(in oklab, #f59e0b 80%, var(--app-fg));
-font-size: 0.55rem;
-}
-.flowdeck-audit-badge.authoritative {
-background: color-mix(in oklab, #34d399 18%, transparent);
-color: color-mix(in oklab, #34d399 80%, var(--app-fg));
-}
-.flowdeck-audit-kind {
-overflow: hidden;
-text-overflow: ellipsis;
-white-space: nowrap;
-color: color-mix(in oklab, var(--app-fg) 70%, transparent);
-}
-.flowdeck-audit-sequence {
-margin-left: auto;
-color: color-mix(in oklab, var(--app-fg) 42%, transparent);
-font-family: ui-monospace, SFMono-Regular, monospace;
-}
+		margin: 0.35rem 0 0.65rem 1.1rem;
+		max-width: 42rem;
+		border: 1px solid color-mix(in oklab, var(--app-fg) 11%, transparent);
+		border-radius: 0.65rem;
+		background: color-mix(in oklab, var(--app-surface) 99%, transparent);
+	}
+	.flowdeck-audit-list {
+		display: grid;
+		gap: 0.12rem;
+		max-height: 14rem;
+		overflow-y: auto;
+		border-top: 1px solid color-mix(in oklab, var(--app-fg) 8%, transparent);
+		padding: 0.45rem 0.65rem 0.5rem 2rem;
+		scrollbar-width: thin;
+		font-size: 0.62rem;
+	}
+	.flowdeck-audit-entry {
+		display: grid;
+		grid-template-columns: 0.55rem minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 0.45rem;
+		min-width: 0;
+		min-height: 1.45rem;
+		border-bottom: 1px solid color-mix(in oklab, var(--app-fg) 5%, transparent);
+	}
+	.flowdeck-audit-entry:last-child {
+		border-bottom: 0;
+	}
+	.flowdeck-audit-badge {
+		display: block;
+		width: 0.38rem;
+		height: 0.38rem;
+		border-radius: 999px;
+		background: #f59e0b;
+		box-shadow: 0 0 0 3px color-mix(in oklab, #f59e0b 12%, transparent);
+		font-size: 0;
+	}
+	.flowdeck-audit-badge.authoritative {
+		background: #34d399;
+		box-shadow: 0 0 0 3px color-mix(in oklab, #34d399 12%, transparent);
+	}
+	.flowdeck-audit-kind {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		color: color-mix(in oklab, var(--app-fg) 66%, transparent);
+	}
+	.flowdeck-audit-sequence {
+		color: color-mix(in oklab, var(--app-fg) 34%, transparent);
+		font-family: ui-monospace, SFMono-Regular, monospace;
+		font-size: 0.57rem;
+	}
 	.flowdeck-report-toggle {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 0.75rem;
 		width: 100%;
-		padding: 0.55rem 0.7rem;
+		min-height: 2.75rem;
+		padding: 0.55rem 0.75rem;
 		text-align: left;
 		color: var(--app-fg);
+	}
+	.flowdeck-report-toggle > span:first-child {
+		min-width: 0;
+	}
+	.flowdeck-report-toggle > span:last-child {
+		flex: 0 0 auto;
+		display: grid;
+		width: 1.25rem;
+		height: 1.25rem;
+		place-items: center;
+		border: 1px solid color-mix(in oklab, var(--app-fg) 14%, transparent);
+		border-radius: 999px;
+		color: color-mix(in oklab, var(--app-fg) 58%, transparent);
+		font-size: 0.8rem;
 	}
 	.flowdeck-report-subtitle {
 		display: block;
@@ -500,13 +525,17 @@ font-family: ui-monospace, SFMono-Regular, monospace;
 		font-size: 0.62rem;
 	}
 	.flowdeck-report-body {
-		border-top: 1px solid color-mix(in oklab, #a78bfa 18%, transparent);
-		padding: 0.65rem 0.7rem;
+		border-top: 1px solid color-mix(in oklab, #a78bfa 13%, transparent);
+		padding: 0.7rem 0.75rem 0.75rem;
 	}
 	.flowdeck-finding {
 		margin-top: 0.5rem;
-		border-top: 1px solid color-mix(in oklab, var(--app-fg) 8%, transparent);
-		padding-top: 0.5rem;
+		border: 1px solid color-mix(in oklab, var(--app-fg) 8%, transparent);
+		border-radius: 0.45rem;
+		padding: 0.55rem 0.6rem;
+	}
+	.flowdeck-finding:first-of-type {
+		margin-top: 0.35rem;
 	}
 	.flowdeck-finding-heading {
 		display: flex;
