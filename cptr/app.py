@@ -198,16 +198,16 @@ if audit_level != AuditLevel.NONE:
     )
 
 
-# CORS middleware: uses CPTR_CORS_ALLOWED_ORIGINS env var (default "*").
+# CORS middleware: credentialed browser access is limited to explicit origins.
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402 - middleware is configured after app creation
 from cptr.env import CORS_ALLOWED_ORIGINS  # noqa: E402 - middleware is configured after app creation
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ALLOWED_ORIGINS if isinstance(CORS_ALLOWED_ORIGINS, list) else ["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
 )
 
 

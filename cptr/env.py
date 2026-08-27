@@ -98,12 +98,18 @@ SUPERVISOR_OPENAI_MODEL = os.environ.get("CPTR_SUPERVISOR_OPENAI_MODEL", "")
 SUPERVISOR_OPENAI_API_KEY = os.environ.get("CPTR_SUPERVISOR_OPENAI_API_KEY", "")
 
 # ── CORS ────────────────────────────────────────────────────
-# Socket.IO CORS allowed origins.
-# Default → "*" (allow all origins)
-# Comma-separated list → allow specific origins only
-#   e.g. "https://example.com,https://app.example.com"
-_cors_raw = os.environ.get("CPTR_CORS_ALLOWED_ORIGINS", "*")
-if _cors_raw.strip() == "*":
-    CORS_ALLOWED_ORIGINS = "*"
+# Browser origins permitted to send credentialed CPTR API requests. Native CPTR
+# uses same-origin requests, so CORS is mainly needed for explicitly configured
+# trusted web clients. Wildcards are never safe with credentials.
+_LOCAL_CORS_ORIGINS = ("http://localhost:8000", "http://127.0.0.1:8000")
+_cors_raw = os.environ.get("CPTR_CORS_ALLOWED_ORIGINS", "").strip()
+if not _cors_raw:
+    CORS_ALLOWED_ORIGINS = list(_LOCAL_CORS_ORIGINS)
+elif _cors_raw == "*":
+    raise RuntimeError(
+        "CPTR_CORS_ALLOWED_ORIGINS must list explicit origins; wildcard origins are not allowed"
+    )
 else:
-    CORS_ALLOWED_ORIGINS = [o.strip() for o in _cors_raw.split(",") if o.strip()] or "*"
+    CORS_ALLOWED_ORIGINS = [origin.strip().rstrip("/") for origin in _cors_raw.split(",") if origin.strip()]
+    if not CORS_ALLOWED_ORIGINS:
+        raise RuntimeError("CPTR_CORS_ALLOWED_ORIGINS must contain at least one explicit origin")

@@ -112,7 +112,9 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             _validate_command("npm install example-package", False)
         self.assertEqual(network.exception.status_code, 403)
 
-        _validate_command("npm install example-package", True)
+        with self.assertRaises(HTTPException) as package_install:
+            _validate_command("npm install example-package", True)
+        self.assertEqual(package_install.exception.status_code, 403)
         _validate_command("npm test", False)
 
     async def test_exact_edit_uses_authorized_workspace_and_never_starts_an_agent(self):
@@ -472,7 +474,7 @@ class DirectCodingExternalCommandScopeTests(unittest.IsolatedAsyncioTestCase):
             await start_workspace_command(request, "ws_1", body)
 
         self.assertEqual(denied.exception.status_code, 403)
-        self.assertIn("command:external", denied.exception.detail)
+        self.assertIn("package installation", denied.exception.detail)
 
 
 class ApiKeyScopeIssuanceTests(unittest.IsolatedAsyncioTestCase):

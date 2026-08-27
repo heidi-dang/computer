@@ -5,8 +5,11 @@ SQLite handles user data (users, auths, user_states)."""
 
 from __future__ import annotations
 
+import json
+import os
 import secrets
 import time
+from ipaddress import ip_address, ip_network
 from dataclasses import dataclass
 from enum import Enum
 
@@ -368,6 +371,30 @@ def get_auth_mode() -> AuthMode:
     return AuthMode.PASSWORD  # Default
 
 
+def _is_trusted_proxy_source(client_host: str, trusted_sources: object) -> bool:
+    """Return true only when ``client_host`` matches an explicit IP/CIDR source.
+
+    Trusted-header deployments are security-sensitive. Hostnames, wildcard
+    values, malformed entries, and an empty list are deliberately rejected so
+    operators cannot accidentally trust a user-supplied identity header.
+    """
+    if not isinstance(trusted_sources, list) or not trusted_sources:
+        return False
+    try:
+        client_ip = ip_address(client_host)
+    except ValueError:
+        return False
+    for raw_source in trusted_sources:
+        if not isinstance(raw_source, str) or not raw_source.strip():
+            continue
+        try:
+            if client_ip in ip_network(raw_source.strip(), strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def check_access(
     client_host: str,
     jwt_token: str | None,
@@ -383,17 +410,23 @@ def check_access(
             return verify_token(jwt_token)
         return None
 
-    # Trusted Header Authentication
+    # Trusted Header Authentication. A remote identity header is meaningful only
+    # when the direct peer is an explicitly configured, trusted proxy. Failing
+    # closed here prevents arbitrary callers from forging `Remote-User` when a
+    # deployment accidentally enables trusted-header mode without a source list.
     if mode == AuthMode.TRUSTED_HEADER:
         config = load_config()
         auth_cfg = config.get("auth", {})
         trusted_sources = auth_cfg.get("trusted_sources", [])
-        if trusted_sources and client_host not in trusted_sources:
+        if not _is_trusted_proxy_source(client_host, trusted_sources):
             return None
         if remote_user_header:
-            return AuthResult(username=remote_user_header)
-        if jwt_token:
-            return verify_token(jwt_token)
+            username = remote_user_header.strip()
+            if username:
+                return AuthResult(username=username)
+        # Do not fall back to a bearer cookie in trusted-header mode. A reverse
+        # proxy is the configured identity authority for this mode and the
+        # caller must arrive through that trusted proxy.
         return None
 
     return None

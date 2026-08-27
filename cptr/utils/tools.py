@@ -17,6 +17,8 @@ import json
 import mimetypes
 import os
 import re
+
+from cptr.services.command_policy import command_policy_violation
 import shlex
 import stat
 import time
@@ -1814,10 +1816,15 @@ def _control_execution_policy_violation(name: str, args: dict, context: dict) ->
         return "Error: control task policy denies network access"
     if name == "run_command":
         command = str(args.get("command") or "")
-        if policy.get("allow_package_install") is False and _CONTROL_PACKAGE_INSTALL_RE.search(command):
-            return "Error: control task policy denies package installation"
-        if policy.get("allow_network") is False and _CONTROL_EXTERNAL_COMMAND_RE.search(command):
-            return "Error: control task policy denies external command execution"
+        violation = command_policy_violation(
+            command,
+            allow_network=policy.get("allow_network") is True,
+            allow_package_install=policy.get("allow_package_install") is True,
+        )
+        if violation:
+            if "package installation" in violation:
+                return "Error: control task policy denies package installation"
+            return f"Error: control task policy denies {violation}"
     return None
 
 

@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from cptr.models import Workspace
 from cptr.services.workspace_availability import is_workspace_available
+from cptr.services.command_policy import command_policy_violation
 from cptr.services.control_auth import authenticate_control_request
 from cptr.utils.db import get_db
 from cptr.utils.identity import IdentityUnavailable, env_for, expand_user_path, identity_for_context
@@ -205,22 +206,22 @@ def _truncate(text: str, max_chars: int = MAX_COMMAND_OUTPUT_CHARS) -> str:
 
 
 def _validate_command(command: str, allow_network: bool) -> None:
-    if "\x00" in command:
-        raise HTTPException(status_code=422, detail="command contains an invalid NUL byte")
-    if _DESTRUCTIVE_COMMAND.search(command):
-        raise HTTPException(
-            status_code=403,
-            detail="destructive commands are not available through direct coding",
-        )
+    violation = command_policy_violation(
+        command,
+        allow_network=allow_network,
+        # Direct coding intentionally has no package-install capability. Future
+        # elevated workspace grants must use a separate controlled runner.
+        allow_package_install=False,
+    )
+    if violation:
+        status_code = 422 if violation.startswith("command ") else 403
+        raise HTTPException(status_code=status_code, detail=violation)
+    # External permission is not SSH permission. Remote execution stays behind
+    # the separate literal-alias SSH API and its dedicated scope/identity checks.
     if _SSH_TRANSPORT_COMMAND.search(command):
         raise HTTPException(
             status_code=403,
-            detail="SSH transport commands are available only through the dedicated SSH control tools",
-        )
-    if not allow_network and _EXTERNAL_COMMAND.search(command):
-        raise HTTPException(
-            status_code=403,
-            detail="command may contact an external service; obtain explicit user approval and set allow_network",
+            detail="SSH transport is only available through the dedicated SSH API",
         )
 
 
