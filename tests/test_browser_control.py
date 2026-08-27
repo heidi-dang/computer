@@ -102,6 +102,18 @@ class BrowserSessionManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("closed", manager._sessions)
 
 
+class CDPNavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_navigate_fails_closed_when_cdp_reports_network_error(self):
+        client = CDPClient(SimpleNamespace(), "target")
+        client._send = AsyncMock(return_value={"errorText": "net::ERR_NAME_NOT_RESOLVED"})
+        client._recv_json = AsyncMock()
+
+        with self.assertRaisesRegex(RuntimeError, "ERR_NAME_NOT_RESOLVED"):
+            await client.navigate("https://example.com")
+
+        client._recv_json.assert_not_awaited()
+
+
 class CDPPressKeyTests(unittest.IsolatedAsyncioTestCase):
     async def test_press_key_dispatches_bounded_key_down_and_up(self):
         client = CDPClient(SimpleNamespace(), "target")

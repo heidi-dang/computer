@@ -138,6 +138,9 @@ class CDPClient:
     async def navigate(self, url: str) -> dict:
         """Navigate to a URL and wait for the page to load."""
         result = await self._send("Page.navigate", {"url": url})
+        error_text = str(result.get("errorText") or "").strip()
+        if error_text:
+            raise RuntimeError(f"Navigation failed: {error_text[:200]}")
 
         # Wait for load event
         while True:
