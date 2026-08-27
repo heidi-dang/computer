@@ -30,7 +30,7 @@ async def main():
     async with await get_db() as db:
         db.add(ControlTask(id=task_id, user_id=user_id, workspace_id=workspace.id, chat_id=chat.id, message_id=assistant_message.id, status="RUNNING", prompt="durable work", model_id="unconfigured-model", idempotency_key=task_key, created_at=1, updated_at=1))
         await db.commit()
-    monitor = MonitorState(monitor_id=monitor_id, goal_id="goal_restart_existing", user_id=user_id, workspace_id=workspace.id, original_goal="Recover the existing task", original_acceptance_criteria=["The existing task is reused"], model_id="unconfigured-model", scopes=[ScopeRecord(scope_id=scope_id, title="The existing task is reused", description="Recover the existing task: The existing task is reused", acceptance_criteria=["The existing task is reused"], status=ScopeStatus.PENDING)])
+    monitor = MonitorState(monitor_id=monitor_id, goal_id="goal_restart_existing", user_id=user_id, workspace_id=workspace.id, original_goal="Recover the existing task", original_acceptance_criteria=["The existing task is reused"], model_id="unconfigured-model", director_state={"execution_policy": {"allow_network": False, "allow_package_install": False}}, scopes=[ScopeRecord(scope_id=scope_id, title="The existing task is reused", description="Recover the existing task: The existing task is reused", acceptance_criteria=["The existing task is reused"], status=ScopeStatus.PENDING)])
     await SqlSupervisorStore().create_monitor(monitor, "restart-monitor-key")
 
 asyncio.run(main())
@@ -46,6 +46,11 @@ class RestartRecoveryTests(unittest.TestCase):
             subprocess.run(["git", "init", "-q", workspace_dir], check=True)
             env = {**os.environ, "CPTR_DATA_DIR": data_dir, "RESTART_WORKSPACE": workspace_dir}
             subprocess.run([sys.executable, "-c", SEED_SCRIPT], check=True, env=env)
+            stored_director_state = self._query(
+                data_dir, "select director_state from autonomous_monitors"
+            )
+            self.assertIn("execution_policy", stored_director_state)
+            self.assertIn("allow_network", stored_director_state)
             port = self._free_port()
             first = self._start_server(data_dir, port, poll_interval="30")
             second = None

@@ -2440,10 +2440,16 @@ async def run_chat_task(
             if isinstance((chat_obj.meta or {}).get("inspection_scope"), str)
             else ("assignment" if "inspection_scope=assignment" in content else "workspace")
         )
+        execution_policy = (
+            dict((chat_obj.meta or {}).get("execution_policy") or {})
+            if isinstance((chat_obj.meta or {}).get("execution_policy"), dict)
+            else {}
+        )
         tools = await get_tool_list(
             builtin_tools=builtin_tools,
             workspace=workspace,
             inspection_scope=inspection_scope,
+            execution_policy=execution_policy,
         )
         if not skill_authoring_allowed:
             tools = [t for t in tools if t["name"] != "manage_skill"]
@@ -2659,6 +2665,7 @@ async def run_chat_task(
             "connection": connection,
             "builtin_tools": builtin_tools,
             "inspection_scope": inspection_scope,
+            "execution_policy": execution_policy,
             "assignment_paths": (
                 (chat_obj.meta or {}).get("assignment_paths")
                 if isinstance((chat_obj.meta or {}).get("assignment_paths"), list)

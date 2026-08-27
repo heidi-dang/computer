@@ -407,6 +407,7 @@ class AutonomousSupervisor:
         acceptance_criteria: list[str],
         model_id: str,
         idempotency_key: str | None = None,
+        execution_policy: dict[str, bool] | None = None,
     ) -> MonitorState:
         normalized_goal = goal.strip()
         criteria = [item.strip() for item in acceptance_criteria if item.strip()]
@@ -432,6 +433,9 @@ class AutonomousSupervisor:
             original_acceptance_criteria=list(criteria),
             model_id=model_id,
             scopes=scopes,
+            director_state=(
+                {"execution_policy": dict(execution_policy)} if execution_policy else {}
+            ),
         )
         return await self.store.create_monitor(monitor, idempotency_key)
 
@@ -1116,6 +1120,11 @@ class AutonomousSupervisor:
             prompt=scoped_assignment,
             model_id=monitor.model_id,
             idempotency_key=key,
+            execution_policy=(
+                dict(monitor.director_state.get("execution_policy") or {})
+                if isinstance(monitor.director_state.get("execution_policy"), dict)
+                else None
+            ),
             review_required=False,
         )
         if str(task.get("status") or "").upper() in {"FAILED", "ERROR", "CANCELLED"}:

@@ -24,11 +24,21 @@ from cptr.utils.redaction import redact_external, redact_sensitive
 router = APIRouter(prefix="/api/control/v1", tags=["control"])
 
 
+class TaskExecutionPolicy(BaseModel):
+    """Server-enforced capability limits for one control-plane worker task."""
+
+    allow_file_writes: bool = True
+    allow_commands: bool = True
+    allow_network: bool = False
+    allow_package_install: bool = False
+
+
 class TaskCreateRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
     prompt: str = Field(min_length=1, max_length=100_000)
     model_id: str = Field(min_length=1, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=200)
+    execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
 
 class MessageRequest(BaseModel):
@@ -48,6 +58,7 @@ class AutonomousCreateRequest(BaseModel):
     acceptance_criteria: list[str] = Field(min_length=1, max_length=100)
     model_id: str = Field(min_length=1, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=200)
+    execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
 
 class ApprovalRequest(BaseModel):
@@ -246,6 +257,7 @@ async def create_task(request: Request, body: TaskCreateRequest):
             prompt=body.prompt,
             model_id=body.model_id,
             idempotency_key=body.idempotency_key,
+            execution_policy=body.execution_policy.model_dump(),
             request=request,
         )
     except KeyError as exc:
@@ -368,6 +380,7 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
             acceptance_criteria=body.acceptance_criteria,
             model_id=body.model_id,
             idempotency_key=body.idempotency_key,
+            execution_policy=body.execution_policy.model_dump(),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

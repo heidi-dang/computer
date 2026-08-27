@@ -42,6 +42,7 @@ class AgentService:
         prompt: str,
         model_id: str,
         idempotency_key: str | None = None,
+        execution_policy: dict[str, bool] | None = None,
         request: Any | None = None,
         review_required: bool = True,
     ) -> dict[str, Any]:
@@ -80,6 +81,7 @@ class AgentService:
                 "internal": True,
                 "control_plane": True,
                 "review_required": review_required,
+                **({"execution_policy": dict(execution_policy)} if execution_policy else {}),
                 **assignment_meta,
             },
             created_at=now,

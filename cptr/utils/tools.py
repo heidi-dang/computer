@@ -1772,6 +1772,54 @@ _ASSIGNMENT_ALLOWED_TOOLS = {
 _ASSIGNMENT_SCOPED_TOOLS = _ASSIGNMENT_ALLOWED_TOOLS
 _ASSIGNMENT_SCOPE_VIOLATION_LIMIT = 2
 
+_CONTROL_FILE_WRITE_TOOLS = {"create_file", "write_file", "edit_file", "multi_edit_file"}
+_CONTROL_NETWORK_TOOLS = {
+    "web_search",
+    "read_url",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_click",
+    "browser_type",
+    "browser_screenshot",
+    "browser_evaluate",
+    "image_generate",
+    "delegate_task",
+}
+_CONTROL_PACKAGE_INSTALL_RE = re.compile(
+    r"(?:^|[;&|]\s*|\s)(?:(?:npm|pnpm|yarn)\s+(?:install|add)\b|"
+    r"pip(?:3)?\s+install\b|uv\s+(?:pip\s+install|sync)\b)",
+    re.IGNORECASE,
+)
+_CONTROL_EXTERNAL_COMMAND_RE = re.compile(
+    r"(?:^|[;&|]\s*|\s)(?:git\s+(?:push|fetch|pull|clone|remote\s+add)\b|"
+    r"(?:npm|pnpm|yarn)\s+(?:publish|login|logout|install|add)\b|"
+    r"pip(?:3)?\s+install\b|uv\s+(?:pip\s+install|sync)\b|"
+    r"curl\b|wget\b|ssh\b|scp\b|rsync\b|"
+    r"docker\s+(?:push|login|pull)\b|kubectl\b|terraform\s+(?:apply|destroy|init)\b|"
+    r"(?:aws|gcloud|az)\b)",
+    re.IGNORECASE,
+)
+
+
+def _control_execution_policy_violation(name: str, args: dict, context: dict) -> str | None:
+    """Enforce server-side capabilities declared for a control-plane task."""
+    policy = context.get("execution_policy")
+    if not isinstance(policy, dict) or not policy:
+        return None
+    if policy.get("allow_file_writes") is False and name in _CONTROL_FILE_WRITE_TOOLS:
+        return "Error: control task policy denies file writes"
+    if policy.get("allow_commands") is False and name == "run_command":
+        return "Error: control task policy denies command execution"
+    if policy.get("allow_network") is False and name in _CONTROL_NETWORK_TOOLS:
+        return "Error: control task policy denies network access"
+    if name == "run_command":
+        command = str(args.get("command") or "")
+        if policy.get("allow_package_install") is False and _CONTROL_PACKAGE_INSTALL_RE.search(command):
+            return "Error: control task policy denies package installation"
+        if policy.get("allow_network") is False and _CONTROL_EXTERNAL_COMMAND_RE.search(command):
+            return "Error: control task policy denies external command execution"
+    return None
+
 
 def _relative_assignment_path(path: str) -> str:
     """Normalize a user/tool path for assignment-scope comparison."""
@@ -3571,6 +3619,7 @@ async def get_tool_list(
     builtin_tools: dict | None = None,
     workspace: str = "",
     inspection_scope: str = "workspace",
+    execution_policy: dict[str, bool] | None = None,
 ) -> list[dict]:
     """Return tool schemas for the LLM.
 
@@ -3627,13 +3676,21 @@ async def get_tool_list(
             name: tool for name, tool in tools.items() if name in _ASSIGNMENT_ALLOWED_TOOLS
         }
 
+    policy = execution_policy or {}
+    if policy.get("allow_file_writes") is False:
+        tools = {name: tool for name, tool in tools.items() if name not in _CONTROL_FILE_WRITE_TOOLS}
+    if policy.get("allow_commands") is False:
+        tools.pop("run_command", None)
+    if policy.get("allow_network") is False:
+        tools = {name: tool for name, tool in tools.items() if name not in _CONTROL_NETWORK_TOOLS}
+
     schemas = [_fn_to_schema(name, t["fn"]) for name, t in tools.items()]
     if not background_subagents_enabled:
         schemas = [_without_background_param(s) for s in schemas]
 
     # Assignment workers never receive external schemas: a remote connector
     # cannot be proven to respect the assignment path boundary.
-    if inspection_scope != "assignment":
+    if inspection_scope != "assignment" and policy.get("allow_network") is not False:
         try:
             cache = await _load_tool_servers()
             for tool_info in cache["tools"].values():
@@ -3646,6 +3703,9 @@ async def get_tool_list(
 
 async def execute_tool(name: str, args: dict, __context__: dict) -> str:
     """Execute a tool by name, injecting execution context."""
+    policy_error = _control_execution_policy_violation(name, args, __context__)
+    if policy_error:
+        return policy_error
     scope_error = _assignment_scope_violation(name, args, __context__)
     if scope_error:
         return scope_error
@@ -3678,7 +3738,10 @@ async def execute_tool(name: str, args: dict, __context__: dict) -> str:
         except Exception as e:
             return f"Error executing {name}: {e}"
 
-    # Check external tool servers
+    # Check external tool servers only when this control task permits networked capabilities.
+    policy = __context__.get("execution_policy")
+    if isinstance(policy, dict) and policy.get("allow_network") is False:
+        return "Error: control task policy denies external tool servers"
     cache = await _load_tool_servers()
     if name in cache["tools"]:
         return await _execute_external_tool(name, args)

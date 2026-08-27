@@ -15,12 +15,14 @@ from cptr.services.verification import VerificationResult
 class FakeAgentService:
     def __init__(self):
         self.started = []
+        self.started_kwargs = []
         self.tasks = {}
         self.cancelled = []
 
     async def start_task(self, *, workspace_id, prompt, model_id, idempotency_key=None, **kwargs):
         task_id = f"task_{len(self.started) + 1}"
         self.started.append((task_id, prompt, idempotency_key))
+        self.started_kwargs.append(dict(kwargs))
         self.tasks[task_id] = {"id": task_id, "status": "COMPLETE", "output": "worker finished"}
         return self.tasks[task_id]
 
@@ -162,6 +164,29 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.scopes[0].status, ScopeStatus.VERIFIED)
         self.assertEqual(state.status, MonitorStatus.COMPLETE)
         self.assertEqual(director.final_gates, 1)
+
+    async def test_worker_inherits_monitor_execution_policy(self):
+        store = InMemorySupervisorStore()
+        agent = FakeAgentService()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=FakeDirector())
+        policy = {
+            "allow_file_writes": False,
+            "allow_commands": True,
+            "allow_network": False,
+            "allow_package_install": False,
+        }
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Audit safely",
+            acceptance_criteria=["Audit completes"],
+            model_id="model-1",
+            execution_policy=policy,
+        )
+
+        await supervisor.run_once(monitor.monitor_id)
+
+        self.assertEqual(agent.started_kwargs[0]["execution_policy"], policy)
 
     async def test_goal_input_is_immutable_and_creation_is_idempotent(self):
         store = InMemorySupervisorStore()

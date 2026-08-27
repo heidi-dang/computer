@@ -6,6 +6,7 @@ from cptr.routers.control import (
     ApprovalRequest,
     AutonomousCreateRequest,
     TaskCreateRequest,
+    TaskExecutionPolicy,
     ReviewDecisionRequest,
     _monitor_summary,
     approve_autonomous,
@@ -57,6 +58,52 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             prompt="Run the tests",
             model_id="model_1",
             idempotency_key="request_1",
+            execution_policy={
+                "allow_file_writes": True,
+                "allow_commands": True,
+                "allow_network": False,
+                "allow_package_install": False,
+            },
+            request=request,
+        )
+
+    async def test_task_creation_forwards_server_enforced_execution_policy(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(
+            start_task=AsyncMock(
+                return_value={"id": "task_2", "workspace_id": "ws_1", "status": "RUNNING"}
+            )
+        )
+        body = TaskCreateRequest(
+            workspace_id="ws_1",
+            prompt="Audit without installs or network",
+            model_id="model_1",
+            execution_policy=TaskExecutionPolicy(
+                allow_file_writes=False,
+                allow_commands=True,
+                allow_network=False,
+                allow_package_install=False,
+            ),
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+        ):
+            await create_task(request, body)
+
+        agent.start_task.assert_awaited_once_with(
+            user_id="user_1",
+            workspace_id="ws_1",
+            prompt="Audit without installs or network",
+            model_id="model_1",
+            idempotency_key=None,
+            execution_policy={
+                "allow_file_writes": False,
+                "allow_commands": True,
+                "allow_network": False,
+                "allow_package_install": False,
+            },
             request=request,
         )
 
@@ -156,6 +203,12 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             acceptance_criteria=["Tests pass"],
             model_id="model_1",
             idempotency_key="goal_1",
+            execution_policy=TaskExecutionPolicy(
+                allow_file_writes=True,
+                allow_commands=True,
+                allow_network=False,
+                allow_package_install=False,
+            ),
         )
         with (
             patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
@@ -167,6 +220,20 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["monitor_id"], "mon_1")
         self.assertEqual(result["status"], "RUNNING")
+        supervisor.create_goal.assert_awaited_once_with(
+            user_id="user_1",
+            workspace_id="ws_1",
+            goal="Ship feature",
+            acceptance_criteria=["Tests pass"],
+            model_id="model_1",
+            idempotency_key="goal_1",
+            execution_policy={
+                "allow_file_writes": True,
+                "allow_commands": True,
+                "allow_network": False,
+                "allow_package_install": False,
+            },
+        )
         schedule.assert_called_once_with(request.app, "mon_1")
 
     async def test_evidence_endpoint_reads_dedicated_evidence_records(self):

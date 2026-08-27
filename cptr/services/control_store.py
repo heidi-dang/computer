@@ -68,6 +68,8 @@ class SqlSupervisorStore:
                     model_id=monitor.model_id,
                     status=monitor.status.value,
                     current_scope_id=monitor.current_scope_id,
+                    approved_operations=list(monitor.approved_operations),
+                    director_state=dict(monitor.director_state),
                     created_at=now,
                     updated_at=now,
                 )
