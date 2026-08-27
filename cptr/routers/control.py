@@ -36,7 +36,10 @@ class TaskExecutionPolicy(BaseModel):
 class TaskCreateRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
     prompt: str = Field(min_length=1, max_length=100_000)
-    model_id: str = Field(min_length=1, max_length=500)
+    # Normal ChatGPT tool use must not trigger implicit model selection or
+    # provider discovery. Delegation is a separate explicit user choice.
+    model_id: str | None = Field(default=None, min_length=1, max_length=500)
+    delegate_to_cptr_model: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
@@ -56,7 +59,8 @@ class AutonomousCreateRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
     goal: str = Field(min_length=1, max_length=100_000)
     acceptance_criteria: list[str] = Field(min_length=1, max_length=100)
-    model_id: str = Field(min_length=1, max_length=500)
+    model_id: str | None = Field(default=None, min_length=1, max_length=500)
+    delegate_to_cptr_model: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
@@ -131,6 +135,35 @@ def _services(request: Request) -> tuple[AgentService, AutonomousSupervisor]:
     if not hasattr(request.app.state, "control_monitor_tasks"):
         request.app.state.control_monitor_tasks = {}
     return agent, supervisor
+
+
+def _require_explicit_model_delegation(model_id: str | None, delegated: bool) -> str:
+    """Prevent implicit CPTR model discovery during normal ChatGPT tool use."""
+    if not delegated:
+        raise HTTPException(
+            status_code=422,
+            detail="CPTR model delegation is disabled by default; set delegate_to_cptr_model=true only when the user explicitly requests a named CPTR model",
+        )
+    if not model_id:
+        raise HTTPException(
+            status_code=422,
+            detail="CPTR model delegation requires an explicit model_id named by the user",
+        )
+    # API-backed delegations must use provider/model, which resolves directly
+    # through the selected connection. An unprefixed model would scan all
+    # connections and may invoke provider model discovery. Local agent profiles
+    # use the existing agent:profile/model form.
+    if model_id.startswith("agent:"):
+        profile_and_model = model_id[len("agent:") :]
+        valid = "/" in profile_and_model and not profile_and_model.startswith("/") and not profile_and_model.endswith("/")
+    else:
+        valid = "/" in model_id and not model_id.startswith("/") and not model_id.endswith("/")
+    if not valid:
+        raise HTTPException(
+            status_code=422,
+            detail="CPTR model delegation requires a fully qualified model_id: provider/model or agent:profile/model; CPTR does not discover a default model",
+        )
+    return model_id
 
 
 async def _ensure_workspace(user_id: str, workspace_id: str) -> Workspace:
@@ -249,13 +282,16 @@ async def get_workspace(request: Request, workspace_id: str):
 async def create_task(request: Request, body: TaskCreateRequest):
     user_id = await _user(request, "task:write")
     await _ensure_workspace(user_id, body.workspace_id)
+    model_id = _require_explicit_model_delegation(
+        body.model_id, body.delegate_to_cptr_model
+    )
     agent, _ = _services(request)
     try:
         return await agent.start_task(
             user_id=user_id,
             workspace_id=body.workspace_id,
             prompt=body.prompt,
-            model_id=body.model_id,
+            model_id=model_id,
             idempotency_key=body.idempotency_key,
             execution_policy=body.execution_policy.model_dump(),
             request=request,
@@ -371,6 +407,9 @@ async def get_git_diff(request: Request, workspace_id: str):
 async def create_autonomous(request: Request, body: AutonomousCreateRequest):
     user_id = await _user(request, "autonomous:run")
     await _ensure_workspace(user_id, body.workspace_id)
+    model_id = _require_explicit_model_delegation(
+        body.model_id, body.delegate_to_cptr_model
+    )
     _, supervisor = _services(request)
     try:
         monitor = await supervisor.create_goal(
@@ -378,7 +417,7 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
             workspace_id=body.workspace_id,
             goal=body.goal,
             acceptance_criteria=body.acceptance_criteria,
-            model_id=body.model_id,
+            model_id=model_id,
             idempotency_key=body.idempotency_key,
             execution_policy=body.execution_policy.model_dump(),
         )

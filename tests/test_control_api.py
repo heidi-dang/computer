@@ -2,6 +2,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
+
 from cptr.routers.control import (
     ApprovalRequest,
     AutonomousCreateRequest,
@@ -41,7 +43,8 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         body = TaskCreateRequest(
             workspace_id="ws_1",
             prompt="Run the tests",
-            model_id="model_1",
+            model_id="provider/model_1",
+            delegate_to_cptr_model=True,
             idempotency_key="request_1",
         )
         with (
@@ -56,7 +59,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             user_id="user_1",
             workspace_id="ws_1",
             prompt="Run the tests",
-            model_id="model_1",
+            model_id="provider/model_1",
             idempotency_key="request_1",
             execution_policy={
                 "allow_file_writes": True,
@@ -77,7 +80,8 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         body = TaskCreateRequest(
             workspace_id="ws_1",
             prompt="Audit without installs or network",
-            model_id="model_1",
+            model_id="provider/model_1",
+            delegate_to_cptr_model=True,
             execution_policy=TaskExecutionPolicy(
                 allow_file_writes=False,
                 allow_commands=True,
@@ -96,7 +100,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             user_id="user_1",
             workspace_id="ws_1",
             prompt="Audit without installs or network",
-            model_id="model_1",
+            model_id="provider/model_1",
             idempotency_key=None,
             execution_policy={
                 "allow_file_writes": False,
@@ -106,6 +110,47 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             },
             request=request,
         )
+
+    async def test_task_creation_rejects_implicit_model_delegation_before_agent_start(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(start_task=AsyncMock())
+        body = TaskCreateRequest(
+            workspace_id="ws_1",
+            prompt="Audit this workspace",
+            model_id="provider/model_1",
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+            self.assertRaises(HTTPException) as rejected,
+        ):
+            await create_task(request, body)
+
+        self.assertEqual(rejected.exception.status_code, 422)
+        self.assertIn("delegation is disabled by default", rejected.exception.detail)
+        agent.start_task.assert_not_awaited()
+
+    async def test_task_creation_rejects_bare_model_before_provider_discovery(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(start_task=AsyncMock())
+        body = TaskCreateRequest(
+            workspace_id="ws_1",
+            prompt="Audit this workspace",
+            model_id="bare-model",
+            delegate_to_cptr_model=True,
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+            self.assertRaises(HTTPException) as rejected,
+        ):
+            await create_task(request, body)
+
+        self.assertEqual(rejected.exception.status_code, 422)
+        self.assertIn("fully qualified model_id", rejected.exception.detail)
+        agent.start_task.assert_not_awaited()
 
     async def test_task_review_endpoint_forwards_read_authorized_lookup(self):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
@@ -168,7 +213,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws_1",
             original_goal="Ship feature",
             original_acceptance_criteria=["Tests pass", "Diff is reviewed"],
-            model_id="model_1",
+            model_id="provider/model_1",
             scopes=[
                 ScopeRecord(
                     "scope_1", "Tests pass", "Tests pass", ["Tests pass"], ScopeStatus.VERIFIED
@@ -193,7 +238,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws_1",
             original_goal="Ship feature",
             original_acceptance_criteria=["Tests pass"],
-            model_id="model_1",
+            model_id="provider/model_1",
             scopes=[ScopeRecord("scope_1", "Tests pass", "Tests pass", ["Tests pass"])],
         )
         supervisor = SimpleNamespace(create_goal=AsyncMock(return_value=monitor))
@@ -201,7 +246,8 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws_1",
             goal="Ship feature",
             acceptance_criteria=["Tests pass"],
-            model_id="model_1",
+            model_id="provider/model_1",
+            delegate_to_cptr_model=True,
             idempotency_key="goal_1",
             execution_policy=TaskExecutionPolicy(
                 allow_file_writes=True,
@@ -225,7 +271,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws_1",
             goal="Ship feature",
             acceptance_criteria=["Tests pass"],
-            model_id="model_1",
+            model_id="provider/model_1",
             idempotency_key="goal_1",
             execution_policy={
                 "allow_file_writes": True,
@@ -245,7 +291,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws_1",
             original_goal="Ship feature",
             original_acceptance_criteria=["Tests pass"],
-            model_id="model_1",
+            model_id="provider/model_1",
             scopes=[ScopeRecord("scope_1", "Tests pass", "Tests pass", ["Tests pass"])],
         )
         supervisor = SimpleNamespace(
@@ -278,7 +324,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             workspace_id="ws_1",
             original_goal="Publish",
             original_acceptance_criteria=["Push is approved"],
-            model_id="model_1",
+            model_id="provider/model_1",
             scopes=[ScopeRecord("scope_1", "Push", "Push", ["Push"], ScopeStatus.PENDING)],
             status=MonitorStatus.APPROVAL_REQUIRED,
             current_scope_id="scope_1",
