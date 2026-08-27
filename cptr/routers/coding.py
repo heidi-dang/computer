@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import re
 import shlex
 import shutil
@@ -111,6 +112,23 @@ class CommandRequest(BaseModel):
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=30, ge=0, le=60)
     allow_network: bool = False
+
+
+class WorkspaceInspectRequest(BaseModel):
+    kind: str = Field(
+        pattern="^(project|tree|metadata|read_many|symbols|tests|dependencies|scripts|release)$"
+    )
+    path: str = Field(default=".", min_length=1, max_length=1_000)
+    paths: list[str] = Field(default_factory=list, max_length=20)
+    query: str | None = Field(default=None, max_length=200)
+    depth: int = Field(default=2, ge=1, le=4)
+
+
+class TestTargetRequest(BaseModel):
+    target: str = Field(pattern="^(python_pytest|node_test|node_vitest|node_build)$")
+    path: str = Field(default=".", min_length=1, max_length=1_000)
+    test_path: str | None = Field(default=None, min_length=1, max_length=1_000)
+    wait_seconds: int = Field(default=30, ge=0, le=60)
 
 
 class SshCommandRequest(BaseModel):
@@ -383,6 +401,241 @@ async def _command_snapshot(
         "output": output,
         "next_offset": next_offset,
     }
+
+
+async def _bounded_tree(
+    request: Request, *, root: Path, start: Path, max_depth: int, max_entries: int = 240
+) -> list[dict[str, Any]]:
+    """Traverse through the identity-aware runtime with deterministic depth and item caps."""
+    results: list[dict[str, Any]] = []
+    queue: list[tuple[Path, int]] = [(start, 0)]
+    while queue and len(results) < max_entries:
+        current, depth = queue.pop(0)
+        try:
+            listing = await Runtime.list_directory(request, str(current))
+        except FileError:
+            continue
+        for entry in listing.get("entries", []):
+            if len(results) >= max_entries:
+                break
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("name") or "")
+            if not name or name in {".git", ".cptr", "node_modules", ".venv", "venv", "dist", "build"}:
+                continue
+            child = current / name
+            try:
+                relative = child.resolve().relative_to(root).as_posix()
+            except ValueError:
+                continue
+            record = {
+                "path": relative,
+                "type": str(entry.get("type") or "file"),
+                "size": entry.get("size"),
+                "modified": entry.get("modified"),
+            }
+            results.append(record)
+            if record["type"] == "directory" and depth < max_depth - 1:
+                queue.append((child, depth + 1))
+    return results
+
+
+async def _try_read_text(request: Request, full: Path, relative: str, *, limit: int = 80_000) -> dict[str, Any] | None:
+    try:
+        stat = await Runtime.stat(request, str(full))
+        if stat.get("type") != "file" or int(stat.get("size") or 0) > limit:
+            return None
+        data = await Runtime.read_file(request, str(full))
+    except FileError:
+        return None
+    if data.get("binary"):
+        return None
+    return {"path": relative, "size": int(stat.get("size") or 0), "content": str(data.get("content") or "")}
+
+
+async def _known_project_files(request: Request, root: Path) -> list[str]:
+    candidates = [
+        "package.json", "pyproject.toml", "requirements.txt", "Pipfile", "poetry.lock",
+        "Cargo.toml", "go.mod", "pom.xml", "build.gradle", "Makefile", "Dockerfile",
+        "docker-compose.yml", "compose.yml", "vite.config.ts", "svelte.config.js",
+    ]
+    found: list[str] = []
+    for relative in candidates:
+        try:
+            stat = await Runtime.stat(request, str(root / relative))
+        except FileError:
+            continue
+        if stat.get("type") == "file":
+            found.append(relative)
+    return found
+
+
+async def _workspace_insight(
+    request: Request, *, root: Path, body: WorkspaceInspectRequest, user_id: str
+) -> dict[str, Any]:
+    start, relative = _relative_path(body.path, root)
+    if body.kind == "tree":
+        return {"path": relative, "entries": await _bounded_tree(request, root=root, start=start, max_depth=body.depth)}
+    if body.kind == "metadata":
+        stat = await Runtime.stat(request, str(start))
+        return {"path": relative, "metadata": {key: stat.get(key) for key in ("name", "type", "size", "modified", "media_type")}}
+    if body.kind == "read_many":
+        if not body.paths:
+            raise HTTPException(status_code=422, detail="paths is required for read_many inspection")
+        files: list[dict[str, Any]] = []
+        for supplied in body.paths:
+            full, item_relative = _relative_path(supplied, root)
+            item = await _try_read_text(request, full, item_relative, limit=MAX_READ_BYTES)
+            if item is not None:
+                item["content"] = _truncate(str(item["content"]), 20_000)
+                files.append(item)
+        return {"files": files, "omitted_count": max(0, len(body.paths) - len(files))}
+    if body.kind == "symbols":
+        if not body.query:
+            raise HTTPException(status_code=422, detail="query is required for symbols inspection")
+        matches = await search_files(
+            body.query,
+            relative,
+            False,
+            False,
+            "",
+            False,
+            __context__={"workspace": str(root), "request": request, "user_id": user_id},
+        )
+        return {"path": relative, "query": body.query, "matches": str(matches)[:40_000]}
+
+    project_files = await _known_project_files(request, root)
+    if body.kind == "project":
+        runtimes: list[str] = []
+        if "package.json" in project_files:
+            runtimes.append("node")
+        if any(name in project_files for name in {"pyproject.toml", "requirements.txt", "Pipfile"}):
+            runtimes.append("python")
+        if "Cargo.toml" in project_files:
+            runtimes.append("rust")
+        if "go.mod" in project_files:
+            runtimes.append("go")
+        return {"project_files": project_files, "detected_runtimes": runtimes, "root": "."}
+    if body.kind == "tests":
+        entries = await _bounded_tree(request, root=root, start=start, max_depth=body.depth, max_entries=480)
+        tests = [
+            entry["path"]
+            for entry in entries
+            if entry["type"] == "file"
+            and (
+                entry["path"].endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+                or "/test_" in entry["path"]
+                or "/tests/" in f"/{entry['path']}"
+            )
+        ][:160]
+        return {"path": relative, "tests": tests, "truncated": len(entries) >= 480}
+    if body.kind == "dependencies":
+        manifests: list[dict[str, Any]] = []
+        package = await _try_read_text(request, root / "package.json", "package.json")
+        if package:
+            try:
+                package_json = json.loads(str(package["content"]))
+                dependencies = {
+                    **(package_json.get("dependencies") or {}),
+                    **(package_json.get("devDependencies") or {}),
+                }
+                manifests.append({"path": "package.json", "packages": sorted(str(key) for key in dependencies)[:160]})
+            except (json.JSONDecodeError, AttributeError):
+                manifests.append({"path": "package.json", "packages": [], "parse_error": "invalid JSON"})
+        for name in ("requirements.txt", "pyproject.toml"):
+            item = await _try_read_text(request, root / name, name)
+            if item:
+                packages = [
+                    line.split("[", 1)[0].split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].strip()
+                    for line in str(item["content"]).splitlines()
+                    if line.strip() and not line.lstrip().startswith(("#", "["))
+                ]
+                manifests.append({"path": name, "packages": [value for value in packages if value][:160]})
+        return {"manifests": manifests, "detected_project_files": project_files}
+    if body.kind == "scripts":
+        package = await _try_read_text(request, root / "package.json", "package.json")
+        if package is None:
+            return {"scripts": {}, "manifest_present": False}
+        try:
+            parsed = json.loads(str(package["content"]))
+            scripts = parsed.get("scripts") if isinstance(parsed, dict) else {}
+            if not isinstance(scripts, dict):
+                scripts = {}
+            return {
+                "scripts": {
+                    str(name)[:120]: str(command)[:500]
+                    for name, command in list(scripts.items())[:80]
+                    if isinstance(name, str) and isinstance(command, str)
+                },
+                "manifest_present": True,
+            }
+        except json.JSONDecodeError:
+            return {"scripts": {}, "manifest_present": True, "parse_error": "invalid JSON"}
+    if body.kind == "release":
+        entries = await _bounded_tree(request, root=root, start=root, max_depth=3, max_entries=300)
+        test_count = sum(
+            1
+            for entry in entries
+            if entry["type"] == "file"
+            and entry["path"].endswith(("_test.py", ".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+        )
+        return {
+            "checks": [
+                {"name": "project_manifest", "status": "present" if project_files else "missing"},
+                {"name": "test_files_discovered", "status": "present" if test_count else "missing", "count": test_count},
+                {"name": "git_metadata", "status": "not_exposed_by_inspection"},
+            ],
+            "note": "This is a static readiness inventory. Run an explicit structured test target for execution evidence.",
+        }
+    raise HTTPException(status_code=422, detail="unsupported workspace inspection kind")
+
+
+@router.post("/workspaces/{workspace_id}/coding/inspect")
+async def inspect_workspace(request: Request, workspace_id: str, body: WorkspaceInspectRequest):
+    user_id = await _user(request, "coding:read")
+    workspace = await _workspace(user_id, workspace_id)
+    root = Path(workspace.path).resolve()
+    try:
+        result = await _workspace_insight(request, root=root, body=body, user_id=user_id)
+    except FileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"workspace_id": workspace_id, "kind": body.kind, **result}
+
+
+@router.post("/workspaces/{workspace_id}/coding/test-targets")
+async def run_workspace_test_target(request: Request, workspace_id: str, body: TestTargetRequest):
+    """Run a fixed local validation profile; the caller never supplies an arbitrary command string."""
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    root = Path(workspace.path).resolve()
+    _, relative_cwd = _relative_path(body.path, root)
+    test_arg = ""
+    if body.test_path:
+        _, test_relative = _relative_path(body.test_path, root)
+        test_arg = f" {shlex.quote(test_relative)}"
+    profiles = {
+        "python_pytest": f"python3 -m pytest{test_arg}",
+        "node_test": f"npm test --{test_arg}",
+        "node_vitest": f"./node_modules/.bin/vitest run{test_arg}",
+        "node_build": "npm run build",
+    }
+    command = profiles[body.target]
+    _validate_command(command, False)
+    response = await run_command(
+        command,
+        relative_cwd,
+        body.wait_seconds,
+        __context__={
+            "workspace": workspace.path,
+            "workspace_id": workspace_id,
+            "request": request,
+            "user_id": user_id,
+        },
+    )
+    match = re.match(r"^Task ([0-9a-f]{8}):", response)
+    if match is None:
+        raise HTTPException(status_code=422, detail=response)
+    return {"target": body.target, **(await _command_snapshot(request, workspace_path=workspace.path, command_id=match.group(1)))}
 
 
 @router.post("/workspaces/{workspace_id}/coding/list")
