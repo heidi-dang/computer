@@ -12,10 +12,17 @@
 		pluginTerminalStreamUrl,
 		renamePluginSession,
 		requestPluginSessionDelete,
+		clearPluginWorkspaceMemory,
+		forgetPluginWorkspaceMemoryFact,
+		getPluginWorkspaceMemoryContext,
+		getPluginWorkspaceMemoryFacts,
+		updatePluginWorkspaceMemoryFact,
 		type PluginTerminalEvent,
 		type PluginTerminalSnapshot,
 		type WorkbenchSession,
-		type WorkbenchSessionEvent
+		type WorkbenchSessionEvent,
+		type WorkspaceMemoryContext,
+		type WorkspaceMemoryFact
 	} from '$lib/apis/plugin';
 	import {
 		appendPluginEvent,
@@ -34,6 +41,12 @@
 	let terminalSnapshot = $state<PluginTerminalSnapshot | null>(null);
 	let terminalLines = $state<PluginTerminalLine[]>([]);
 	let terminalState = $state<'idle' | 'connecting' | 'live' | 'reconnecting' | 'unavailable' | 'error'>('idle');
+	let memoryLoading = $state(false);
+	let memoryError = $state('');
+	let memoryContext = $state<WorkspaceMemoryContext | null>(null);
+	let memoryFacts = $state<WorkspaceMemoryFact[]>([]);
+	let memoryBusyFactId = $state<string | null>(null);
+	let memoryClearing = $state(false);
 
 	const selectedSessionId = $derived($pluginConsole.selectedSessionId);
 	const selectedSession = $derived(
@@ -47,6 +60,7 @@
 			? `${selectedSession.active_target_type}:${selectedSession.active_workspace_id ?? ''}:${selectedSession.active_target_id}`
 			: ''
 	);
+	const selectedWorkspaceId = $derived(selectedSession?.workspace_id ?? selectedSession?.active_workspace_id ?? null);
 
 	type ParsedSseEvent = { id?: string; type: string; data: string };
 
@@ -165,6 +179,83 @@
 			await reloadSelectedSession(sessionId);
 		} catch (reason) {
 			toast.error(reason instanceof Error ? reason.message : 'Could not load this Plugin session');
+		}
+	}
+
+	async function reloadWorkspaceMemory(workspaceId: string, refresh = false) {
+		memoryLoading = true;
+		memoryError = '';
+		try {
+			const [context, facts] = await Promise.all([
+				getPluginWorkspaceMemoryContext(workspaceId, refresh),
+				getPluginWorkspaceMemoryFacts(workspaceId)
+			]);
+			memoryContext = context;
+			memoryFacts = facts.facts;
+		} catch (reason) {
+			memoryError = reason instanceof Error ? reason.message : 'Could not load workspace memory';
+		} finally {
+			memoryLoading = false;
+		}
+	}
+
+	async function toggleMemoryFactPin(fact: WorkspaceMemoryFact) {
+		if (!selectedWorkspaceId) return;
+		memoryBusyFactId = fact.fact_id;
+		try {
+			const updated = await updatePluginWorkspaceMemoryFact(selectedWorkspaceId, fact.fact_id, {
+				pinned: !fact.pinned
+			});
+			memoryFacts = memoryFacts.map((item) => (item.fact_id === updated.fact_id ? updated : item));
+		} catch (reason) {
+			toast.error(reason instanceof Error ? reason.message : 'Could not update workspace memory');
+		} finally {
+			memoryBusyFactId = null;
+		}
+	}
+
+	async function editMemoryFact(fact: WorkspaceMemoryFact) {
+		if (!selectedWorkspaceId) return;
+		const content = window.prompt('Edit workspace memory fact', fact.content)?.trim();
+		if (!content || content === fact.content) return;
+		memoryBusyFactId = fact.fact_id;
+		try {
+			const updated = await updatePluginWorkspaceMemoryFact(selectedWorkspaceId, fact.fact_id, { content });
+			memoryFacts = memoryFacts.map((item) => (item.fact_id === updated.fact_id ? updated : item));
+		} catch (reason) {
+			toast.error(reason instanceof Error ? reason.message : 'Could not edit workspace memory');
+		} finally {
+			memoryBusyFactId = null;
+		}
+	}
+
+	async function forgetMemoryFact(fact: WorkspaceMemoryFact) {
+		if (!selectedWorkspaceId || !window.confirm('Forget this workspace memory fact?')) return;
+		memoryBusyFactId = fact.fact_id;
+		try {
+			await forgetPluginWorkspaceMemoryFact(selectedWorkspaceId, fact.fact_id);
+			memoryFacts = memoryFacts.filter((item) => item.fact_id !== fact.fact_id);
+			toast.success('Workspace memory fact forgotten');
+		} catch (reason) {
+			toast.error(reason instanceof Error ? reason.message : 'Could not forget workspace memory');
+		} finally {
+			memoryBusyFactId = null;
+		}
+	}
+
+	async function clearWorkspaceMemory() {
+		if (!selectedWorkspaceId) return;
+		if (!window.confirm('Permanently clear all CPTR workspace-memory facts and recorded history for this workspace? This cannot be undone.')) return;
+		memoryClearing = true;
+		try {
+			await clearPluginWorkspaceMemory(selectedWorkspaceId);
+			memoryContext = null;
+			memoryFacts = [];
+			toast.success('Workspace memory cleared');
+		} catch (reason) {
+			toast.error(reason instanceof Error ? reason.message : 'Could not clear workspace memory');
+		} finally {
+			memoryClearing = false;
 		}
 	}
 
@@ -300,7 +391,17 @@
 		};
 	});
 
-	onMount(() => {
+			$effect(() => {
+			const workspaceId = selectedWorkspaceId;
+			memoryContext = null;
+			memoryFacts = [];
+			memoryError = '';
+			if (!workspaceId) return;
+			void reloadWorkspaceMemory(workspaceId);
+		});
+
+		onMount(() => {
+
 		let mounted = true;
 		void (async () => {
 			try {
@@ -348,8 +449,60 @@
 			<div class="plugin-notice error">{error}</div>
 		{:else}
 			<div class="plugin-console-body">
-				<PluginLiveTerminal snapshot={terminalSnapshot} lines={terminalLines} connectionState={terminalState} />
-				<section class="plugin-activity" aria-label="Plugin activity timeline">
+									<PluginLiveTerminal snapshot={terminalSnapshot} lines={terminalLines} connectionState={terminalState} />
+					<section class="plugin-memory" aria-label="Workspace memory">
+						<div class="plugin-memory-heading">
+							<div>
+								<h2>Workspace Memory</h2>
+								<p>Redacted, owner-scoped CPTR facts and current stage. Private prompts, reasoning, and raw terminal output are not stored.</p>
+							</div>
+							{#if selectedWorkspaceId}
+								<div class="plugin-memory-actions">
+									<button type="button" onclick={() => void reloadWorkspaceMemory(selectedWorkspaceId, true)} disabled={memoryLoading}>Verify freshness</button>
+									<button type="button" class="danger" onclick={() => void clearWorkspaceMemory()} disabled={memoryClearing}>Clear memory</button>
+								</div>
+							{/if}
+						</div>
+						{#if !selectedWorkspaceId}
+							<p class="plugin-notice">Bind this Workbench Session to a workspace to view its durable memory.</p>
+						{:else if memoryLoading}
+							<p class="plugin-notice">Loading workspace memory…</p>
+						{:else if memoryError}
+							<p class="plugin-notice error">{memoryError}</p>
+						{:else}
+							<div class="plugin-memory-status">
+								<span>Cursor {memoryContext?.memory_cursor ?? 0}</span>
+								<span class:stale={memoryContext?.freshness['matches_current_workspace_fingerprint'] === false}>
+									{memoryContext?.freshness['matches_current_workspace_fingerprint'] === false ? 'Needs revalidation' : 'Current memory available'}
+								</span>
+							</div>
+							{#if memoryContext?.workspace_stage['last_completed'] || memoryContext?.workspace_stage['active_goal']}
+								<div class="plugin-memory-stage">
+									{#if memoryContext?.workspace_stage['active_goal']}<p><strong>Goal:</strong> {String(memoryContext.workspace_stage['active_goal'])}</p>{/if}
+									{#if memoryContext?.workspace_stage['last_completed']}<p><strong>Last completed:</strong> {String(memoryContext.workspace_stage['last_completed'])}</p>{/if}
+								</div>
+							{/if}
+							{#if memoryFacts.length === 0}
+								<p class="plugin-notice">No durable facts have been recorded yet. ChatGPT can use the workspace context tool and save only user-directed, verified facts.</p>
+							{:else}
+								<div class="plugin-memory-facts">
+									{#each memoryFacts as fact (fact.fact_id)}
+										<article class:stale={fact.status === 'STALE'}>
+											<div class="plugin-memory-fact-meta"><span>{fact.category}</span><span>{fact.status.toLowerCase()}</span>{#if fact.pinned}<span>pinned</span>{/if}</div>
+											<p>{fact.content}</p>
+											<div class="plugin-memory-fact-actions">
+												<button type="button" onclick={() => void toggleMemoryFactPin(fact)} disabled={memoryBusyFactId === fact.fact_id}>{fact.pinned ? 'Unpin' : 'Pin'}</button>
+												<button type="button" onclick={() => void editMemoryFact(fact)} disabled={memoryBusyFactId === fact.fact_id}>Edit</button>
+												<button type="button" class="danger" onclick={() => void forgetMemoryFact(fact)} disabled={memoryBusyFactId === fact.fact_id}>Forget</button>
+											</div>
+										</article>
+									{/each}
+								</div>
+							{/if}
+						{/if}
+					</section>
+					<section class="plugin-activity" aria-label="Plugin activity timeline">
+
 					<div class="plugin-activity-heading">
 						<h2>Activity</h2>
 						<span>{selectedEvents.length ? `${selectedEvents.length} recent events` : 'Awaiting durable events'}</span>
@@ -448,9 +601,130 @@
 		padding: 0.85rem 1rem 1rem;
 	}
 
+	.plugin-memory,
 	.plugin-activity {
 		min-height: 0;
 		padding: 0 0.1rem;
+	}
+
+	.plugin-memory {
+		padding: 0.75rem;
+		border: 1px solid var(--border-color, #dbe3ef);
+		border-radius: 0.65rem;
+		background: color-mix(in srgb, var(--bg-secondary, #f8fafc) 70%, transparent);
+	}
+
+	.plugin-memory-heading,
+	.plugin-memory-actions,
+	.plugin-memory-status,
+	.plugin-memory-fact-meta,
+	.plugin-memory-fact-actions {
+		display: flex;
+		align-items: center;
+		gap: 0.45rem;
+	}
+
+	.plugin-memory-heading {
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 0.75rem;
+	}
+
+	.plugin-memory-heading h2,
+	.plugin-memory-heading p,
+	.plugin-memory-stage p,
+	.plugin-memory-facts p {
+		margin: 0;
+	}
+
+	.plugin-memory-heading h2 {
+		font-size: 0.8rem;
+		font-weight: 700;
+		color: var(--text-primary, #111827);
+	}
+
+	.plugin-memory-heading p {
+		max-width: 46rem;
+		margin-top: 0.2rem;
+		font-size: 0.72rem;
+		line-height: 1.35;
+		color: var(--text-secondary, #64748b);
+	}
+
+	.plugin-memory-actions {
+		flex: none;
+	}
+
+	.plugin-memory button {
+		padding: 0.28rem 0.44rem;
+		border: 1px solid var(--border-color, #cbd5e1);
+		border-radius: 0.35rem;
+		font-size: 0.68rem;
+		color: var(--text-primary, #334155);
+		background: transparent;
+		cursor: pointer;
+	}
+
+	.plugin-memory button:disabled {
+		opacity: 0.55;
+		cursor: progress;
+	}
+
+	.plugin-memory button.danger {
+		border-color: #fca5a5;
+		color: #b91c1c;
+	}
+
+	.plugin-memory-status {
+		justify-content: space-between;
+		margin-top: 0.65rem;
+		font: 0.66rem/1.3 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		color: var(--text-secondary, #64748b);
+	}
+
+	.plugin-memory-status .stale,
+	.plugin-memory-facts article.stale .plugin-memory-fact-meta {
+		color: #b45309;
+	}
+
+	.plugin-memory-stage {
+		margin-top: 0.55rem;
+		padding: 0.5rem 0.6rem;
+		border-left: 2px solid #93c5fd;
+		font-size: 0.75rem;
+		line-height: 1.45;
+		color: var(--text-primary, #334155);
+	}
+
+	.plugin-memory-facts {
+		display: grid;
+		gap: 0.45rem;
+		margin-top: 0.65rem;
+	}
+
+	.plugin-memory-facts article {
+		padding: 0.55rem 0.6rem;
+		border: 1px solid var(--border-color, #dbe3ef);
+		border-radius: 0.45rem;
+		background: var(--bg-primary, #fff);
+	}
+
+	.plugin-memory-fact-meta {
+		flex-wrap: wrap;
+		font: 0.62rem/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+		text-transform: uppercase;
+		color: var(--text-secondary, #64748b);
+	}
+
+	.plugin-memory-facts p {
+		margin-top: 0.35rem;
+		font-size: 0.76rem;
+		line-height: 1.4;
+		color: var(--text-primary, #334155);
+	}
+
+	.plugin-memory-fact-actions {
+		margin-top: 0.45rem;
 	}
 
 	.plugin-activity-heading {
@@ -486,7 +760,10 @@
 	}
 
 	:global(.dark) .plugin-console-header h1,
-	:global(.dark) .plugin-activity-heading h2 {
+	:global(.dark) .plugin-activity-heading h2,
+	:global(.dark) .plugin-memory-heading h2,
+	:global(.dark) .plugin-memory-stage,
+	:global(.dark) .plugin-memory-facts p {
 		color: #e5e7eb;
 	}
 	:global(.dark) .plugin-console-header button {
@@ -504,6 +781,13 @@
 		.plugin-console-body {
 			gap: 0.65rem;
 			padding: 0.65rem 0.75rem 0.85rem;
+		}
+		.plugin-memory-heading {
+			flex-direction: column;
+		}
+		.plugin-memory-actions {
+			width: 100%;
+			justify-content: flex-end;
 		}
 	}
 

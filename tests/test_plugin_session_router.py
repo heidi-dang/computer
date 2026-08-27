@@ -6,9 +6,13 @@ from fastapi import HTTPException
 
 from cptr.routers.plugin import (
     AppendWorkbenchSessionEventRequest,
+    AppendWorkspaceMemoryEventRequest,
+    ClearWorkspaceMemoryRequest,
     _after_sequence,
     _ensure_target_owner,
     append_control_workbench_session_event,
+    append_control_workspace_memory_event,
+    clear_control_workspace_memory,
 )
 
 
@@ -63,6 +67,32 @@ class PluginSessionRouterTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(HTTPException) as error:
                 await _ensure_target_owner("user_1", "command", "missing", "ws_1")
         self.assertEqual(error.exception.status_code, 404)
+
+    async def test_workspace_memory_event_uses_control_owner_and_cannot_bypass_workspace_scope(self):
+        body = AppendWorkspaceMemoryEventRequest(
+            workspace_id="ws_1",
+            operation_id="mcp:read:1",
+            kind="workspace.inspected",
+            summary="Read a bounded source file.",
+        )
+        request = SimpleNamespace()
+        expected = {"event": {"event_id": "wme_1", "sequence": 1}, "idempotent": False}
+        with patch("cptr.routers.plugin._control_user", new=AsyncMock(return_value="user_1")), patch(
+            "cptr.routers.plugin._record_workspace_memory_event", new=AsyncMock(return_value=expected)
+        ) as record:
+            result = await append_control_workspace_memory_event(request, body)
+
+        self.assertEqual(result, expected)
+        record.assert_awaited_once_with("user_1", body)
+
+    async def test_workspace_memory_clear_requires_explicit_confirmation(self):
+        request = SimpleNamespace()
+        body = ClearWorkspaceMemoryRequest(workspace_id="ws_1", confirm=False)
+        with patch("cptr.routers.plugin._control_user", new=AsyncMock()) as auth:
+            with self.assertRaises(HTTPException) as error:
+                await clear_control_workspace_memory(request, body)
+        self.assertEqual(error.exception.status_code, 422)
+        auth.assert_not_awaited()
 
     def test_plugin_session_cursor_rejects_malformed_last_event_id(self):
         request = SimpleNamespace(headers={"last-event-id": "wbs_example:not-a-number"})

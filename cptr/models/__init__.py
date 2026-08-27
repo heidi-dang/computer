@@ -27,6 +27,11 @@ from cptr.models.control import (
 from cptr.models.files import File
 from cptr.models.users import Auth, User, UserStates
 from cptr.models.workspaces import Workspace
+from cptr.models.workspace_memory import (
+    WorkspaceMemoryEvent,
+    WorkspaceMemoryFact,
+    WorkspaceMemoryStream,
+)
 
 __all__ = [
     "Auth",
@@ -51,6 +56,9 @@ __all__ = [
     "User",
     "UserStates",
     "Workspace",
+    "WorkspaceMemoryEvent",
+    "WorkspaceMemoryFact",
+    "WorkspaceMemoryStream",
     "internal_status",
     "is_internal_chat",
     "is_pending_subagent_result_message",

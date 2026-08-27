@@ -108,3 +108,77 @@ export const pluginSessionStreamUrl = (sessionId: string, afterSequence = 0) =>
 
 export const pluginTerminalStreamUrl = (sessionId: string, afterSequence = 0) =>
 	`/api/plugin/v1/sessions/${encodeURIComponent(sessionId)}/terminal/stream${query(afterSequence)}`;
+
+
+export interface WorkspaceMemoryFact {
+	fact_id: string;
+	category: string;
+	content: string;
+	paths: string[];
+	source_event_id: string | null;
+	status: 'ACTIVE' | 'STALE' | 'ARCHIVED' | string;
+	pinned: boolean;
+	revision: number;
+	verified_fingerprint: string | null;
+	created_at: string | number;
+	updated_at: string | number;
+}
+
+export interface WorkspaceMemoryEvent {
+	event_id: string;
+	sequence: number;
+	kind: string;
+	source: string;
+	session_id: string | null;
+	tool_name: string | null;
+	outcome: string;
+	summary: string;
+	affected_paths: string[];
+	details: Record<string, unknown>;
+	workspace_fingerprint: string | null;
+	created_at: string | number;
+}
+
+export interface WorkspaceMemoryContext {
+	workspace_id: string;
+	memory_cursor: number;
+	workspace_stage: Record<string, unknown>;
+	relevant_facts: WorkspaceMemoryFact[];
+	freshness: Record<string, unknown>;
+}
+
+export const getPluginWorkspaceMemoryContext = (workspaceId: string, refresh = false) =>
+	fetchJSON<WorkspaceMemoryContext>(
+		`/api/plugin/v1/workspace-memory/workspaces/${encodeURIComponent(workspaceId)}/context${
+			refresh ? '?refresh=true' : ''
+		}`
+	);
+
+export const getPluginWorkspaceMemoryFacts = (workspaceId: string, includeStale = true) =>
+	fetchJSON<{ workspace_id: string; facts: WorkspaceMemoryFact[] }>(
+		`/api/plugin/v1/workspace-memory/workspaces/${encodeURIComponent(workspaceId)}/facts${
+			includeStale ? '' : '?include_stale=false'
+		}`
+	);
+
+export const updatePluginWorkspaceMemoryFact = (
+	workspaceId: string,
+	factId: string,
+	body: { content?: string; pinned?: boolean; status?: string }
+) =>
+	fetchJSON<WorkspaceMemoryFact>(
+		`/api/plugin/v1/workspace-memory/workspaces/${encodeURIComponent(workspaceId)}/facts/${encodeURIComponent(factId)}`,
+		{ method: 'PATCH', ...jsonBody(body) }
+	);
+
+export const forgetPluginWorkspaceMemoryFact = (workspaceId: string, factId: string) =>
+	fetchJSON<{ workspace_id: string; fact_id: string; forgotten_at: string | number }>(
+		`/api/plugin/v1/workspace-memory/workspaces/${encodeURIComponent(workspaceId)}/facts/${encodeURIComponent(factId)}`,
+		{ method: 'DELETE' }
+	);
+
+export const clearPluginWorkspaceMemory = (workspaceId: string) =>
+	fetchJSON<{ workspace_id: string; cleared_at: string | number; cursor: number }>(
+		'/api/plugin/v1/workspace-memory/clear',
+		jsonBody({ workspace_id: workspaceId, confirm: true })
+	);

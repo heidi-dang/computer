@@ -21,6 +21,8 @@ from cptr.services.workbench_sessions import (
     workbench_session_hub,
     workbench_session_store,
 )
+from cptr.services.workspace_memory import workspace_memory_store
+from cptr.utils.workspace_fingerprint import snapshot_workspace
 from cptr.utils.db import get_db
 
 router = APIRouter(tags=["plugin-sessions"])
@@ -56,6 +58,41 @@ class RenameWorkbenchSessionRequest(BaseModel):
 
 class DeleteWorkbenchSessionRequest(BaseModel):
     confirmation_id: str = Field(min_length=16, max_length=200)
+
+
+class AppendWorkspaceMemoryEventRequest(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=200)
+    operation_id: str = Field(min_length=1, max_length=200)
+    kind: str = Field(min_length=1, max_length=80)
+    summary: str = Field(min_length=1, max_length=4_000)
+    tool_name: str | None = Field(default=None, max_length=160)
+    outcome: str = Field(default="COMPLETE", max_length=32)
+    source: str = Field(default="mcp", max_length=80)
+    session_id: str | None = Field(default=None, max_length=200)
+    affected_paths: list[str] = Field(default_factory=list, max_length=64)
+    details: dict[str, Any] = Field(default_factory=dict)
+    workspace_fingerprint: str | None = Field(default=None, max_length=128)
+
+
+class RecordWorkspaceMemoryFactRequest(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=4_000)
+    category: str = Field(default="note", max_length=40)
+    pinned: bool = False
+    paths: list[str] = Field(default_factory=list, max_length=64)
+    source_event_id: str | None = Field(default=None, max_length=200)
+    workspace_fingerprint: str | None = Field(default=None, max_length=128)
+
+
+class UpdateWorkspaceMemoryFactRequest(BaseModel):
+    content: str | None = Field(default=None, min_length=1, max_length=4_000)
+    pinned: bool | None = None
+    status: str | None = Field(default=None, max_length=32)
+
+
+class ClearWorkspaceMemoryRequest(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=200)
+    confirm: bool = False
 
 
 async def _control_user(request: Request, required_scope: str) -> str:
@@ -517,3 +554,269 @@ async def confirm_delete_plugin_session(request: Request, body: DeleteWorkbenchS
     if result is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
     return result
+
+
+async def _workspace_memory_fingerprint(
+    owner_id: str, workspace_id: str, *, refresh: bool
+) -> str | None:
+    """Return an optional current bounded fingerprint without exposing a host path."""
+    if not refresh:
+        return None
+    async with await get_db() as db:
+        workspace = await db.get(Workspace, workspace_id)
+    if workspace is None or workspace.user_id != owner_id:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    try:
+        snapshot = await snapshot_workspace(workspace.path)
+    except (OSError, ValueError):
+        return None
+    return str(snapshot.get("fingerprint") or "") or None
+
+
+async def _ensure_memory_session_owner(owner_id: str, session_id: str | None, workspace_id: str) -> None:
+    if not session_id:
+        return
+    session = await workbench_session_store.get(owner_id=owner_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+    bound_workspace = session.get("workspace_id") or session.get("active_workspace_id")
+    if bound_workspace and bound_workspace != workspace_id:
+        raise HTTPException(status_code=422, detail="workbench session belongs to a different workspace")
+
+
+async def _record_workspace_memory_event(owner_id: str, body: AppendWorkspaceMemoryEventRequest) -> dict:
+    await _ensure_workspace_owner(owner_id, body.workspace_id)
+    await _ensure_memory_session_owner(owner_id, body.session_id, body.workspace_id)
+    try:
+        return await workspace_memory_store.record_event(
+            owner_id=owner_id,
+            workspace_id=body.workspace_id,
+            operation_id=body.operation_id,
+            kind=body.kind,
+            summary=body.summary,
+            tool_name=body.tool_name,
+            outcome=body.outcome,
+            source=body.source,
+            session_id=body.session_id,
+            affected_paths=body.affected_paths,
+            details=body.details,
+            workspace_fingerprint=body.workspace_fingerprint,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+async def _workspace_memory_context(owner_id: str, workspace_id: str, *, refresh: bool) -> dict:
+    await _ensure_workspace_owner(owner_id, workspace_id)
+    fingerprint = await _workspace_memory_fingerprint(owner_id, workspace_id, refresh=refresh)
+    try:
+        return await workspace_memory_store.get_context(
+            owner_id=owner_id,
+            workspace_id=workspace_id,
+            workspace_fingerprint=fingerprint,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
+
+
+@router.post("/api/control/v1/workspace-memory/events")
+async def append_control_workspace_memory_event(
+    request: Request, body: AppendWorkspaceMemoryEventRequest
+):
+    return await _record_workspace_memory_event(await _control_user(request, "task:write"), body)
+
+
+@router.get("/api/control/v1/workspace-memory/workspaces/{workspace_id}/context")
+async def get_control_workspace_memory_context(
+    request: Request, workspace_id: str, refresh: bool = False
+):
+    return await _workspace_memory_context(
+        await _control_user(request, "task:read"), workspace_id, refresh=refresh
+    )
+
+
+@router.get("/api/control/v1/workspace-memory/workspaces/{workspace_id}/timeline")
+async def get_control_workspace_memory_timeline(
+    request: Request, workspace_id: str, after_sequence: int = 0, limit: int = 50
+):
+    user_id = await _control_user(request, "task:read")
+    try:
+        return await workspace_memory_store.list_events(
+            owner_id=user_id,
+            workspace_id=workspace_id,
+            after_sequence=after_sequence,
+            limit=limit,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
+
+
+@router.get("/api/control/v1/workspace-memory/workspaces/{workspace_id}/facts")
+async def list_control_workspace_memory_facts(request: Request, workspace_id: str, include_stale: bool = True):
+    user_id = await _control_user(request, "task:read")
+    try:
+        return await workspace_memory_store.list_facts(
+            owner_id=user_id, workspace_id=workspace_id, include_stale=include_stale
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
+
+
+@router.post("/api/control/v1/workspace-memory/facts")
+async def create_control_workspace_memory_fact(
+    request: Request, body: RecordWorkspaceMemoryFactRequest
+):
+    user_id = await _control_user(request, "task:write")
+    await _ensure_workspace_owner(user_id, body.workspace_id)
+    try:
+        return await workspace_memory_store.record_fact(
+            owner_id=user_id,
+            workspace_id=body.workspace_id,
+            content=body.content,
+            category=body.category,
+            pinned=body.pinned,
+            paths=body.paths,
+            source_event_id=body.source_event_id,
+            workspace_fingerprint=body.workspace_fingerprint,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/api/control/v1/workspace-memory/workspaces/{workspace_id}/facts/{fact_id}")
+async def update_control_workspace_memory_fact(
+    request: Request, workspace_id: str, fact_id: str, body: UpdateWorkspaceMemoryFactRequest
+):
+    user_id = await _control_user(request, "task:write")
+    try:
+        return await workspace_memory_store.update_fact(
+            owner_id=user_id,
+            workspace_id=workspace_id,
+            fact_id=fact_id,
+            content=body.content,
+            pinned=body.pinned,
+            status=body.status,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace memory fact not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/api/control/v1/workspace-memory/workspaces/{workspace_id}/facts/{fact_id}")
+async def forget_control_workspace_memory_fact(request: Request, workspace_id: str, fact_id: str):
+    user_id = await _control_user(request, "task:write")
+    try:
+        return await workspace_memory_store.forget_fact(
+            owner_id=user_id, workspace_id=workspace_id, fact_id=fact_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace memory fact not found") from exc
+
+
+@router.post("/api/control/v1/workspace-memory/clear")
+async def clear_control_workspace_memory(request: Request, body: ClearWorkspaceMemoryRequest):
+    if not body.confirm:
+        raise HTTPException(status_code=422, detail="set confirm=true to clear workspace memory")
+    user_id = await _control_user(request, "task:write")
+    try:
+        return await workspace_memory_store.clear(owner_id=user_id, workspace_id=body.workspace_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
+
+
+@router.post("/api/plugin/v1/workspace-memory/events")
+async def append_plugin_workspace_memory_event(request: Request, body: AppendWorkspaceMemoryEventRequest):
+    return await _record_workspace_memory_event(_web_user(request), body)
+
+
+@router.get("/api/plugin/v1/workspace-memory/workspaces/{workspace_id}/context")
+async def get_plugin_workspace_memory_context(
+    request: Request, workspace_id: str, refresh: bool = False
+):
+    return await _workspace_memory_context(_web_user(request), workspace_id, refresh=refresh)
+
+
+@router.get("/api/plugin/v1/workspace-memory/workspaces/{workspace_id}/timeline")
+async def get_plugin_workspace_memory_timeline(
+    request: Request, workspace_id: str, after_sequence: int = 0, limit: int = 50
+):
+    user_id = _web_user(request)
+    try:
+        return await workspace_memory_store.list_events(
+            owner_id=user_id, workspace_id=workspace_id, after_sequence=after_sequence, limit=limit
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
+
+
+@router.get("/api/plugin/v1/workspace-memory/workspaces/{workspace_id}/facts")
+async def list_plugin_workspace_memory_facts(request: Request, workspace_id: str, include_stale: bool = True):
+    user_id = _web_user(request)
+    try:
+        return await workspace_memory_store.list_facts(
+            owner_id=user_id, workspace_id=workspace_id, include_stale=include_stale
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
+
+
+@router.post("/api/plugin/v1/workspace-memory/facts")
+async def create_plugin_workspace_memory_fact(request: Request, body: RecordWorkspaceMemoryFactRequest):
+    user_id = _web_user(request)
+    await _ensure_workspace_owner(user_id, body.workspace_id)
+    try:
+        return await workspace_memory_store.record_fact(
+            owner_id=user_id,
+            workspace_id=body.workspace_id,
+            content=body.content,
+            category=body.category,
+            pinned=body.pinned,
+            paths=body.paths,
+            source_event_id=body.source_event_id,
+            workspace_fingerprint=body.workspace_fingerprint,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/api/plugin/v1/workspace-memory/workspaces/{workspace_id}/facts/{fact_id}")
+async def update_plugin_workspace_memory_fact(
+    request: Request, workspace_id: str, fact_id: str, body: UpdateWorkspaceMemoryFactRequest
+):
+    user_id = _web_user(request)
+    try:
+        return await workspace_memory_store.update_fact(
+            owner_id=user_id,
+            workspace_id=workspace_id,
+            fact_id=fact_id,
+            content=body.content,
+            pinned=body.pinned,
+            status=body.status,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace memory fact not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/api/plugin/v1/workspace-memory/workspaces/{workspace_id}/facts/{fact_id}")
+async def forget_plugin_workspace_memory_fact(request: Request, workspace_id: str, fact_id: str):
+    user_id = _web_user(request)
+    try:
+        return await workspace_memory_store.forget_fact(
+            owner_id=user_id, workspace_id=workspace_id, fact_id=fact_id
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace memory fact not found") from exc
+
+
+@router.post("/api/plugin/v1/workspace-memory/clear")
+async def clear_plugin_workspace_memory(request: Request, body: ClearWorkspaceMemoryRequest):
+    if not body.confirm:
+        raise HTTPException(status_code=422, detail="set confirm=true to clear workspace memory")
+    user_id = _web_user(request)
+    try:
+        return await workspace_memory_store.clear(owner_id=user_id, workspace_id=body.workspace_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail="workspace not found") from exc
