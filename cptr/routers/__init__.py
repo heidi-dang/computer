@@ -18,6 +18,7 @@ from cptr.routers.git import router as git_router
 from cptr.routers.images import router as images_router
 from cptr.routers.memory import router as memory_router
 from cptr.routers.notifications import router as notifications_router
+from cptr.routers.plugin import router as plugin_router
 from cptr.routers.search import router as search_router
 from cptr.routers.skills import router as skills_router
 from cptr.routers.state import router as state_router
@@ -42,6 +43,7 @@ __all__ = [
     "images_router",
     "memory_router",
     "notifications_router",
+    "plugin_router",
     "search_router",
     "skills_router",
     "state_router",

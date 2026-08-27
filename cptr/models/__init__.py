@@ -21,6 +21,8 @@ from cptr.models.control import (
     ControlLiveEvent,
     ControlMessage,
     ControlTask,
+    WorkbenchSession,
+    WorkbenchSessionEvent,
 )
 from cptr.models.files import File
 from cptr.models.users import Auth, User, UserStates
@@ -43,6 +45,8 @@ __all__ = [
     "ControlLiveEvent",
     "ControlMessage",
     "ControlTask",
+    "WorkbenchSession",
+    "WorkbenchSessionEvent",
     "File",
     "User",
     "UserStates",

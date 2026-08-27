@@ -25,6 +25,7 @@ from cptr.routers import (
     images_router,
     memory_router,
     notifications_router,
+    plugin_router,
     search_router,
     skills_router,
     state_router,
@@ -310,6 +311,7 @@ app.include_router(git_router)
 app.include_router(images_router)
 app.include_router(memory_router)
 app.include_router(notifications_router)
+app.include_router(plugin_router)
 app.include_router(search_router)
 app.include_router(skills_router)
 app.include_router(state_router)
