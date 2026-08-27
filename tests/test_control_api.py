@@ -42,9 +42,8 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         services = (agent, SimpleNamespace())
         body = TaskCreateRequest(
             workspace_id="ws_1",
-            prompt="Run the tests",
+            prompt="Run the tests allow:delegation",
             model_id="provider/model_1",
-            delegate_to_cptr_model=True,
             idempotency_key="request_1",
         )
         with (
@@ -58,7 +57,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         agent.start_task.assert_awaited_once_with(
             user_id="user_1",
             workspace_id="ws_1",
-            prompt="Run the tests",
+            prompt="Run the tests allow:delegation",
             model_id="provider/model_1",
             idempotency_key="request_1",
             execution_policy={
@@ -79,9 +78,8 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         )
         body = TaskCreateRequest(
             workspace_id="ws_1",
-            prompt="Audit without installs or network",
+            prompt="Audit without installs or network allow:delegation",
             model_id="provider/model_1",
-            delegate_to_cptr_model=True,
             execution_policy=TaskExecutionPolicy(
                 allow_file_writes=False,
                 allow_commands=True,
@@ -99,7 +97,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         agent.start_task.assert_awaited_once_with(
             user_id="user_1",
             workspace_id="ws_1",
-            prompt="Audit without installs or network",
+            prompt="Audit without installs or network allow:delegation",
             model_id="provider/model_1",
             idempotency_key=None,
             execution_policy={
@@ -136,9 +134,8 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         agent = SimpleNamespace(start_task=AsyncMock())
         body = TaskCreateRequest(
             workspace_id="ws_1",
-            prompt="Audit this workspace",
+            prompt="Audit this workspace allow:delegation",
             model_id="bare-model",
-            delegate_to_cptr_model=True,
         )
         with (
             patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
@@ -244,10 +241,9 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         supervisor = SimpleNamespace(create_goal=AsyncMock(return_value=monitor))
         body = AutonomousCreateRequest(
             workspace_id="ws_1",
-            goal="Ship feature",
+            goal="Ship feature allow:delegation",
             acceptance_criteria=["Tests pass"],
             model_id="provider/model_1",
-            delegate_to_cptr_model=True,
             idempotency_key="goal_1",
             execution_policy=TaskExecutionPolicy(
                 allow_file_writes=True,
@@ -269,7 +265,7 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         supervisor.create_goal.assert_awaited_once_with(
             user_id="user_1",
             workspace_id="ws_1",
-            goal="Ship feature",
+            goal="Ship feature allow:delegation",
             acceptance_criteria=["Tests pass"],
             model_id="provider/model_1",
             idempotency_key="goal_1",

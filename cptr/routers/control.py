@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -39,7 +40,6 @@ class TaskCreateRequest(BaseModel):
     # Normal ChatGPT tool use must not trigger implicit model selection or
     # provider discovery. Delegation is a separate explicit user choice.
     model_id: str | None = Field(default=None, min_length=1, max_length=500)
-    delegate_to_cptr_model: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
@@ -60,7 +60,6 @@ class AutonomousCreateRequest(BaseModel):
     goal: str = Field(min_length=1, max_length=100_000)
     acceptance_criteria: list[str] = Field(min_length=1, max_length=100)
     model_id: str | None = Field(default=None, min_length=1, max_length=500)
-    delegate_to_cptr_model: bool = False
     idempotency_key: str | None = Field(default=None, max_length=200)
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
@@ -137,12 +136,15 @@ def _services(request: Request) -> tuple[AgentService, AutonomousSupervisor]:
     return agent, supervisor
 
 
-def _require_explicit_model_delegation(model_id: str | None, delegated: bool) -> str:
-    """Prevent implicit CPTR model discovery during normal ChatGPT tool use."""
-    if not delegated:
+_DELEGATION_MARKER_RE = re.compile(r"(?<![\w:])allow:delegation(?![\w:])", re.IGNORECASE)
+
+
+def _require_explicit_model_delegation(model_id: str | None, delegation_text: str) -> str:
+    """Require a user-visible delegation marker before resolving a CPTR model."""
+    if not _DELEGATION_MARKER_RE.search(delegation_text):
         raise HTTPException(
             status_code=422,
-            detail="CPTR model delegation is disabled by default; set delegate_to_cptr_model=true only when the user explicitly requests a named CPTR model",
+            detail="CPTR model delegation is disabled by default; include the literal allow:delegation marker in the delegated task or goal only when the user explicitly requests a named CPTR model",
         )
     if not model_id:
         raise HTTPException(
@@ -282,9 +284,7 @@ async def get_workspace(request: Request, workspace_id: str):
 async def create_task(request: Request, body: TaskCreateRequest):
     user_id = await _user(request, "task:write")
     await _ensure_workspace(user_id, body.workspace_id)
-    model_id = _require_explicit_model_delegation(
-        body.model_id, body.delegate_to_cptr_model
-    )
+    model_id = _require_explicit_model_delegation(body.model_id, body.prompt)
     agent, _ = _services(request)
     try:
         return await agent.start_task(
@@ -407,9 +407,7 @@ async def get_git_diff(request: Request, workspace_id: str):
 async def create_autonomous(request: Request, body: AutonomousCreateRequest):
     user_id = await _user(request, "autonomous:run")
     await _ensure_workspace(user_id, body.workspace_id)
-    model_id = _require_explicit_model_delegation(
-        body.model_id, body.delegate_to_cptr_model
-    )
+    model_id = _require_explicit_model_delegation(body.model_id, body.goal)
     _, supervisor = _services(request)
     try:
         monitor = await supervisor.create_goal(
