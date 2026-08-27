@@ -31,6 +31,7 @@ from cptr.routers import (
     terminal_router,
     webhook_router,
     workspace_router,
+    workbench_router,
 )
 from cptr.utils.config import check_access, load_config
 from cptr.utils.db import init_db
@@ -315,6 +316,7 @@ app.include_router(skills_router)
 app.include_router(state_router)
 app.include_router(terminal_router)
 app.include_router(workspace_router)
+app.include_router(workbench_router)
 
 
 # Health

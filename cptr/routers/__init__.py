@@ -23,6 +23,7 @@ from cptr.routers.skills import router as skills_router
 from cptr.routers.state import router as state_router
 from cptr.routers.terminal import router as terminal_router
 from cptr.routers.workspace import router as workspace_router
+from cptr.routers.workbench import router as workbench_router
 
 __all__ = [
     "admin_router",
@@ -48,4 +49,5 @@ __all__ = [
     "terminal_router",
     "webhook_router",
     "workspace_router",
+    "workbench_router",
 ]

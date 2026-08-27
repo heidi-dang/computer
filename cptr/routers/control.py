@@ -6,12 +6,14 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
-from cptr.models import Workspace
+from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.agent_service import AgentService
 from cptr.services.control_auth import authenticate_control_request
@@ -22,6 +24,135 @@ from cptr.utils.db import get_db
 from cptr.utils.redaction import redact_external, redact_sensitive
 
 router = APIRouter(prefix="/api/control/v1", tags=["control"])
+
+async def _default_model() -> str | None:
+    value = await Config.get("chat.default_model")
+    return str(value).strip() if value else None
+
+
+_DELEGATION_MARKER_RE = re.compile(r"(?<![\w:])allow:delegate(?![\w:])", re.IGNORECASE)
+
+
+def _is_qualified_model_id(model_id: str) -> bool:
+    candidate = model_id.strip()
+    if candidate.startswith("agent:"):
+        profile_and_model = candidate[len("agent:") :]
+        return (
+            "/" in profile_and_model
+            and not profile_and_model.startswith("/")
+            and not profile_and_model.endswith("/")
+        )
+    return "/" in candidate and not candidate.startswith("/") and not candidate.endswith("/")
+
+
+def _require_delegation_marker(delegation_text: str) -> None:
+    if not _DELEGATION_MARKER_RE.search(delegation_text):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DELEGATION_NOT_ALLOWED",
+                "message": "delegated CPTR/model execution is disabled by default; the user prompt must contain the exact token allow:delegate",
+                "retriable": False,
+                "field": "prompt",
+            },
+        )
+
+
+def _require_explicit_delegation(model_id: str | None, delegation_text: str) -> str:
+    """Fail closed unless the delegated request is authorized and resolves to a qualified model/profile."""
+    _require_delegation_marker(delegation_text)
+    candidate = (model_id or "").strip()
+    if not candidate:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DELEGATION_MODEL_REQUIRED",
+                "message": "delegated execution requires model_id or a configured qualified CPTR default model",
+                "retriable": False,
+                "field": "model_id",
+            },
+        )
+    if not _is_qualified_model_id(candidate):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "DELEGATION_MODEL_NOT_QUALIFIED",
+                "message": "delegated execution requires a fully qualified model_id: provider/model or agent:profile/model",
+                "retriable": False,
+                "field": "model_id",
+            },
+        )
+    return candidate
+
+
+def _safe_diff_path(value: str) -> bool:
+    from pathlib import Path, PureWindowsPath
+
+    candidate = value.strip()
+    if not candidate:
+        return False
+    path = Path(candidate)
+    windows = PureWindowsPath(candidate)
+    return not path.is_absolute() and not windows.is_absolute() and ".." not in path.parts
+
+
+def _bound_diff_result(
+    value: dict[str, Any],
+    *,
+    max_bytes: int,
+    paths: list[str] | None = None,
+) -> dict[str, Any]:
+    selected = set(paths or [])
+    source_files = list(value.get("files") or [])
+    omitted_paths: list[str] = []
+    if selected:
+        filtered = []
+        for item in source_files:
+            path = str(item.get("path") or "") if isinstance(item, dict) else ""
+            if path in selected:
+                filtered.append(item)
+            elif path:
+                omitted_paths.append(path)
+        source_files = filtered
+    output_files: list[dict[str, Any]] = []
+    used = 0
+    truncated = bool(value.get("truncated", False))
+    for item in source_files:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "")
+        encoded = json.dumps(item, sort_keys=True, default=str).encode("utf-8")
+        if used + len(encoded) > max_bytes:
+            output_files.append({"path": path, "omitted": True})
+            if path:
+                omitted_paths.append(path)
+            truncated = True
+            continue
+        output_files.append(item)
+        used += len(encoded)
+    result = {key: item for key, item in value.items() if key != "files"}
+    result.update(
+        {
+            "files": output_files,
+            "max_bytes": max_bytes,
+            "bytes_returned": used,
+            "truncated": truncated,
+            "omitted_paths": sorted(set(omitted_paths)),
+        }
+    )
+    return result
+
+
+def _is_quiesced_status(status: str) -> bool:
+    return status.upper() in {
+        "COMPLETE",
+        "COMPLETE_WITH_TOOL_ERRORS",
+        "FAILED",
+        "CANCELLED",
+        "REVIEW_REQUIRED",
+        "REJECTED",
+        "BLOCKED",
+    }
 
 
 class TaskExecutionPolicy(BaseModel):
@@ -36,7 +167,7 @@ class TaskExecutionPolicy(BaseModel):
 class TaskCreateRequest(BaseModel):
     workspace_id: str = Field(min_length=1, max_length=200)
     prompt: str = Field(min_length=1, max_length=100_000)
-    model_id: str = Field(min_length=1, max_length=500)
+    model_id: str | None = Field(default=None, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=200)
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
@@ -64,6 +195,7 @@ class AutonomousCreateRequest(BaseModel):
 class ApprovalRequest(BaseModel):
     approval_id: str = Field(min_length=1, max_length=200)
     approved: bool
+    note: str | None = Field(default=None, max_length=50_000)
 
 
 def _monitor_summary(monitor: MonitorState) -> dict[str, Any]:
@@ -79,11 +211,14 @@ def _monitor_summary(monitor: MonitorState) -> dict[str, Any]:
         "approval_id": monitor.approval_id,
         "original_goal": monitor.original_goal,
         "acceptance_criteria": list(monitor.original_acceptance_criteria),
+        "created_at": monitor.created_at,
+        "updated_at": monitor.updated_at,
         "scopes": [
             {
                 "scope_id": scope.scope_id,
                 "title": scope.title,
                 "status": scope.status.value,
+                "verified": scope.status.value == "VERIFIED",
                 "attempt_count": scope.attempt_count,
                 "failure_signature_counts": dict(scope.failure_signature_counts),
                 "worker_task_ids": list(scope.worker_task_ids),
@@ -223,39 +358,184 @@ async def recover_monitors(app: Any) -> None:
 
 
 @router.get("/workspaces")
-async def list_workspaces(request: Request):
+async def list_workspaces(request: Request, include_unavailable: bool = False):
     user_id = await _user(request, "workspace:read")
     workspaces = await Workspace.get_by_user(user_id)
-    return {
-        "workspaces": [
+    rows = []
+    for workspace in workspaces:
+        available = is_workspace_available(workspace)
+        if not include_unavailable and not available:
+            continue
+        rows.append(
             {
                 "workspace_id": workspace.id,
                 "name": workspace.name,
-                "available": is_workspace_available(workspace),
+                "available": available,
+                "last_used_at": workspace.updated_at or workspace.created_at,
             }
-            for workspace in workspaces
+        )
+    return {"workspaces": rows}
+
+@router.get("/models")
+async def list_models(request: Request):
+    await _user(request, "task:read")
+    from cptr.routers.chat import _get_connections, _get_connection_models
+    from cptr.utils.agents.detection import get_available_agent_model_entries
+    connections = [c for c in await _get_connections() if c.get("enabled", True)]
+    entries = []
+    for conn in connections:
+        prefix = (conn.get("prefix_id") or "").strip()
+        for model in await _get_connection_models(conn, request.app.state):
+            model_id = f"{prefix}/{model}" if prefix else model
+            if _is_qualified_model_id(model_id):
+                entries.append({"model_id": model_id, "name": model, "default": False})
+    for item in await get_available_agent_model_entries(request.app.state):
+        model_id = str(item.get("id") or item.get("model_id") or "").strip()
+        if _is_qualified_model_id(model_id):
+            entries.append(
+                {
+                    "model_id": model_id,
+                    "name": str(item.get("name") or model_id),
+                    "default": False,
+                }
+            )
+    default = await _default_model()
+    for item in entries:
+        item["default"] = item["model_id"] == default
+    return {"models": entries}
+
+@router.get("/tasks")
+async def list_tasks(request: Request, workspace_id: str | None = None, status: str | None = None, limit: int = 20):
+    user_id = await _user(request, "task:read")
+    limit = max(1, min(limit, 100))
+    async with await get_db() as db:
+        query = select(ControlTask).where(ControlTask.user_id == user_id)
+        if workspace_id:
+            query = query.where(ControlTask.workspace_id == workspace_id)
+        if status:
+            query = query.where(ControlTask.status == status)
+        query = query.order_by(ControlTask.created_at.desc()).limit(limit)
+        rows = (await db.execute(query)).scalars().all()
+    return {
+        "tasks": [
+            {
+                "id": row.id,
+                "task_id": row.id,
+                "workspace_id": row.workspace_id,
+                "status": row.status,
+                "review_status": row.review_status,
+                "error": redact_external(row.error) if row.error else None,
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+            for row in rows
         ]
     }
+
+
+@router.get("/tasks/{task_id}/events")
+async def get_task_events(
+    request: Request,
+    task_id: str,
+    after_sequence: int = 0,
+    max_events: int = 50,
+):
+    user_id = await _user(request, "task:read")
+    agent, _ = _services(request)
+    try:
+        task = await agent.get_task(task_id, user_id=user_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="task not found") from exc
+    if after_sequence < 0 or max_events < 1 or max_events > 500:
+        raise HTTPException(status_code=422, detail={"code":"INVALID_PAGINATION", "message":"after_sequence/max_events are out of range", "retriable":False})
+    from cptr.services.live_events import live_event_hub
+
+    events = await live_event_hub.store.replay(
+        f"task:{task['id']}",
+        after_sequence=after_sequence,
+        limit=max_events + 1,
+    )
+    truncated = len(events) > max_events
+    page = events[:max_events]
+    return {
+        "task_id": task_id,
+        "after_sequence": after_sequence,
+        "last_sequence": page[-1].sequence if page else after_sequence,
+        "max_events": max_events,
+        "truncated": truncated,
+        "events": [event.to_dict() for event in page],
+    }
+
+
+@router.get("/autonomous")
+async def list_autonomous(
+    request: Request,
+    workspace_id: str | None = None,
+    status: str | None = None,
+    limit: int = 20,
+):
+    user_id = await _user(request, "autonomous:run")
+    limit = max(1, min(limit, 100))
+    async with await get_db() as db:
+        query = select(AutonomousMonitor).where(AutonomousMonitor.user_id == user_id)
+        if workspace_id:
+            query = query.where(AutonomousMonitor.workspace_id == workspace_id)
+        if status:
+            query = query.where(AutonomousMonitor.status == status)
+        query = query.order_by(AutonomousMonitor.updated_at.desc()).limit(limit)
+        rows = list((await db.execute(query)).scalars().all())
+    _, supervisor = _services(request)
+    monitors = []
+    for row in rows:
+        monitor = await supervisor.store.get_monitor(row.id)
+        if monitor is not None:
+            monitors.append(_monitor_summary(monitor))
+    return {"monitors": monitors}
 
 
 @router.get("/workspaces/{workspace_id}")
 async def get_workspace(request: Request, workspace_id: str):
     user_id = await _user(request, "workspace:read")
-    workspace = await _ensure_workspace(user_id, workspace_id)
-    return {"workspace_id": workspace.id, "name": workspace.name, "available": True}
+    async with await get_db() as db:
+        workspace = await db.get(Workspace, workspace_id)
+    if workspace is None or workspace.user_id != user_id:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    available = is_workspace_available(workspace)
+    is_git_repo = False
+    dirty_file_count = 0
+    if available:
+        from cptr.utils.git import is_repo, status
+        from cptr.utils.identity import identity_for_user_id
+
+        identity = await identity_for_user_id(user_id)
+        is_git_repo = await is_repo(workspace.path, identity)
+        if is_git_repo:
+            git_status = await status(workspace.path, identity)
+            dirty_file_count = len(git_status.get("files", []))
+    return {
+        "workspace_id": workspace.id,
+        "name": workspace.name,
+        "available": available,
+        "is_git_repo": is_git_repo,
+        "dirty_file_count": dirty_file_count,
+        "last_used_at": workspace.updated_at or workspace.created_at,
+    }
 
 
 @router.post("/tasks")
 async def create_task(request: Request, body: TaskCreateRequest):
     user_id = await _user(request, "task:write")
     await _ensure_workspace(user_id, body.workspace_id)
+    _require_delegation_marker(body.prompt)
+    selected_model = body.model_id or await _default_model()
+    model_id = _require_explicit_delegation(selected_model, body.prompt)
     agent, _ = _services(request)
     try:
         return await agent.start_task(
             user_id=user_id,
             workspace_id=body.workspace_id,
             prompt=body.prompt,
-            model_id=body.model_id,
+            model_id=model_id,
             idempotency_key=body.idempotency_key,
             execution_policy=body.execution_policy.model_dump(),
             request=request,
@@ -271,19 +551,36 @@ async def get_task(request: Request, task_id: str):
     user_id = await _user(request, "task:read")
     agent, _ = _services(request)
     try:
-        return await agent.get_task(task_id, user_id=user_id)
+        task = await agent.get_task(task_id, user_id=user_id)
+        task["review_status"] = str((task.get("review") or {}).get("status") or "NOT_REQUIRED")
+        return task
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
 
 
 @router.get("/tasks/{task_id}/output")
-async def get_task_output(request: Request, task_id: str):
+async def get_task_output(request: Request, task_id: str, offset: int = 0, max_chars: int = 20_000):
     user_id = await _user(request, "task:read")
+    if offset < 0 or max_chars < 1 or max_chars > 200_000:
+        raise HTTPException(status_code=422, detail={"code":"INVALID_PAGINATION", "message":"offset/max_chars are out of range", "retriable":False})
     agent, _ = _services(request)
     try:
-        return await agent.get_output(task_id, user_id=user_id)
+        output = await agent.get_output(task_id, user_id=user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
+    content = str(output.get("content") or "")
+    page = content[offset : offset + max_chars]
+    return {
+        "task_id": task_id,
+        "status": str(output.get("status") or "UNKNOWN"),
+        "content": page,
+        "offset": offset,
+        "max_chars": max_chars,
+        "total_chars": len(content),
+        "truncated": offset + len(page) < len(content),
+        "completion_integrity": output.get("completion_integrity"),
+        "review": output.get("review"),
+    }
 
 
 @router.post("/tasks/{task_id}/messages")
@@ -291,12 +588,18 @@ async def send_task_message(request: Request, task_id: str, body: MessageRequest
     user_id = await _user(request, "task:write")
     agent, _ = _services(request)
     try:
-        return await agent.send_message(
+        response = await agent.send_message(
             task_id,
             user_id=user_id,
             content=body.content,
             idempotency_key=body.idempotency_key,
         )
+        task = await agent.get_task(task_id, user_id=user_id)
+        return {
+            **response,
+            "accepted": True,
+            "status": task["status"],
+        }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     except ValueError as exc:
@@ -304,13 +607,19 @@ async def send_task_message(request: Request, task_id: str, body: MessageRequest
 
 
 @router.get("/tasks/{task_id}/review")
-async def get_task_review(request: Request, task_id: str):
+async def get_task_review(request: Request, task_id: str, max_diff_bytes: int = 100_000):
     user_id = await _user(request, "task:read")
+    if max_diff_bytes < 1 or max_diff_bytes > 2_000_000:
+        raise HTTPException(status_code=422, detail={"code":"INVALID_LIMIT", "message":"max_diff_bytes is out of range", "retriable":False, "field":"max_diff_bytes"})
     agent, _ = _services(request)
     try:
-        return await agent.get_task_review(task_id, user_id=user_id)
+        review = await agent.get_task_review(task_id, user_id=user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
+    diff = review.get("diff")
+    if isinstance(diff, dict):
+        review["diff"] = _bound_diff_result(diff, max_bytes=max_diff_bytes)
+    return review
 
 
 @router.post("/tasks/{task_id}/review")
@@ -318,13 +627,18 @@ async def decide_task_review(request: Request, task_id: str, body: ReviewDecisio
     user_id = await _user(request, "task:write")
     agent, _ = _services(request)
     try:
-        return await agent.decide_review(
+        result = await agent.decide_review(
             task_id,
             user_id=user_id,
             decision=body.decision,
             note=body.note,
             idempotency_key=body.idempotency_key,
         )
+        if body.decision.strip().upper() == "REQUEST_CHANGES":
+            result["follow_up_task_id"] = str(
+                (result.get("review_message") or {}).get("task_id") or task_id
+            )
+        return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     except ValueError as exc:
@@ -336,7 +650,9 @@ async def cancel_task(request: Request, task_id: str):
     user_id = await _user(request, "task:write")
     agent, _ = _services(request)
     try:
-        return await agent.cancel_task(task_id, user_id=user_id)
+        result = await agent.cancel_task(task_id, user_id=user_id)
+        result["quiesced"] = _is_quiesced_status(str(result.get("status") or ""))
+        return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
 
@@ -357,20 +673,32 @@ async def get_git_status(request: Request, workspace_id: str):
 
 
 @router.get("/workspaces/{workspace_id}/git/diff")
-async def get_git_diff(request: Request, workspace_id: str):
+async def get_git_diff(
+    request: Request,
+    workspace_id: str,
+    paths: list[str] | None = Query(default=None),
+    max_bytes: int = 100_000,
+):
     user_id = await _user(request, "git:read")
     await _ensure_workspace(user_id, workspace_id)
+    if max_bytes < 1 or max_bytes > 2_000_000:
+        raise HTTPException(status_code=422, detail={"code":"INVALID_LIMIT", "message":"max_bytes is out of range", "retriable":False, "field":"max_bytes"})
+    for path in paths or []:
+        if not _safe_diff_path(path):
+            raise HTTPException(status_code=422, detail={"code":"INVALID_PATH", "message":"diff paths must be workspace-relative", "retriable":False, "field":"paths"})
     agent, _ = _services(request)
     try:
-        return await agent.get_diff(workspace_id, user_id=user_id)
+        diff = await agent.get_diff(workspace_id, user_id=user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="workspace not found") from exc
+    return _bound_diff_result(diff, max_bytes=max_bytes, paths=paths)
 
 
 @router.post("/autonomous")
 async def create_autonomous(request: Request, body: AutonomousCreateRequest):
     user_id = await _user(request, "autonomous:run")
     await _ensure_workspace(user_id, body.workspace_id)
+    model_id = _require_explicit_delegation(body.model_id, body.goal)
     _, supervisor = _services(request)
     try:
         monitor = await supervisor.create_goal(
@@ -378,7 +706,7 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
             workspace_id=body.workspace_id,
             goal=body.goal,
             acceptance_criteria=body.acceptance_criteria,
-            model_id=body.model_id,
+            model_id=model_id,
             idempotency_key=body.idempotency_key,
             execution_policy=body.execution_policy.model_dump(),
         )
@@ -421,29 +749,40 @@ async def get_autonomous(request: Request, monitor_id: str):
 
 
 @router.get("/autonomous/{monitor_id}/events")
-async def get_autonomous_events(request: Request, monitor_id: str):
+async def get_autonomous_events(
+    request: Request,
+    monitor_id: str,
+    after_sequence: int = 0,
+    max_events: int = 100,
+):
     user_id = await _user(request, "autonomous:run")
     _, supervisor = _services(request)
     monitor = await supervisor.store.get_monitor(monitor_id)
     if monitor is None or monitor.user_id != user_id:
         raise HTTPException(status_code=404, detail="monitor not found")
-    events = []
-    for scope in monitor.scopes:
-        events.extend(
-            {"scope_id": scope.scope_id, "status": status.value} for status in scope.history
-        )
-    if monitor.status in {
-        MonitorStatus.COMPLETE,
-        MonitorStatus.BLOCKED,
-        MonitorStatus.FAILED,
-        MonitorStatus.CANCELLED,
-    }:
-        events.append({"monitor_id": monitor.monitor_id, "status": monitor.status.value})
-    return {"monitor_id": monitor_id, "events": events}
+    if after_sequence < 0 or max_events < 1 or max_events > 500:
+        raise HTTPException(status_code=422, detail={"code":"INVALID_PAGINATION", "message":"after_sequence/max_events are out of range", "retriable":False})
+    from cptr.services.live_events import live_event_hub
+
+    events = await live_event_hub.store.replay(
+        f"monitor:{monitor_id}",
+        after_sequence=after_sequence,
+        limit=max_events + 1,
+    )
+    truncated = len(events) > max_events
+    page = events[:max_events]
+    return {
+        "monitor_id": monitor_id,
+        "after_sequence": after_sequence,
+        "last_sequence": page[-1].sequence if page else after_sequence,
+        "max_events": max_events,
+        "truncated": truncated,
+        "events": [event.to_dict() for event in page],
+    }
 
 
 @router.get("/autonomous/{monitor_id}/evidence")
-async def get_autonomous_evidence(request: Request, monitor_id: str):
+async def get_autonomous_evidence(request: Request, monitor_id: str, scope: str | None = None):
     user_id = await _user(request, "autonomous:run")
     _, supervisor = _services(request)
     monitor = await supervisor.store.get_monitor(monitor_id)
@@ -452,6 +791,7 @@ async def get_autonomous_evidence(request: Request, monitor_id: str):
     evidence = await supervisor.store.list_evidence(monitor_id)
     return {
         "monitor_id": monitor_id,
+        "scope": scope,
         "evidence": [
             {
                 "evidence_id": item.evidence_id,
@@ -461,6 +801,7 @@ async def get_autonomous_evidence(request: Request, monitor_id: str):
                 "created_at": item.created_at,
             }
             for item in evidence
+            if scope is None or item.scope_id == scope
         ],
     }
 
@@ -543,7 +884,11 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
                 "task_id": task_id,
             },
         )
-        return response
+        return {
+            "message_id": str(response.get("message_id") or response.get("control_message_id") or ""),
+            "status": str(response.get("delivery_status") or response.get("status") or "QUEUED"),
+            "accepted": True,
+        }
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="worker task not found") from exc
     except ValueError as exc:
@@ -575,7 +920,9 @@ async def cancel_autonomous(request: Request, monitor_id: str):
         else "monitor.status",
         payload={"status": result.status.value},
     )
-    return _monitor_summary(result)
+    summary = _monitor_summary(result)
+    summary["quiesced"] = _is_quiesced_status(result.status.value)
+    return summary
 
 
 @router.post("/autonomous/{monitor_id}/approve")
@@ -587,7 +934,10 @@ async def approve_autonomous(request: Request, monitor_id: str, body: ApprovalRe
         raise HTTPException(status_code=404, detail="monitor not found")
     try:
         monitor = await supervisor.approve(
-            monitor_id, approval_id=body.approval_id, approved=body.approved
+            monitor_id,
+            approval_id=body.approval_id,
+            approved=body.approved,
+            note=body.note,
         )
         if monitor.status == MonitorStatus.RUNNING:
             _schedule_monitor(request.app, monitor.monitor_id)

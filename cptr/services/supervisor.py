@@ -146,6 +146,7 @@ class ApprovalRecord:
     requested_at: int = field(default_factory=lambda: int(time.time() * 1000))
     decided_at: int | None = None
     decided_by: str | None = None
+    note: str | None = None
 
 
 class SupervisorStore(Protocol):
@@ -180,7 +181,7 @@ class SupervisorStore(Protocol):
     async def get_approval(self, approval_id: str) -> ApprovalRecord | None: ...
 
     async def decide_approval(
-        self, approval_id: str, *, status: str, decided_by: str
+        self, approval_id: str, *, status: str, decided_by: str, note: str | None = None
     ) -> ApprovalRecord: ...
 
     async def claim_workspace(self, workspace_id: str, monitor_id: str) -> bool: ...
@@ -315,12 +316,13 @@ class InMemorySupervisorStore:
         return self.approvals.get(approval_id)
 
     async def decide_approval(
-        self, approval_id: str, *, status: str, decided_by: str
+        self, approval_id: str, *, status: str, decided_by: str, note: str | None = None
     ) -> ApprovalRecord:
         record = self.approvals[approval_id]
         record.status = status
         record.decided_at = int(time.time() * 1000)
         record.decided_by = decided_by
+        record.note = note
         return record
 
     async def claim_workspace(self, workspace_id: str, monitor_id: str) -> bool:
@@ -484,7 +486,14 @@ class AutonomousSupervisor:
         await self.store.save_monitor(monitor)
         return monitor
 
-    async def approve(self, monitor_id: str, *, approval_id: str, approved: bool) -> MonitorState:
+    async def approve(
+        self,
+        monitor_id: str,
+        *,
+        approval_id: str,
+        approved: bool,
+        note: str | None = None,
+    ) -> MonitorState:
         monitor = await self._required_monitor(monitor_id)
         approval = await self.store.get_approval(approval_id)
         if (
@@ -499,6 +508,7 @@ class AutonomousSupervisor:
             approval_id,
             status="APPROVED" if approved else "DENIED",
             decided_by=monitor.user_id,
+            note=note,
         )
         monitor.approval_id = None
         if approved:

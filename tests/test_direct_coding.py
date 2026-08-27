@@ -12,17 +12,38 @@ from fastapi.testclient import TestClient
 from cptr.app import app as cptr_app
 from cptr.app import application as cptr_application
 from cptr.routers.coding import (
+    ApplyEditsRequest,
     CommandRequest,
     EditRequest,
+    TestTargetRequest as CodingTestTargetRequest,
+    WorkspaceInspectRequest,
     _relative_path,
     _validate_command,
+    apply_workspace_edits,
     edit_workspace_file,
+    inspect_workspace,
+    run_workspace_test_target,
     start_workspace_command,
+    _cursor,
+    _sha256,
 )
 from cptr.routers.coding import router as coding_router
 from cptr.routers.gateway import CreateApiKeyRequest, create_api_key
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
 from cptr.utils.tools import command_sessions, run_command, stop_command_session
+
+
+class DirectCodingContractHelperTests(unittest.TestCase):
+    def test_cursor_rejects_malformed_values_as_typed_bad_request(self):
+        with self.assertRaises(HTTPException) as caught:
+            _cursor("not-a-cursor")
+        self.assertEqual(caught.exception.status_code, 400)
+        self.assertEqual(caught.exception.detail["code"], "INVALID_CURSOR")
+
+    def test_content_hash_is_over_full_content_independent_of_slice(self):
+        content = "alpha\nbeta\ngamma\n"
+        self.assertEqual(_sha256(content), hashlib.sha256(content.encode()).hexdigest())
+        self.assertNotEqual(_sha256("beta\n"), _sha256(content))
 
 
 class DirectCodingAppRegistrationTests(unittest.TestCase):
@@ -142,6 +163,36 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             "def f():\n    return 'new'\n",
         )
 
+    async def test_apply_edits_uses_original_spans_so_replacements_cannot_capture_later_targets(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = ApplyEditsRequest(
+            path="src/app.py",
+            edits=[
+                {"target": "first", "replacement": "second"},
+                {"target": "second", "replacement": "done"},
+            ],
+        )
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.Runtime.read_file",
+                new=AsyncMock(return_value={"binary": False, "content": "first\nsecond\n"}),
+            ),
+            patch("cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})) as write_file,
+        ):
+            result = await apply_workspace_edits(request, "ws_1", body)
+
+        write_file.assert_awaited_once_with(
+            request,
+            "/tmp/cptr-direct-coding/src/app.py",
+            "second\ndone\n",
+        )
+        self.assertEqual(result["sha256"], _sha256("second\ndone\n"))
+        self.assertIn("-first", result["diff"])
+        self.assertIn("+done", result["diff"])
+
     async def test_direct_command_uses_no_model_or_agent_inputs(self):
         request = SimpleNamespace()
         workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
@@ -178,6 +229,103 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_direct_command_marks_initial_wait_timeout_when_process_is_still_running(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(command="python -m pytest", cwd=".", wait_seconds=5)
+        snapshot = {
+            "command_id": "deadbeef",
+            "status": "RUNNING",
+            "exit_code": None,
+            "output": "",
+            "next_offset": 0,
+            "duration_ms": 5000,
+            "output_truncated": False,
+            "timed_out": False,
+        }
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: running\nCommand: python -m pytest\nnext_offset: 0\n---\n"),
+            ),
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(return_value=snapshot.copy()),
+            ),
+        ):
+            result = await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(result["status"], "RUNNING")
+        self.assertTrue(result["timed_out"])
+
+    async def test_workspace_inspection_uses_direct_workspace_scope(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = WorkspaceInspectRequest(kind="project")
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding._workspace_insight",
+                new=AsyncMock(
+                    return_value={
+                        "project_files": ["package.json"],
+                        "detected_runtimes": ["node"],
+                        "root": ".",
+                    }
+                ),
+            ) as insight,
+        ):
+            result = await inspect_workspace(request, "ws_1", body)
+
+        self.assertEqual(result["workspace_id"], "ws_1")
+        self.assertEqual(result["kind"], "project")
+        self.assertEqual(result["detected_runtimes"], ["node"])
+        insight.assert_awaited_once()
+
+    async def test_structured_test_target_maps_to_fixed_command_profile(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CodingTestTargetRequest(target="node_build", path=".", wait_seconds=0)
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: running"),
+            ) as run,
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(
+                    return_value={
+                        "command_id": "deadbeef",
+                        "status": "RUNNING",
+                        "exit_code": None,
+                        "output": "",
+                        "next_offset": 0,
+                        "duration_ms": 0,
+                        "output_truncated": False,
+                        "timed_out": False,
+                    }
+                ),
+            ),
+        ):
+            result = await run_workspace_test_target(request, "ws_1", body)
+
+        self.assertEqual(result["target"], "node_build")
+        run.assert_awaited_once_with(
+            "npm run build",
+            ".",
+            0,
+            __context__={
+                "workspace": "/tmp/cptr-direct-coding",
+                "workspace_id": "ws_1",
+                "request": request,
+                "user_id": "user_1",
+            },
+        )
 
     async def test_run_command_publishes_real_incremental_live_terminal_events(self):
         hub = LiveEventHub(store=LiveEventStore())
@@ -433,8 +581,14 @@ class DirectCodingHttpFlowTests(unittest.TestCase):
                 )
 
         self.assertEqual(write.status_code, 200)
-        self.assertIn("src/example.py", listing.json()["entries"])
-        self.assertIn("value = 1", search.json()["matches"])
+        self.assertIn(
+            {"path": "src/example.py", "type": "file", "size": len("value = 1\n")},
+            listing.json()["entries"],
+        )
+        self.assertIn(
+            {"path": "example.py", "line": 1, "text": "value = 1"},
+            search.json()["matches"],
+        )
         self.assertEqual(read.status_code, 200)
         self.assertEqual(read.json()["content"], "value = 1\n")
         self.assertEqual(edit.status_code, 200)

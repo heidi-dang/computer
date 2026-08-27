@@ -157,6 +157,7 @@ class AutonomousApproval(Base):
     requested_at = Column(BigInteger, nullable=False)
     decided_at = Column(BigInteger, nullable=True)
     decided_by = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
 
 
 class AutonomousWorkspaceLease(Base):
@@ -183,6 +184,68 @@ class ControlIdempotency(Base):
     created_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (UniqueConstraint("user_id", "key", name="uq_control_idempotency_user_key"),)
+
+
+def _workbench_session_id() -> str:
+    return f"wbs_{uuid.uuid4().hex}"
+
+
+class WorkbenchSession(Base):
+    """Durable owner-scoped grouping for observable CPTR plugin activity."""
+
+    __tablename__ = "workbench_sessions"
+
+    id = Column(Text, primary_key=True, default=_workbench_session_id)
+    user_id = Column(Text, ForeignKey("users.id"), nullable=False)
+    name = Column(Text, nullable=False)
+    workspace_id = Column(Text, ForeignKey("workspaces.id"), nullable=True)
+    status = Column(Text, nullable=False, default="OPEN")
+    active_target_type = Column(Text, nullable=True)
+    active_target_id = Column(Text, nullable=True)
+    active_workspace_id = Column(Text, nullable=True)
+    event_count = Column(BigInteger, nullable=False, default=0)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+    last_event_at = Column(BigInteger, nullable=True)
+    archived_at = Column(BigInteger, nullable=True)
+    deleted_at = Column(BigInteger, nullable=True)
+    delete_requested_at = Column(BigInteger, nullable=True)
+    delete_confirmation_hash = Column(Text, nullable=True)
+    delete_confirmation_expires_at = Column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index("ix_workbench_session_user_status_updated", "user_id", "status", "updated_at"),
+        Index("ix_workbench_session_user_last_event", "user_id", "last_event_at"),
+    )
+
+
+class WorkbenchSessionEvent(Base):
+    """Sanitized immutable event in a durable Workbench Session timeline."""
+
+    __tablename__ = "workbench_session_events"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    session_id = Column(Text, ForeignKey("workbench_sessions.id", ondelete="CASCADE"), nullable=False)
+    user_id = Column(Text, ForeignKey("users.id"), nullable=False)
+    sequence = Column(BigInteger, nullable=False)
+    source = Column(Text, nullable=False)
+    actor = Column(Text, nullable=False)
+    event_type = Column(Text, nullable=False)
+    state = Column(Text, nullable=True)
+    target_type = Column(Text, nullable=True)
+    target_id = Column(Text, nullable=True)
+    workspace_id = Column(Text, nullable=True)
+    tool_name = Column(Text, nullable=True)
+    summary = Column(Text, nullable=False)
+    details = Column(JSON, nullable=False, default=dict)
+    metrics = Column(JSON, nullable=False, default=dict)
+    policy = Column(JSON, nullable=False, default=dict)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "sequence", name="uq_workbench_session_event_sequence"),
+        Index("ix_workbench_session_event_user_session_sequence", "user_id", "session_id", "sequence"),
+    )
 
 
 class ControlLiveEvent(Base):

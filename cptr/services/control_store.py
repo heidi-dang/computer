@@ -347,10 +347,11 @@ class SqlSupervisorStore:
                 requested_at=row.requested_at,
                 decided_at=row.decided_at,
                 decided_by=row.decided_by,
+                note=row.note,
             )
 
     async def decide_approval(
-        self, approval_id: str, *, status: str, decided_by: str
+        self, approval_id: str, *, status: str, decided_by: str, note: str | None = None
     ) -> ApprovalRecord:
         async with await get_db() as db:
             row = await db.get(AutonomousApproval, approval_id)
@@ -359,6 +360,7 @@ class SqlSupervisorStore:
             row.status = status
             row.decided_at = _now_ms()
             row.decided_by = decided_by
+            row.note = note
             await db.commit()
             return ApprovalRecord(
                 approval_id=row.id,

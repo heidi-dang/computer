@@ -21,6 +21,8 @@ from cptr.models.control import (
     ControlLiveEvent,
     ControlMessage,
     ControlTask,
+    WorkbenchSession,
+    WorkbenchSessionEvent,
 )
 from cptr.models.files import File
 from cptr.models.users import Auth, User, UserStates
@@ -47,6 +49,8 @@ __all__ = [
     "User",
     "UserStates",
     "Workspace",
+    "WorkbenchSession",
+    "WorkbenchSessionEvent",
     "internal_status",
     "is_internal_chat",
     "is_pending_subagent_result_message",
