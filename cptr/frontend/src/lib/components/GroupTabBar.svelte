@@ -45,6 +45,7 @@
 		onHomeNewChat?: () => void;
 		onHomeNewTerminal?: () => void;
 		onHomeNewBrowser?: () => void;
+		onHomeNewPlugin?: () => void;
 		onHomeSplit?: (direction: 'horizontal' | 'vertical') => void;
 		onHomeCloseGroup?: () => void;
 		homeSplitDirection?: 'horizontal' | 'vertical';
@@ -65,6 +66,7 @@
 		onHomeNewChat,
 		onHomeNewTerminal,
 		onHomeNewBrowser,
+		onHomeNewPlugin,
 		onHomeSplit,
 		onHomeCloseGroup,
 		homeSplitDirection = 'horizontal',
@@ -113,6 +115,8 @@
 				return 'monitor';
 			case 'browser':
 				return 'browser';
+			case 'plugin':
+				return 'spark';
 			default:
 				return 'page';
 		}
@@ -227,6 +231,11 @@
 						icon: 'browser',
 						shortcut: formatChord($keybindings.newBrowser),
 						onclick: () => onHomeNewBrowser?.()
+					},
+					{
+						label: 'Plugin console',
+						icon: 'spark',
+						onclick: () => onHomeNewPlugin?.()
 					}
 				]
 			: [

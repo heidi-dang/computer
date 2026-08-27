@@ -55,7 +55,7 @@ export interface FileSearchTarget {
 
 export interface Tab {
 	id: string;
-	type: 'home' | 'files' | 'terminal' | 'file' | 'chat' | 'preview' | 'browser'; // preview is migrated on load
+	type: 'home' | 'files' | 'terminal' | 'file' | 'chat' | 'preview' | 'browser' | 'plugin'; // preview is migrated on load
 	label: string;
 	filePath?: string;
 	edit?: boolean;
@@ -76,7 +76,8 @@ const SUPPORTED_TAB_TYPES = new Set([
 	'file',
 	'chat',
 	'preview',
-	'browser'
+	'browser',
+	'plugin'
 ]);
 
 function isSupportedTab(tab: { type?: unknown }): tab is Tab {

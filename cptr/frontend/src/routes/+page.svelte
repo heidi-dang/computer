@@ -45,6 +45,7 @@
 	import Terminal from '$lib/components/Terminal.svelte';
 	import BrowserPreview from '$lib/components/BrowserPreview.svelte';
 	import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
+	import PluginPanel from '$lib/components/plugin/PluginPanel.svelte';
 	import DirectoryPicker from '$lib/components/DirectoryPicker.svelte';
 	import GroupTabBar from '$lib/components/GroupTabBar.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -167,6 +168,22 @@
 			console.error('Failed to create Home browser:', error);
 			toast.error(error instanceof Error ? error.message : 'Failed to open Browser');
 		}
+	}
+
+	function openHomePlugin(groupId = $homeState.activeGroupId) {
+		const group = $homeState.groups.find((item) => item.id === groupId);
+		if (!group) return;
+		const existing = group.tabs.find((tab) => tab.type === 'plugin');
+		if (existing) {
+			updateHomeTabs(groupId, (tabs) => ({ tabs, activeTabId: existing.id }));
+			return;
+		}
+		const tab: Tab = {
+			id: `home-plugin-${Date.now()}`,
+			type: 'plugin',
+			label: 'Plugin'
+		};
+		updateHomeTabs(groupId, (tabs) => ({ tabs: [...tabs, tab], activeTabId: tab.id }));
 	}
 
 	function closeHomeTab(tabId: string, groupId = $homeState.activeGroupId) {
@@ -1024,8 +1041,9 @@
 				onHomeMove={(tabId, fromGroupId) => moveHomeTabToGroup(tabId, fromGroupId, homePane.id)}
 				onHomeNewChat={() => openHomeChat(undefined, homePane.id)}
 				onHomeNewTerminal={() => openHomeTerminal(homePane.id)}
-				onHomeNewBrowser={() => openHomeBrowser(undefined, homePane.id)}
-				onHomeSplit={(direction) => {
+					onHomeNewBrowser={() => openHomeBrowser(undefined, homePane.id)}
+					onHomeNewPlugin={() => openHomePlugin(homePane.id)}
+					onHomeSplit={(direction) => {
 					setHomeActiveGroup(homePane.id);
 					splitHomeTab(direction);
 				}}
@@ -1064,19 +1082,25 @@
 						<Terminal sessionId={tab.sessionId!} />
 					</div>
 				{/each}
-				{#each homePane.tabs.filter((tab) => tab.type === 'browser' && tab.browserSessionId) as tab (tab.id)}
-					<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== homePane.activeTabId}>
-						<BrowserPreview
-							sessionId={tab.browserSessionId!}
-							groupId={homePane.id}
-							tabId={tab.id}
-							initialUrl={tab.path}
-							active={tab.id === homePane.activeTabId && homePane.id === $homeState.activeGroupId}
-							onTabUpdate={(label) => updateHomeBrowserTab(tab.id, label, homePane.id)}
-							onOpenBrowser={(url) => openHomeBrowser(url, homePane.id)}
-						/>
-					</div>
-				{/each}
+									{#each homePane.tabs.filter((tab) => tab.type === 'browser' && tab.browserSessionId) as tab (tab.id)}
+						<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== homePane.activeTabId}>
+							<BrowserPreview
+								sessionId={tab.browserSessionId!}
+								groupId={homePane.id}
+								tabId={tab.id}
+								initialUrl={tab.path}
+								active={tab.id === homePane.activeTabId && homePane.id === $homeState.activeGroupId}
+								onTabUpdate={(label) => updateHomeBrowserTab(tab.id, label, homePane.id)}
+								onOpenBrowser={(url) => openHomeBrowser(url, homePane.id)}
+							/>
+						</div>
+					{/each}
+					{#each homePane.tabs.filter((tab) => tab.type === 'plugin') as tab (tab.id)}
+						<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== homePane.activeTabId}>
+							<PluginPanel />
+						</div>
+					{/each}
+
 				{#if homeTab?.type === 'home'}
 					<div class="h-full overflow-y-auto px-6">
 						<div class="mx-auto flex min-h-full w-full max-w-md flex-col justify-center py-5">
