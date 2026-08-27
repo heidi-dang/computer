@@ -41,9 +41,13 @@ _CHROME_PATHS_WINDOWS = [
     ("LOCALAPPDATA", "BraveSoftware/Brave-Browser/Application/brave.exe"),
 ]
 
-# Track launched process so we can kill it on shutdown
+# Track browser processes launched by CPTR so shutdown never targets arbitrary user Chrome.
 _launched_process: asyncio.subprocess.Process | None = None
 _user_data_dir: str | None = None
+_managed_process: asyncio.subprocess.Process | None = None
+_managed_user_data_dir: str | None = None
+_managed_base_url: str | None = None
+_managed_lock = asyncio.Lock()
 
 
 def find_browser() -> str | None:
@@ -160,9 +164,92 @@ async def ensure_browser(port: int = 9222) -> str:
     )
 
 
+async def ensure_managed_browser() -> str:
+    """Launch or reuse CPTR's isolated automation Chrome instance.
+
+    Unlike ``ensure_browser()``, this never attaches to an arbitrary pre-existing
+    CDP endpoint. It owns a temporary profile and an ephemeral loopback debug port
+    so MCP browser control cannot inherit the user's normal Chrome cookies/profile.
+    """
+    global _managed_process, _managed_user_data_dir, _managed_base_url
+
+    async with _managed_lock:
+        if (
+            _managed_process is not None
+            and _managed_process.returncode is None
+            and _managed_base_url
+            and await _probe_cdp(_managed_base_url)
+        ):
+            return _managed_base_url
+
+        if _managed_process is not None and _managed_process.returncode is None:
+            try:
+                _managed_process.terminate()
+                await asyncio.wait_for(_managed_process.wait(), timeout=5)
+            except (asyncio.TimeoutError, ProcessLookupError):
+                try:
+                    _managed_process.kill()
+                except ProcessLookupError:
+                    pass
+        _managed_process = None
+        _managed_base_url = None
+        if _managed_user_data_dir:
+            shutil.rmtree(_managed_user_data_dir, ignore_errors=True)
+            _managed_user_data_dir = None
+
+        chrome_path = find_browser()
+        if not chrome_path:
+            raise RuntimeError(
+                "No Chrome or Chromium found. Install Google Chrome, Chromium, Brave, or Edge."
+            )
+
+        import socket
+
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+        base_url = f"http://127.0.0.1:{port}"
+        _managed_user_data_dir = tempfile.mkdtemp(prefix="cptr-managed-browser-")
+        args = [
+            chrome_path,
+            f"--remote-debugging-port={port}",
+            "--remote-debugging-address=127.0.0.1",
+            "--headless=new",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-sync",
+            "--disable-translate",
+            "--disable-extensions",
+            f"--user-data-dir={_managed_user_data_dir}",
+            "about:blank",
+        ]
+        if Path("/.dockerenv").exists():
+            args.insert(-1, "--no-sandbox")
+
+        _managed_process = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            if _managed_process.returncode is not None:
+                break
+            if await _probe_cdp(base_url):
+                _managed_base_url = base_url
+                return base_url
+
+        try:
+            _managed_process.terminate()
+        except ProcessLookupError:
+            pass
+        raise RuntimeError("Managed Chrome started but its local CDP endpoint did not become ready")
+
+
 async def shutdown_browser() -> None:
-    """Kill the Chrome process we launched (if any). Called on app shutdown."""
-    global _launched_process, _user_data_dir
+    """Kill Chrome processes launched by CPTR. Called on app shutdown."""
+    global _launched_process, _user_data_dir, _managed_process, _managed_user_data_dir, _managed_base_url
 
     if _launched_process and _launched_process.returncode is None:
         logger.info("Shutting down launched Chrome (pid %d)", _launched_process.pid)
@@ -175,6 +262,22 @@ async def shutdown_browser() -> None:
             except ProcessLookupError:
                 pass
         _launched_process = None
+
+    if _managed_process and _managed_process.returncode is None:
+        logger.info("Shutting down managed automation Chrome (pid %d)", _managed_process.pid)
+        try:
+            _managed_process.terminate()
+            await asyncio.wait_for(_managed_process.wait(), timeout=5)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            try:
+                _managed_process.kill()
+            except ProcessLookupError:
+                pass
+    _managed_process = None
+    _managed_base_url = None
+    if _managed_user_data_dir:
+        shutil.rmtree(_managed_user_data_dir, ignore_errors=True)
+        _managed_user_data_dir = None
 
     # Clean up temp profile
     if _user_data_dir:

@@ -314,6 +314,21 @@ class CDPClient:
                 {"type": "keyUp", "key": char},
             )
 
+    async def press_key(self, key: str, modifiers: list[str] | None = None) -> None:
+        """Send a bounded keyboard key/chord to the active page."""
+        modifier_bits = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
+        mask = 0
+        for modifier in modifiers or []:
+            if modifier not in modifier_bits:
+                raise ValueError(f"Unsupported modifier: {modifier}")
+            mask |= modifier_bits[modifier]
+
+        params: dict[str, Any] = {"key": key, "modifiers": mask}
+        if len(key) == 1 and not (mask & (1 | 2 | 4)):
+            params["text"] = key
+        await self._send("Input.dispatchKeyEvent", {"type": "keyDown", **params})
+        await self._send("Input.dispatchKeyEvent", {"type": "keyUp", **params})
+
     async def scroll(self, direction: str = "down", amount: int = 3) -> None:
         """Scroll the page. Direction: 'up' or 'down'."""
         delta_y = 300 * amount * (1 if direction == "down" else -1)

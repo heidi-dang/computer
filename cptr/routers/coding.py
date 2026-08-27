@@ -9,11 +9,14 @@ bounded command-session management.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import re
 import shlex
 import shutil
+import uuid
 from pathlib import Path, PureWindowsPath
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -40,6 +43,11 @@ MAX_COMMAND_CHARS = 20_000
 MAX_COMMAND_OUTPUT_CHARS = 20_000
 MAX_SSH_ALIAS_CHARS = 128
 _SSH_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+MAX_BROWSER_URL_CHARS = 4_096
+MAX_BROWSER_TEXT_CHARS = 20_000
+MAX_BROWSER_SNAPSHOT_CHARS = 24_000
+_BROWSER_OPERATION_TIMEOUT_SECONDS = 45
+_BROWSER_CONTROL_LOCKS: dict[str, asyncio.Lock] = {}
 
 # Direct coding supports local development and validation. Deliberately refuse
 # operations that publish, deploy, destroy state, or obtain credentials. Network
@@ -108,6 +116,32 @@ class SshCommandRequest(BaseModel):
     alias: str = Field(min_length=1, max_length=MAX_SSH_ALIAS_CHARS)
     command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
     wait_seconds: int = Field(default=0, ge=0, le=60)
+
+
+class BrowserControlRequest(BaseModel):
+    action: Literal[
+        "status",
+        "navigate",
+        "snapshot",
+        "click",
+        "type",
+        "press_key",
+        "scroll",
+        "screenshot",
+        "close",
+    ]
+    url: str | None = Field(default=None, max_length=MAX_BROWSER_URL_CHARS)
+    ref: str | None = Field(default=None, max_length=64)
+    text: str | None = Field(default=None, max_length=MAX_BROWSER_TEXT_CHARS)
+    key: str | None = Field(default=None, max_length=128)
+    modifiers: list[Literal["Alt", "Control", "Meta", "Shift"]] = Field(
+        default_factory=list, max_length=4
+    )
+    direction: Literal["up", "down"] = "down"
+    amount: int = Field(default=3, ge=1, le=20)
+    width: int | None = Field(default=None, ge=320, le=3_840)
+    height: int | None = Field(default=None, ge=240, le=2_160)
+    allow_network: bool = False
 
 
 class CreateDirectoryRequest(BaseModel):
@@ -194,6 +228,67 @@ def _require_external_scope(request: Request) -> None:
     scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
     if "command:external" not in scopes:
         raise HTTPException(status_code=403, detail="SSH commands require the command:external scope")
+
+
+def _browser_session_key(user_id: str, workspace_id: str) -> str:
+    return f"control:{user_id}:{workspace_id}"
+
+
+def _browser_lock(session_key: str) -> asyncio.Lock:
+    lock = _BROWSER_CONTROL_LOCKS.get(session_key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _BROWSER_CONTROL_LOCKS[session_key] = lock
+    return lock
+
+
+def _is_loopback_browser_host(hostname: str) -> bool:
+    host = hostname.strip().lower().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _validate_browser_url(request: Request, url: str, *, allow_network: bool) -> str:
+    value = url.strip()
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
+        raise HTTPException(status_code=422, detail="browser URL must be an absolute http or https URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise HTTPException(status_code=422, detail="browser URL must not contain embedded credentials")
+    if not _is_loopback_browser_host(parsed.hostname):
+        if not allow_network:
+            raise HTTPException(
+                status_code=403,
+                detail="external browser navigation requires explicit allow_network=true",
+            )
+        _require_external_scope(request)
+    return value
+
+
+def _bounded_browser_snapshot(value: str) -> tuple[str, bool]:
+    if len(value) <= MAX_BROWSER_SNAPSHOT_CHARS:
+        return value, False
+    return (
+        f"{value[:MAX_BROWSER_SNAPSHOT_CHARS]}\n\n[Browser snapshot truncated by CPTR.]",
+        True,
+    )
+
+
+async def _managed_browser_client(session_key: str):
+    from cptr.utils.browser.launcher import ensure_managed_browser
+    from cptr.utils.browser.session import session_manager
+
+    cdp_url = await asyncio.wait_for(
+        ensure_managed_browser(), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+    )
+    return await asyncio.wait_for(
+        session_manager.get_or_create(session_key, cdp_url),
+        timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS,
+    )
 
 
 def _parse_ssh_aliases(content: str) -> list[str]:
@@ -534,6 +629,188 @@ async def cancel_workspace_command(request: Request, workspace_id: str, command_
         workspace_path=workspace.path,
         command_id=command_id,
     )
+
+
+@router.post("/workspaces/{workspace_id}/browser")
+async def control_managed_browser(
+    request: Request, workspace_id: str, body: BrowserControlRequest
+):
+    """Control CPTR's isolated Chrome session through the scoped Control API."""
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    session_key = _browser_session_key(user_id, workspace_id)
+
+    from cptr.utils.browser.launcher import find_browser
+    from cptr.utils.browser.session import session_manager
+
+    if body.action == "status":
+        browser = find_browser()
+        return {
+            "workspace_id": workspace_id,
+            "action": body.action,
+            "status": "ready" if browser else "unavailable",
+            "available": bool(browser),
+            "active": session_manager.has(session_key),
+            "managed": True,
+            "browser": Path(browser).name if browser else "",
+        }
+
+    lock = _browser_lock(session_key)
+    try:
+        async with lock:
+            if body.action == "close":
+                await session_manager.close(session_key)
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "closed",
+                    "active": False,
+                    "managed": True,
+                }
+
+            client = await _managed_browser_client(session_key)
+
+            if body.action == "navigate":
+                if not body.url:
+                    raise HTTPException(status_code=422, detail="navigate requires url")
+                url = _validate_browser_url(request, body.url, allow_network=body.allow_network)
+                navigation = await asyncio.wait_for(
+                    client.navigate(url), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+                )
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "ok",
+                    "managed": True,
+                    "url": url,
+                    "title": str(navigation.get("title", ""))[:512],
+                }
+
+            if body.action == "snapshot":
+                snapshot, truncated = _bounded_browser_snapshot(
+                    await asyncio.wait_for(
+                        client.snapshot(), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+                    )
+                )
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "ok",
+                    "managed": True,
+                    "snapshot": snapshot,
+                    "truncated": truncated,
+                }
+
+            if body.action == "click":
+                if not body.ref:
+                    raise HTTPException(status_code=422, detail="click requires ref")
+                await asyncio.wait_for(
+                    client.click(body.ref), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+                )
+                snapshot, truncated = _bounded_browser_snapshot(
+                    await asyncio.wait_for(
+                        client.snapshot(), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+                    )
+                )
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "ok",
+                    "managed": True,
+                    "snapshot": snapshot,
+                    "truncated": truncated,
+                }
+
+            if body.action == "type":
+                if not body.ref:
+                    raise HTTPException(status_code=422, detail="type requires ref")
+                if body.text is None:
+                    raise HTTPException(status_code=422, detail="type requires text")
+                await asyncio.wait_for(
+                    client.type_text(body.ref, body.text),
+                    timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS,
+                )
+                snapshot, truncated = _bounded_browser_snapshot(
+                    await asyncio.wait_for(
+                        client.snapshot(), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+                    )
+                )
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "ok",
+                    "managed": True,
+                    "snapshot": snapshot,
+                    "truncated": truncated,
+                }
+
+            if body.action == "press_key":
+                key = (body.key or "").strip()
+                if not key:
+                    raise HTTPException(status_code=422, detail="press_key requires key")
+                await asyncio.wait_for(
+                    client.press_key(key, body.modifiers),
+                    timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS,
+                )
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "ok",
+                    "managed": True,
+                }
+
+            if body.action == "scroll":
+                await asyncio.wait_for(
+                    client.scroll(body.direction, body.amount),
+                    timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS,
+                )
+                snapshot, truncated = _bounded_browser_snapshot(
+                    await asyncio.wait_for(
+                        client.snapshot(), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+                    )
+                )
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "ok",
+                    "managed": True,
+                    "snapshot": snapshot,
+                    "truncated": truncated,
+                }
+
+            if body.action == "screenshot":
+                if (body.width is None) != (body.height is None):
+                    raise HTTPException(
+                        status_code=422,
+                        detail="screenshot width and height must be provided together",
+                    )
+                png = await asyncio.wait_for(
+                    client.screenshot(width=body.width, height=body.height),
+                    timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS,
+                )
+                relative = Path(".cptr") / "screenshots" / f"browser-control-{uuid.uuid4().hex}.png"
+                await Runtime.write_file(request, str(Path(workspace.path) / relative), png)
+                return {
+                    "workspace_id": workspace_id,
+                    "action": body.action,
+                    "status": "ok",
+                    "managed": True,
+                    "screenshot_path": relative.as_posix(),
+                    "bytes": len(png),
+                }
+
+            raise HTTPException(status_code=422, detail="unsupported browser action")
+    except HTTPException:
+        raise
+    except asyncio.TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="browser operation timed out") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)[:500]) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)[:500]) from exc
+    finally:
+        if body.action == "close" and not lock.locked():
+            _BROWSER_CONTROL_LOCKS.pop(session_key, None)
 
 
 @router.get("/workspaces/{workspace_id}/ssh/hosts")

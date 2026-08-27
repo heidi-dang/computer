@@ -53,6 +53,17 @@ class BrowserSessionManager:
         logger.info("Browser session created for chat %s", chat_id[:8])
         return client
 
+    def has(self, chat_id: str) -> bool:
+        """Return whether a live browser session exists without creating one."""
+        client = self._sessions.get(chat_id)
+        if client is None:
+            return False
+        if client.is_closed():
+            self._sessions.pop(chat_id, None)
+            self._last_used.pop(chat_id, None)
+            return False
+        return True
+
     async def close(self, chat_id: str) -> None:
         """Close and remove a specific chat's session."""
         client = self._sessions.pop(chat_id, None)
