@@ -199,6 +199,32 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error_code"], "FDX_RESPONSE_TOO_LARGE")
         self.assertTrue(result["fallback_recommended"])
 
+    async def test_degraded_reason_redacts_absolute_host_paths(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            service = FdxIntelligenceService()
+            with patch.object(
+                service,
+                "_run_cli",
+                new=AsyncMock(
+                    side_effect=FdxIntelligenceError(
+                        "FDX_OPERATION_FAILED",
+                        "native failure at /etc/cptr-private/config",
+                    )
+                ),
+            ):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="capabilities",
+                    options={},
+                )
+        self.assertEqual(result["status"], "degraded")
+        self.assertIn("<redacted-path>", result["reason"])
+        self.assertNotIn("/etc/cptr-private/config", result["reason"])
+
     def test_cli_builder_rejects_option_shaped_git_refs(self):
         with self.assertRaises(FdxIntelligenceError) as caught:
             FdxIntelligenceService._cli_argv("diff", {"base": "--output=/tmp/leak"})
