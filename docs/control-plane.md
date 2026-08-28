@@ -137,7 +137,7 @@ The selected `repo_path` is relative to the authorized workspace or, when `worke
 
 CPTR prefers a persistent `fdx serve --root <authorized-repository>` process for daemon-capable intelligence and negotiates protocol/capabilities before use. Daemons are keyed by user, workspace, and resolved repository root, bounded by `CPTR_FDX_MAX_DAEMONS`, reaped after the configured idle TTL, and terminated during CPTR shutdown. Other read-only FDX intelligence actions run as argv-based subprocesses without a shell. Returned paths are converted to repository-relative values where possible; host paths and oversized output are redacted or bounded before leaving CPTR.
 
-FDX binary discovery is explicit and local-only: `CPTR_FDX_BINARY`, then the execution identity's `~/.cptr/bin/fdx`, then `CPTR_DATA_DIR/bin/fdx`, then `fdx` on that identity's `PATH`. If FDX is disabled, unavailable, incompatible, times out, or returns degraded evidence, the response sets `fallback_recommended=true` and ChatGPT continues with the ordinary CPTR tree/search/read/Git primitives rather than failing the Direct Coding task.
+FDX binary discovery is explicit and local-only: `CPTR_FDX_BINARY`, then the execution identity's `~/.cptr/bin/fdx`, then the standard Cargo install location `~/.cargo/bin/fdx`, then `CPTR_DATA_DIR/bin/fdx`, then `fdx` on that identity's `PATH`. If FDX is disabled, unavailable, incompatible, times out, or returns degraded evidence, the response sets `fallback_recommended=true` and ChatGPT continues with the ordinary CPTR tree/search/read/Git primitives rather than failing the Direct Coding task.
 
 ## Health and metrics
 

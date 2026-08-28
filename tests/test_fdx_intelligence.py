@@ -162,11 +162,27 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error_code"], "FDX_REPOSITORY_ROOT_REQUIRED")
         self.assertTrue(result["fallback_recommended"])
 
+    def test_resolve_binary_discovers_standard_cargo_install_location(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cargo_bin = Path(temp) / ".cargo" / "bin"
+            cargo_bin.mkdir(parents=True)
+            binary = cargo_bin / ("fdx.exe" if os.name == "nt" else "fdx")
+            binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            binary.chmod(0o755)
+            service = FdxIntelligenceService()
+            with (
+                patch("cptr.services.fdx_intelligence.FDX_BINARY", ""),
+                patch("cptr.services.fdx_intelligence.shutil.which", return_value=None),
+            ):
+                resolved = service._resolve_binary(_identity(temp))
+        self.assertEqual(resolved, str(binary.resolve()))
+
     async def test_unavailable_binary_returns_typed_fallback_instead_of_failing_direct_coding(self):
         with tempfile.TemporaryDirectory() as temp:
             service = FdxIntelligenceService()
             with (
                 patch("cptr.services.fdx_intelligence.FDX_BINARY", str(Path(temp) / "missing-fdx")),
+                patch("cptr.services.fdx_intelligence.DATA_DIR", str(Path(temp) / "data")),
                 patch("cptr.services.fdx_intelligence.shutil.which", return_value=None),
             ):
                 result = await service.execute(

@@ -315,6 +315,7 @@ class FdxIntelligenceService:
             candidates.append(expand_user_path(FDX_BINARY, identity))
         executable_name = "fdx.exe" if os.name == "nt" else "fdx"
         candidates.append(Path(identity.home) / ".cptr" / "bin" / executable_name)
+        candidates.append(Path(identity.home) / ".cargo" / "bin" / executable_name)
         candidates.append(Path(DATA_DIR) / "bin" / executable_name)
         for candidate in candidates:
             path = Path(candidate)
