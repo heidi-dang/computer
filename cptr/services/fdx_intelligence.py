@@ -806,7 +806,7 @@ class FdxIntelligenceService:
                 "status": "unavailable",
                 "fallback_recommended": True,
                 "error_code": exc.code,
-                "reason": str(exc),
+                "reason": self._sanitize_string(str(exc), root),
                 "fallback_tools": [
                     "cptr_workspace_tree",
                     "cptr_workspace_search_symbols",
@@ -823,7 +823,7 @@ class FdxIntelligenceService:
                 "status": "degraded",
                 "fallback_recommended": True,
                 "error_code": exc.code,
-                "reason": str(exc),
+                "reason": self._sanitize_string(str(exc), root),
                 "retriable": exc.retriable,
                 "fallback_tools": [
                     "cptr_workspace_tree",
