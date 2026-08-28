@@ -805,6 +805,72 @@ def _worktree_path_for_branch(repo_root: str, branch: str) -> str:
     return os.path.join(os.path.dirname(repo_root), safe or "worktree")
 
 
+async def change_manifest(
+    root: str, identity: ExecutionIdentity | None = None
+) -> list[dict[str, str]]:
+    """Return working-tree changes relative to HEAD, including untracked files and renames."""
+    _, raw, _ = await _run(
+        "diff", "--name-status", "-z", "--find-renames", "HEAD", "--", cwd=root, identity=identity
+    )
+    tokens = raw.split("\0")
+    changes: list[dict[str, str]] = []
+    index = 0
+    while index < len(tokens):
+        status_code = tokens[index]
+        index += 1
+        if not status_code:
+            continue
+        if index >= len(tokens):
+            break
+        code = status_code[0]
+        if code in {"R", "C"}:
+            old_path = tokens[index]
+            new_path = tokens[index + 1] if index + 1 < len(tokens) else ""
+            index += 2
+            if old_path and new_path:
+                changes.append(
+                    {
+                        "status": "renamed" if code == "R" else "copied",
+                        "old_path": old_path,
+                        "path": new_path,
+                    }
+                )
+            continue
+        path = tokens[index]
+        index += 1
+        if not path:
+            continue
+        status_name = {
+            "A": "added",
+            "D": "deleted",
+            "M": "modified",
+            "T": "modified",
+            "U": "modified",
+        }.get(code, "modified")
+        changes.append({"status": status_name, "path": path})
+
+    _, untracked_raw, _ = await _run(
+        "ls-files", "--others", "--exclude-standard", "-z", cwd=root, identity=identity
+    )
+    tracked_paths = {item.get("path", "") for item in changes}
+    for path in untracked_raw.split("\0"):
+        if path and path not in tracked_paths:
+            changes.append({"status": "added", "path": path})
+    return changes
+
+
+async def repository_root(root: str, identity: ExecutionIdentity | None = None) -> str:
+    """Return the canonical top-level directory for a Git repository."""
+    _, out, _ = await _run("rev-parse", "--show-toplevel", cwd=root, identity=identity)
+    return out.strip() or root
+
+
+async def current_revision(root: str, identity: ExecutionIdentity | None = None) -> str:
+    """Return the current HEAD revision."""
+    _, out, _ = await _run("rev-parse", "HEAD", cwd=root, identity=identity)
+    return out.strip()
+
+
 async def create_worktree(
     root: str,
     branch: str,
@@ -812,11 +878,32 @@ async def create_worktree(
     identity: ExecutionIdentity | None = None,
 ) -> dict[str, str]:
     """Create a new branch-backed worktree beside the current repository."""
-    _, repo_root_out, _ = await _run("rev-parse", "--show-toplevel", cwd=root, identity=identity)
-    repo_root = repo_root_out.strip() or root
+    repo_root = await repository_root(root, identity)
     target_path = path or _worktree_path_for_branch(repo_root, branch)
     await _run("worktree", "add", "-b", branch, target_path, cwd=root, identity=identity)
     return {"path": target_path}
+
+
+async def remove_worktree(
+    root: str,
+    path: str,
+    *,
+    force: bool = False,
+    identity: ExecutionIdentity | None = None,
+) -> None:
+    """Remove one worktree owned by the repository."""
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")
+    args.append(path)
+    await _run(*args, cwd=root, identity=identity)
+
+
+async def delete_branch_force(
+    root: str, name: str, identity: ExecutionIdentity | None = None
+) -> None:
+    """Delete a local branch that CPTR created for an isolated direct worker."""
+    await _run("branch", "-D", name, cwd=root, identity=identity)
 
 
 async def checkout(root: str, branch: str, identity: ExecutionIdentity | None = None) -> None:

@@ -39,6 +39,15 @@ async def main():
     )
     async with await get_db() as db:
         db.add(
+            ChatMessage(
+                id="worker-message",
+                chat_id=chat.id,
+                role="assistant",
+                content="",
+                created_at=1,
+            )
+        )
+        db.add(
             ControlTask(
                 id="task_cancel",
                 user_id=user_id,

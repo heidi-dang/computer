@@ -18,12 +18,14 @@ from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.agent_service import AgentService
 from cptr.services.control_auth import authenticate_control_request
 from cptr.services.control_store import SqlSupervisorStore
+from cptr.services.direct_coding_workers import DirectCodingWorkerError, resolve_direct_worker_root
 from cptr.services.supervisor import AutonomousSupervisor, MonitorState, MonitorStatus
 from cptr.services.supervisor_director import LocalSupervisorDirector, OpenAISupervisorDirector
 from cptr.utils.db import get_db
 from cptr.utils.redaction import redact_external, redact_sensitive
 
 router = APIRouter(prefix="/api/control/v1", tags=["control"])
+
 
 async def _default_model() -> str | None:
     value = await Config.get("chat.default_model")
@@ -376,11 +378,13 @@ async def list_workspaces(request: Request, include_unavailable: bool = False):
         )
     return {"workspaces": rows}
 
+
 @router.get("/models")
 async def list_models(request: Request):
     await _user(request, "task:read")
     from cptr.routers.chat import _get_connections, _get_connection_models
     from cptr.utils.agents.detection import get_available_agent_model_entries
+
     connections = [c for c in await _get_connections() if c.get("enabled", True)]
     entries = []
     for conn in connections:
@@ -404,8 +408,11 @@ async def list_models(request: Request):
         item["default"] = item["model_id"] == default
     return {"models": entries}
 
+
 @router.get("/tasks")
-async def list_tasks(request: Request, workspace_id: str | None = None, status: str | None = None, limit: int = 20):
+async def list_tasks(
+    request: Request, workspace_id: str | None = None, status: str | None = None, limit: int = 20
+):
     user_id = await _user(request, "task:read")
     limit = max(1, min(limit, 100))
     async with await get_db() as db:
@@ -447,7 +454,14 @@ async def get_task_events(
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="task not found") from exc
     if after_sequence < 0 or max_events < 1 or max_events > 500:
-        raise HTTPException(status_code=422, detail={"code":"INVALID_PAGINATION", "message":"after_sequence/max_events are out of range", "retriable":False})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_PAGINATION",
+                "message": "after_sequence/max_events are out of range",
+                "retriable": False,
+            },
+        )
     from cptr.services.live_events import live_event_hub
 
     events = await live_event_hub.store.replay(
@@ -562,7 +576,14 @@ async def get_task(request: Request, task_id: str):
 async def get_task_output(request: Request, task_id: str, offset: int = 0, max_chars: int = 20_000):
     user_id = await _user(request, "task:read")
     if offset < 0 or max_chars < 1 or max_chars > 200_000:
-        raise HTTPException(status_code=422, detail={"code":"INVALID_PAGINATION", "message":"offset/max_chars are out of range", "retriable":False})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_PAGINATION",
+                "message": "offset/max_chars are out of range",
+                "retriable": False,
+            },
+        )
     agent, _ = _services(request)
     try:
         output = await agent.get_output(task_id, user_id=user_id)
@@ -610,7 +631,15 @@ async def send_task_message(request: Request, task_id: str, body: MessageRequest
 async def get_task_review(request: Request, task_id: str, max_diff_bytes: int = 100_000):
     user_id = await _user(request, "task:read")
     if max_diff_bytes < 1 or max_diff_bytes > 2_000_000:
-        raise HTTPException(status_code=422, detail={"code":"INVALID_LIMIT", "message":"max_diff_bytes is out of range", "retriable":False, "field":"max_diff_bytes"})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_LIMIT",
+                "message": "max_diff_bytes is out of range",
+                "retriable": False,
+                "field": "max_diff_bytes",
+            },
+        )
     agent, _ = _services(request)
     try:
         review = await agent.get_task_review(task_id, user_id=user_id)
@@ -658,16 +687,29 @@ async def cancel_task(request: Request, task_id: str):
 
 
 @router.get("/workspaces/{workspace_id}/git/status")
-async def get_git_status(request: Request, workspace_id: str):
+async def get_git_status(request: Request, workspace_id: str, worker_id: str | None = None):
     user_id = await _user(request, "git:read")
     workspace = await _ensure_workspace(user_id, workspace_id)
     from cptr.utils.git import is_repo, status
     from cptr.utils.identity import identity_for_user_id
 
     identity = await identity_for_user_id(user_id)
-    if not await is_repo(workspace.path, identity):
+    root = workspace.path
+    if worker_id:
+        try:
+            root = str(
+                await resolve_direct_worker_root(
+                    user_id=user_id, workspace_id=workspace_id, worker_id=worker_id
+                )
+            )
+        except DirectCodingWorkerError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc), "retriable": exc.status_code >= 409},
+            ) from exc
+    if not await is_repo(root, identity):
         return {"is_repo": False, "files": []}
-    result = await status(workspace.path, identity)
+    result = await status(root, identity)
     result["is_repo"] = True
     return result
 
@@ -678,20 +720,59 @@ async def get_git_diff(
     workspace_id: str,
     paths: list[str] | None = Query(default=None),
     max_bytes: int = 100_000,
+    worker_id: str | None = None,
 ):
     user_id = await _user(request, "git:read")
     await _ensure_workspace(user_id, workspace_id)
     if max_bytes < 1 or max_bytes > 2_000_000:
-        raise HTTPException(status_code=422, detail={"code":"INVALID_LIMIT", "message":"max_bytes is out of range", "retriable":False, "field":"max_bytes"})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_LIMIT",
+                "message": "max_bytes is out of range",
+                "retriable": False,
+                "field": "max_bytes",
+            },
+        )
     for path in paths or []:
         if not _safe_diff_path(path):
-            raise HTTPException(status_code=422, detail={"code":"INVALID_PATH", "message":"diff paths must be workspace-relative", "retriable":False, "field":"paths"})
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INVALID_PATH",
+                    "message": "diff paths must be workspace-relative",
+                    "retriable": False,
+                    "field": "paths",
+                },
+            )
+    if worker_id:
+        from cptr.utils.git import diff as git_diff, is_repo
+        from cptr.utils.identity import identity_for_user_id
+
+        try:
+            root = str(
+                await resolve_direct_worker_root(
+                    user_id=user_id, workspace_id=workspace_id, worker_id=worker_id
+                )
+            )
+        except DirectCodingWorkerError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc), "retriable": exc.status_code >= 409},
+            ) from exc
+        identity = await identity_for_user_id(user_id)
+        if not await is_repo(root, identity):
+            value = {"is_repo": False, "files": [], "diagnostic": "not a git repository"}
+        else:
+            value = await git_diff(root, None, False, True, False, identity)
+            value["is_repo"] = True
+        return _bound_diff_result(value, max_bytes=max_bytes, paths=paths)
     agent, _ = _services(request)
     try:
-        diff = await agent.get_diff(workspace_id, user_id=user_id)
+        value = await agent.get_diff(workspace_id, user_id=user_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="workspace not found") from exc
-    return _bound_diff_result(diff, max_bytes=max_bytes, paths=paths)
+    return _bound_diff_result(value, max_bytes=max_bytes, paths=paths)
 
 
 @router.post("/autonomous")
@@ -761,7 +842,14 @@ async def get_autonomous_events(
     if monitor is None or monitor.user_id != user_id:
         raise HTTPException(status_code=404, detail="monitor not found")
     if after_sequence < 0 or max_events < 1 or max_events > 500:
-        raise HTTPException(status_code=422, detail={"code":"INVALID_PAGINATION", "message":"after_sequence/max_events are out of range", "retriable":False})
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_PAGINATION",
+                "message": "after_sequence/max_events are out of range",
+                "retriable": False,
+            },
+        )
     from cptr.services.live_events import live_event_hub
 
     events = await live_event_hub.store.replay(
@@ -885,7 +973,9 @@ async def send_autonomous_message(request: Request, monitor_id: str, body: Messa
             },
         )
         return {
-            "message_id": str(response.get("message_id") or response.get("control_message_id") or ""),
+            "message_id": str(
+                response.get("message_id") or response.get("control_message_id") or ""
+            ),
             "status": str(response.get("delivery_status") or response.get("status") or "QUEUED"),
             "accepted": True,
         }

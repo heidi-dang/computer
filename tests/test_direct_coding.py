@@ -29,6 +29,7 @@ from cptr.routers.coding import (
 )
 from cptr.routers.coding import router as coding_router
 from cptr.routers.gateway import CreateApiKeyRequest, create_api_key
+from cptr.services.api_keys import ApiKeyPrincipal
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
 from cptr.utils.tools import command_sessions, run_command, stop_command_session
 
@@ -60,12 +61,14 @@ class DirectCodingAppRegistrationTests(unittest.TestCase):
             workspace = SimpleNamespace(path=workspace_root, user_id="user_1")
             with (
                 patch(
-                    "cptr.services.control_auth._get_api_keys",
-                    new=AsyncMock(return_value=[key]),
-                ),
-                patch(
-                    "cptr.services.control_auth.Auth.get_by_user_id",
-                    new=AsyncMock(return_value=SimpleNamespace(username="tester")),
+                    "cptr.services.control_auth.resolve_api_key_principal",
+                    new=AsyncMock(
+                        return_value=ApiKeyPrincipal(
+                            user_id="user_1",
+                            username="tester",
+                            scopes=frozenset(key["scopes"]),
+                        )
+                    ),
                 ),
                 patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
             ):
@@ -93,12 +96,14 @@ class DirectCodingAppRegistrationTests(unittest.TestCase):
             workspace = SimpleNamespace(path=workspace_root, user_id="user_1")
             with (
                 patch(
-                    "cptr.services.control_auth._get_api_keys",
-                    new=AsyncMock(return_value=[key]),
-                ),
-                patch(
-                    "cptr.services.control_auth.Auth.get_by_user_id",
-                    new=AsyncMock(return_value=SimpleNamespace(username="tester")),
+                    "cptr.services.control_auth.resolve_api_key_principal",
+                    new=AsyncMock(
+                        return_value=ApiKeyPrincipal(
+                            user_id="user_1",
+                            username="tester",
+                            scopes=frozenset(key["scopes"]),
+                        )
+                    ),
                 ),
                 patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
                 TestClient(cptr_application) as client,
@@ -149,9 +154,13 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
             patch(
                 "cptr.routers.coding.Runtime.read_file",
-                new=AsyncMock(return_value={"binary": False, "content": "def f():\n    return 'old'\n"}),
+                new=AsyncMock(
+                    return_value={"binary": False, "content": "def f():\n    return 'old'\n"}
+                ),
             ) as read_file,
-            patch("cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})) as write_file,
+            patch(
+                "cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})
+            ) as write_file,
         ):
             result = await edit_workspace_file(request, "ws_1", body)
 
@@ -163,7 +172,9 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             "def f():\n    return 'new'\n",
         )
 
-    async def test_apply_edits_uses_original_spans_so_replacements_cannot_capture_later_targets(self):
+    async def test_apply_edits_uses_original_spans_so_replacements_cannot_capture_later_targets(
+        self,
+    ):
         request = SimpleNamespace()
         workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
         body = ApplyEditsRequest(
@@ -180,7 +191,9 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
                 "cptr.routers.coding.Runtime.read_file",
                 new=AsyncMock(return_value={"binary": False, "content": "first\nsecond\n"}),
             ),
-            patch("cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})) as write_file,
+            patch(
+                "cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})
+            ) as write_file,
         ):
             result = await apply_workspace_edits(request, "ws_1", body)
 
@@ -200,7 +213,10 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
             patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
-            patch("cptr.routers.coding.run_command", new=AsyncMock(return_value="Task deadbeef: exited (code 0)")) as run,
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: exited (code 0)"),
+            ) as run,
             patch(
                 "cptr.routers.coding._command_snapshot",
                 new=AsyncMock(
@@ -248,7 +264,9 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
             patch(
                 "cptr.routers.coding.run_command",
-                new=AsyncMock(return_value="Task deadbeef: running\nCommand: python -m pytest\nnext_offset: 0\n---\n"),
+                new=AsyncMock(
+                    return_value="Task deadbeef: running\nCommand: python -m pytest\nnext_offset: 0\n---\n"
+                ),
             ),
             patch(
                 "cptr.routers.coding._command_snapshot",
@@ -333,7 +351,9 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
         identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
         with tempfile.TemporaryDirectory() as workspace_root:
             with (
-                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
                 patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
                 patch("cptr.services.live_events.live_event_hub", hub),
             ):
@@ -370,14 +390,15 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
         finally:
             command_sessions.pop(command_id, None)
 
-
     async def test_run_command_projects_runtime_bytes_into_parent_task_stream(self):
         hub = LiveEventHub(store=LiveEventStore())
         request = SimpleNamespace()
         identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
         with tempfile.TemporaryDirectory() as workspace_root:
             with (
-                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
                 patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
                 patch("cptr.services.live_events.live_event_hub", hub),
             ):
@@ -416,7 +437,9 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
         identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
         with tempfile.TemporaryDirectory() as workspace_root:
             with (
-                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
                 patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
                 patch("cptr.services.live_events.live_event_hub", hub),
             ):
@@ -456,7 +479,9 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
         identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
         with tempfile.TemporaryDirectory() as workspace_root:
             with (
-                patch("cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)),
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
                 patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
                 patch("cptr.services.live_events.live_event_hub", hub),
             ):
@@ -500,19 +525,23 @@ class DirectCodingHttpFlowTests(unittest.TestCase):
             "scopes": ["coding:read", "coding:write", "command:execute"],
         }
         headers = {"Authorization": f"Bearer {token}"}
+        hub = LiveEventHub(store=LiveEventStore())
 
         with tempfile.TemporaryDirectory() as workspace_root:
             workspace = SimpleNamespace(path=workspace_root, user_id="user_1")
             with (
                 patch(
-                    "cptr.services.control_auth._get_api_keys",
-                    new=AsyncMock(return_value=[key]),
-                ),
-                patch(
-                    "cptr.services.control_auth.Auth.get_by_user_id",
-                    new=AsyncMock(return_value=SimpleNamespace(username="tester")),
+                    "cptr.services.control_auth.resolve_api_key_principal",
+                    new=AsyncMock(
+                        return_value=ApiKeyPrincipal(
+                            user_id="user_1",
+                            username="tester",
+                            scopes=frozenset(key["scopes"]),
+                        )
+                    ),
                 ),
                 patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+                patch("cptr.services.live_events.live_event_hub", hub),
                 TestClient(app) as client,
             ):
                 write = client.post(
@@ -581,10 +610,12 @@ class DirectCodingHttpFlowTests(unittest.TestCase):
                 )
 
         self.assertEqual(write.status_code, 200)
-        self.assertIn(
-            {"path": "src/example.py", "type": "file", "size": len("value = 1\n")},
-            listing.json()["entries"],
+        listed_file = next(
+            item for item in listing.json()["entries"] if item["path"] == "src/example.py"
         )
+        self.assertEqual(listed_file["type"], "file")
+        self.assertEqual(listed_file["size"], len("value = 1\n"))
+        self.assertIsNotNone(listed_file["modified"])
         self.assertIn(
             {"path": "example.py", "line": 1, "text": "value = 1"},
             search.json()["matches"],
@@ -630,7 +661,9 @@ class DirectCodingExternalCommandScopeTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ApiKeyScopeIssuanceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_key_issuer_defaults_to_direct_coding_scopes_and_allows_explicit_external_scope(self):
+    async def test_key_issuer_defaults_to_direct_coding_scopes_and_allows_explicit_external_scope(
+        self,
+    ):
         request = SimpleNamespace(
             client=SimpleNamespace(host="127.0.0.1"),
             cookies={},
@@ -695,12 +728,14 @@ class DirectCodingHttpAuthorizationTests(unittest.TestCase):
             workspace = SimpleNamespace(path=workspace_root, user_id="user_1")
             with (
                 patch(
-                    "cptr.services.control_auth._get_api_keys",
-                    new=AsyncMock(return_value=[key]),
-                ),
-                patch(
-                    "cptr.services.control_auth.Auth.get_by_user_id",
-                    new=AsyncMock(return_value=SimpleNamespace(username="tester")),
+                    "cptr.services.control_auth.resolve_api_key_principal",
+                    new=AsyncMock(
+                        return_value=ApiKeyPrincipal(
+                            user_id="user_1",
+                            username="tester",
+                            scopes=frozenset(key["scopes"]),
+                        )
+                    ),
                 ),
                 patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
                 TestClient(app) as client,

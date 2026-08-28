@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- 📈 **Backend performance metrics and readiness checks.** Admins can inspect bounded request, database, event-loop, command-session, live-event, process-memory, file-descriptor, and SQLite WAL metrics; separate liveness and readiness endpoints make service supervision more reliable.
+- 🧪 **Performance regression contracts.** Tests now guard bounded directory traversal, concurrent batch reads, deduplicated search context reads, terminal chunk integrity, live-event batching, and command-session retention.
+
+### Changed
+
+- ⚡ **Command output no longer waits on database or synchronous log flushes.** PTY capture uses larger reads, bounded queues, buffered log writes, and bounded terminal-event coalescing while preserving durable command logs and incremental output retrieval.
+- 💾 **Live Workbench events use batched SQLite durability.** Event writes share transactions, sequence maxima are cached per target, and replay retention cleanup runs periodically instead of on every event.
+- 🗂️ **Direct-coding repository inspection does less filesystem work.** Non-recursive listing no longer recursively counts child files, recursive pagination stops at the requested page boundary, multi-file reads use bounded concurrency, and search context reads each source file once.
+- 🔐 **Control API keys use indexed lookup with bounded principal caching.** Existing JSON-stored keys are migrated automatically and remain mirrored for compatibility.
+- 🧱 **SQLite connections are tuned for concurrent CPTR workloads.** Foreign-key enforcement, bounded busy waits, WAL checkpointing, memory cache, mmap, and configurable synchronous durability are applied consistently.
+
+### Fixed
+
+- 🧹 **Completed command sessions no longer accumulate indefinitely.** Finished sessions expire by TTL and a hard retained-session cap, while active child process groups are terminated and drained during shutdown.
+- 🛡️ **Linux child commands receive best-effort parent-death termination.** Unexpected CPTR process loss is less likely to leave orphan command groups behind.
+
 ## [0.9.21] - 2026-08-04
 
 ### Added

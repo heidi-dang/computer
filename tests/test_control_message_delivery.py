@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 SEED_SCRIPT = r"""
 import asyncio
 import os
-from cptr.models import Chat, ControlTask, User, Workspace
+from cptr.models import Chat, ChatMessage, ControlTask, User, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import init_db, get_db
 
@@ -20,6 +20,10 @@ async def main():
     workspace = await Workspace.upsert(user_id, os.environ["DELIVERY_WORKSPACE"], "delivery", {})
     chat = await Chat.create(user_id=user_id, title="delivery", meta={}, created_at=1)
     async with await get_db() as db:
+        db.add_all([
+            ChatMessage(id="worker-message", chat_id=chat.id, role="assistant", content="", created_at=1),
+            ChatMessage(id="chat-message-1", chat_id=chat.id, role="user", content="steer", created_at=1),
+        ])
         db.add(ControlTask(
             id="task_delivery",
             user_id=user_id,
@@ -68,7 +72,7 @@ asyncio.run(main())
 EFFECT_OUTCOME_SCRIPT = r"""
 import asyncio
 import os
-from cptr.models import Chat, ControlTask, User, Workspace
+from cptr.models import Chat, ChatMessage, ControlTask, User, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import init_db, get_db
 
@@ -78,6 +82,10 @@ async def main():
     workspace = await Workspace.upsert(user_id, os.environ["DELIVERY_WORKSPACE"], "delivery", {})
     chat = await Chat.create(user_id=user_id, title="delivery", meta={}, created_at=1)
     async with await get_db() as db:
+        db.add_all([
+            ChatMessage(id="worker-effect-1", chat_id=chat.id, role="assistant", content="", created_at=1),
+            ChatMessage(id="chat-effect-1", chat_id=chat.id, role="user", content="steer", created_at=1),
+        ])
         db.add(ControlTask(
             id="task_effect",
             user_id=user_id,
@@ -147,7 +155,7 @@ asyncio.run(main())
 GENERATION_FENCE_SCRIPT = r"""
 import asyncio
 import os
-from cptr.models import Chat, ControlTask, User, Workspace
+from cptr.models import Chat, ChatMessage, ControlTask, User, Workspace
 from cptr.services.control_store import ControlTaskStore
 from cptr.utils.db import init_db, get_db
 
@@ -157,6 +165,10 @@ async def main():
     workspace = await Workspace.upsert(user_id, os.environ["DELIVERY_WORKSPACE"], "delivery", {})
     chat = await Chat.create(user_id=user_id, title="delivery", meta={}, created_at=1)
     async with await get_db() as db:
+        db.add_all([
+            ChatMessage(id="worker-generation-0", chat_id=chat.id, role="assistant", content="", created_at=1),
+            ChatMessage(id="chat-message-generation", chat_id=chat.id, role="user", content="steer", created_at=1),
+        ])
         db.add(ControlTask(
             id="task_generation",
             user_id=user_id,

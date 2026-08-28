@@ -54,6 +54,20 @@ async def lifespan(app: FastAPI):
     _logging.getLogger(__name__).info("truststore: using system certificate store")
 
     await init_db()
+
+    from cptr.services.live_events import live_event_hub
+    from cptr.services.runtime_metrics import event_loop_lag_worker
+    from cptr.utils.tools import command_session_reaper_loop, start_command_session_manager
+
+    await live_event_hub.start()
+    start_command_session_manager()
+    app.state.command_session_reaper_task = asyncio.create_task(
+        command_session_reaper_loop(), name="cptr-command-session-reaper"
+    )
+    app.state.event_loop_lag_task = asyncio.create_task(
+        event_loop_lag_worker(), name="cptr-event-loop-lag"
+    )
+
     from cptr.routers.control import recover_monitors
 
     await recover_monitors(app)
@@ -109,6 +123,13 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError):
                 await scheduler_task
 
+        for task_name in ("command_session_reaper_task", "event_loop_lag_task"):
+            background_task = getattr(app.state, task_name, None)
+            if background_task:
+                background_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await background_task
+
         bot_manager = getattr(app.state, "bot_manager", None)
         if bot_manager:
             await bot_manager.stop_all()
@@ -118,6 +139,16 @@ async def lifespan(app: FastAPI):
             await cancel_all_async_subagents(reason="shutdown")
         except Exception:
             pass
+
+        # Command sessions own process groups, log writers, and live-event
+        # producers. Quiesce them before closing event durability.
+        try:
+            from cptr.utils.tools import shutdown_command_sessions
+
+            await shutdown_command_sessions()
+        except Exception:
+            pass
+
         # Clean up browser sessions and launched Chrome used by agent tools.
         try:
             from cptr.utils.browser.session import session_manager
@@ -139,8 +170,48 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
 
+        # FDX daemons are workspace-bound native processes owned by this CPTR
+        # execution process. Shut them down before event/logging infrastructure.
+        try:
+            from cptr.services.fdx_intelligence import service as fdx_intelligence_service
+
+            await fdx_intelligence_service.close_all()
+        except Exception:
+            pass
+
+        try:
+            from cptr.services.live_events import live_event_hub
+
+            await live_event_hub.close()
+        except Exception:
+            pass
+        try:
+            from cptr.utils.logger import complete_logging
+
+            await complete_logging()
+        except Exception:
+            pass
+
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.middleware("http")
+async def performance_metrics_middleware(request: Request, call_next):
+    """Record bounded request latency samples without affecting responses."""
+    from cptr.services.runtime_metrics import runtime_metrics
+
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+        return response
+    finally:
+        runtime_metrics.observe_request(
+            (time.perf_counter() - started) * 1000.0,
+            status_code=status_code,
+        )
 
 
 # Auth middleware
@@ -150,7 +221,7 @@ async def auth_middleware(request: Request, call_next):
     # Skip auth for: auth endpoints, health, static assets, HTML pages
     if (
         path.startswith("/api/auth")
-        or path == "/api/health"
+        or path.startswith("/api/health")
         or path == "/api/config"
         or path == "/api/changelog"
         or path == "/manifest.json"
@@ -319,12 +390,43 @@ app.include_router(workspace_router)
 app.include_router(workbench_router)
 
 
-# Health
+# Health / operational metrics
 @app.get("/api/health")
+@app.get("/api/health/live")
 async def health():
     import os
 
     return {"status": "ok", "uptime_seconds": int(time.time() - START_TIME), "pid": os.getpid()}
+
+
+@app.get("/api/health/ready")
+async def health_ready():
+    from cptr.utils.db import database_ready
+
+    ready = await database_ready()
+    payload = {"status": "ready" if ready else "not_ready"}
+    return payload if ready else JSONResponse(payload, status_code=503)
+
+
+@app.get("/api/metrics")
+async def metrics(request: Request):
+    """Admin-only bounded operational snapshot for performance/stability diagnosis."""
+    from cptr.routers.admin import require_admin
+    from cptr.services.api_keys import api_key_cache_stats
+    from cptr.services.live_events import live_event_hub
+    from cptr.services.runtime_metrics import runtime_metrics
+    from cptr.utils.db import database_file_stats
+    from cptr.utils.tools import command_session_metrics
+
+    require_admin(request)
+    snapshot = runtime_metrics.snapshot()
+    snapshot["database"].update(database_file_stats())
+    return {
+        **snapshot,
+        "commands": command_session_metrics(),
+        "live_events": live_event_hub.stats(),
+        "api_key_cache": api_key_cache_stats(),
+    }
 
 
 @app.get("/api/changelog")

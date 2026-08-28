@@ -29,9 +29,14 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from cptr.models import Auth, Chat, ChatMessage, Config
+from cptr.models import Chat, ChatMessage, Config
 from cptr.models.workspaces import Workspace
 from cptr.services.agent_service import AgentService
+from cptr.services.api_keys import (
+    list_api_keys as load_api_keys,
+    resolve_api_key_principal,
+    save_api_keys,
+)
 from cptr.utils.agents.prompts import message_text
 from cptr.utils.config import AuthResult, now_ms
 from cptr.utils.runtime import FileError, Runtime
@@ -51,13 +56,12 @@ OWUI_TASK_HEADER = "X-OpenWebUI-Task"
 
 
 async def _get_api_keys() -> list[dict]:
-    """Load API keys from Config store."""
-    keys = await Config.get("api_keys")
-    return keys if isinstance(keys, list) else []
+    """Load API keys from the indexed control-key store."""
+    return await load_api_keys()
 
 
 async def _save_api_keys(keys: list[dict]) -> None:
-    await Config.upsert({"api_keys": keys})
+    await save_api_keys(keys)
 
 
 def _hash_key(raw: str) -> str:
@@ -85,21 +89,14 @@ async def _authenticate(request: Request) -> str:
     if not token:
         raise HTTPException(401, "Empty bearer token")
 
-    token_hash = _hash_key(token)
-    keys = await _get_api_keys()
-    for key in keys:
-        if key.get("key_hash") == token_hash:
-            user_id = key.get("user_id")
-            if not user_id:
-                raise HTTPException(500, "API key has no user_id")
-            auth_row = await Auth.get_by_user_id(user_id)
-            request.state.auth = AuthResult(
-                user_id=user_id,
-                username=auth_row.username if auth_row else None,
-            )
-            return user_id
-
-    raise HTTPException(401, "Invalid API key")
+    principal = await resolve_api_key_principal(_hash_key(token))
+    if principal is None:
+        raise HTTPException(401, "Invalid API key")
+    request.state.auth = AuthResult(
+        user_id=principal.user_id,
+        username=principal.username,
+    )
+    return principal.user_id
 
 
 # ── GET /v1/models ───────────────────────────────────────────
@@ -507,6 +504,7 @@ _UTILITY_PATTERNS = [
     "Generate 1-3 broad tags",  # tags generation
     "tags_generation",
 ]
+
 
 async def _intercept_task(
     request: Request,

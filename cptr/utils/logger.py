@@ -50,9 +50,7 @@ class InterceptHandler(logging.Handler):
             frame = frame.f_back
             depth += 1
 
-        loguru_logger.opt(depth=depth, exception=record.exc_info).log(
-            level, record.getMessage()
-        )
+        loguru_logger.opt(depth=depth, exception=record.exc_info).log(level, record.getMessage())
 
 
 def _json_stdout_sink(message) -> None:
@@ -83,9 +81,7 @@ def _json_stdout_sink(message) -> None:
 def _text_stdout_format(record) -> str:
     extra = ""
     visible_extra = {
-        k: v
-        for k, v in record["extra"].items()
-        if k not in {"auditable", "upstream_diagnostic"}
+        k: v for k, v in record["extra"].items() if k not in {"auditable", "upstream_diagnostic"}
     }
     if visible_extra:
         extra = " - {extra[extra_json]}"
@@ -148,13 +144,14 @@ def setup_logging() -> None:
         )
 
     if LOG_FORMAT == "json":
-        loguru_logger.add(_json_stdout_sink, level=LOG_LEVEL, filter=normal_filter)
+        loguru_logger.add(_json_stdout_sink, level=LOG_LEVEL, filter=normal_filter, enqueue=True)
     else:
         loguru_logger.add(
             sys.stdout,
             level=LOG_LEVEL,
             format=_text_stdout_format,
             filter=normal_filter,
+            enqueue=True,
         )
 
     if AUDIT_LOG_LEVEL in _AUDIT_LEVELS:
@@ -165,6 +162,7 @@ def setup_logging() -> None:
             rotation=AUDIT_LOG_ROTATION,
             format=_audit_format,
             filter=lambda record: record["extra"].get("auditable") is True,
+            enqueue=True,
         )
 
     if LOG_UPSTREAM_REQUESTS:
@@ -175,6 +173,7 @@ def setup_logging() -> None:
             rotation=UPSTREAM_REQUEST_LOG_ROTATION,
             format=_upstream_format,
             filter=lambda record: record["extra"].get("upstream_diagnostic") is True,
+            enqueue=True,
         )
 
     logging.basicConfig(handlers=[InterceptHandler()], level=LOG_LEVEL, force=True)
@@ -184,6 +183,11 @@ def setup_logging() -> None:
         uvicorn_logger.setLevel(LOG_LEVEL)
 
     loguru_logger.info("logging configured")
+
+
+async def complete_logging() -> None:
+    """Flush queued Loguru sinks during application shutdown."""
+    await loguru_logger.complete()
 
 
 def audit_logger():

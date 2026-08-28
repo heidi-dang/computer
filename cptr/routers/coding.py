@@ -25,9 +25,16 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from cptr.env import DIRECT_CODING_IO_CONCURRENCY
 from cptr.models import Workspace
-from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.control_auth import authenticate_control_request
+from cptr.services.direct_coding_workers import (
+    DirectCodingWorkerError,
+    resolve_direct_worker_root,
+    service as direct_worker_service,
+)
+from cptr.services.fdx_intelligence import service as fdx_intelligence_service
+from cptr.services.workspace_availability import is_workspace_available
 from cptr.utils.db import get_db
 from cptr.utils.identity import IdentityUnavailable, env_for, expand_user_path, identity_for_context
 from cptr.utils.runtime import FileError, Runtime
@@ -79,7 +86,11 @@ _SSH_TRANSPORT_COMMAND = re.compile(
 )
 
 
-class ListRequest(BaseModel):
+class WorkerTargetRequest(BaseModel):
+    worker_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ListRequest(WorkerTargetRequest):
     path: str = Field(default=".", min_length=1, max_length=1_000)
     recursive: bool = False
     max_entries: int = Field(default=500, ge=1, le=5000)
@@ -87,13 +98,13 @@ class ListRequest(BaseModel):
     include_unavailable: bool = False
 
 
-class ReadRequest(BaseModel):
+class ReadRequest(WorkerTargetRequest):
     path: str = Field(min_length=1, max_length=1_000)
     start_line: int = Field(default=0, ge=0, le=1_000_000)
     end_line: int = Field(default=0, ge=0, le=1_000_000)
 
 
-class SearchRequest(BaseModel):
+class SearchRequest(WorkerTargetRequest):
     query: str = Field(min_length=1, max_length=10_000)
     path: str = Field(default=".", min_length=1, max_length=1_000)
     regex: bool = False
@@ -104,14 +115,14 @@ class SearchRequest(BaseModel):
     context_lines: int = Field(default=0, ge=0, le=10)
 
 
-class WriteRequest(BaseModel):
+class WriteRequest(WorkerTargetRequest):
     path: str = Field(min_length=1, max_length=1_000)
     content: str = Field(max_length=MAX_WRITE_BYTES)
     expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     overwrite: bool = False
 
 
-class EditRequest(BaseModel):
+class EditRequest(WorkerTargetRequest):
     path: str = Field(min_length=1, max_length=1_000)
     target: str = Field(min_length=1, max_length=MAX_WRITE_BYTES)
     replacement: str = Field(max_length=MAX_WRITE_BYTES)
@@ -121,7 +132,7 @@ class EditRequest(BaseModel):
     replace_all: bool = False
 
 
-class CommandRequest(BaseModel):
+class CommandRequest(WorkerTargetRequest):
     command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=30, ge=0, le=60)
@@ -129,7 +140,7 @@ class CommandRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
 
 
-class WorkspaceInspectRequest(BaseModel):
+class WorkspaceInspectRequest(WorkerTargetRequest):
     kind: Literal[
         "project",
         "tree",
@@ -147,7 +158,64 @@ class WorkspaceInspectRequest(BaseModel):
     depth: int = Field(default=2, ge=1, le=4)
 
 
-class TestTargetRequest(BaseModel):
+class FdxIntelligenceRequest(WorkerTargetRequest):
+    action: Literal[
+        "status",
+        "capabilities",
+        "read",
+        "search",
+        "grep",
+        "batch",
+        "outline",
+        "tree",
+        "ls",
+        "impact",
+        "impact_v2",
+        "why",
+        "evidence_graph",
+        "semantic_status",
+        "semantic_references",
+        "build_status",
+        "build_graph",
+        "diff",
+        "index_status",
+        "plan",
+    ]
+    repo_path: str = Field(default=".", min_length=1, max_length=1_000)
+    path: str | None = Field(default=None, min_length=1, max_length=1_000)
+    paths: list[str] = Field(default_factory=list, max_length=20)
+    query: str | None = Field(default=None, max_length=10_000)
+    pattern: str | None = Field(default=None, max_length=10_000)
+    symbol: str | None = Field(default=None, max_length=2_000)
+    target: str | None = Field(default=None, max_length=2_000)
+    mode: Literal["auto", "raw", "prototype", "deep"] = "auto"
+    kind: str | None = Field(default=None, max_length=120)
+    direction: Literal["in", "out", "both"] = "both"
+    depth: int = Field(default=3, ge=1, le=20)
+    base: str | None = Field(default=None, max_length=300)
+    head: str | None = Field(default=None, max_length=300)
+    limit: int | None = Field(default=None, ge=1, le=20_000)
+    offset: int | None = Field(default=None, ge=1, le=10_000_000)
+    max_matches: int = Field(default=50, ge=1, le=1_000)
+    max_files: int = Field(default=20, ge=1, le=100)
+    limit_per_file: int | None = Field(default=None, ge=1, le=20_000)
+    min_lines: int = Field(default=1, ge=1, le=100_000)
+    context: int = Field(default=2, ge=0, le=20)
+    with_deps: bool = True
+    fixed_strings: bool = False
+    case_sensitive: bool = False
+    no_cache: bool = False
+    dirs_only: bool = False
+    all: bool = False
+    staged: bool = False
+    policy_overlay: bool = False
+    lang: Literal["rust", "typescript", "javascript"] = "rust"
+    intent: Literal["localize", "reference_complete", "rename", "impact_seed", "context"] = (
+        "reference_complete"
+    )
+
+
+class TestTargetRequest(WorkerTargetRequest):
     target: Literal["python_pytest", "node_test", "node_vitest", "node_build"]
     path: str = Field(default=".", min_length=1, max_length=1_000)
     test_path: str | None = Field(default=None, min_length=1, max_length=1_000)
@@ -186,36 +254,54 @@ class BrowserControlRequest(BaseModel):
     allow_network: bool = False
 
 
-class CreateDirectoryRequest(BaseModel):
+class CreateDirectoryRequest(WorkerTargetRequest):
     path: str = Field(min_length=1, max_length=1_000)
 
 
-class MoveRequest(BaseModel):
+class MoveRequest(WorkerTargetRequest):
     source: str = Field(min_length=1, max_length=1_000)
     destination: str = Field(min_length=1, max_length=1_000)
     overwrite: bool = False
 
 
-class DeleteRequest(BaseModel):
+class DeleteRequest(WorkerTargetRequest):
     path: str = Field(min_length=1, max_length=1_000)
+
 
 class BatchFileRequest(BaseModel):
     path: str = Field(min_length=1, max_length=1_000)
     start_line: int = Field(default=0, ge=0)
     end_line: int = Field(default=0, ge=0)
 
-class ReadManyRequest(BaseModel):
+
+class ReadManyRequest(WorkerTargetRequest):
     files: list[BatchFileRequest] = Field(min_length=1, max_length=10)
     max_chars: int = Field(default=20_000, ge=1, le=200_000)
+
 
 class ApplyEdit(BaseModel):
     target: str = Field(min_length=1, max_length=MAX_WRITE_BYTES)
     replacement: str = Field(max_length=MAX_WRITE_BYTES)
 
-class ApplyEditsRequest(BaseModel):
+
+class ApplyEditsRequest(WorkerTargetRequest):
     path: str = Field(min_length=1, max_length=1_000)
     edits: list[ApplyEdit] = Field(min_length=1, max_length=20)
     expected_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+class DirectWorkerCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    responsibility: str = Field(default="", max_length=500)
+    repo_path: str = Field(default=".", min_length=1, max_length=1_000)
+
+
+class DirectWorkersIntegrateRequest(BaseModel):
+    worker_ids: list[str] = Field(min_length=1, max_length=16)
+
+
+class DirectWorkerCloseRequest(BaseModel):
+    discard_changes: bool = False
 
 
 def _raise_auth(exc: PermissionError) -> None:
@@ -242,6 +328,49 @@ async def _workspace(user_id: str, workspace_id: str) -> Workspace:
     return workspace
 
 
+def _raise_worker_error(exc: DirectCodingWorkerError) -> None:
+    raise HTTPException(
+        status_code=exc.status_code,
+        detail={"code": exc.code, "message": str(exc), "retriable": exc.status_code >= 409},
+    ) from exc
+
+
+async def _coding_root(
+    user_id: str, workspace_id: str, workspace: Workspace, worker_id: str | None
+) -> Path:
+    if not worker_id:
+        return Path(workspace.path).resolve()
+    try:
+        return await resolve_direct_worker_root(
+            user_id=user_id, workspace_id=workspace_id, worker_id=worker_id
+        )
+    except DirectCodingWorkerError as exc:
+        _raise_worker_error(exc)
+        raise AssertionError("unreachable")
+
+
+async def _touch_worker(user_id: str, workspace_id: str, worker_id: str | None) -> None:
+    if not worker_id:
+        return
+    await direct_worker_service.mark_activity(
+        user_id=user_id, workspace_id=workspace_id, worker_id=worker_id, status_value="WORKING"
+    )
+
+
+def _command_context(
+    *, request: Request, user_id: str, workspace_id: str, workspace_path: str, worker_id: str | None
+) -> dict[str, Any]:
+    context: dict[str, Any] = {
+        "workspace": workspace_path,
+        "workspace_id": workspace_id,
+        "request": request,
+        "user_id": user_id,
+    }
+    if worker_id:
+        context["direct_worker_id"] = worker_id
+    return context
+
+
 def _relative_path(path: str, root: Path) -> tuple[Path, str]:
     value = path.strip()
     if not value:
@@ -254,7 +383,9 @@ def _relative_path(path: str, root: Path) -> tuple[Path, str]:
         raise HTTPException(status_code=422, detail="path traversal rejected")
     relative = resolved.relative_to(root).as_posix()
     if any(part.startswith(".env") for part in resolved.relative_to(root).parts):
-        raise HTTPException(status_code=403, detail="environment files are not available through direct coding")
+        raise HTTPException(
+            status_code=403, detail="environment files are not available through direct coding"
+        )
     return resolved, relative
 
 
@@ -264,19 +395,39 @@ def _truncate(text: str, max_chars: int = MAX_COMMAND_OUTPUT_CHARS) -> str:
     half = max_chars // 2
     return f"{text[:half]}\n\n... [output truncated] ...\n\n{text[-half:]}"
 
+
 def _sha256(value: str | bytes) -> str:
     return hashlib.sha256(value if isinstance(value, bytes) else value.encode("utf-8")).hexdigest()
 
+
 def _precondition(actual: str, expected: str | None) -> None:
     if expected and actual != expected:
-        raise HTTPException(status_code=409, detail={"code": "STALE_HASH", "message": "file changed since it was read; reread it and retry", "retriable": True, "field": "expected_sha256"})
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "STALE_HASH",
+                "message": "file changed since it was read; reread it and retry",
+                "retriable": True,
+                "field": "expected_sha256",
+            },
+        )
+
 
 def _cursor(value: str | None) -> int:
     if value is None:
         return 0
     if not value.isdigit():
-        raise HTTPException(status_code=400, detail={"code":"INVALID_CURSOR", "message":"cursor must be a non-negative integer", "retriable":False, "field":"cursor"})
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "INVALID_CURSOR",
+                "message": "cursor must be a non-negative integer",
+                "retriable": False,
+                "field": "cursor",
+            },
+        )
     return int(value)
+
 
 def _command_idempotency_get(user_id: str, workspace_id: str, key: str) -> str | None:
     now = time.monotonic()
@@ -298,7 +449,9 @@ def _command_idempotency_put(user_id: str, workspace_id: str, key: str, command_
 
 
 def _bounded_diff(old: str, new: str, path: str) -> tuple[str, bool]:
-    raw = "".join(difflib.unified_diff(old.splitlines(True), new.splitlines(True), fromfile=path, tofile=path))
+    raw = "".join(
+        difflib.unified_diff(old.splitlines(True), new.splitlines(True), fromfile=path, tofile=path)
+    )
     return _truncate(raw, 20_000), len(raw) > 20_000
 
 
@@ -325,7 +478,9 @@ def _validate_command(command: str, allow_network: bool) -> None:
 def _require_external_scope(request: Request) -> None:
     scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
     if "command:external" not in scopes:
-        raise HTTPException(status_code=403, detail="SSH commands require the command:external scope")
+        raise HTTPException(
+            status_code=403, detail="SSH commands require the command:external scope"
+        )
 
 
 def _browser_session_key(user_id: str, workspace_id: str) -> str:
@@ -354,9 +509,13 @@ def _validate_browser_url(request: Request, url: str, *, allow_network: bool) ->
     value = url.strip()
     parsed = urlsplit(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
-        raise HTTPException(status_code=422, detail="browser URL must be an absolute http or https URL")
+        raise HTTPException(
+            status_code=422, detail="browser URL must be an absolute http or https URL"
+        )
     if parsed.username is not None or parsed.password is not None:
-        raise HTTPException(status_code=422, detail="browser URL must not contain embedded credentials")
+        raise HTTPException(
+            status_code=422, detail="browser URL must not contain embedded credentials"
+        )
     if not _is_loopback_browser_host(parsed.hostname):
         if not allow_network:
             raise HTTPException(
@@ -405,13 +564,17 @@ def _parse_ssh_aliases(content: str) -> list[str]:
     return sorted(aliases, key=str.casefold)
 
 
-async def _ssh_runtime(request: Request, *, user_id: str, workspace_path: str) -> tuple[str, list[str]]:
+async def _ssh_runtime(
+    request: Request, *, user_id: str, workspace_path: str
+) -> tuple[str, list[str]]:
     try:
         identity = await identity_for_context(
             {"request": request, "user_id": user_id, "workspace": workspace_path}
         )
     except IdentityUnavailable as exc:
-        raise HTTPException(status_code=503, detail="SSH execution identity is unavailable") from exc
+        raise HTTPException(
+            status_code=503, detail="SSH execution identity is unavailable"
+        ) from exc
 
     environment = env_for(identity, Path(workspace_path))
     ssh_executable = shutil.which("ssh", path=environment.get("PATH"))
@@ -424,7 +587,9 @@ async def _ssh_runtime(request: Request, *, user_id: str, workspace_path: str) -
     except FileError as exc:
         if exc.status_code == 404:
             return ssh_executable, []
-        raise HTTPException(status_code=exc.status_code, detail="SSH config is not available") from exc
+        raise HTTPException(
+            status_code=exc.status_code, detail="SSH config is not available"
+        ) from exc
     if data.get("binary"):
         raise HTTPException(status_code=415, detail="SSH config is not a text file")
     return ssh_executable, _parse_ssh_aliases(str(data.get("content") or ""))
@@ -605,22 +770,21 @@ async def _workspace_insight(
     if body.kind == "tree":
         return {
             "path": relative,
-            "entries": await _bounded_tree(
-                request, root=root, start=start, max_depth=body.depth
-            ),
+            "entries": await _bounded_tree(request, root=root, start=start, max_depth=body.depth),
         }
     if body.kind == "metadata":
         stat = await Runtime.stat(request, str(start))
         return {
             "path": relative,
             "metadata": {
-                key: stat.get(key)
-                for key in ("name", "type", "size", "modified", "media_type")
+                key: stat.get(key) for key in ("name", "type", "size", "modified", "media_type")
             },
         }
     if body.kind == "read_many":
         if not body.paths:
-            raise HTTPException(status_code=422, detail="paths is required for read_many inspection")
+            raise HTTPException(
+                status_code=422, detail="paths is required for read_many inspection"
+            )
         files: list[dict[str, Any]] = []
         for supplied in body.paths:
             full, item_relative = _relative_path(supplied, root)
@@ -719,11 +883,7 @@ async def _workspace_insight(
             item = await _try_read_text(request, root / name, name)
             if item:
                 packages = [
-                    line.split("[", 1)[0]
-                    .split("=", 1)[0]
-                    .split("<", 1)[0]
-                    .split(">", 1)[0]
-                    .strip()
+                    line.split("[", 1)[0].split("=", 1)[0].split("<", 1)[0].split(">", 1)[0].strip()
                     for line in str(item["content"]).splitlines()
                     if line.strip() and not line.lstrip().startswith(("#", "["))
                 ]
@@ -761,9 +921,7 @@ async def _workspace_insight(
                 "parse_error": "invalid JSON",
             }
     if body.kind == "release":
-        entries = await _bounded_tree(
-            request, root=root, start=root, max_depth=3, max_entries=300
-        )
+        entries = await _bounded_tree(request, root=root, start=root, max_depth=3, max_entries=300)
         test_count = sum(
             1
             for entry in entries
@@ -790,30 +948,153 @@ async def _workspace_insight(
     raise HTTPException(status_code=422, detail="unsupported workspace inspection kind")
 
 
-@router.post("/workspaces/{workspace_id}/coding/inspect")
-async def inspect_workspace(
-    request: Request, workspace_id: str, body: WorkspaceInspectRequest
+@router.post("/workspaces/{workspace_id}/coding/workers")
+async def create_direct_worker(
+    request: Request, workspace_id: str, body: DirectWorkerCreateRequest
 ):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    try:
+        return await direct_worker_service.create(
+            user_id=user_id,
+            workspace=workspace,
+            name=body.name,
+            responsibility=body.responsibility,
+            repo_path=body.repo_path,
+        )
+    except DirectCodingWorkerError as exc:
+        _raise_worker_error(exc)
+
+
+@router.get("/workspaces/{workspace_id}/coding/workers")
+async def list_direct_workers(request: Request, workspace_id: str):
+    user_id = await _user(request, "coding:read")
+    await _workspace(user_id, workspace_id)
+    return {
+        "workspace_id": workspace_id,
+        "workers": await direct_worker_service.list(user_id=user_id, workspace_id=workspace_id),
+    }
+
+
+@router.get("/workspaces/{workspace_id}/coding/workers/{worker_id}")
+async def get_direct_worker(request: Request, workspace_id: str, worker_id: str):
+    user_id = await _user(request, "coding:read")
+    await _workspace(user_id, workspace_id)
+    try:
+        return await direct_worker_service.get(
+            user_id=user_id, workspace_id=workspace_id, worker_id=worker_id
+        )
+    except DirectCodingWorkerError as exc:
+        _raise_worker_error(exc)
+
+
+@router.get("/workspaces/{workspace_id}/coding/workers-overview")
+async def direct_workers_overview(request: Request, workspace_id: str):
+    user_id = await _user(request, "coding:read")
+    await _workspace(user_id, workspace_id)
+    workers = await direct_worker_service.list(user_id=user_id, workspace_id=workspace_id)
+    return {
+        "workspace_id": workspace_id,
+        "workers": workers,
+        "total": len(workers),
+        "active": sum(1 for worker in workers if worker["status"] in {"RUNNING", "WORKING"}),
+        "ready": sum(1 for worker in workers if worker["status"] == "READY"),
+        "integrated": sum(1 for worker in workers if worker["status"] == "INTEGRATED"),
+    }
+
+
+@router.post("/workspaces/{workspace_id}/coding/workers-integrate")
+async def integrate_direct_workers(
+    request: Request, workspace_id: str, body: DirectWorkersIntegrateRequest
+):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    try:
+        return await direct_worker_service.integrate(
+            user_id=user_id, workspace=workspace, worker_ids=body.worker_ids
+        )
+    except DirectCodingWorkerError as exc:
+        _raise_worker_error(exc)
+
+
+@router.post("/workspaces/{workspace_id}/coding/workers/{worker_id}/close")
+async def close_direct_worker(
+    request: Request,
+    workspace_id: str,
+    worker_id: str,
+    body: DirectWorkerCloseRequest,
+):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    try:
+        return await direct_worker_service.close(
+            user_id=user_id,
+            workspace=workspace,
+            worker_id=worker_id,
+            discard_changes=body.discard_changes,
+        )
+    except DirectCodingWorkerError as exc:
+        _raise_worker_error(exc)
+
+
+@router.post("/workspaces/{workspace_id}/coding/inspect")
+async def inspect_workspace(request: Request, workspace_id: str, body: WorkspaceInspectRequest):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     try:
-        result = await _workspace_insight(
-            request, root=root, body=body, user_id=user_id
-        )
+        result = await _workspace_insight(request, root=root, body=body, user_id=user_id)
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     return {"workspace_id": workspace_id, "kind": body.kind, **result}
 
 
+@router.post("/workspaces/{workspace_id}/coding/fdx")
+async def run_fdx_intelligence(request: Request, workspace_id: str, body: FdxIntelligenceRequest):
+    """Run one structured, read-only FDX repository-intelligence operation."""
+    user_id = await _user(request, "coding:read")
+    workspace = await _workspace(user_id, workspace_id)
+    coding_root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    repo_root, repo_relative = _relative_path(body.repo_path, coding_root)
+    if not repo_root.is_dir():
+        raise HTTPException(status_code=422, detail="repo_path must resolve to a directory")
+
+    options = body.model_dump(exclude={"action", "worker_id", "repo_path"}, exclude_none=True)
+    if body.path:
+        _, options["path"] = _relative_path(body.path, repo_root)
+    if body.paths:
+        options["paths"] = [_relative_path(path, repo_root)[1] for path in body.paths]
+    if body.target and ("/" in body.target or "\\" in body.target or body.target.startswith(".")):
+        _, options["target"] = _relative_path(body.target, repo_root)
+
+    try:
+        identity = await identity_for_context(
+            {"request": request, "user_id": user_id, "workspace": str(repo_root)}
+        )
+    except IdentityUnavailable as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    result = await fdx_intelligence_service.execute(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        root=repo_root,
+        identity=identity,
+        action=body.action,
+        options=options,
+    )
+    result["repo_path"] = repo_relative
+    if body.worker_id:
+        result["worker_id"] = body.worker_id
+        await _touch_worker(user_id, workspace_id, body.worker_id)
+    return result
+
+
 @router.post("/workspaces/{workspace_id}/coding/test-targets")
-async def run_workspace_test_target(
-    request: Request, workspace_id: str, body: TestTargetRequest
-):
+async def run_workspace_test_target(request: Request, workspace_id: str, body: TestTargetRequest):
     """Run one fixed local validation profile; callers cannot provide arbitrary commands."""
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     _, relative_cwd = _relative_path(body.path, root)
     test_arg = ""
     if body.test_path:
@@ -831,19 +1112,21 @@ async def run_workspace_test_target(
         command,
         relative_cwd,
         body.wait_seconds,
-        __context__={
-            "workspace": workspace.path,
-            "workspace_id": workspace_id,
-            "request": request,
-            "user_id": user_id,
-        },
+        __context__=_command_context(
+            request=request,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            workspace_path=str(root),
+            worker_id=body.worker_id,
+        ),
     )
     match = re.match(r"^Task ([0-9a-f]{8}):", response)
     if match is None:
         raise HTTPException(status_code=422, detail=response)
+    await _touch_worker(user_id, workspace_id, body.worker_id)
     snapshot = await _command_snapshot(
         request,
-        workspace_path=workspace.path,
+        workspace_path=str(root),
         command_id=match.group(1),
         wait_seconds=0,
     )
@@ -856,44 +1139,54 @@ async def run_workspace_test_target(
 async def list_workspace_files(request: Request, workspace_id: str, body: ListRequest):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
+    start = _cursor(body.cursor)
     try:
-        result = await Runtime.list_tree(request, str(full), body.recursive)
+        result = await Runtime.list_tree_entries(
+            request,
+            str(full),
+            body.recursive,
+            start,
+            body.max_entries,
+        )
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    raw = str(result.get("text") or "")
+
     entries = []
-    for display_line in sorted((x.strip() for x in raw.splitlines()), key=str.casefold):
-        if not display_line or display_line == "(empty directory)":
-            continue
-        # Runtime.list_tree returns human-readable lines such as
-        # `src/example.py  (10 B)` or `src/  (3 files)`. Strip only the
-        # trailing display metadata before resolving the actual path.
-        tree_path = re.sub(r"\s+\([^\n]*\)$", "", display_line).rstrip("/")
+    for entry in result.get("entries") or []:
+        tree_path = str(entry.get("path") or "")
         if not tree_path:
             continue
-        item = full / tree_path
-        try:
-            st = item.stat()
-        except OSError:
-            continue
-        output_path = tree_path if relative in {"", "."} else (Path(relative) / tree_path).as_posix()
-        entries.append({
-            "path": output_path,
-            "type": "directory" if item.is_dir() else "file",
-            "size": st.st_size if item.is_file() else 0,
-        })
-    start = _cursor(body.cursor)
-    page = entries[start:start + body.max_entries]
-    return {"workspace_id": workspace_id, "path": relative, "entries": page, "total": len(entries), "truncated": start + len(page) < len(entries), "max_entries": body.max_entries, "cursor": str(start + len(page)) if start + len(page) < len(entries) else None}
+        output_path = (
+            tree_path if relative in {"", "."} else (Path(relative) / tree_path).as_posix()
+        )
+        entries.append(
+            {
+                "path": output_path,
+                "type": str(entry.get("type") or "file"),
+                "size": int(entry.get("size") or 0),
+                "modified": entry.get("modified"),
+            }
+        )
+    next_offset = result.get("next_offset")
+    return {
+        "workspace_id": workspace_id,
+        "path": relative,
+        "entries": entries,
+        "total": int(result.get("total") or len(entries)),
+        "total_exact": bool(result.get("total_exact", True)),
+        "truncated": bool(result.get("truncated")),
+        "max_entries": body.max_entries,
+        "cursor": str(next_offset) if next_offset is not None else None,
+    }
 
 
 @router.post("/workspaces/{workspace_id}/coding/read")
 async def read_workspace_file(request: Request, workspace_id: str, body: ReadRequest):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
     try:
         stat = await Runtime.stat(request, str(full))
@@ -901,12 +1194,16 @@ async def read_workspace_file(request: Request, workspace_id: str, body: ReadReq
             raise HTTPException(status_code=404, detail="file not found")
         size = int(stat.get("size") or 0)
         if size > MAX_READ_BYTES:
-            raise HTTPException(status_code=413, detail=f"file is too large (max {MAX_READ_BYTES} bytes)")
+            raise HTTPException(
+                status_code=413, detail=f"file is too large (max {MAX_READ_BYTES} bytes)"
+            )
         data = await Runtime.read_file(request, str(full))
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if data.get("binary"):
-        raise HTTPException(status_code=415, detail="binary files are not available through direct coding")
+        raise HTTPException(
+            status_code=415, detail="binary files are not available through direct coding"
+        )
     content, start_line, end_line, total_lines = _line_slice(
         str(data.get("content") or ""), body.start_line, body.end_line
     )
@@ -926,7 +1223,7 @@ async def read_workspace_file(request: Request, workspace_id: str, body: ReadReq
 async def search_workspace_files(request: Request, workspace_id: str, body: SearchRequest):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     _, relative = _relative_path(body.path, root)
     result = await search_files(
         body.query,
@@ -935,10 +1232,10 @@ async def search_workspace_files(request: Request, workspace_id: str, body: Sear
         body.case_insensitive,
         body.include,
         body.filenames_only,
-        __context__={"workspace": workspace.path, "request": request, "user_id": user_id},
+        __context__={"workspace": str(root), "request": request, "user_id": user_id},
     )
     raw_matches = result if isinstance(result, list) else str(result or "").splitlines()
-    matches = []
+    parsed_matches: list[dict[str, Any]] = []
     for item in raw_matches:
         if isinstance(item, dict):
             path = str(item.get("path") or "")
@@ -953,30 +1250,45 @@ async def search_workspace_files(request: Request, workspace_id: str, body: Sear
                 path, line, text = raw, 0, ""
             else:
                 continue
-        match = {"path": path, "line": line, "text": text}
-        if body.context_lines > 0 and line > 0:
+        parsed_matches.append({"path": path, "line": line, "text": text})
+
+    matches = parsed_matches[: body.max_results]
+    if body.context_lines > 0:
+        semaphore = asyncio.Semaphore(DIRECT_CODING_IO_CONCURRENCY)
+        paths = list(dict.fromkeys(match["path"] for match in matches if match["line"] > 0))
+
+        async def read_source(path: str) -> tuple[str, list[str] | None]:
             candidates = []
             if relative not in {"", "."}:
                 candidates.append(root / relative / path)
             candidates.append(root / path)
-            source = next((candidate for candidate in candidates if candidate.is_file()), None)
-            if source is not None:
-                try:
-                    context_data = await Runtime.read_file(request, str(source))
+            async with semaphore:
+                for source in candidates:
+                    try:
+                        context_data = await Runtime.read_file(request, str(source))
+                    except FileError:
+                        continue
                     if not context_data.get("binary"):
-                        source_lines = str(context_data.get("content") or "").splitlines()
-                        start = max(0, line - body.context_lines - 1)
-                        end = min(len(source_lines), line + body.context_lines)
-                        match["context"] = source_lines[start:end]
-                except FileError:
-                    pass
-        matches.append(match)
+                        return path, str(context_data.get("content") or "").splitlines()
+            return path, None
+
+        source_results = await asyncio.gather(*(read_source(path) for path in paths))
+        source_lines_by_path = {path: lines for path, lines in source_results if lines is not None}
+        for match in matches:
+            line = int(match["line"])
+            source_lines = source_lines_by_path.get(str(match["path"]))
+            if line <= 0 or source_lines is None:
+                continue
+            start = max(0, line - body.context_lines - 1)
+            end = min(len(source_lines), line + body.context_lines)
+            match["context"] = source_lines[start:end]
+
     return {
         "workspace_id": workspace_id,
         "path": relative,
-        "matches": matches[:body.max_results],
+        "matches": matches,
         "max_results": body.max_results,
-        "truncated": len(matches) > body.max_results,
+        "truncated": len(parsed_matches) > body.max_results,
     }
 
 
@@ -984,7 +1296,7 @@ async def search_workspace_files(request: Request, workspace_id: str, body: Sear
 async def write_workspace_file(request: Request, workspace_id: str, body: WriteRequest):
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
     try:
         try:
@@ -997,29 +1309,46 @@ async def write_workspace_file(request: Request, workspace_id: str, body: WriteR
             if exc.status_code != 404:
                 raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
             if body.expected_sha256:
-                raise HTTPException(status_code=409, detail={"code":"STALE_HASH", "message":"expected_sha256 cannot be used for a missing file", "retriable":False, "field":"expected_sha256"})
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "STALE_HASH",
+                        "message": "expected_sha256 cannot be used for a missing file",
+                        "retriable": False,
+                        "field": "expected_sha256",
+                    },
+                )
         await Runtime.write_file(request, str(full), body.content)
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return {"workspace_id": workspace_id, "path": relative, "bytes_written": len(body.content.encode("utf-8")), "sha256": _sha256(body.content)}
+    return {
+        "workspace_id": workspace_id,
+        "path": relative,
+        "bytes_written": len(body.content.encode("utf-8")),
+        "sha256": _sha256(body.content),
+    }
 
 
 @router.post("/workspaces/{workspace_id}/coding/edit")
 async def edit_workspace_file(request: Request, workspace_id: str, body: EditRequest):
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
     try:
         data = await Runtime.read_file(request, str(full))
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if data.get("binary"):
-        raise HTTPException(status_code=415, detail="binary files are not available through direct coding")
+        raise HTTPException(
+            status_code=415, detail="binary files are not available through direct coding"
+        )
     content = str(data.get("content") or "")
     _precondition(_sha256(content), body.expected_sha256)
     if len(content.encode("utf-8")) > MAX_WRITE_BYTES:
-        raise HTTPException(status_code=413, detail=f"file is too large (max {MAX_WRITE_BYTES} bytes)")
+        raise HTTPException(
+            status_code=413, detail=f"file is too large (max {MAX_WRITE_BYTES} bytes)"
+        )
 
     if body.start_line or body.end_line:
         lines = content.splitlines(keepends=True)
@@ -1028,12 +1357,34 @@ async def edit_workspace_file(request: Request, workspace_id: str, body: EditReq
         region = "".join(lines[start:end])
         count = region.count(body.target)
         if count != 1 and (not body.replace_all or count == 0):
-            raise HTTPException(status_code=409, detail={"code":"AMBIGUOUS_EDIT", "message":"target must occur exactly once in the requested line range", "match_count":count, "context_hint": region[:200]})
-        updated = "".join(lines[:start]) + region.replace(body.target, body.replacement, -1 if body.replace_all else 1) + "".join(lines[end:])
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "AMBIGUOUS_EDIT",
+                    "message": "target must occur exactly once in the requested line range",
+                    "match_count": count,
+                    "context_hint": region[:200],
+                },
+            )
+        updated = (
+            "".join(lines[:start])
+            + region.replace(body.target, body.replacement, -1 if body.replace_all else 1)
+            + "".join(lines[end:])
+        )
     else:
         count = content.count(body.target)
         if count != 1 and (not body.replace_all or count == 0):
-            raise HTTPException(status_code=409, detail={"code":"AMBIGUOUS_EDIT", "message":"target must occur exactly once in the file unless replace_all=true", "match_count":count, "context_hint": content[:200], "retriable":True, "field":"target"})
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "AMBIGUOUS_EDIT",
+                    "message": "target must occur exactly once in the file unless replace_all=true",
+                    "match_count": count,
+                    "context_hint": content[:200],
+                    "retriable": True,
+                    "field": "target",
+                },
+            )
         updated = content.replace(body.target, body.replacement, -1 if body.replace_all else 1)
     if len(updated.encode("utf-8")) > MAX_WRITE_BYTES:
         raise HTTPException(status_code=413, detail=f"edited file exceeds {MAX_WRITE_BYTES} bytes")
@@ -1046,41 +1397,61 @@ async def edit_workspace_file(request: Request, workspace_id: str, body: EditReq
         "path": relative,
         "replaced_characters": len(body.target),
         "inserted_characters": len(body.replacement),
-        "sha256": _sha256(updated), "diff": _bounded_diff(content, updated, relative)[0],
+        "sha256": _sha256(updated),
+        "diff": _bounded_diff(content, updated, relative)[0],
     }
+
 
 @router.post("/workspaces/{workspace_id}/coding/read-many")
 async def read_many_workspace_files(request: Request, workspace_id: str, body: ReadManyRequest):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
-    total = 0
-    files = []
-    any_truncated = False
-    for item in body.files:
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    semaphore = asyncio.Semaphore(DIRECT_CODING_IO_CONCURRENCY)
+
+    async def read_one(item: BatchFileRequest) -> dict[str, Any]:
         full, relative = _relative_path(item.path, root)
         try:
-            data = await Runtime.read_file(request, str(full))
+            async with semaphore:
+                data = await Runtime.read_file(request, str(full))
         except FileError as exc:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
         if data.get("binary"):
-            raise HTTPException(status_code=415, detail="binary files are not available through direct coding")
+            raise HTTPException(
+                status_code=415,
+                detail=f"binary file is not available through direct coding: {relative}",
+            )
         raw = str(data.get("content") or "")
         sliced, start, end, lines = _line_slice(raw, item.start_line, item.end_line)
+        return {
+            "path": relative,
+            "raw": raw,
+            "sliced": sliced,
+            "start_line": start,
+            "end_line": end,
+            "total_lines": lines,
+        }
+
+    loaded = await asyncio.gather(*(read_one(item) for item in body.files))
+    total = 0
+    files = []
+    any_truncated = False
+    for item in loaded:
         remaining = max(0, body.max_chars - total)
+        sliced = str(item["sliced"])
         text = sliced[:remaining]
         file_truncated = len(text) < len(sliced)
         any_truncated = any_truncated or file_truncated
         total += len(text)
         files.append(
             {
-                "path": relative,
+                "path": item["path"],
                 "content": text,
-                "content_sha256": _sha256(raw),
+                "content_sha256": _sha256(str(item["raw"])),
                 "truncated": file_truncated,
-                "start_line": start,
-                "end_line": end,
-                "total_lines": lines,
+                "start_line": item["start_line"],
+                "end_line": item["end_line"],
+                "total_lines": item["total_lines"],
             }
         )
     return {
@@ -1090,18 +1461,21 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
         "truncated": any_truncated,
     }
 
+
 @router.post("/workspaces/{workspace_id}/coding/apply-edits")
 async def apply_workspace_edits(request: Request, workspace_id: str, body: ApplyEditsRequest):
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
     try:
         data = await Runtime.read_file(request, str(full))
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     if data.get("binary"):
-        raise HTTPException(status_code=415, detail="binary files are not available through direct coding")
+        raise HTTPException(
+            status_code=415, detail="binary files are not available through direct coding"
+        )
 
     original = str(data.get("content") or "")
     _precondition(_sha256(original), body.expected_sha256)
@@ -1169,13 +1543,25 @@ async def create_workspace_directory(
 ):
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
     try:
         existing = await Runtime.stat(request, str(full))
         if existing.get("type") == "directory":
-            return {"workspace_id": workspace_id, "path": relative, "type": "directory", "created": False}
-        raise HTTPException(status_code=409, detail={"code":"PATH_CONFLICT", "message":"path exists and is not a directory", "retriable":False})
+            return {
+                "workspace_id": workspace_id,
+                "path": relative,
+                "type": "directory",
+                "created": False,
+            }
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PATH_CONFLICT",
+                "message": "path exists and is not a directory",
+                "retriable": False,
+            },
+        )
     except HTTPException:
         raise
     except FileError as exc:
@@ -1192,13 +1578,15 @@ async def create_workspace_directory(
 async def move_workspace_file(request: Request, workspace_id: str, body: MoveRequest):
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     source, source_relative = _relative_path(body.source, root)
     destination, destination_relative = _relative_path(body.destination, root)
     try:
         source_stat = await Runtime.stat(request, str(source))
         if source_stat.get("type") != "file":
-            raise HTTPException(status_code=422, detail="only files may be moved through direct coding")
+            raise HTTPException(
+                status_code=422, detail="only files may be moved through direct coding"
+            )
         destination_exists = False
         try:
             await Runtime.stat(request, str(destination))
@@ -1216,24 +1604,36 @@ async def move_workspace_file(request: Request, workspace_id: str, body: MoveReq
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     destination_data = await Runtime.read_file(request, str(destination))
-    return {"workspace_id": workspace_id, "source": source_relative, "destination": destination_relative, "sha256": _sha256(str(destination_data.get("content") or ""))}
+    return {
+        "workspace_id": workspace_id,
+        "source": source_relative,
+        "destination": destination_relative,
+        "sha256": _sha256(str(destination_data.get("content") or "")),
+    }
 
 
 @router.post("/workspaces/{workspace_id}/coding/delete")
 async def delete_workspace_file(request: Request, workspace_id: str, body: DeleteRequest):
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
     try:
         try:
             file_stat = await Runtime.stat(request, str(full))
         except FileError as exc:
             if exc.status_code == 404:
-                return {"workspace_id": workspace_id, "path": relative, "deleted": False, "existed": False}
+                return {
+                    "workspace_id": workspace_id,
+                    "path": relative,
+                    "deleted": False,
+                    "existed": False,
+                }
             raise
         if file_stat.get("type") != "file":
-            raise HTTPException(status_code=422, detail="only files may be deleted through direct coding")
+            raise HTTPException(
+                status_code=422, detail="only files may be deleted through direct coding"
+            )
         await Runtime.delete_item(request, str(full))
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
@@ -1244,17 +1644,18 @@ async def delete_workspace_file(request: Request, workspace_id: str, body: Delet
 async def start_workspace_command(request: Request, workspace_id: str, body: CommandRequest):
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
-    root = Path(workspace.path).resolve()
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     _, relative_cwd = _relative_path(body.cwd, root)
     _validate_command(body.command, body.allow_network)
+    idempotency_workspace = f"{workspace_id}:{body.worker_id or '-'}"
     if body.idempotency_key:
-        existing_id = _command_idempotency_get(user_id, workspace_id, body.idempotency_key)
+        existing_id = _command_idempotency_get(user_id, idempotency_workspace, body.idempotency_key)
         if existing_id:
             existing = get_command_session(request, existing_id)
-            if existing is not None and existing.get("workspace") == workspace.path:
+            if existing is not None and existing.get("workspace") == str(root):
                 return await _command_snapshot(
                     request,
-                    workspace_path=workspace.path,
+                    workspace_path=str(root),
                     command_id=existing_id,
                 )
     scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
@@ -1267,22 +1668,24 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         body.command,
         relative_cwd,
         body.wait_seconds,
-        __context__={
-            "workspace": workspace.path,
-            "workspace_id": workspace_id,
-            "request": request,
-            "user_id": user_id,
-        },
+        __context__=_command_context(
+            request=request,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            workspace_path=str(root),
+            worker_id=body.worker_id,
+        ),
     )
     match = re.match(r"^Task ([0-9a-f]{8}):", response)
     if match is None:
         raise HTTPException(status_code=422, detail=response)
     command_id = match.group(1)
+    await _touch_worker(user_id, workspace_id, body.worker_id)
     if body.idempotency_key:
-        _command_idempotency_put(user_id, workspace_id, body.idempotency_key, command_id)
+        _command_idempotency_put(user_id, idempotency_workspace, body.idempotency_key, command_id)
     snapshot = await _command_snapshot(
         request,
-        workspace_path=workspace.path,
+        workspace_path=str(root),
         command_id=command_id,
         wait_seconds=0,
     )
@@ -1299,14 +1702,24 @@ async def get_workspace_command(
     offset: int = 0,
     wait_seconds: int = 0,
     tail_bytes: int | None = None,
+    worker_id: str | None = None,
 ):
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
-    if offset < 0 or wait_seconds < 0 or wait_seconds > 60 or (tail_bytes is not None and (tail_bytes < 0 or tail_bytes > 10_000_000)):
-        raise HTTPException(status_code=422, detail="offset, wait_seconds, and tail_bytes must be within their allowed range")
+    root = await _coding_root(user_id, workspace_id, workspace, worker_id)
+    if (
+        offset < 0
+        or wait_seconds < 0
+        or wait_seconds > 60
+        or (tail_bytes is not None and (tail_bytes < 0 or tail_bytes > 10_000_000))
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="offset, wait_seconds, and tail_bytes must be within their allowed range",
+        )
     return await _command_snapshot(
         request,
-        workspace_path=workspace.path,
+        workspace_path=str(root),
         command_id=command_id,
         offset=offset,
         wait_seconds=wait_seconds,
@@ -1315,27 +1728,28 @@ async def get_workspace_command(
 
 
 @router.post("/workspaces/{workspace_id}/coding/commands/{command_id}/cancel")
-async def cancel_workspace_command(request: Request, workspace_id: str, command_id: str):
+async def cancel_workspace_command(
+    request: Request, workspace_id: str, command_id: str, worker_id: str | None = None
+):
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, worker_id)
     session = get_command_session(request, command_id)
-    if session is None or session.get("workspace") != workspace.path:
+    if session is None or session.get("workspace") != str(root):
         raise HTTPException(status_code=404, detail="command not found")
     error = stop_command_session(request, command_id)
     if error:
         raise HTTPException(status_code=409, detail=error)
     return await _command_snapshot(
         request,
-        workspace_path=workspace.path,
+        workspace_path=str(root),
         command_id=command_id,
         wait_seconds=2,
     )
 
 
 @router.post("/workspaces/{workspace_id}/browser")
-async def control_managed_browser(
-    request: Request, workspace_id: str, body: BrowserControlRequest
-):
+async def control_managed_browser(request: Request, workspace_id: str, body: BrowserControlRequest):
     """Control CPTR's isolated Chrome session through the scoped Control API."""
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
@@ -1593,7 +2007,9 @@ async def get_ssh_command(
     _require_external_scope(request)
     workspace = await _workspace(user_id, workspace_id)
     if offset < 0 or wait_seconds < 0 or wait_seconds > 60:
-        raise HTTPException(status_code=422, detail="offset and wait_seconds must be within their allowed range")
+        raise HTTPException(
+            status_code=422, detail="offset and wait_seconds must be within their allowed range"
+        )
     session = _ssh_session(request, command_id, workspace.path)
     snapshot = await _command_snapshot(
         request,

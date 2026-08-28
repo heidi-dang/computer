@@ -19,6 +19,7 @@ import os
 import re
 import shlex
 import stat
+import sys
 import time
 import uuid
 from pathlib import Path, PureWindowsPath
@@ -29,8 +30,18 @@ from fastapi import Request
 from cptr.env import (
     CHAT_TOOL_COMMAND_MAX_CHARS,
     CHAT_TOOL_MAX_CHARS,
+    COMMAND_EVENT_QUEUE_SIZE,
+    COMMAND_LOG_BATCH_BYTES,
+    COMMAND_LOG_FLUSH_INTERVAL_MS,
+    COMMAND_LOG_MAX_BYTES,
+    COMMAND_LOG_QUEUE_SIZE,
+    COMMAND_OUTPUT_BUFFER_BYTES,
+    COMMAND_READ_CHUNK_BYTES,
+    COMMAND_SESSION_REAPER_INTERVAL_SECONDS,
     EXECUTE_TIMEOUT,
     TASK_CANCELLATION_TIMEOUT_SECONDS,
+    TERMINAL_EVENT_COALESCE_BYTES,
+    TERMINAL_EVENT_FLUSH_INTERVAL_MS,
 )
 from cptr.utils.gitignore import is_gitignored, load_gitignore
 from cptr.utils.identity import (
@@ -40,6 +51,7 @@ from cptr.utils.identity import (
     identity_for_context,
     preexec_for,
 )
+from cptr.services.execution_manager import command_session_registry
 from cptr.utils.runtime import Runtime, FileError
 
 try:
@@ -60,7 +72,7 @@ except ImportError:
 
 # ── Command session state ───────────────────────────────────
 
-command_sessions: dict[str, dict] = {}
+command_sessions: dict[str, dict] = command_session_registry.sessions
 # command_session_id → {
 #   "master_fd": int | None,   PTY mode (Unix) — read/write through this fd
 #   "proc": Popen | Process,   The child process handle
@@ -71,12 +83,33 @@ command_sessions: dict[str, dict] = {}
 #   "log_path": str,
 # }
 MAX_COMMAND_SESSIONS = 5
-_MAX_LOG_SIZE = 50 * 1024 * 1024  # 50MB — rotate when exceeded
+_MAX_LOG_SIZE = COMMAND_LOG_MAX_BYTES
+_STOP_SESSION_WRITER = object()
+_accept_new_command_sessions = True
 
 VALID_TASK_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
 MAX_TASK_ITEMS = 256
 MAX_TASK_CONTENT_CHARS = 4000
 _TASK_TRUNCATION_MARKER = "... [truncated]"
+
+
+def _compose_preexec(preexec_fn=None):
+    """Add best-effort Linux parent-death signalling without changing identity setup."""
+    if not sys.platform.startswith("linux"):
+        return preexec_fn
+
+    def combined() -> None:
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL(None)
+            libc.prctl(1, int(signal.SIGTERM))  # PR_SET_PDEATHSIG
+        except Exception:
+            pass
+        if preexec_fn is not None:
+            preexec_fn()
+
+    return combined
 
 
 def _spawn_pty(command: str, cwd: str, env: dict, preexec_fn=None) -> tuple:
@@ -93,7 +126,7 @@ def _spawn_pty(command: str, cwd: str, env: dict, preexec_fn=None) -> tuple:
             cwd=cwd,
             env=env,
             start_new_session=True,
-            preexec_fn=preexec_fn,
+            preexec_fn=_compose_preexec(preexec_fn),
         )
     except Exception:
         os.close(slave_fd)
@@ -117,7 +150,7 @@ def _spawn_pty_argv(argv: list[str], cwd: str, env: dict, preexec_fn=None) -> tu
             cwd=cwd,
             env=env,
             start_new_session=True,
-            preexec_fn=preexec_fn,
+            preexec_fn=_compose_preexec(preexec_fn),
         )
     except Exception:
         os.close(slave_fd)
@@ -143,24 +176,79 @@ def _kill_process_group(pid: int, force: bool = False) -> None:
             pass
 
 
-def _rotate_log(log_path: str, log_file) -> tuple:
-    """Keep the newest half of the log file. Returns new (file, bytes_written)."""
-    log_file.flush()
-    log_file.close()
+def _rotate_log_path(log_path: str) -> int:
+    """Keep the newest half of a large log without materializing every line."""
+    path = Path(log_path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return 0
+    if size <= 0:
+        return 0
+    with path.open("rb") as source:
+        source.seek(size // 2)
+        if source.tell() > 0:
+            source.readline()  # drop a partial JSONL record
+        tail = source.read()
+    marker = (json.dumps({"type": "log_rotated", "ts": time.time()}) + "\n").encode()
+    with path.open("wb") as target:
+        target.write(marker)
+        target.write(tail)
+    return len(marker) + len(tail)
 
-    with open(log_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
 
-    keep = lines[len(lines) // 2 :]
+def _write_log_batch(log_path: str, entries: list[str]) -> int:
+    if not entries:
+        try:
+            return Path(log_path).stat().st_size
+        except OSError:
+            return 0
+    path = Path(log_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = "".join(entries).encode("utf-8", errors="replace")
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size + len(encoded) > _MAX_LOG_SIZE:
+        size = _rotate_log_path(log_path)
+    with path.open("ab") as target:
+        target.write(encoded)
+    return size + len(encoded)
 
-    with open(log_path, "w", encoding="utf-8") as f:
-        f.write(json.dumps({"type": "log_rotated", "ts": time.time()}) + "\n")
-        for line in keep:
-            f.write(line)
 
-    new_file = open(log_path, "a", encoding="utf-8")
-    new_size = sum(len(line.encode("utf-8", errors="replace")) for line in keep)
-    return new_file, new_size
+async def _command_log_writer(command_session_id: str) -> None:
+    """Batch command JSONL writes away from the event-loop hot path."""
+    session = command_sessions.get(command_session_id)
+    if not session:
+        return
+    queue = session.get("log_queue")
+    log_path = session.get("log_path")
+    if not isinstance(queue, asyncio.Queue) or not log_path:
+        return
+    batch: list[str] = []
+    batch_bytes = 0
+    flush_seconds = COMMAND_LOG_FLUSH_INTERVAL_MS / 1000.0
+    stopping = False
+    while True:
+        item = None
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=flush_seconds)
+        except asyncio.TimeoutError:
+            pass
+        if item is _STOP_SESSION_WRITER:
+            stopping = True
+            queue.task_done()
+        elif isinstance(item, str):
+            batch.append(item)
+            batch_bytes += len(item.encode("utf-8", errors="replace"))
+            queue.task_done()
+        if batch and (stopping or item is None or batch_bytes >= COMMAND_LOG_BATCH_BYTES):
+            await asyncio.to_thread(_write_log_batch, str(log_path), batch)
+            batch = []
+            batch_bytes = 0
+        if stopping:
+            return
 
 
 async def _publish_command_session_event(
@@ -198,49 +286,118 @@ async def _publish_command_session_event(
     )
 
 
+async def _command_event_writer(command_session_id: str) -> None:
+    """Coalesce terminal bytes and persist live events independently of PTY reads."""
+    session = command_sessions.get(command_session_id)
+    if not session:
+        return
+    queue = session.get("event_queue")
+    if not isinstance(queue, asyncio.Queue):
+        return
+    terminal = bytearray()
+    flush_seconds = TERMINAL_EVENT_FLUSH_INTERVAL_MS / 1000.0
+
+    async def flush_terminal(*, force: bool = False) -> None:
+        while terminal and (force or len(terminal) >= TERMINAL_EVENT_COALESCE_BYTES):
+            chunk_size = min(len(terminal), TERMINAL_EVENT_COALESCE_BYTES)
+            payload = bytes(terminal[:chunk_size])
+            del terminal[:chunk_size]
+            await _publish_command_session_event(
+                session,
+                "terminal.chunk",
+                {
+                    "command_id": command_session_id,
+                    "stream": "stdout",
+                    "text": payload.decode(errors="replace"),
+                },
+            )
+            session["terminal_events_published"] = (
+                int(session.get("terminal_events_published") or 0) + 1
+            )
+
+    while True:
+        item = None
+        try:
+            if terminal:
+                item = await asyncio.wait_for(queue.get(), timeout=flush_seconds)
+            else:
+                item = await queue.get()
+        except asyncio.TimeoutError:
+            await flush_terminal(force=True)
+            continue
+
+        if item is _STOP_SESSION_WRITER:
+            queue.task_done()
+            await flush_terminal(force=True)
+            return
+        event_type, payload = item
+        queue.task_done()
+        if event_type == "terminal.bytes":
+            terminal.extend(payload)
+            if len(terminal) >= TERMINAL_EVENT_COALESCE_BYTES:
+                await flush_terminal()
+            continue
+        await flush_terminal(force=True)
+        await _publish_command_session_event(session, event_type, payload)
+
+
+async def _queue_command_session_event(
+    session: dict[str, Any] | None, event_type: str, payload: dict[str, Any]
+) -> None:
+    queue = session.get("event_queue") if session else None
+    if isinstance(queue, asyncio.Queue):
+        await queue.put((event_type, payload))
+
+
+def _queue_command_terminal_bytes(session: dict[str, Any] | None, chunk: bytes) -> None:
+    queue = session.get("event_queue") if session else None
+    if not isinstance(queue, asyncio.Queue):
+        return
+    try:
+        queue.put_nowait(("terminal.bytes", bytes(chunk)))
+    except asyncio.QueueFull:
+        session["terminal_event_dropped_bytes"] = int(
+            session.get("terminal_event_dropped_bytes") or 0
+        ) + len(chunk)
+
+
 async def stream_command_session_output(command_session_id: str):
-    """Read output from a command process into memory + JSONL log and the live terminal."""
+    """Capture process output without making PTY reads wait on disk or SQLite."""
     session = command_sessions.get(command_session_id)
     if not session:
         return
 
     master_fd = session.get("master_fd")
     proc = session["proc"]
-    log_path = session.get("log_path")
-    log_file = None
-    log_bytes = 0
-    loop = asyncio.get_event_loop()
+    log_queue = session.get("log_queue")
+    loop = asyncio.get_running_loop()
+
+    if isinstance(log_queue, asyncio.Queue):
+        await log_queue.put(
+            json.dumps(
+                {
+                    "type": "start",
+                    "command": session["command"],
+                    "pid": proc.pid,
+                    "ts": time.time(),
+                }
+            )
+            + "\n"
+        )
 
     try:
-        if log_path:
-            Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-            log_file = open(log_path, "a", encoding="utf-8")
-            entry = (
-                json.dumps(
-                    {
-                        "type": "start",
-                        "command": session["command"],
-                        "pid": proc.pid,
-                        "ts": time.time(),
-                    }
-                )
-                + "\n"
-            )
-            log_file.write(entry)
-            log_file.flush()
-            log_bytes += len(entry.encode("utf-8", errors="replace"))
-
         while True:
-            # Read from PTY fd (Unix) or subprocess pipe (Windows fallback)
             if master_fd is not None:
                 try:
-                    chunk = await loop.run_in_executor(None, os.read, master_fd, 4096)
+                    chunk = await loop.run_in_executor(
+                        None, os.read, master_fd, COMMAND_READ_CHUNK_BYTES
+                    )
                     if not chunk:
                         break
                 except OSError:
-                    break  # EIO when child exits
+                    break
             else:
-                chunk = await proc.stdout.read(4096)
+                chunk = await proc.stdout.read(COMMAND_READ_CHUNK_BYTES)
                 if not chunk:
                     break
 
@@ -248,22 +405,14 @@ async def stream_command_session_output(command_session_id: str):
             if session:
                 session["output"].extend(chunk)
                 session["total_bytes"] += len(chunk)
-                if len(session["output"]) > 256 * 1024:
-                    session["output"] = session["output"][-256 * 1024 :]
+                if len(session["output"]) > COMMAND_OUTPUT_BUFFER_BYTES:
+                    session["output"] = session["output"][-COMMAND_OUTPUT_BUFFER_BYTES:]
                 async with session["condition"]:
                     session["condition"].notify_all()
-                await _publish_command_session_event(
-                    session,
-                    "terminal.chunk",
-                    {
-                        "command_id": command_session_id,
-                        "stream": "stdout",
-                        "text": chunk.decode(errors="replace"),
-                    },
-                )
+                _queue_command_terminal_bytes(session, chunk)
 
-            if log_file:
-                entry = (
+            if isinstance(log_queue, asyncio.Queue):
+                await log_queue.put(
                     json.dumps(
                         {
                             "type": "output",
@@ -273,16 +422,10 @@ async def stream_command_session_output(command_session_id: str):
                     )
                     + "\n"
                 )
-                entry_size = len(entry.encode("utf-8", errors="replace"))
-                if log_bytes + entry_size > _MAX_LOG_SIZE:
-                    log_file, log_bytes = _rotate_log(log_path, log_file)
-                log_file.write(entry)
-                log_file.flush()
-                log_bytes += entry_size
     except Exception:
+        # Process completion below remains authoritative even if capture fails.
         pass
     finally:
-        # Wait for the process to finish and collect exit code
         session = command_sessions.get(command_session_id)
         if master_fd is not None:
             exit_code = await loop.run_in_executor(None, proc.wait)
@@ -296,25 +439,40 @@ async def stream_command_session_output(command_session_id: str):
 
         if session:
             session["done"] = True
+            session["completed_at"] = time.time()
             session["exit_code"] = exit_code
-            session["master_fd"] = None  # fd is closed
+            session["master_fd"] = None
             async with session["condition"]:
                 session["condition"].notify_all()
-            await _publish_command_session_event(
+            await _queue_command_session_event(
                 session,
                 "command.completed",
                 {
                     "command_id": command_session_id,
                     "status": "COMPLETE" if exit_code == 0 else "FAILED",
                     "exit_code": exit_code,
+                    "dropped_live_bytes": int(session.get("terminal_event_dropped_bytes") or 0),
                 },
             )
 
-        if log_file:
-            log_file.write(
+            event_queue = session.get("event_queue")
+            if isinstance(event_queue, asyncio.Queue):
+                await event_queue.put(_STOP_SESSION_WRITER)
+
+        if isinstance(log_queue, asyncio.Queue):
+            await log_queue.put(
                 json.dumps({"type": "end", "exit_code": exit_code, "ts": time.time()}) + "\n"
             )
-            log_file.close()
+            await log_queue.put(_STOP_SESSION_WRITER)
+
+        writers = []
+        if session:
+            for key in ("event_writer_task", "log_writer_task"):
+                writer = session.get(key)
+                if isinstance(writer, asyncio.Task):
+                    writers.append(writer)
+        if writers:
+            await asyncio.gather(*writers, return_exceptions=True)
 
 
 # ── Helper ──────────────────────────────────────────────────
@@ -422,6 +580,7 @@ def list_command_sessions(
     auth=None,
     context: dict | None = None,
 ) -> list[dict[str, Any]]:
+    command_session_registry.reap()
     sessions: list[dict[str, Any]] = []
     if context and context.get("request") is not None:
         request = context["request"]
@@ -450,6 +609,7 @@ def get_command_session(
     auth=None,
     context: dict | None = None,
 ) -> dict | None:
+    command_session_registry.reap()
     session = command_sessions.get(command_session_id)
     if context and context.get("request") is not None:
         request = context["request"]
@@ -535,6 +695,95 @@ def stop_command_session(
         return None
     _kill_process_group(session["proc"].pid, force=force)
     return None
+
+
+def start_command_session_manager() -> None:
+    """Allow new command sessions after a fresh application lifespan starts."""
+    global _accept_new_command_sessions
+    _accept_new_command_sessions = True
+    command_session_registry.reap()
+
+
+def reap_command_sessions() -> list[str]:
+    return command_session_registry.reap()
+
+
+async def command_session_reaper_loop() -> None:
+    while True:
+        await asyncio.sleep(COMMAND_SESSION_REAPER_INTERVAL_SECONDS)
+        command_session_registry.reap()
+
+
+async def shutdown_command_sessions(*, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS) -> None:
+    """Stop accepting work and quiesce every owned child process on shutdown."""
+    global _accept_new_command_sessions
+    _accept_new_command_sessions = False
+    active = [session for session in command_sessions.values() if not session.get("done")]
+    for session in active:
+        proc = session.get("proc")
+        if proc is not None:
+            try:
+                _kill_process_group(proc.pid, force=False)
+            except Exception:
+                pass
+
+    capture_tasks = [
+        session.get("log_task")
+        for session in active
+        if isinstance(session.get("log_task"), asyncio.Task)
+    ]
+    if capture_tasks:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*capture_tasks, return_exceptions=True),
+                timeout=max(0.1, timeout),
+            )
+        except asyncio.TimeoutError:
+            pass
+
+    remaining = [session for session in active if not _command_session_quiescent(session)]
+    for session in remaining:
+        proc = session.get("proc")
+        if proc is not None:
+            try:
+                _kill_process_group(proc.pid, force=True)
+            except Exception:
+                pass
+    remaining_tasks = [
+        session.get("log_task")
+        for session in remaining
+        if isinstance(session.get("log_task"), asyncio.Task) and not session["log_task"].done()
+    ]
+    if remaining_tasks:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*remaining_tasks, return_exceptions=True), timeout=1.0
+            )
+        except asyncio.TimeoutError:
+            for task in remaining_tasks:
+                task.cancel()
+
+    # Lifespan shutdown prevents new ASGI traffic while this function runs.
+    # Re-open the in-process manager afterward so application/test harnesses can
+    # start a fresh lifespan in the same interpreter without stale shutdown state.
+    _accept_new_command_sessions = True
+
+
+def command_session_metrics() -> dict[str, int]:
+    stats = command_session_registry.stats()
+    stats.update(
+        {
+            "terminal_events_published": sum(
+                int(session.get("terminal_events_published") or 0)
+                for session in command_sessions.values()
+            ),
+            "terminal_event_dropped_bytes": sum(
+                int(session.get("terminal_event_dropped_bytes") or 0)
+                for session in command_sessions.values()
+            ),
+        }
+    )
+    return stats
 
 
 def _owned_command_sessions(message_id: str) -> list[dict[str, Any]]:
@@ -1451,6 +1700,9 @@ async def run_command(
     :param wait: Seconds to wait for the command to finish before returning (max 300). Returns early if done sooner. Null returns immediately. Use 30-60 for installs and builds, 5-10 for quick commands, null or 0 for long-lived servers.
     """
     workspace = __context__["workspace"]
+    if not _accept_new_command_sessions:
+        return "Error: CPTR is shutting down and is not accepting new command sessions."
+    command_session_registry.reap()
     try:
         identity = await identity_for_context(__context__)
     except IdentityUnavailable as e:
@@ -1462,11 +1714,7 @@ async def run_command(
     if not work_dir.is_dir():
         return f"Error: not a directory: {cwd}"
 
-    active = sum(
-        1
-        for t in command_sessions.values()
-        if not t.get("done") and (user_id is None or t.get("user_id") == user_id)
-    )
+    active = command_session_registry.active_count(user_id)
     if active >= MAX_COMMAND_SESSIONS:
         return f"Error: too many running command sessions ({active}/{MAX_COMMAND_SESSIONS}). Stop one first."
 
@@ -1517,6 +1765,7 @@ async def run_command(
     log_path = Path(workspace) / ".cptr" / "task_logs" / f"{command_session_id}.jsonl"
     try:
         if request is None:
+            _kill_process_group(proc.pid)
             return "Error: request context unavailable"
         await Runtime.write_file(request, str(log_path), "")
     except FileError as e:
@@ -1541,7 +1790,7 @@ async def run_command(
             "workspace_id": str(workspace_id),
         }
 
-    command_sessions[command_session_id] = {
+    session = {
         "command_session_id": command_session_id,
         "master_fd": master_fd,
         "proc": proc,
@@ -1556,23 +1805,44 @@ async def run_command(
         "call_id": __context__.get("call_id"),
         "live_target": live_target,
         "created_at": time.time(),
+        "completed_at": None,
         "done": False,
         "exit_code": None,
         "log_path": str(log_path),
         "log_task": None,
         "condition": asyncio.Condition(),
+        "log_queue": asyncio.Queue(maxsize=COMMAND_LOG_QUEUE_SIZE),
+        "event_queue": (
+            asyncio.Queue(maxsize=COMMAND_EVENT_QUEUE_SIZE) if live_target is not None else None
+        ),
+        "log_writer_task": None,
+        "event_writer_task": None,
+        "terminal_events_published": 0,
+        "terminal_event_dropped_bytes": 0,
     }
-    await _publish_command_session_event(
-        command_sessions[command_session_id],
-        "command.started",
-        {
-            "command_id": command_session_id,
-            "summary": command,
-            "status": "RUNNING",
-        },
+    command_session_registry.register(command_session_id, session)
+    session["log_writer_task"] = asyncio.create_task(
+        _command_log_writer(command_session_id), name=f"cptr-command-log-{command_session_id}"
     )
-    log_task = asyncio.create_task(stream_command_session_output(command_session_id))
-    command_sessions[command_session_id]["log_task"] = log_task
+    if live_target is not None:
+        session["event_writer_task"] = asyncio.create_task(
+            _command_event_writer(command_session_id),
+            name=f"cptr-command-events-{command_session_id}",
+        )
+        await _queue_command_session_event(
+            session,
+            "command.started",
+            {
+                "command_id": command_session_id,
+                "summary": command,
+                "status": "RUNNING",
+            },
+        )
+    log_task = asyncio.create_task(
+        stream_command_session_output(command_session_id),
+        name=f"cptr-command-capture-{command_session_id}",
+    )
+    session["log_task"] = log_task
 
     # Wait for the command to finish inline (matches open-terminal behaviour)
     if wait is None and EXECUTE_TIMEOUT:
@@ -1814,7 +2084,9 @@ def _control_execution_policy_violation(name: str, args: dict, context: dict) ->
         return "Error: control task policy denies network access"
     if name == "run_command":
         command = str(args.get("command") or "")
-        if policy.get("allow_package_install") is False and _CONTROL_PACKAGE_INSTALL_RE.search(command):
+        if policy.get("allow_package_install") is False and _CONTROL_PACKAGE_INSTALL_RE.search(
+            command
+        ):
             return "Error: control task policy denies package installation"
         if policy.get("allow_network") is False and _CONTROL_EXTERNAL_COMMAND_RE.search(command):
             return "Error: control task policy denies external command execution"
@@ -1945,9 +2217,7 @@ def _assignment_scope_violation(name: str, args: dict, context: dict) -> str | N
     # file. The operation itself still filters/validates the concrete file.
     if any(item.startswith(f"{candidate}/") for item in allowed):
         return None
-    return _assignment_scope_denial(
-        context, f"path is not named by this assignment: {candidate}"
-    )
+    return _assignment_scope_denial(context, f"path is not named by this assignment: {candidate}")
 
 
 async def create_automation(
@@ -3672,13 +3942,13 @@ async def get_tool_list(
     if disabled_tools:
         tools = {name: tool for name, tool in tools.items() if name not in disabled_tools}
     if inspection_scope == "assignment":
-        tools = {
-            name: tool for name, tool in tools.items() if name in _ASSIGNMENT_ALLOWED_TOOLS
-        }
+        tools = {name: tool for name, tool in tools.items() if name in _ASSIGNMENT_ALLOWED_TOOLS}
 
     policy = execution_policy or {}
     if policy.get("allow_file_writes") is False:
-        tools = {name: tool for name, tool in tools.items() if name not in _CONTROL_FILE_WRITE_TOOLS}
+        tools = {
+            name: tool for name, tool in tools.items() if name not in _CONTROL_FILE_WRITE_TOOLS
+        }
     if policy.get("allow_commands") is False:
         tools.pop("run_command", None)
     if policy.get("allow_network") is False:

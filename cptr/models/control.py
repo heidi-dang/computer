@@ -172,6 +172,24 @@ class AutonomousWorkspaceLease(Base):
     expires_at = Column(BigInteger, nullable=False)
 
 
+class ControlApiKey(Base):
+    """Indexed API-key metadata for gateway and scoped Control API authentication."""
+
+    __tablename__ = "control_api_keys"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    key_hash = Column(Text, nullable=False)
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name = Column(Text, nullable=False, default="default")
+    scopes = Column(JSON, nullable=False, default=list)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index("ix_control_api_key_hash", "key_hash", unique=True),
+        Index("ix_control_api_key_user_created", "user_id", "created_at"),
+    )
+
+
 class ControlIdempotency(Base):
     __tablename__ = "control_idempotency"
 
@@ -184,6 +202,38 @@ class ControlIdempotency(Base):
     created_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (UniqueConstraint("user_id", "key", name="uq_control_idempotency_user_key"),)
+
+
+def _direct_coding_worker_id() -> str:
+    return f"dcw_{uuid.uuid4().hex}"
+
+
+class DirectCodingWorker(Base):
+    """Model-free, owner-scoped direct-coding lane backed by a Git worktree."""
+
+    __tablename__ = "direct_coding_workers"
+
+    id = Column(Text, primary_key=True, default=_direct_coding_worker_id)
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    workspace_id = Column(Text, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+    name = Column(Text, nullable=False)
+    responsibility = Column(Text, nullable=False, default="")
+    repo_path = Column(Text, nullable=False, default=".")
+    status = Column(Text, nullable=False, default="READY")
+    branch = Column(Text, nullable=False)
+    worktree_path = Column(Text, nullable=False)
+    base_revision = Column(Text, nullable=False)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+    last_activity_at = Column(BigInteger, nullable=True)
+    integrated_at = Column(BigInteger, nullable=True)
+    closed_at = Column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index("ix_direct_coding_worker_user_workspace_status", "user_id", "workspace_id", "status"),
+        Index("ix_direct_coding_worker_user_updated", "user_id", "updated_at"),
+        UniqueConstraint("user_id", "branch", name="uq_direct_coding_worker_user_branch"),
+    )
 
 
 def _workbench_session_id() -> str:
@@ -225,7 +275,9 @@ class WorkbenchSessionEvent(Base):
     __tablename__ = "workbench_session_events"
 
     id = Column(Text, primary_key=True, default=_uuid)
-    session_id = Column(Text, ForeignKey("workbench_sessions.id", ondelete="CASCADE"), nullable=False)
+    session_id = Column(
+        Text, ForeignKey("workbench_sessions.id", ondelete="CASCADE"), nullable=False
+    )
     user_id = Column(Text, ForeignKey("users.id"), nullable=False)
     sequence = Column(BigInteger, nullable=False)
     source = Column(Text, nullable=False)
@@ -244,7 +296,9 @@ class WorkbenchSessionEvent(Base):
 
     __table_args__ = (
         UniqueConstraint("session_id", "sequence", name="uq_workbench_session_event_sequence"),
-        Index("ix_workbench_session_event_user_session_sequence", "user_id", "session_id", "sequence"),
+        Index(
+            "ix_workbench_session_event_user_session_sequence", "user_id", "session_id", "sequence"
+        ),
     )
 
 

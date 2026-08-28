@@ -142,6 +142,23 @@ class Runtime:
         return await _file(await _request_identity(request), _list_tree, path, recursive)
 
     @staticmethod
+    async def list_tree_entries(
+        request: Request,
+        path: str,
+        recursive: bool = False,
+        offset: int = 0,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        return await _file(
+            await _request_identity(request),
+            _list_tree_entries,
+            path,
+            recursive,
+            offset,
+            limit,
+        )
+
+    @staticmethod
     async def read_file(request: Request, path: str) -> dict[str, Any]:
         return await _file(await _request_identity(request), _read_file, path)
 
@@ -173,7 +190,9 @@ class Runtime:
         )
 
     @staticmethod
-    async def search_files(request: Request, query: str, path: str, limit: int = 20) -> dict[str, Any]:
+    async def search_files(
+        request: Request, query: str, path: str, limit: int = 20
+    ) -> dict[str, Any]:
         return await _file(await _request_identity(request), _search_files, path, query, limit)
 
     @staticmethod
@@ -192,7 +211,9 @@ class Runtime:
     async def upload_file(
         request: Request, directory: str, filename: str, content: bytes
     ) -> dict[str, Any]:
-        return await _file(await _request_identity(request), _upload_file, directory, filename, content)
+        return await _file(
+            await _request_identity(request), _upload_file, directory, filename, content
+        )
 
     @staticmethod
     async def read_bytes(request: Request, path: str) -> dict[str, Any]:
@@ -466,51 +487,100 @@ def _list_directory(path: str) -> dict[str, Any]:
     return {"path": str(target), "entries": entries}
 
 
-def _list_tree(path: str, recursive: bool = False) -> dict[str, Any]:
+_TREE_IGNORE = {
+    ".git",
+    "node_modules",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".next",
+    "build",
+    "dist",
+    ".cptr",
+    ".svelte-kit",
+}
+
+
+def _list_tree_entries(
+    path: str,
+    recursive: bool = False,
+    offset: int = 0,
+    limit: int = 500,
+) -> dict[str, Any]:
+    """Return structured, bounded tree entries without recursive folder counting."""
     target = _path(path)
     if not target.is_dir():
         raise FileError(f"not a directory: {path}")
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 5_000))
+    stop_after = offset + limit + 1
+    discovered: list[dict[str, Any]] = []
 
-    ignore = {
-        ".git",
-        "node_modules",
-        "__pycache__",
-        ".venv",
-        "venv",
-        ".next",
-        "build",
-        "dist",
-        ".cptr",
-        ".svelte-kit",
-    }
-    lines = []
+    def append_item(item: Path, relative: Path) -> bool:
+        if item.name in _TREE_IGNORE:
+            return False
+        try:
+            st = item.stat()
+            kind = "symlink" if item.is_symlink() else "directory" if item.is_dir() else "file"
+            discovered.append(
+                {
+                    "path": relative.as_posix(),
+                    "type": kind,
+                    "size": st.st_size if kind == "file" else 0,
+                    "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                }
+            )
+        except OSError:
+            return False
+        return len(discovered) >= stop_after
+
     if recursive:
         for root, dirs, files in os.walk(target):
-            dirs[:] = sorted(d for d in dirs if d not in ignore)
-            rel = Path(root).relative_to(target)
+            dirs[:] = sorted(d for d in dirs if d not in _TREE_IGNORE)
+            root_path = Path(root)
+            for dirname in dirs:
+                child = root_path / dirname
+                if append_item(child, child.relative_to(target)):
+                    break
+            if len(discovered) >= stop_after:
+                break
             for filename in sorted(files):
-                item = Path(root) / filename
-                try:
-                    size = item.stat().st_size
-                except OSError:
-                    size = 0
-                lines.append(f"{rel / filename}  ({_human_size(size)})")
+                child = root_path / filename
+                if append_item(child, child.relative_to(target)):
+                    break
+            if len(discovered) >= stop_after:
+                break
     else:
-        for item in sorted(target.iterdir()):
-            if item.name in ignore:
+        try:
+            entries = sorted(os.scandir(target), key=lambda item: item.name.casefold())
+        except PermissionError as exc:
+            raise FileError(f"Permission denied: {path}", 403) from exc
+        for entry in entries:
+            if entry.name in _TREE_IGNORE:
                 continue
-            if item.is_dir():
-                try:
-                    count = sum(1 for child in item.rglob("*") if child.is_file())
-                except (PermissionError, OSError):
-                    count = 0
-                lines.append(f"{item.name}/  ({count} files)")
-            else:
-                try:
-                    size = item.stat().st_size
-                except OSError:
-                    size = 0
-                lines.append(f"{item.name}  ({_human_size(size)})")
+            append_item(Path(entry.path), Path(entry.name))
+
+    has_more = len(discovered) > offset + limit
+    page = discovered[offset : offset + limit]
+    return {
+        "entries": page,
+        "truncated": has_more,
+        "next_offset": offset + len(page) if has_more else None,
+        "total": len(discovered) if not has_more else offset + len(page) + 1,
+        "total_exact": not has_more,
+    }
+
+
+def _list_tree(path: str, recursive: bool = False) -> dict[str, Any]:
+    """Legacy human-readable tree surface backed by the bounded scanner."""
+    result = _list_tree_entries(path, recursive, 0, 5_000)
+    lines = []
+    for entry in result["entries"]:
+        suffix = "/" if entry["type"] == "directory" else ""
+        metadata = "directory" if entry["type"] == "directory" else _human_size(entry["size"])
+        lines.append(f"{entry['path']}{suffix}  ({metadata})")
+    if result["truncated"]:
+        lines.append("... (truncated)")
     return {"text": "\n".join(lines) if lines else "(empty directory)"}
 
 
@@ -958,6 +1028,7 @@ CALLS = {
         _file_matches,
         _list_directory,
         _list_tree,
+        _list_tree_entries,
         _move_item,
         _read_bytes,
         _read_file,
