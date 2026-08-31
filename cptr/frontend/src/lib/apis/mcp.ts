@@ -26,7 +26,7 @@ export interface McpToolSpec {
 export interface McpContentItem {
 	type: 'text' | 'image' | 'resource' | string;
 	text?: string;
-	data?: string;      // base64 for images
+	data?: string; // base64 for images
 	mimeType?: string;
 	uri?: string;
 }
@@ -38,13 +38,132 @@ export interface McpResource {
 	mimeType?: string;
 }
 
+export type McpTrafficEventType =
+	| 'session_opened'
+	| 'session_closed'
+	| 'request_started'
+	| 'request_finished'
+	| 'request_failed'
+	| 'tool_started'
+	| 'tool_finished'
+	| 'tool_failed';
+
+export type McpTrafficStatus = 'started' | 'complete' | 'error' | 'connected' | 'disconnected';
+
+export type McpTrafficErrorCode =
+	| 'timeout'
+	| 'validation_error'
+	| 'unauthorized'
+	| 'tool_error'
+	| 'transport_error'
+	| 'internal_error';
+
+export interface McpTrafficClient {
+	id: string;
+	label: string;
+	version: string | null;
+}
+
+export interface McpTrafficEvent {
+	version: 1;
+	event_id: string;
+	sequence: number;
+	ingestion_sequence: number;
+	event_type: McpTrafficEventType;
+	timestamp_ms: number;
+	session_id: string | null;
+	client: McpTrafficClient;
+	request_id: string | null;
+	method: string | null;
+	tool_name: string | null;
+	status: McpTrafficStatus;
+	duration_ms: number | null;
+	request_bytes: number | null;
+	response_bytes: number | null;
+	error_code: McpTrafficErrorCode | null;
+}
+
+export interface McpTrafficClientSnapshot {
+	id: string;
+	label: string;
+	version: string | null;
+	active_sessions: number;
+	active_requests: number;
+	total_requests: number;
+	errors: number;
+	last_seen: number;
+	last_tool: string | null;
+}
+
+export interface McpTrafficSessionSnapshot {
+	session_id: string;
+	client_id: string;
+	connected_at: number;
+	last_seen: number;
+}
+
+export interface McpTrafficSnapshot {
+	version: 1;
+	sequence: number;
+	center: { id: string; label: string; status: string };
+	clients: McpTrafficClientSnapshot[];
+	sessions: McpTrafficSessionSnapshot[];
+	events: McpTrafficEvent[];
+	stream_health: {
+		subscriber_count: number;
+		slow_subscriber_drops: number;
+		session_evictions: number;
+		request_evictions: number;
+		expired_sessions: number;
+		event_capacity: number;
+		session_capacity: number;
+	};
+}
+
+export interface McpTrafficStreamCallbacks {
+	onSnapshot: (snapshot: McpTrafficSnapshot) => void;
+	onTraffic: (event: McpTrafficEvent) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown) => void;
+}
+
+// ── Traffic topology ─────────────────────────────────────────────────────────
+
+export const getMcpTrafficSnapshot = () =>
+	fetchJSON<McpTrafficSnapshot>('/api/mcp/traffic/snapshot');
+
+export function openMcpTrafficStream(callbacks: McpTrafficStreamCallbacks): () => void {
+	const source = new EventSource('/api/mcp/traffic/stream');
+
+	const parse = <T>(message: MessageEvent<string>, callback: (value: T) => void) => {
+		try {
+			callback(JSON.parse(message.data) as T);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+
+	source.addEventListener('snapshot', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onSnapshot)
+	);
+	source.addEventListener('traffic', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onTraffic)
+	);
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+
+	return () => source.close();
+}
+
 // ── Server management ────────────────────────────────────────────────────────
 
 export const listMcpServers = () =>
 	fetchJSON<{ servers: McpServer[] }>('/api/mcp/servers').then((r) => r.servers);
 
 export const getMcpServerStatus = (serverId: string) =>
-	fetchJSON<{ server_id: string; type: string; status: string }>(`/api/mcp/servers/${serverId}/status`);
+	fetchJSON<{ server_id: string; type: string; status: string }>(
+		`/api/mcp/servers/${serverId}/status`
+	);
 
 export const reconnectMcpServer = (serverId: string) =>
 	fetchJSON(`/api/mcp/servers/${serverId}/reconnect`, { method: 'POST' });
@@ -57,9 +176,9 @@ export const getMcpServerLogs = (serverId: string, limit = 200) =>
 // ── Tool discovery ────────────────────────────────────────────────────────────
 
 export const listServerTools = (serverId: string) =>
-	fetchJSON<{ server_id: string; tools: McpToolSpec[] }>(
-		`/api/mcp/servers/${serverId}/tools`
-	).then((r) => r.tools);
+	fetchJSON<{ server_id: string; tools: McpToolSpec[] }>(`/api/mcp/servers/${serverId}/tools`).then(
+		(r) => r.tools
+	);
 
 export const listAllTools = () =>
 	fetchJSON<{ tools: McpToolSpec[]; count: number }>('/api/mcp/tools').then((r) => r.tools);
