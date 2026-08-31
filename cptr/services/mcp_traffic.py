@@ -95,6 +95,7 @@ class McpTrafficStore:
         self.max_sessions = max(1, int(max_sessions))
         self.subscriber_queue_size = max(1, int(subscriber_queue_size))
         self.session_ttl_ms = max(1, int(session_ttl_seconds)) * 1000
+        self.max_active_requests = self.max_events
         self.max_clients = max(8, min(self.max_events, self.max_sessions * 2))
         self._dedupe_capacity = max(32, self.max_events * 4)
 
@@ -109,6 +110,7 @@ class McpTrafficStore:
         self._ingestion_sequence = 0
         self._slow_subscriber_drops = 0
         self._session_evictions = 0
+        self._request_evictions = 0
         self._expired_sessions = 0
 
     def subscribe(self) -> asyncio.Queue[dict[str, object]]:
@@ -181,6 +183,7 @@ class McpTrafficStore:
                     "subscriber_count": len(self._subscribers),
                     "slow_subscriber_drops": self._slow_subscriber_drops,
                     "session_evictions": self._session_evictions,
+                    "request_evictions": self._request_evictions,
                     "expired_sessions": self._expired_sessions,
                     "event_capacity": self.max_events,
                     "session_capacity": self.max_sessions,
@@ -252,6 +255,16 @@ class McpTrafficStore:
         elif event.event_type == "session_closed" and event.session_id:
             self._sessions.pop(event.session_id, None)
         elif event.event_type == "request_started" and event.request_id:
+            if (
+                event.request_id not in self._active_requests
+                and len(self._active_requests) >= self.max_active_requests
+            ):
+                oldest_request = min(
+                    self._active_requests.items(),
+                    key=lambda item: (int(item[1]["started_at"]), item[0]),
+                )[0]
+                self._active_requests.pop(oldest_request, None)
+                self._request_evictions += 1
             self._active_requests[event.request_id] = {
                 "client_id": event.client.id,
                 "started_at": event.timestamp_ms,

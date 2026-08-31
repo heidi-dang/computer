@@ -173,6 +173,20 @@ class McpTrafficStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["stream_health"]["subscriber_count"], 1)
         self.assertEqual((await store.snapshot())["stream_health"]["subscriber_count"], 0)
 
+    async def test_active_requests_are_bounded_when_terminal_events_are_lost(self):
+        store = McpTrafficStore(max_events=2, max_sessions=4, subscriber_queue_size=2)
+        await store.ingest(
+            [
+                traffic_event("event-001", "request_started", request_id="request-1"),
+                traffic_event("event-002", "request_started", request_id="request-2"),
+                traffic_event("event-003", "request_started", request_id="request-3"),
+            ]
+        )
+
+        snapshot = await store.snapshot()
+        self.assertEqual(snapshot["clients"][0]["active_requests"], 2)
+        self.assertEqual(snapshot["stream_health"]["request_evictions"], 1)
+
     async def test_max_sessions_evicts_oldest_session_state_only(self):
         store = McpTrafficStore(max_events=8, max_sessions=1, subscriber_queue_size=2)
         await store.ingest(
