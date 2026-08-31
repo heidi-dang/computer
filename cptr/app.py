@@ -12,25 +12,36 @@ from cptr.routers import (
     audio_router,
     auth_router,
     automations_router,
+    automations_extended_router,
     bridge_router,
     browser_router,
+    browser_extended_router,
     chat_router,
+    chat_extended_router,
     coding_router,
     control_router,
     control_stream_router,
     events_router,
     files_router,
     gateway_router,
+    gateway_extended_router,
     git_router,
     images_router,
+    mcp_router,
     memory_router,
+    memory_extended_router,
     notifications_router,
     search_router,
+    search_extended_router,
     skills_router,
+    skills_extended_router,
     state_router,
+    system_router,
     terminal_router,
+    terminal_extended_router,
     webhook_router,
     workspace_router,
+    workspace_extended_router,
     workbench_router,
 )
 from cptr.utils.config import check_access, load_config
@@ -368,25 +379,36 @@ app.include_router(admin_router)
 app.include_router(audio_router)
 app.include_router(auth_router)
 app.include_router(automations_router)
+app.include_router(automations_extended_router)
 app.include_router(bridge_router)
 app.include_router(browser_router)
+app.include_router(browser_extended_router)
 app.include_router(webhook_router)
 app.include_router(chat_router)
+app.include_router(chat_extended_router)
 app.include_router(coding_router)
 app.include_router(control_router)
 app.include_router(control_stream_router)
 app.include_router(events_router)
 app.include_router(files_router)
 app.include_router(gateway_router)
+app.include_router(gateway_extended_router)
 app.include_router(git_router)
 app.include_router(images_router)
+app.include_router(mcp_router)
 app.include_router(memory_router)
+app.include_router(memory_extended_router)
 app.include_router(notifications_router)
 app.include_router(search_router)
+app.include_router(search_extended_router)
 app.include_router(skills_router)
+app.include_router(skills_extended_router)
 app.include_router(state_router)
+app.include_router(system_router)
 app.include_router(terminal_router)
+app.include_router(terminal_extended_router)
 app.include_router(workspace_router)
+app.include_router(workspace_extended_router)
 app.include_router(workbench_router)
 
 
