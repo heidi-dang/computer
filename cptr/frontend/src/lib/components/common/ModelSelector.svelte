@@ -3,6 +3,12 @@
 	import { chatModels, type ChatModel } from '$lib/stores/chat';
 	import DropdownMenu from '../DropdownMenu.svelte';
 	import { t } from '$lib/i18n';
+	import {
+		displayModelName,
+		groupModelsBySource,
+		modelSearchText,
+		sourceLabel
+	} from '$lib/utils/model-display';
 
 	interface Props {
 		selectedModel: string | null;
@@ -30,75 +36,7 @@
 	let highlightedIndex = $state(0);
 	let isSmallViewport = $state(false);
 
-	const SOURCE_LABELS: Record<string, string> = {
-		openai: 'OpenAI',
-		anthropic: 'Anthropic',
-		deepseek: 'DeepSeek',
-		google: 'Google',
-		gemini: 'Gemini',
-		openrouter: 'OpenRouter',
-		ollama: 'Ollama',
-		'openai-compatible': 'OpenAI Compatible',
-		codex: 'Codex',
-		claude: 'Claude',
-		hermes: 'Hermes',
-		opencode: 'OpenCode'
-	};
-
-	function formatSourceName(value: string): string {
-		const trimmed = value.trim();
-		if (!trimmed) return 'Other';
-		const alias = SOURCE_LABELS[trimmed.toLowerCase()];
-		if (alias) return alias;
-		return trimmed
-			.replace(/[_-]+/g, ' ')
-			.replace(/\b\w/g, (char) => char.toUpperCase());
-	}
-
-	function sourceKey(model: ChatModel): string {
-		if (model.provider === 'agent') {
-			return `agent:${(model.agent_id || model.profile_id || 'agent').toLowerCase()}`;
-		}
-		return `connection:${(model.connection_id || model.source_name || model.provider || 'other').toLowerCase()}`;
-	}
-
-	function sourceLabel(model: ChatModel): string {
-		if (model.provider === 'agent') {
-			return formatSourceName(model.agent_id || model.profile_id || 'Agent');
-		}
-		const configuredName = model.source_name?.trim();
-		return configuredName || formatSourceName(model.provider || 'Other');
-	}
-
-	function displayModelName(model: ChatModel): string {
-		if (model.provider !== 'agent') return model.name || model.id;
-		for (const candidate of [model.name, model.id]) {
-			if (!candidate.startsWith('agent:')) continue;
-			const slash = candidate.indexOf('/');
-			if (slash >= 0 && slash < candidate.length - 1) return candidate.slice(slash + 1);
-		}
-		return model.name || model.id;
-	}
-
-	function modelSearchText(model: ChatModel): string {
-		return [
-			displayModelName(model),
-			model.name,
-			model.id,
-			model.provider,
-			model.source_name,
-			model.agent_id,
-			model.profile_id,
-			sourceLabel(model)
-		]
-			.filter(Boolean)
-			.join(' ')
-			.toLowerCase();
-	}
-
-	const selectorMaxHeight = $derived(
-		isSmallViewport ? 'min(58dvh,30rem)' : 'min(55vh,28rem)'
-	);
+	const selectorMaxHeight = $derived(isSmallViewport ? 'min(58dvh,30rem)' : 'min(55vh,28rem)');
 
 	const matchingModels = $derived(
 		search.trim()
@@ -106,16 +44,7 @@
 			: $chatModels
 	);
 
-	const modelGroups = $derived.by(() => {
-		const groups = new Map<string, { label: string; models: ChatModel[] }>();
-		for (const model of matchingModels) {
-			const key = sourceKey(model);
-			const existing = groups.get(key);
-			if (existing) existing.models.push(model);
-			else groups.set(key, { label: sourceLabel(model), models: [model] });
-		}
-		return Array.from(groups.values());
-	});
+	const modelGroups = $derived(groupModelsBySource(matchingModels));
 
 	const filtered = $derived(modelGroups.flatMap((group) => group.models));
 
