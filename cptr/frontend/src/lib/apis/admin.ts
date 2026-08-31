@@ -191,6 +191,7 @@ export interface ModelConfigResponse {
 		name: string;
 		provider: string;
 		connection_id: string;
+		source_name?: string;
 		agent_id?: string;
 		profile_id?: string;
 	}[];
@@ -208,6 +209,12 @@ export const updateModelConfig = (
 ) =>
 	fetchJSON(`/api/admin/models/${encodeURIComponent(modelId)}/config`, {
 		...jsonBody(update),
+		method: 'PUT'
+	});
+
+export const bulkUpdateModelConfig = (modelIds: string[], isActive: boolean) =>
+	fetchJSON<{ ok: boolean; updated: number }>('/api/admin/models/bulk/config', {
+		...jsonBody({ model_ids: modelIds, is_active: isActive }),
 		method: 'PUT'
 	});
 

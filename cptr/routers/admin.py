@@ -13,6 +13,7 @@ from cptr.utils.config import AuthResult, _get_jwt_secret, check_access, hash_pa
 from cptr.utils.crypto import decrypt_key, encrypt_key, mask_key
 from cptr.utils.agents.detection import get_agent_status, invalidate_agent_detection_cache
 from cptr.utils.agents.models import save_agent_profiles
+from cptr.utils.model_config import apply_bulk_model_active_state
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -452,6 +453,7 @@ async def _build_model_config(request: Request):
                     "id": prefixed_id,
                     "name": model_id,
                     "provider": conn.get("provider", ""),
+                    "source_name": conn.get("name") or conn.get("provider", ""),
                     "connection_id": conn["id"],
                 }
             )
@@ -474,6 +476,29 @@ async def refresh_model_list(request: Request):
 class UpdateModelConfigRequest(BaseModel):
     is_active: Optional[bool] = None
     params: Optional[dict] = None
+
+
+class BulkUpdateModelConfigRequest(BaseModel):
+    model_ids: list[str]
+    is_active: bool
+
+
+@router.put("/models/bulk/config")
+async def bulk_update_model_config(request: Request, body: BulkUpdateModelConfigRequest):
+    """Atomically enable or disable a set of models while preserving their other config."""
+    require_admin(request)
+    model_ids = [
+        model_id.strip()
+        for model_id in dict.fromkeys(body.model_ids)
+        if model_id.strip() and model_id.strip() != "*"
+    ]
+    if not model_ids:
+        return {"ok": True, "updated": 0}
+
+    all_config = await Config.get(CONFIG_KEY_CHAT_MODELS) or {}
+    all_config = apply_bulk_model_active_state(all_config, model_ids, body.is_active)
+    await Config.upsert({CONFIG_KEY_CHAT_MODELS: all_config})
+    return {"ok": True, "updated": len(model_ids)}
 
 
 @router.put("/models/{model_id:path}/config")

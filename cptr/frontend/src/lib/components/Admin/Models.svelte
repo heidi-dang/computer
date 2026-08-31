@@ -5,6 +5,7 @@
 		getModelConfig,
 		refreshModelList,
 		updateModelConfig,
+		bulkUpdateModelConfig,
 		getAdminConfig,
 		updateConfig,
 		type ModelConfigEntry
@@ -23,6 +24,10 @@
 		id: string;
 		name: string;
 		provider: string;
+		connection_id: string;
+		source_name?: string;
+		agent_id?: string;
+		profile_id?: string;
 		is_active: boolean;
 		rows: ParamRow[];
 		systemPrompt: string;
@@ -34,8 +39,10 @@
 	let loading = $state(true);
 	let saving = $state(false);
 	let refreshing = $state(false);
+	let bulkUpdating = $state(false);
 	let models = $state<ModelEntry[]>([]);
 	let selectedId = $state<string | null>(null);
+	let modelSearch = $state('');
 
 	let globalRows = $state<ParamRow[]>([]);
 	let globalSystemPrompt = $state('');
@@ -114,6 +121,27 @@ Files:
 {{FILE_TREE}}`;
 
 	let hasDirty = $derived(globalDirty || models.some((m) => m.dirty));
+
+	function modelSearchText(model: ModelEntry): string {
+		return [
+			model.name,
+			model.id,
+			model.provider,
+			model.source_name,
+			model.agent_id,
+			model.profile_id
+		]
+			.filter(Boolean)
+			.join(' ')
+			.toLowerCase();
+	}
+
+	let filteredModels = $derived.by(() => {
+		const query = modelSearch.trim().toLowerCase();
+		return query ? models.filter((model) => modelSearchText(model).includes(query)) : models;
+	});
+	let visibleEnabledCount = $derived(filteredModels.filter((model) => model.is_active).length);
+	let visibleDisabledCount = $derived(filteredModels.filter((model) => !model.is_active).length);
 
 	function parseRows(config: ModelConfigEntry | undefined): ParamRow[] {
 		const rp = config?.params?.request_params;
@@ -278,10 +306,34 @@ Files:
 		models = [...models];
 		try {
 			await updateModelConfig(model.id, { is_active: newVal });
+			await refreshChatState();
 		} catch {
 			model.is_active = !newVal;
 			models = [...models];
 			toast.error($t('models.failedToToggle'));
+		}
+	}
+
+	async function bulkSetVisibleModels(newVal: boolean) {
+		const targets = filteredModels.filter((model) => model.is_active !== newVal);
+		if (targets.length === 0 || bulkUpdating) return;
+
+		bulkUpdating = true;
+		try {
+			const targetIds = targets.map((model) => model.id);
+			const targetSet = new Set(targetIds);
+			const result = await bulkUpdateModelConfig(targetIds, newVal);
+			models = models.map((model) =>
+				targetSet.has(model.id) ? { ...model, is_active: newVal } : model
+			);
+			await refreshChatState();
+			toast.success(
+				$t(newVal ? 'models.bulkEnabled' : 'models.bulkDisabled', { count: result.updated })
+			);
+		} catch {
+			toast.error($t('models.bulkFailed'));
+		} finally {
+			bulkUpdating = false;
 		}
 	}
 
@@ -534,7 +586,7 @@ Files:
 				<button
 					class="flex items-center justify-center w-6 h-6 rounded-lg text-gray-400 hover:text-gray-700 disabled:opacity-50 disabled:hover:text-gray-400 dark:text-gray-600 dark:hover:text-gray-300 dark:disabled:hover:text-gray-600 transition-colors duration-75"
 					onclick={refreshModels}
-					disabled={refreshing || saving}
+					disabled={refreshing || saving || bulkUpdating}
 					aria-label={$t('models.refresh')}
 					use:tooltip={$t('models.refresh')}
 				>
@@ -619,8 +671,59 @@ Files:
 				)}
 			{/if}
 
+			<!-- Model search and bulk controls -->
+			<div class="app-subtle-surface mt-3 mb-2 rounded-2xl border p-2.5">
+				<div class="relative">
+					<Icon
+						name="search"
+						size={14}
+						class="app-icon-muted pointer-events-none absolute left-3 top-1/2 -translate-y-1/2"
+					/>
+					<input
+						type="search"
+						bind:value={modelSearch}
+						placeholder={$t('models.searchPlaceholder')}
+						class="app-raised-surface h-10 w-full rounded-xl border pl-9 pr-9 text-base sm:text-xs outline-none transition-shadow focus:ring-2 focus:ring-[var(--app-focus-ring)]"
+						spellcheck="false"
+					/>
+					{#if modelSearch}
+						<button
+							type="button"
+							class="app-interactive app-icon-muted absolute right-1.5 top-1/2 flex size-7 -translate-y-1/2 items-center justify-center rounded-lg"
+							onclick={() => (modelSearch = '')}
+							aria-label={$t('models.clearSearch')}
+						>
+							<Icon name="x" size={12} />
+						</button>
+					{/if}
+				</div>
+				<div class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
+					<span class="text-[0.6875rem] text-gray-400 dark:text-gray-500">
+						{$t('models.showingCount', { shown: filteredModels.length, total: models.length })}
+					</span>
+					<div class="grid w-full grid-cols-2 gap-2 sm:ml-auto sm:w-auto">
+						<button
+							type="button"
+							class="app-interactive min-h-9 rounded-xl border px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40"
+							disabled={bulkUpdating || visibleDisabledCount === 0}
+							onclick={() => bulkSetVisibleModels(true)}
+						>
+							{$t('models.enableShown', { count: visibleDisabledCount })}
+						</button>
+						<button
+							type="button"
+							class="app-interactive min-h-9 rounded-xl border px-3 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40"
+							disabled={bulkUpdating || visibleEnabledCount === 0}
+							onclick={() => bulkSetVisibleModels(false)}
+						>
+							{$t('models.disableShown', { count: visibleEnabledCount })}
+						</button>
+					</div>
+				</div>
+			</div>
+
 			<!-- Per-model list -->
-			{#each models as model}
+			{#each filteredModels as model}
 				<div class="group flex items-center gap-2 w-full h-7 text-left">
 					<button
 						type="button"
@@ -631,7 +734,11 @@ Files:
 					>
 						{model.name}
 					</button>
-					<ToggleSwitch value={model.is_active} onchange={(value) => toggleModel(model, value)} />
+					<ToggleSwitch
+						value={model.is_active}
+						disabled={bulkUpdating}
+						onchange={(value) => toggleModel(model, value)}
+					/>
 				</div>
 
 				{#if selectedId === model.id}
@@ -680,6 +787,10 @@ Files:
 				<p class="text-[0.8125rem] text-gray-400 dark:text-gray-600 py-4">
 					{$t('models.noModels')}
 				</p>
+			{:else if filteredModels.length === 0}
+				<p class="text-[0.8125rem] text-gray-400 dark:text-gray-600 py-4 text-center">
+					{$t('models.noMatches')}
+				</p>
 			{/if}
 		</div>
 
@@ -687,6 +798,7 @@ Files:
 			<button
 				class="text-[0.8125rem] text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors duration-100"
 				onclick={saveAll}
+				disabled={saving || bulkUpdating}
 			>
 				{#if saving}{$t('settings.saving')}{:else}{$t('settings.save')}{/if}
 			</button>
