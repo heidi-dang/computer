@@ -56,6 +56,8 @@ export type McpRecentRequestRow = {
 export type McpTrafficState = {
 	sequence: number;
 	eventCapacity: number;
+	sessionCapacity: number;
+	clientCapacity: number;
 	events: McpTrafficEvent[];
 	clients: Record<string, McpTrafficClientState>;
 	sessions: Record<string, McpTrafficSessionState>;
@@ -115,6 +117,28 @@ function eventLimit(snapshot: McpTrafficSnapshot): number {
 
 function boundedTail<T>(items: T[], limit: number): T[] {
 	return items.length <= limit ? items : items.slice(items.length - limit);
+}
+
+function oldestKey<T extends { lastSeen?: number; startedAt?: number }>(
+	record: Record<string, T>
+): string | null {
+	return (
+		Object.entries(record).sort(
+			([leftId, left], [rightId, right]) =>
+				(left.lastSeen ?? left.startedAt ?? 0) - (right.lastSeen ?? right.startedAt ?? 0) ||
+				leftId.localeCompare(rightId)
+		)[0]?.[0] ?? null
+	);
+}
+
+function pruneClients(clients: Record<string, McpTrafficClientState>, capacity: number): void {
+	while (Object.keys(clients).length > capacity) {
+		const removable = Object.values(clients)
+			.filter((client) => client.activeSessions === 0 && client.activeRequests === 0)
+			.sort((a, b) => a.lastSeen - b.lastSeen || a.id.localeCompare(b.id))[0];
+		if (!removable) break;
+		delete clients[removable.id];
+	}
 }
 
 function upsertClient(
@@ -242,9 +266,18 @@ export function hydrateMcpTraffic(snapshot: McpTrafficSnapshot): McpTrafficState
 	) as Record<string, McpTrafficSessionState>;
 	const derived = reconstructDerivedState(events, clients, limit);
 
+	const sessionCapacity = Math.max(
+		1,
+		snapshot.stream_health.session_capacity || snapshot.sessions.length || 1
+	);
+	const clientCapacity = Math.max(8, limit + sessionCapacity);
+	pruneClients(clients, clientCapacity);
+
 	return {
 		sequence: snapshot.sequence,
 		eventCapacity: limit,
+		sessionCapacity,
+		clientCapacity,
 		events,
 		clients,
 		sessions,
@@ -287,6 +320,16 @@ export function applyMcpTrafficEvent(
 	switch (event.event_type) {
 		case 'session_opened':
 			if (event.session_id) {
+				if (!sessions[event.session_id] && Object.keys(sessions).length >= state.sessionCapacity) {
+					const evictedSessionId = oldestKey(sessions);
+					if (evictedSessionId) {
+						const evictedClient = clients[sessions[evictedSessionId].clientId];
+						if (evictedClient) {
+							evictedClient.activeSessions = Math.max(0, evictedClient.activeSessions - 1);
+						}
+						delete sessions[evictedSessionId];
+					}
+				}
 				if (!sessions[event.session_id]) client.activeSessions += 1;
 				sessions[event.session_id] = {
 					sessionId: event.session_id,
@@ -308,6 +351,17 @@ export function applyMcpTrafficEvent(
 		case 'request_started': {
 			const request = activeRequestFrom(event);
 			if (request && !activeRequests[request.requestId]) {
+				if (Object.keys(activeRequests).length >= state.eventCapacity) {
+					const evictedRequestId = oldestKey(activeRequests);
+					if (evictedRequestId) {
+						const evictedClient = clients[activeRequests[evictedRequestId].clientId];
+						if (evictedClient) {
+							evictedClient.activeRequests = Math.max(0, evictedClient.activeRequests - 1);
+						}
+						delete activeRequests[evictedRequestId];
+						recentRequests = recentRequests.filter((row) => row.requestId !== evictedRequestId);
+					}
+				}
 				activeRequests[request.requestId] = request;
 				client.activeRequests += 1;
 				recentRequests = replaceRecentRow(
@@ -335,6 +389,8 @@ export function applyMcpTrafficEvent(
 			if (event.tool_name) client.lastTool = event.tool_name;
 			break;
 	}
+
+	pruneClients(clients, state.clientCapacity);
 
 	return {
 		...state,
