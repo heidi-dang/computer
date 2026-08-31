@@ -160,9 +160,9 @@ async def get_mcp_traffic_snapshot(request: Request):
 async def stream_mcp_traffic(request: Request):
     """Stream bounded MCP traffic events to an authenticated admin browser."""
     require_admin(request)
-    queue = mcp_traffic_store.subscribe()
 
     async def _event_stream():
+        queue = mcp_traffic_store.subscribe()
         try:
             await mcp_traffic_store.expire_stale_sessions()
             yield _traffic_sse("snapshot", await mcp_traffic_store.snapshot())

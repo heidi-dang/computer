@@ -94,6 +94,24 @@ class McpTrafficApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("arguments", encoded)
         self.assertNotIn("result", encoded)
 
+    async def test_sse_subscribes_only_when_body_iteration_starts(self):
+        store = McpTrafficStore(max_events=8, max_sessions=4, subscriber_queue_size=2)
+        request = route_request()
+        admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
+
+        with (
+            patch.object(mcp_router, "mcp_traffic_store", store),
+            patch.object(mcp_router, "require_admin", admin),
+        ):
+            response = await mcp_router.stream_mcp_traffic(request)
+            self.assertEqual((await store.snapshot())["stream_health"]["subscriber_count"], 0)
+            iterator = response.body_iterator.__aiter__()
+            await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            self.assertEqual((await store.snapshot())["stream_health"]["subscriber_count"], 1)
+            await iterator.aclose()
+
+        self.assertEqual((await store.snapshot())["stream_health"]["subscriber_count"], 0)
+
     async def test_sse_emits_snapshot_then_new_traffic_event(self):
         store = McpTrafficStore(max_events=8, max_sessions=4, subscriber_queue_size=2)
         await store.ingest([traffic_event("event-001", "request_started")])
