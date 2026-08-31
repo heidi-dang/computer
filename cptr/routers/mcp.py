@@ -32,6 +32,7 @@ from pydantic import BaseModel
 
 from cptr.routers.admin import require_admin
 from cptr.services.control_auth import authenticate_control_request
+from cptr.services.mcp_activity import McpActivityBatch, mcp_activity_store
 from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
 from cptr.utils.crypto import decrypt_key
 
@@ -65,6 +66,20 @@ async def _require_traffic_writer(request: Request) -> str:
 
 
 def _traffic_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+async def _require_activity_writer(request: Request) -> str:
+    """Authenticate the plugin Activity writer with its dedicated scope."""
+    try:
+        return await authenticate_control_request(request, "mcp:activity:write")
+    except PermissionError as exc:
+        if str(exc).startswith("missing required scope"):
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc
+
+
+def _activity_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
 
@@ -138,6 +153,51 @@ class ResourceReadRequest(BaseModel):
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+@router.post("/activity/events")
+async def ingest_mcp_activity(request: Request, body: McpActivityBatch):
+    """Accept one bounded batch of redacted tool activity from the MCP adapter."""
+    await _require_activity_writer(request)
+    return await mcp_activity_store.ingest(body.events)
+
+
+@router.get("/activity/snapshot")
+async def get_mcp_activity_snapshot(request: Request):
+    """Return the admin-only bounded MCP tool activity snapshot."""
+    require_admin(request)
+    return await mcp_activity_store.snapshot()
+
+
+@router.get("/activity/stream")
+async def stream_mcp_activity(request: Request):
+    """Stream bounded MCP tool activity to an authenticated admin browser."""
+    require_admin(request)
+
+    async def _event_stream():
+        queue = mcp_activity_store.subscribe()
+        try:
+            yield _activity_sse("snapshot", await mcp_activity_store.snapshot())
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                yield _activity_sse("activity", event)
+        finally:
+            mcp_activity_store.unsubscribe(queue)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/traffic/events")
