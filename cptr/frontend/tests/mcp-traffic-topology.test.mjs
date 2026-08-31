@@ -222,6 +222,25 @@ test('topology UI exposes live graph, safe request table, responsive layout and 
 	assert.doesNotMatch(recent, /record\.arguments|record\.result|authorization|bearer token/i);
 });
 
+test('MCP Console uses one full-width pane at a time on mobile', async () => {
+	const console = await read('lib/components/mcp/McpConsole.svelte');
+
+	assert.match(console, /type MobileConsoleView = 'servers' \| 'console' \| 'tool'/);
+	assert.match(console, /let mobileView = \$state<MobileConsoleView>\('servers'\)/);
+	assert.match(console, /lg:hidden/);
+	assert.match(console, />\s*Servers\s*</);
+	assert.match(console, />\s*Activity\s*</);
+	assert.match(console, />\s*Tool\s*</);
+	assert.match(console, /flex-col[^"\n]*lg:flex-row/);
+	assert.match(console, /mobileView === 'servers'/);
+	assert.match(console, /mobileView === 'console'/);
+	assert.match(console, /mobileView === 'tool'/);
+	assert.match(console, /lg:w-56/);
+	assert.match(console, /lg:w-72/);
+	assert.match(console, /mobileView = 'tool'/);
+	assert.match(console, /mobileView = 'console'/);
+});
+
 test('reducer ignores duplicate and stale ingestion sequences', () => {
 	const initial = reducer.hydrateMcpTraffic(snapshot());
 	const event = trafficEvent(1, 'request_started');
