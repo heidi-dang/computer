@@ -191,6 +191,37 @@ test('reducer projects request completion and failure without unsafe payload fie
 	assert.equal(row.errorCode, 'tool_error');
 });
 
+test('topology UI exposes live graph, safe request table, responsive layout and console switch', async () => {
+	const [page, topology, graph, recent] = await Promise.all([
+		read('routes/mcp/+page.svelte'),
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpTopologyGraph.svelte'),
+		read('lib/components/mcp/McpRecentRequests.svelte')
+	]);
+
+	assert.match(page, /Topology/);
+	assert.match(page, /Console/);
+	assert.match(page, /McpTopology/);
+	assert.match(page, /McpConsole/);
+	assert.match(topology, /getMcpTrafficSnapshot/);
+	assert.match(topology, /openMcpTrafficStream/);
+	assert.match(topology, /reconnecting/);
+	assert.match(topology, /1000,\s*2000,\s*4000,\s*8000/);
+	assert.match(topology, /grid-cols-1/);
+	assert.match(topology, /lg:grid-cols/);
+	assert.match(graph, /<svg/);
+	assert.match(graph, /CPTR MCP/);
+	assert.match(graph, /traffic-particle/);
+	assert.match(graph, /center-ripple/);
+	assert.match(graph, /prefers-reduced-motion:\s*reduce/);
+	assert.match(recent, /Client/);
+	assert.match(recent, /Method \/ Tool/);
+	assert.match(recent, /In \/ Out/);
+	assert.match(recent, /Status/);
+	assert.match(recent, /When/);
+	assert.doesNotMatch(recent, /record\.arguments|record\.result|authorization|bearer token/i);
+});
+
 test('reducer ignores duplicate and stale ingestion sequences', () => {
 	const initial = reducer.hydrateMcpTraffic(snapshot());
 	const event = trafficEvent(1, 'request_started');
