@@ -154,6 +154,43 @@ test('reducer keeps active request and session maps bounded under missing termin
 	assert.equal(state.clients.gemini.activeSessions, 1);
 });
 
+test('reducer projects request completion and failure without unsafe payload fields', () => {
+	let state = reducer.hydrateMcpTraffic(snapshot());
+	state = reducer.applyMcpTrafficEvent(state, trafficEvent(1, 'request_started'));
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(2, 'request_finished', {
+			request_id: 'request-1',
+			status: 'complete',
+			duration_ms: 25,
+			response_bytes: 42
+		})
+	);
+	assert.equal(state.clients.chatgpt.activeRequests, 0);
+	assert.equal(state.clients.chatgpt.totalRequests, 1);
+	let row = reducer.recentRequestRows(state)[0];
+	assert.equal(row.status, 'complete');
+	assert.equal(row.durationMs, 25);
+	assert.equal(row.responseBytes, 42);
+	assert.equal('arguments' in row, false);
+	assert.equal('result' in row, false);
+
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(3, 'request_failed', {
+			request_id: 'request-missing-start',
+			status: 'error',
+			duration_ms: 10,
+			error_code: 'tool_error'
+		})
+	);
+	assert.equal(state.clients.chatgpt.totalRequests, 2);
+	assert.equal(state.clients.chatgpt.errors, 1);
+	row = reducer.recentRequestRows(state)[0];
+	assert.equal(row.status, 'error');
+	assert.equal(row.errorCode, 'tool_error');
+});
+
 test('reducer ignores duplicate and stale ingestion sequences', () => {
 	const initial = reducer.hydrateMcpTraffic(snapshot());
 	const event = trafficEvent(1, 'request_started');
