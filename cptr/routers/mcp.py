@@ -24,7 +24,10 @@ import logging
 from collections import deque
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+import json
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from cptr.routers.admin import require_admin
@@ -182,9 +185,20 @@ async def list_server_tools(request: Request, server_id: str):
 
 @router.post("/servers/{server_id}/tools/{tool_name}/invoke")
 async def invoke_server_tool(
-    request: Request, server_id: str, tool_name: str, body: InvokeToolRequest
+    request: Request,
+    server_id: str,
+    tool_name: str,
+    body: InvokeToolRequest,
+    stream: bool = Query(False, description="Return an SSE stream instead of a single JSON response"),
 ):
-    """Invoke a named tool on a specific MCP server."""
+    """Invoke a named tool on a specific MCP server.
+
+    Set ?stream=1 to receive Server-Sent Events:
+        event: tool_start   data: {"tool": "...", "arguments": {...}}
+        event: tool_chunk   data: <one McpContentItem as JSON>
+        event: tool_done    data: {"result": [...], "elapsed_ms": N}
+        event: tool_error   data: {"message": "..."}
+    """
     require_admin(request)
     servers = await _get_tool_servers()
     server = next((s for s in servers if s.get("id") == server_id), None)
@@ -193,7 +207,9 @@ async def invoke_server_tool(
     server_type = server.get("type", "openapi")
     if server_type not in ("mcp", "mcp_stdio"):
         raise HTTPException(400, "Server is not an MCP server")
-    try:
+
+    async def _run_tool():
+        """Connect and call the tool, returns (client, result, should_disconnect)."""
         client, should_disconnect = await asyncio.wait_for(_get_client(server), timeout=15.0)
         try:
             result = await asyncio.wait_for(
@@ -202,13 +218,55 @@ async def invoke_server_tool(
         finally:
             if should_disconnect:
                 await client.disconnect()
+        return result
+
+    def _sse(event: str, data: Any) -> str:
+        return "event: " + event + "\ndata: " + json.dumps(data) + "\n\n"
+
+    if stream:
+        async def _event_stream():
+            import time
+            t0 = time.time()
+            yield _sse("tool_start", {"tool": tool_name, "arguments": body.arguments})
+            try:
+                result = await _run_tool()
+                for item in result:
+                    content = item if isinstance(item, dict) else (item.model_dump() if hasattr(item, "model_dump") else str(item))
+                    yield _sse("tool_chunk", content)
+                elapsed_ms = int((time.time() - t0) * 1000)
+                result_serializable = [
+                    r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else str(r))
+                    for r in result
+                ]
+                yield _sse("tool_done", {"result": result_serializable, "elapsed_ms": elapsed_ms})
+            except asyncio.TimeoutError:
+                yield _sse("tool_error", {"message": "MCP tool call timed out"})
+            except Exception as exc:
+                yield _sse("tool_error", {"message": str(exc)})
+
+        return StreamingResponse(
+            _event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # Non-streaming path (default)
+    try:
+        result = await _run_tool()
     except asyncio.TimeoutError:
         raise HTTPException(504, "MCP tool call timed out")
     except RuntimeError as exc:
         raise HTTPException(422, str(exc))
     except Exception as exc:
         raise HTTPException(502, f"MCP error: {exc}")
-    return {"server_id": server_id, "tool": tool_name, "result": result}
+    result_serializable = [
+        r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else str(r))
+        for r in result
+    ]
+    return {"server_id": server_id, "tool": tool_name, "result": result_serializable}
 
 
 @router.get("/servers/{server_id}/status")
