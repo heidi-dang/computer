@@ -31,6 +31,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from cptr.routers.admin import require_admin
+from cptr.services.control_auth import authenticate_control_request
+from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
 from cptr.utils.crypto import decrypt_key
 
 logger = logging.getLogger(__name__)
@@ -52,12 +54,27 @@ def append_server_log(server_id: str, line: str) -> None:
     _log_buffer(server_id).append(line)
 
 
+async def _require_traffic_writer(request: Request) -> str:
+    """Authenticate the plugin telemetry writer with its dedicated scope."""
+    try:
+        return await authenticate_control_request(request, "mcp:traffic:write")
+    except PermissionError as exc:
+        if str(exc).startswith("missing required scope"):
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc
+
+
+def _traffic_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
 async def _get_tool_servers() -> list[dict]:
     """Load tool server configs from the Config store (same as admin router)."""
     from cptr.models import Config
+
     value = await Config.get("tool_servers")
     return list(value) if isinstance(value, list) else []
 
@@ -104,7 +121,9 @@ async def _get_client(server: dict):
         )
         return client, False  # keep-alive; don't disconnect after
 
-    raise ValueError(f"Server type '{server_type}' is not an MCP server (type must be 'mcp' or 'mcp_stdio')")
+    raise ValueError(
+        f"Server type '{server_type}' is not an MCP server (type must be 'mcp' or 'mcp_stdio')"
+    )
 
 
 # ── Request / response models ────────────────────────────────────────────────
@@ -119,6 +138,58 @@ class ResourceReadRequest(BaseModel):
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+@router.post("/traffic/events")
+async def ingest_mcp_traffic(request: Request, body: McpTrafficBatch):
+    """Accept one bounded batch of sanitized telemetry from the MCP adapter."""
+    await _require_traffic_writer(request)
+    await mcp_traffic_store.expire_stale_sessions()
+    return await mcp_traffic_store.ingest(body.events)
+
+
+@router.get("/traffic/snapshot")
+async def get_mcp_traffic_snapshot(request: Request):
+    """Return the admin-only current MCP topology snapshot."""
+    require_admin(request)
+    await mcp_traffic_store.expire_stale_sessions()
+    return await mcp_traffic_store.snapshot()
+
+
+@router.get("/traffic/stream")
+async def stream_mcp_traffic(request: Request):
+    """Stream bounded MCP traffic events to an authenticated admin browser."""
+    require_admin(request)
+    queue = mcp_traffic_store.subscribe()
+
+    async def _event_stream():
+        try:
+            await mcp_traffic_store.expire_stale_sessions()
+            yield _traffic_sse("snapshot", await mcp_traffic_store.snapshot())
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except TimeoutError:
+                    expired = await mcp_traffic_store.expire_stale_sessions()
+                    if expired:
+                        yield _traffic_sse("snapshot", await mcp_traffic_store.snapshot())
+                    else:
+                        yield ": keepalive\n\n"
+                    continue
+                yield _traffic_sse("traffic", event)
+        finally:
+            mcp_traffic_store.unsubscribe(queue)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/servers")
@@ -140,9 +211,7 @@ async def list_mcp_servers(request: Request):
         }
         if server_type in ("mcp", "mcp_stdio"):
             try:
-                client, should_disconnect = await asyncio.wait_for(
-                    _get_client(s), timeout=5.0
-                )
+                client, should_disconnect = await asyncio.wait_for(_get_client(s), timeout=5.0)
                 # Just poke list_tools to verify connection
                 await asyncio.wait_for(client.list_tool_specs(), timeout=5.0)
                 entry["health"] = "connected"
@@ -189,7 +258,9 @@ async def invoke_server_tool(
     server_id: str,
     tool_name: str,
     body: InvokeToolRequest,
-    stream: bool = Query(False, description="Return an SSE stream instead of a single JSON response"),
+    stream: bool = Query(
+        False, description="Return an SSE stream instead of a single JSON response"
+    ),
 ):
     """Invoke a named tool on a specific MCP server.
 
@@ -224,18 +295,26 @@ async def invoke_server_tool(
         return "event: " + event + "\ndata: " + json.dumps(data) + "\n\n"
 
     if stream:
+
         async def _event_stream():
             import time
+
             t0 = time.time()
             yield _sse("tool_start", {"tool": tool_name, "arguments": body.arguments})
             try:
                 result = await _run_tool()
                 for item in result:
-                    content = item if isinstance(item, dict) else (item.model_dump() if hasattr(item, "model_dump") else str(item))
+                    content = (
+                        item
+                        if isinstance(item, dict)
+                        else (item.model_dump() if hasattr(item, "model_dump") else str(item))
+                    )
                     yield _sse("tool_chunk", content)
                 elapsed_ms = int((time.time() - t0) * 1000)
                 result_serializable = [
-                    r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else str(r))
+                    r
+                    if isinstance(r, dict)
+                    else (r.model_dump() if hasattr(r, "model_dump") else str(r))
                     for r in result
                 ]
                 yield _sse("tool_done", {"result": result_serializable, "elapsed_ms": elapsed_ms})
@@ -284,6 +363,7 @@ async def get_server_status(request: Request, server_id: str):
     # For stdio, check if we have a live managed session
     if server_type == "mcp_stdio":
         from cptr.utils.mcp.stdio_manager import stdio_manager
+
         client = stdio_manager._instances.get(server_id)
         connected = client is not None and client.session is not None
         return {
@@ -317,6 +397,7 @@ async def reconnect_server(request: Request, server_id: str):
 
     if server_type == "mcp_stdio":
         from cptr.utils.mcp.stdio_manager import stdio_manager
+
         # Kill existing session if present
         await stdio_manager.disconnect(server_id)
         command = server.get("command", "")
@@ -361,7 +442,7 @@ async def get_server_logs(request: Request, server_id: str, limit: int = 200):
     if server.get("type") != "mcp_stdio":
         raise HTTPException(400, "Log streaming is only available for stdio MCP servers")
     buf = _log_buffer(server_id)
-    lines = list(buf)[-max(1, min(limit, 500)):]
+    lines = list(buf)[-max(1, min(limit, 500)) :]
     return {"server_id": server_id, "lines": lines, "total_buffered": len(buf)}
 
 
@@ -455,9 +536,7 @@ async def list_server_resources(request: Request, server_id: str):
 
 
 @router.post("/servers/{server_id}/resources/read")
-async def read_server_resource(
-    request: Request, server_id: str, body: ResourceReadRequest
-):
+async def read_server_resource(request: Request, server_id: str, body: ResourceReadRequest):
     """Read a specific MCP resource by URI."""
     require_admin(request)
     servers = await _get_tool_servers()
@@ -472,9 +551,7 @@ async def read_server_resource(
         try:
             if not client.session:
                 raise RuntimeError("Not connected")
-            result = await asyncio.wait_for(
-                client.session.read_resource(body.uri), timeout=30.0
-            )
+            result = await asyncio.wait_for(client.session.read_resource(body.uri), timeout=30.0)
             contents = [c.model_dump() for c in result.contents]
         finally:
             if should_disconnect:
