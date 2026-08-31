@@ -19,13 +19,14 @@ test('models admin API exposes connection display metadata and atomic bulk updat
 
 test('models settings filters by model and source metadata', async () => {
 	const models = await read('lib/components/Admin/Models.svelte');
+	const displayUtils = await read('lib/utils/model-display.ts');
 
 	assert.match(models, /modelSearch/);
 	assert.match(models, /filteredModels/);
 	assert.match(models, /modelSearchText/);
-	assert.match(models, /model\.source_name/);
-	assert.match(models, /model\.agent_id/);
-	assert.match(models, /model\.profile_id/);
+	assert.match(displayUtils, /model\.source_name/);
+	assert.match(displayUtils, /model\.agent_id/);
+	assert.match(displayUtils, /model\.profile_id/);
 	assert.match(models, /models\.searchPlaceholder/);
 });
 

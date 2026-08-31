@@ -13,6 +13,7 @@
 	import { t } from '$lib/i18n';
 	import { tooltip } from '$lib/tooltip';
 	import { refreshChatState } from '$lib/stores/chat';
+	import { displayModelName, groupModelsBySource, modelSearchText } from '$lib/utils/model-display';
 	import Icon from '../Icon.svelte';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import ModelSelector from '$lib/components/common/ModelSelector.svelte';
@@ -122,24 +123,11 @@ Files:
 
 	let hasDirty = $derived(globalDirty || models.some((m) => m.dirty));
 
-	function modelSearchText(model: ModelEntry): string {
-		return [
-			model.name,
-			model.id,
-			model.provider,
-			model.source_name,
-			model.agent_id,
-			model.profile_id
-		]
-			.filter(Boolean)
-			.join(' ')
-			.toLowerCase();
-	}
-
 	let filteredModels = $derived.by(() => {
 		const query = modelSearch.trim().toLowerCase();
 		return query ? models.filter((model) => modelSearchText(model).includes(query)) : models;
 	});
+	let filteredModelGroups = $derived(groupModelsBySource(filteredModels));
 	let visibleEnabledCount = $derived(filteredModels.filter((model) => model.is_active).length);
 	let visibleDisabledCount = $derived(filteredModels.filter((model) => !model.is_active).length);
 
@@ -722,65 +710,92 @@ Files:
 				</div>
 			</div>
 
-			<!-- Per-model list -->
-			{#each filteredModels as model}
-				<div class="group flex items-center gap-2 w-full h-7 text-left">
-					<button
-						type="button"
-						class="flex-1 min-w-0 text-left text-[0.8125rem] truncate {model.is_active
-							? 'text-gray-700 dark:text-gray-300'
-							: 'text-gray-400 dark:text-gray-600'}"
-						onclick={() => (selectedId = selectedId === model.id ? null : model.id)}
+			<!-- Per-model list grouped exactly like the model selector -->
+			{#each filteredModelGroups as group (group.key)}
+				<section
+					class="mb-3 overflow-hidden rounded-2xl border border-gray-200/80 dark:border-white/8"
+				>
+					<div
+						class="app-raised-surface flex min-h-9 items-center justify-between gap-2 border-b border-gray-200/80 px-3 py-2 dark:border-white/8"
 					>
-						{model.name}
-					</button>
-					<ToggleSwitch
-						value={model.is_active}
-						disabled={bulkUpdating}
-						onchange={(value) => toggleModel(model, value)}
-					/>
-				</div>
+						<span
+							class="text-[0.6875rem] font-medium tracking-wide text-gray-500 dark:text-gray-400"
+						>
+							{group.label}
+						</span>
+						<span class="text-[0.625rem] tabular-nums text-gray-400 dark:text-gray-600">
+							{group.models.length}
+						</span>
+					</div>
 
-				{#if selectedId === model.id}
-					{@render compactThresholdField(
-						`model-${model.id}-compact-threshold`,
-						model.compactTokenThreshold,
-						(value) => {
-							model.compactTokenThreshold = value;
-							model.dirty = true;
-						}
-					)}
-					{@render systemPromptField(
-						model.systemPrompt,
-						(v) => {
-							model.systemPrompt = v;
-							model.dirty = true;
-						},
-						$t('models.systemPromptInherited')
-					)}
-					{@render builtinToolsField(
-						model.builtinTools,
-						globalBuiltinTools,
-						(tools) => {
-							model.builtinTools = tools;
-							model.dirty = true;
-							models = [...models];
-						},
-						$t('models.resetToDefault')
-					)}
-					{@render paramRows(
-						model.rows,
-						() => (model.dirty = true),
-						(i) => {
-							model.rows = model.rows.filter((_, idx) => idx !== i);
-							model.dirty = true;
-						},
-						() => {
-							model.rows = [...model.rows, { key: '', value: '' }];
-							model.dirty = true;
-						}
-					)}
-				{/if}
+					<div class="divide-y divide-gray-100 dark:divide-white/5">
+						{#each group.models as model (model.id)}
+							<div class="px-1.5 py-0.5">
+								<div
+									class="app-interactive group flex min-h-10 w-full items-center gap-2 rounded-xl px-2 text-left"
+								>
+									<button
+										type="button"
+										class="min-w-0 flex-1 py-2 text-left text-[0.8125rem] leading-snug break-words {model.is_active
+											? 'text-gray-700 dark:text-gray-300'
+											: 'text-gray-400 dark:text-gray-600'}"
+										onclick={() => (selectedId = selectedId === model.id ? null : model.id)}
+									>
+										{displayModelName(model)}
+									</button>
+									<ToggleSwitch
+										value={model.is_active}
+										disabled={bulkUpdating}
+										onchange={(value) => toggleModel(model, value)}
+									/>
+								</div>
+
+								{#if selectedId === model.id}
+									<div class="px-2 pb-2">
+										{@render compactThresholdField(
+											`model-${model.id}-compact-threshold`,
+											model.compactTokenThreshold,
+											(value) => {
+												model.compactTokenThreshold = value;
+												model.dirty = true;
+											}
+										)}
+										{@render systemPromptField(
+											model.systemPrompt,
+											(v) => {
+												model.systemPrompt = v;
+												model.dirty = true;
+											},
+											$t('models.systemPromptInherited')
+										)}
+										{@render builtinToolsField(
+											model.builtinTools,
+											globalBuiltinTools,
+											(tools) => {
+												model.builtinTools = tools;
+												model.dirty = true;
+												models = [...models];
+											},
+											$t('models.resetToDefault')
+										)}
+										{@render paramRows(
+											model.rows,
+											() => (model.dirty = true),
+											(i) => {
+												model.rows = model.rows.filter((_, idx) => idx !== i);
+												model.dirty = true;
+											},
+											() => {
+												model.rows = [...model.rows, { key: '', value: '' }];
+												model.dirty = true;
+											}
+										)}
+									</div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+				</section>
 			{/each}
 
 			{#if models.length === 0}
