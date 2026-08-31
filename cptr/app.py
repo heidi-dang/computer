@@ -236,6 +236,7 @@ async def auth_middleware(request: Request, call_next):
         or path == "/api/config"
         or path == "/api/changelog"
         or path == "/manifest.json"
+        or (request.method == "POST" and path == "/api/mcp/traffic/events")
     ):
         return await call_next(request)
     if (
