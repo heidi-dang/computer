@@ -1746,7 +1746,7 @@
 >
 	{#if !isLanding}
 		<div
-			class="relative z-30 -mb-12 flex h-7 shrink-0 items-center gap-2 pl-3 pr-2 dark:border-white/6"
+			class="chat-floating-header relative z-30 -mb-12 flex h-8 shrink-0 items-center gap-2 pl-3 pr-2 dark:border-white/6"
 			style="border-color: color-mix(in oklab, var(--app-fg) 8%, transparent);"
 		>
 			<div
@@ -1762,7 +1762,7 @@
 			<div class="flex shrink-0 items-center gap-0.5">
 				<button
 					type="button"
-					class="relative flex size-6 shrink-0 items-center justify-center rounded-lg transition-colors duration-75 {statusButtonClass}"
+					class="touch-target app-interactive relative flex size-7 shrink-0 items-center justify-center rounded-xl transition-colors duration-75 {statusButtonClass}"
 					aria-label={$t('bar.newChat')}
 					title={$t('bar.newChat')}
 					use:tooltip={$t('bar.newChat')}
@@ -1773,7 +1773,7 @@
 				<button
 					bind:this={statusButtonEl}
 					type="button"
-					class="relative flex size-6 shrink-0 items-center justify-center rounded-lg transition-colors duration-75 {statusButtonClass}"
+					class="touch-target app-interactive relative flex size-7 shrink-0 items-center justify-center rounded-xl transition-colors duration-75 {statusButtonClass}"
 					aria-label={statusTitle}
 					title={statusTitle}
 					use:tooltip={statusTitle}
@@ -1789,13 +1789,13 @@
 		<!-- Landing: input + recent chats -->
 		<div class="flex-1 overflow-y-auto flex flex-col">
 			<div
-				class="max-w-xl w-full mx-auto px-4 flex flex-col my-auto pt-6 {previousChats.length === 0
+				class="chat-landing max-w-2xl w-full mx-auto px-4 sm:px-6 flex flex-col my-auto pt-8 {previousChats.length === 0
 					? 'pb-20'
-					: 'pb-6'}"
+					: 'pb-8'}"
 			>
 				<!-- Greeting -->
 				<div class="mb-8 text-center">
-					<h1 class="text-lg font-normal text-gray-800 dark:text-gray-200 tracking-tight">
+					<h1 class="text-xl sm:text-2xl font-medium text-gray-800 dark:text-gray-200 tracking-tight">
 						{$t('chat.greeting')}
 					</h1>
 				</div>
@@ -1853,9 +1853,9 @@
 				onscroll={handleMessagesScroll}
 			>
 				<div
-					class="{$widescreenMode
+					class="chat-transcript {$widescreenMode
 						? 'max-w-full'
-						: 'max-w-2xl'} mx-auto w-full px-4 pt-16 pb-16 flex flex-col gap-4"
+						: 'max-w-3xl'} mx-auto w-full px-4 sm:px-6 pt-16 pb-20 flex flex-col gap-5"
 				>
 					{#if hasHiddenMessages}
 						<div bind:this={loadSentinelEl} class="h-1 w-full" aria-hidden="true"></div>
@@ -1898,8 +1898,8 @@
 		{/if}
 
 		<!-- Input area -->
-		<div class="px-4 py-3" style="background: var(--app-bg);">
-			<div class="{$widescreenMode ? 'max-w-full' : 'max-w-2xl'} mx-auto w-full relative">
+		<div class="chat-input-dock mobile-safe-bottom px-3 sm:px-4 pt-2.5 pb-3" style="background: var(--app-bg);">
+			<div class="{$widescreenMode ? 'max-w-full' : 'max-w-3xl'} mx-auto w-full relative">
 				{#if !autoScroll && activePath.length > 0}
 					<div
 						class="absolute -top-10 left-0 right-0 pr-2 flex justify-end z-30 pointer-events-none"
@@ -1986,3 +1986,35 @@
 		}}
 	/>
 {/if}
+
+<style>
+	.chat-input-dock {
+		border-top: 1px solid color-mix(in oklab, var(--app-accent) 6%, transparent);
+		background: color-mix(in oklab, var(--app-bg) 96%, transparent) !important;
+		backdrop-filter: blur(16px);
+		-webkit-backdrop-filter: blur(16px);
+	}
+
+	@media (max-width: 767px) {
+		.chat-floating-header {
+			height: 2.75rem;
+			padding-inline: 0.5rem;
+		}
+
+		.chat-transcript {
+			padding-left: 0.875rem;
+			padding-right: 0.875rem;
+			padding-bottom: 6rem;
+			gap: 1.125rem;
+		}
+
+		.chat-landing {
+			padding-top: 2rem;
+		}
+
+		.chat-input-dock {
+			padding-left: max(0.625rem, env(safe-area-inset-left, 0px));
+			padding-right: max(0.625rem, env(safe-area-inset-right, 0px));
+		}
+	}
+</style>

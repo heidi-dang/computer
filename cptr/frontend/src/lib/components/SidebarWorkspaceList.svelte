@@ -301,7 +301,7 @@
 	});
 </script>
 
-<div class="flex items-center justify-between h-8 pl-3.5 pr-1.5 shrink-0">
+<div class="flex items-center justify-between min-h-9 pl-3.5 pr-1.5 shrink-0">
 	<button
 		class="group flex flex-1 h-full items-center gap-1 text-left text-xs text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400 transition-colors duration-100"
 		onclick={() => (workspacesExpanded = !workspacesExpanded)}
@@ -317,7 +317,7 @@
 		</span>
 	</button>
 	<button
-		class="flex items-center justify-center w-7 h-7 rounded-lg text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 transition-colors duration-100"
+		class="touch-target app-interactive flex items-center justify-center w-8 h-8 rounded-xl text-gray-300 hover:text-gray-500 dark:text-gray-600 dark:hover:text-gray-400 transition-colors duration-100"
 		onclick={onaddworkspace}
 		aria-label={$t('sidebar.addWorkspace')}
 		use:tooltip={$t('sidebar.addWorkspace')}
@@ -339,9 +339,9 @@
 		{@const isLoading = wsChatsLoading.has(ws.path)}
 		<div class="ws-item">
 			<div
-				class="group flex items-center gap-1 w-full h-7 px-2 rounded-lg text-xs font-medium transition-colors duration-100
+				class="workspace-row app-interactive group flex items-center gap-1 w-full min-h-8 px-2.5 rounded-xl text-xs font-medium transition-colors duration-100
 				{ws.path === currentPath
-					? 'bg-gray-200/50 text-gray-900 dark:bg-white/8 dark:text-white'
+					? 'app-interactive-active text-gray-900 dark:text-white'
 					: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 			>
 				<a
@@ -489,7 +489,17 @@
 	@reference "../../app.css";
 
 	.ws-item {
-		margin-bottom: 0.125rem;
+		margin-bottom: 0.1875rem;
+	}
+
+	.workspace-row:hover {
+		background: var(--app-hover);
+	}
+
+	@media (max-width: 767px) {
+		.workspace-row {
+			min-height: 2.75rem;
+		}
 	}
 
 	.ws-icon-toggle {

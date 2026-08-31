@@ -67,7 +67,7 @@
 
 {#if $sidebarOpen}
 	<button
-		class="fixed inset-0 bg-black/50 z-40 cursor-default md:hidden"
+		class="fixed inset-0 z-40 cursor-default bg-[#00101f]/70 backdrop-blur-[2px] md:hidden"
 		onclick={closeSidebar}
 		aria-label={$t('sidebar.closeSidebar')}
 	></button>
@@ -116,14 +116,18 @@
 		left: 0;
 		top: 0;
 		bottom: 0;
-		width: 13.75rem;
+		width: min(20rem, 88vw);
 		z-index: 50;
 		display: flex;
 		flex-direction: column;
-		background: var(--app-bg);
+		background: color-mix(in oklab, var(--app-surface) 96%, transparent);
 		color: var(--app-fg);
 		border-right: 1px solid var(--app-border);
 		padding-top: env(safe-area-inset-top, 0);
+		padding-bottom: env(safe-area-inset-bottom, 0);
+		box-shadow: 1rem 0 3rem -2rem var(--app-shadow-color);
+		backdrop-filter: blur(18px);
+		-webkit-backdrop-filter: blur(18px);
 	}
 
 	:global(.dark) .sidebar {
@@ -135,6 +139,9 @@
 			position: relative;
 			z-index: auto;
 			width: var(--sw, 13.75rem);
+			box-shadow: none;
+			backdrop-filter: none;
+			-webkit-backdrop-filter: none;
 		}
 	}
 

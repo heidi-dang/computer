@@ -169,12 +169,29 @@
 	function terminalTheme() {
 		const background = themeColor('--app-bg');
 		const foreground = themeColor('--app-fg');
+		const nightOwl = document.documentElement.classList.contains('dark');
 		return {
 			background,
 			foreground,
-			cursor: foreground,
+			cursor: nightOwl ? '#82aaff' : foreground,
 			cursorAccent: background,
-			selectionBackground: withAlpha(foreground, 0.2)
+			selectionBackground: nightOwl ? 'rgba(130, 170, 255, 0.24)' : withAlpha(foreground, 0.2),
+			black: nightOwl ? '#011627' : '#111827',
+			red: nightOwl ? '#ef5350' : '#dc2626',
+			green: nightOwl ? '#22da6e' : '#16a34a',
+			yellow: nightOwl ? '#addb67' : '#ca8a04',
+			blue: nightOwl ? '#82aaff' : '#2563eb',
+			magenta: nightOwl ? '#c792ea' : '#9333ea',
+			cyan: nightOwl ? '#21c7a8' : '#0891b2',
+			white: nightOwl ? '#d6deeb' : '#e5e7eb',
+			brightBlack: nightOwl ? '#637777' : '#6b7280',
+			brightRed: nightOwl ? '#ff5874' : '#ef4444',
+			brightGreen: nightOwl ? '#7fdbca' : '#22c55e',
+			brightYellow: nightOwl ? '#ecc48d' : '#eab308',
+			brightBlue: nightOwl ? '#a4baff' : '#3b82f6',
+			brightMagenta: nightOwl ? '#d6a4ff' : '#a855f7',
+			brightCyan: nightOwl ? '#5fdbc4' : '#06b6d4',
+			brightWhite: nightOwl ? '#ffffff' : '#f9fafb'
 		};
 	}
 

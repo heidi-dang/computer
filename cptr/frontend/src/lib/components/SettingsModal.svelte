@@ -191,14 +191,14 @@
 
 <Modal
 	{onclose}
-	class="w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-4 md:mx-0 flex flex-col md:flex-row max-h-[85vh] lg:max-h-[90vh] md:h-[35rem] lg:h-[42rem] xl:h-[46rem]"
+	class="w-full max-w-3xl lg:max-w-4xl xl:max-w-5xl mx-0 sm:mx-4 md:mx-0 flex flex-col md:flex-row h-[92dvh] sm:h-auto max-h-[92dvh] lg:max-h-[90vh] md:h-[35rem] lg:h-[42rem] xl:h-[46rem]"
 >
 	<nav
-		class="shrink-0 min-w-0 md:min-h-0 overflow-x-auto md:overflow-x-hidden md:overflow-y-auto scrollbar-none border-b md:border-b-0 md:border-r border-gray-200 dark:border-white/6 md:w-[11.25rem]"
+		class="settings-nav shrink-0 min-w-0 md:min-h-0 overflow-x-auto md:overflow-x-hidden md:overflow-y-auto scrollbar-none border-b md:border-b-0 md:border-r border-gray-200 dark:border-white/6 md:w-[12rem]"
 	>
 		<div class="flex w-max min-w-full md:w-auto md:min-w-0 md:flex-col p-1 gap-px">
 			<button
-				class="flex items-center gap-1.5 h-7 px-2 md:w-full shrink-0 rounded-lg text-xs text-gray-400 dark:text-gray-600 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-75 md:mb-1"
+				class="touch-target app-interactive flex items-center gap-2 min-h-8 px-2.5 md:w-full shrink-0 rounded-xl text-xs text-gray-400 dark:text-gray-600 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-75 md:mb-1"
 				onclick={onclose}
 			>
 				<Icon name="chevron-left" size={12} />
@@ -208,9 +208,9 @@
 			<!-- Personal -->
 			{#each personalTabs as tab}
 				<button
-					class="flex items-center gap-1.5 h-7 px-2 md:w-full shrink-0 rounded-lg text-xs text-left transition-colors duration-75
+					class="touch-target app-interactive flex items-center gap-2 min-h-8 px-2.5 md:w-full shrink-0 rounded-xl text-xs text-left transition-colors duration-75
 						{activeTab === tab.id
-						? 'font-medium text-gray-900 dark:text-white bg-gray-100 dark:bg-white/6'
+						? 'app-interactive-active font-medium text-gray-900 dark:text-white'
 						: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 					onclick={() => (activeTab = tab.id)}
 				>
@@ -228,9 +228,9 @@
 
 				{#each adminTabs as tab}
 					<button
-						class="flex items-center gap-1.5 h-7 px-2 md:w-full shrink-0 rounded-lg text-xs text-left transition-colors duration-75
+						class="touch-target app-interactive flex items-center gap-2 min-h-8 px-2.5 md:w-full shrink-0 rounded-xl text-xs text-left transition-colors duration-75
 							{activeTab === tab.id
-							? 'font-medium text-gray-900 dark:text-white bg-gray-100 dark:bg-white/6'
+							? 'app-interactive-active font-medium text-gray-900 dark:text-white'
 							: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 						onclick={() => (activeTab = tab.id)}
 					>
@@ -242,7 +242,7 @@
 		</div>
 	</nav>
 
-	<div class="flex-1 overflow-y-auto scrollbar-none min-h-0 p-4 md:px-5">
+	<div class="settings-content flex-1 overflow-y-auto scrollbar-none min-h-0 p-4 sm:p-5 md:px-6">
 		{#if activeTab === 'general'}
 			<General {showPwaSettings} />
 		{:else if activeTab === 'notifications'}

@@ -15,6 +15,7 @@
 	import {
 		DEFAULT_BORDER_CONTRAST,
 		MAX_BORDER_CONTRAST,
+		NIGHTOWL_THEME_CONFIG,
 		normalizeBorderContrast,
 		normalizeHexColor,
 		resolveThemeMode,
@@ -61,6 +62,18 @@
 	function setTheme(v: Theme) {
 		theme.set(v);
 	}
+
+	function applyNightOwlPreset() {
+		theme.set('dark');
+		themeConfig.set(sanitizeThemeConfig(NIGHTOWL_THEME_CONFIG));
+		borderContrast.set(null);
+	}
+
+	const nightOwlActive = $derived(
+		$theme === 'dark' &&
+		resolvedConfig.background.toLowerCase() === '#011627' &&
+		resolvedConfig.foreground.toLowerCase() === '#d6deeb'
+	);
 
 	function updateThemeColors(next: { background?: string; foreground?: string }) {
 		const current = $themeConfig ?? {};
@@ -279,12 +292,12 @@
 		</div>
 
 		<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2">{$t('general.theme')}</h3>
-		<div class="flex gap-1">
+		<div class="flex flex-wrap gap-1">
 			{#each [{ value: 'light' as Theme, label: $t('general.light'), icon: 'sun-light' }, { value: 'dark' as Theme, label: $t('general.dark'), icon: 'half-moon' }, { value: 'system' as Theme, label: $t('general.system'), icon: 'monitor' }] as opt}
 				<button
-					class="flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs transition-colors duration-100
+					class="app-interactive flex items-center gap-1.5 h-8 px-2.5 rounded-xl text-xs border border-transparent transition-colors duration-100
 					{$theme === opt.value
-						? 'bg-gray-200/50 dark:bg-white/8 text-gray-900 dark:text-white font-medium'
+						? 'app-interactive-active text-gray-900 dark:text-white font-medium'
 						: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 					onclick={() => setTheme(opt.value)}
 				>
@@ -292,6 +305,28 @@
 					{opt.label}
 				</button>
 			{/each}
+		</div>
+
+		<div class="mt-3">
+			<button
+				type="button"
+				class="nightowl-preset group flex w-full items-center gap-3 rounded-2xl border px-3 py-2.5 text-left transition-all duration-150"
+				class:active={nightOwlActive}
+				onclick={applyNightOwlPreset}
+			>
+				<span class="nightowl-swatch" aria-hidden="true">
+					<span></span><span></span><span></span>
+				</span>
+				<span class="min-w-0 flex-1">
+					<span class="block text-xs font-medium text-gray-900 dark:text-white">NightOwl</span>
+					<span class="mt-0.5 block text-[0.6875rem] text-gray-400 dark:text-gray-500">
+						Deep navy surfaces with cool blue focus accents
+					</span>
+				</span>
+				{#if nightOwlActive}
+					<Icon name="check" size={14} class="app-accent shrink-0" />
+			{/if}
+			</button>
 		</div>
 
 		<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2 mt-5">
@@ -501,5 +536,44 @@
 		border-radius: 624.9375rem;
 		border: 1px solid color-mix(in oklab, var(--app-bg) 70%, transparent);
 		background: color-mix(in oklab, var(--app-fg) 82%, var(--app-bg));
+	}
+
+	.nightowl-preset {
+		background: color-mix(in oklab, var(--app-surface) 92%, transparent);
+		border-color: var(--app-border);
+	}
+
+	.nightowl-preset:hover,
+	.nightowl-preset.active {
+		background: var(--app-active);
+		border-color: color-mix(in oklab, var(--app-accent) 28%, transparent);
+		box-shadow: 0 0 0 1px color-mix(in oklab, var(--app-accent) 8%, transparent);
+	}
+
+	.nightowl-swatch {
+		display: inline-flex;
+		width: 2.5rem;
+		height: 1.75rem;
+		overflow: hidden;
+		border-radius: 0.625rem;
+		border: 1px solid rgb(130 170 255 / 0.24);
+		background: #011627;
+		box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.025);
+	}
+
+	.nightowl-swatch span {
+		flex: 1;
+	}
+
+	.nightowl-swatch span:nth-child(1) {
+		background: #011627;
+	}
+
+	.nightowl-swatch span:nth-child(2) {
+		background: #0b253a;
+	}
+
+	.nightowl-swatch span:nth-child(3) {
+		background: #82aaff;
 	}
 </style>

@@ -26,10 +26,10 @@
 	}
 </script>
 
-<div class="relative px-1 pb-0.5 shrink-0">
+<div class="relative px-1.5 pb-1.5 shrink-0">
 	<button
 		bind:this={menuButtonEl}
-		class="flex items-center gap-2 w-full h-8 px-2 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100"
+		class="touch-target app-interactive footer-profile flex items-center gap-2.5 w-full min-h-9 px-2.5 rounded-xl text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100"
 		onclick={() => (showMenu = !showMenu)}
 	>
 		<img
@@ -91,3 +91,15 @@
 		onclose={() => (showMenu = false)}
 	/>
 {/if}
+
+<style>
+	.footer-profile:hover {
+		background: var(--app-hover);
+	}
+
+	@media (max-width: 767px) {
+		.footer-profile {
+			min-height: 2.75rem;
+		}
+	}
+</style>

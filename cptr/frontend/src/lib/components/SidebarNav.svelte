@@ -18,7 +18,7 @@
 
 <div class="px-1.5 mt-1 shrink-0">
 	<button
-		class="group flex items-center gap-1.5 w-full h-7 px-2 rounded-lg text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100"
+		class="touch-target app-interactive group flex items-center gap-2 w-full min-h-8 px-2.5 rounded-xl text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100"
 		onclick={() => showSearch.set(true)}
 	>
 		<Icon name="search" size={14} />
@@ -36,7 +36,7 @@
 	<div class="px-1.5 shrink-0">
 		<a
 			href="/scheduled"
-			class="flex items-center gap-1.5 w-full h-7 px-2 rounded-lg text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100 no-underline"
+			class="touch-target app-interactive flex items-center gap-2 w-full min-h-8 px-2.5 rounded-xl text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100 no-underline"
 			onclick={openAutomations}
 		>
 			<Icon name="clock" size={14} />

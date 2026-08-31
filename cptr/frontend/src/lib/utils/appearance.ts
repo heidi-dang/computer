@@ -25,9 +25,21 @@ type ResolvedTheme = 'dark' | 'light';
 
 const DEFAULT_UI_FONT =
 	"'Inter', -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif";
-export const DEFAULT_BORDER_CONTRAST = 1.5;
-export const DEFAULT_DIVIDER_CONTRAST = 0.875;
-export const MAX_BORDER_CONTRAST = 16;
+export const DEFAULT_BORDER_CONTRAST = 8;
+export const DEFAULT_DIVIDER_CONTRAST = 4.5;
+export const MAX_BORDER_CONTRAST = 24;
+
+export const NIGHTOWL_THEME_CONFIG: ThemeConfig = {
+	light: {
+		background: '#f8fafc',
+		foreground: '#1f2937'
+	},
+	dark: {
+		background: '#011627',
+		foreground: '#d6deeb'
+	},
+	uiFont: DEFAULT_UI_FONT
+};
 
 export function normalizeBorderContrast(value: unknown): number | null {
 	if (value === null || value === undefined || value === '') return null;
@@ -92,10 +104,11 @@ export function sanitizeThemeConfig(value: unknown): ThemeConfig | null {
 
 export function defaultThemeConfig(theme: Theme): Required<ThemeColors> & { uiFont: string } {
 	const resolved = resolveThemeMode(theme);
+	const palette = NIGHTOWL_THEME_CONFIG[resolved] ?? {};
 	return {
-		background: resolved === 'dark' ? '#0a0a0a' : '#ffffff',
-		foreground: resolved === 'dark' ? '#d4d4d4' : '#525252',
-		uiFont: DEFAULT_UI_FONT
+		background: palette.background ?? (resolved === 'dark' ? '#011627' : '#f8fafc'),
+		foreground: palette.foreground ?? (resolved === 'dark' ? '#d6deeb' : '#1f2937'),
+		uiFont: NIGHTOWL_THEME_CONFIG.uiFont ?? DEFAULT_UI_FONT
 	};
 }
 

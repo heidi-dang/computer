@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount, tick } from 'svelte';
-	import { chatModels } from '$lib/stores/chat';
+	import { chatModels, type ChatModel } from '$lib/stores/chat';
 	import DropdownMenu from '../DropdownMenu.svelte';
 	import { t } from '$lib/i18n';
 
@@ -30,12 +30,102 @@
 	let highlightedIndex = $state(0);
 	let isSmallViewport = $state(false);
 
-	const selectorMaxHeight = $derived(isSmallViewport ? '7.5rem' : '15rem');
+	const SOURCE_LABELS: Record<string, string> = {
+		openai: 'OpenAI',
+		anthropic: 'Anthropic',
+		deepseek: 'DeepSeek',
+		google: 'Google',
+		gemini: 'Gemini',
+		openrouter: 'OpenRouter',
+		ollama: 'Ollama',
+		'openai-compatible': 'OpenAI Compatible',
+		codex: 'Codex',
+		claude: 'Claude',
+		hermes: 'Hermes',
+		opencode: 'OpenCode'
+	};
 
-	const filtered = $derived(
+	function formatSourceName(value: string): string {
+		const trimmed = value.trim();
+		if (!trimmed) return 'Other';
+		const alias = SOURCE_LABELS[trimmed.toLowerCase()];
+		if (alias) return alias;
+		return trimmed
+			.replace(/[_-]+/g, ' ')
+			.replace(/\b\w/g, (char) => char.toUpperCase());
+	}
+
+	function sourceKey(model: ChatModel): string {
+		if (model.provider === 'agent') {
+			return `agent:${(model.agent_id || model.profile_id || 'agent').toLowerCase()}`;
+		}
+		return `connection:${(model.connection_id || model.source_name || model.provider || 'other').toLowerCase()}`;
+	}
+
+	function sourceLabel(model: ChatModel): string {
+		if (model.provider === 'agent') {
+			return formatSourceName(model.agent_id || model.profile_id || 'Agent');
+		}
+		const configuredName = model.source_name?.trim();
+		return configuredName || formatSourceName(model.provider || 'Other');
+	}
+
+	function displayModelName(model: ChatModel): string {
+		if (model.provider !== 'agent') return model.name || model.id;
+		for (const candidate of [model.name, model.id]) {
+			if (!candidate.startsWith('agent:')) continue;
+			const slash = candidate.indexOf('/');
+			if (slash >= 0 && slash < candidate.length - 1) return candidate.slice(slash + 1);
+		}
+		return model.name || model.id;
+	}
+
+	function modelSearchText(model: ChatModel): string {
+		return [
+			displayModelName(model),
+			model.name,
+			model.id,
+			model.provider,
+			model.source_name,
+			model.agent_id,
+			model.profile_id,
+			sourceLabel(model)
+		]
+			.filter(Boolean)
+			.join(' ')
+			.toLowerCase();
+	}
+
+	const selectorMaxHeight = $derived(
+		isSmallViewport ? 'min(58dvh,30rem)' : 'min(55vh,28rem)'
+	);
+
+	const matchingModels = $derived(
 		search.trim()
-			? $chatModels.filter((m) => m.name.toLowerCase().includes(search.toLowerCase()))
+			? $chatModels.filter((model) => modelSearchText(model).includes(search.trim().toLowerCase()))
 			: $chatModels
+	);
+
+	const modelGroups = $derived.by(() => {
+		const groups = new Map<string, { label: string; models: ChatModel[] }>();
+		for (const model of matchingModels) {
+			const key = sourceKey(model);
+			const existing = groups.get(key);
+			if (existing) existing.models.push(model);
+			else groups.set(key, { label: sourceLabel(model), models: [model] });
+		}
+		return Array.from(groups.values());
+	});
+
+	const filtered = $derived(modelGroups.flatMap((group) => group.models));
+
+	const selectedEntry = $derived($chatModels.find((model) => model.id === selectedModel));
+	const selectedLabel = $derived(
+		selectedEntry
+			? selectedEntry.provider === 'agent'
+				? `${sourceLabel(selectedEntry)} · ${displayModelName(selectedEntry)}`
+				: displayModelName(selectedEntry)
+			: ''
 	);
 
 	const menuItems = $derived.by(() => {
@@ -54,16 +144,20 @@
 						}
 					]
 				: []),
-			...filtered.map((m) => ({
-				label: m.name,
-				tooltip: m.name,
-				active: m.id === selectedModel,
-				check: true,
-				onclick: () => {
-					selectedModel = m.id;
-					onchange?.(m.id);
-				}
-			}))
+			...modelGroups.flatMap((group) =>
+				group.models.map((model) => ({
+					label: displayModelName(model),
+					tooltip: `${group.label} · ${displayModelName(model)}`,
+					section: group.label,
+					wrapLabel: true,
+					active: model.id === selectedModel,
+					check: true,
+					onclick: () => {
+						selectedModel = model.id;
+						onchange?.(model.id);
+					}
+				}))
+			)
 		];
 
 		const highlighted = Math.min(highlightedIndex, Math.max(items.length - 1, 0));
@@ -134,16 +228,16 @@
 <span class="relative inline-flex {open ? 'z-[1001]' : ''}">
 	<button
 		bind:this={btnEl}
-		class="flex items-center gap-1 px-2 py-1 rounded-lg text-[0.6875rem] text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors duration-100"
+		class="touch-target app-interactive flex items-center gap-1.5 px-2 py-1 rounded-xl text-[0.6875rem] text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 transition-colors duration-100"
 		onclick={toggle}
+		title={selectedLabel || nullLabel}
 	>
-		<span class="truncate max-w-[10rem]"
+		<span class="truncate max-w-[12rem] sm:max-w-[16rem]"
 			>{selectedModel === null || selectedModel === ''
 				? nullLabel
 				: $chatModels.length === 0
 					? $t('modelSelector.noModels')
-					: $chatModels.find((m) => m.id === selectedModel)?.name ||
-						$t('modelSelector.selectModel')}</span
+					: selectedLabel || $t('modelSelector.selectModel')}</span
 		>
 		{#if $chatModels.length > 0 || nullable}
 			<svg
@@ -168,13 +262,13 @@
 			{preferAbove}
 			forceAbove={preferAbove}
 			maxHeight={selectorMaxHeight}
-			className="w-52"
+			className="model-selector-menu w-[min(24rem,calc(100vw-1rem))]"
 			scrollActiveIntoView
 			scrollActiveBlock="center"
 			{align}
 		>
 			{#snippet header()}
-				<div class="flex items-center gap-1.5 h-6 px-2 mt-0.5">
+				<div class="flex items-center gap-2 h-10 px-2.5">
 					<svg
 						class="w-3 h-3 shrink-0 text-gray-300 dark:text-gray-600"
 						viewBox="0 0 24 24"
@@ -190,7 +284,7 @@
 						bind:this={searchInputEl}
 						value={search}
 						placeholder={$t('modelSelector.search')}
-						class="w-full bg-transparent text-[0.6875rem] text-gray-500 dark:text-gray-400 placeholder:text-gray-300 dark:placeholder:text-gray-600 outline-none"
+						class="w-full bg-transparent text-base sm:text-xs text-gray-500 dark:text-gray-400 placeholder:text-gray-300 dark:placeholder:text-gray-600 outline-none"
 						oninput={(e) => {
 							search = e.currentTarget.value;
 							resetHighlightedIndex();

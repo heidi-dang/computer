@@ -1097,7 +1097,7 @@
 >
 	<!-- Header: breadcrumb + actions -->
 	<div
-		class="flex items-center gap-2 h-9 px-3 border-b border-gray-200 dark:border-white/6 shrink-0"
+		class="file-toolbar flex items-center gap-2 h-10 px-3 border-b border-gray-200 dark:border-white/6 shrink-0"
 	>
 		<div class="flex items-center gap-1 text-xs min-w-0 flex-1">
 			{#each breadcrumbs() as seg, i}
@@ -1131,7 +1131,7 @@
 
 		<!-- Refresh -->
 		<button
-			class="flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100 shrink-0"
+			class="file-toolbar-action app-interactive flex items-center justify-center w-7 h-7 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100 shrink-0"
 			onclick={() => fetchDirectory(cwd)}
 			use:tooltip={$t('files.refresh')}
 		>
@@ -1142,7 +1142,7 @@
 			<!-- Sort dropdown -->
 			<button
 				bind:this={sortBtnEl}
-				class="flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100 shrink-0"
+				class="file-toolbar-action app-interactive flex items-center justify-center w-7 h-7 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100 shrink-0"
 				onclick={() => {
 					sortMenuOpen = !sortMenuOpen;
 				}}
@@ -1154,7 +1154,7 @@
 			<!-- Three-dot menu -->
 			<button
 				bind:this={addBtnEl}
-				class="flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100 shrink-0"
+				class="file-toolbar-action app-interactive flex items-center justify-center w-7 h-7 rounded-lg text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-100 shrink-0"
 				onclick={() => {
 					toggleAddMenu();
 				}}
@@ -1183,12 +1183,12 @@
 
 	<!-- Search -->
 	<div
-		class="flex items-center gap-1.5 h-8 px-3 border-b border-gray-200 dark:border-white/6 shrink-0"
+		class="file-search flex items-center gap-2 h-9 px-3 border-b border-gray-200 dark:border-white/6 shrink-0"
 	>
 		<Icon name="search" size={13} class="text-gray-400 shrink-0" />
 		<input
 			type="text"
-			class="flex-1 border-none outline-none bg-transparent text-xs text-gray-900 dark:text-white placeholder:text-gray-400"
+			class="file-search-input flex-1 border-none outline-none bg-transparent text-xs text-gray-900 dark:text-white placeholder:text-gray-400"
 			placeholder={$t('files.searchFilesAndContents')}
 			bind:value={searchQuery}
 		/>

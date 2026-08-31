@@ -20,7 +20,7 @@
 	let loading = $state(false);
 	let isSignup = $state(false);
 
-	const isSetup = mode === 'password' && needsSetup;
+	const isSetup = $derived(mode === 'password' && needsSetup);
 
 	async function submit() {
 		if (isSetup && password.length < 6) {
@@ -71,13 +71,17 @@
 </script>
 
 <div
-	class="app-theme flex items-center justify-center h-dvh bg-white dark:bg-black p-6"
+	class="auth-shell app-theme flex items-center justify-center h-dvh p-4 sm:p-6"
 	style="background: var(--app-bg); color: var(--app-fg);"
 >
-	<div class="w-full max-w-md">
-		<h1 class="text-lg font-semibold tracking-tight text-gray-900 dark:text-white mb-3">
-			Computer
-		</h1>
+	<div class="auth-card app-raised-surface w-full max-w-md rounded-3xl border p-5 sm:p-7">
+		<div class="mb-5 flex items-center gap-3">
+			<img src="/favicon.png" alt="" class="size-9 rounded-xl" />
+			<div>
+				<h1 class="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">Computer</h1>
+				<p class="mt-0.5 text-[0.6875rem] text-gray-400 dark:text-gray-500">Private workspace control</p>
+			</div>
+		</div>
 
 		{#if isSetup}
 			<p class="text-xs text-gray-400 dark:text-gray-600 -mt-2 mb-3">
@@ -97,24 +101,22 @@
 				type="text"
 				placeholder={$t('auth.username')}
 				bind:value={username}
-				autofocus
 				autocomplete="username"
 				spellcheck="false"
-				class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-1"
+				class="auth-input block w-full rounded-xl border bg-transparent px-3 py-2.5 text-sm text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none"
 			/>
 			<input
 				type="password"
 				placeholder={$t('auth.password')}
 				bind:value={password}
 				autocomplete={isSetup ? 'new-password' : 'current-password'}
-				class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-1"
+				class="auth-input mt-2 block w-full rounded-xl border bg-transparent px-3 py-2.5 text-sm text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none"
 			/>
 
 			<button
 				type="submit"
 				disabled={loading || !password || !username.trim()}
-				class="flex items-center gap-2 text-[0.8125rem] text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white transition-colors duration-100
-					disabled:opacity-30 disabled:pointer-events-none mt-2"
+				class="auth-submit app-interactive mt-3 flex min-h-11 w-full items-center justify-center gap-2 rounded-xl px-4 text-sm font-medium disabled:opacity-30 disabled:pointer-events-none"
 			>
 				{#if loading}
 					<Spinner size={14} />
@@ -155,3 +157,35 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	.auth-shell {
+		background-image:
+			radial-gradient(circle at 20% 0%, color-mix(in oklab, var(--app-accent) 12%, transparent), transparent 34rem),
+			radial-gradient(circle at 100% 100%, color-mix(in oklab, var(--app-accent) 8%, transparent), transparent 30rem);
+	}
+
+	.auth-card {
+		box-shadow: 0 2rem 6rem -2.5rem var(--app-shadow-color);
+	}
+
+	.auth-input {
+		border-color: var(--app-border);
+		background: var(--app-surface-subtle);
+	}
+
+	.auth-input:focus {
+		border-color: color-mix(in oklab, var(--app-accent) 42%, transparent);
+		box-shadow: 0 0 0 3px color-mix(in oklab, var(--app-accent) 10%, transparent);
+	}
+
+	.auth-submit {
+		background: var(--app-accent);
+		color: var(--app-bg);
+		box-shadow: 0 0.75rem 2rem -1rem color-mix(in oklab, var(--app-accent) 60%, transparent);
+	}
+
+	.auth-submit:hover:not(:disabled) {
+		background: var(--app-accent-strong);
+	}
+</style>

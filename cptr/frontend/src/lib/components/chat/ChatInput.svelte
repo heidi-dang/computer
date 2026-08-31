@@ -1545,7 +1545,7 @@
 		</div>
 	{/if}
 
-	<div class="app-surface rounded-3xl shadow-lg border transition px-1">
+	<div class="composer-shell app-raised-surface rounded-[1.65rem] shadow-lg border transition px-1">
 		<!-- Uploaded Files Preview -->
 		{#if attachedUploads.length > 0}
 			<div class="mx-2 pt-2 flex flex-wrap gap-2">
@@ -1631,7 +1631,7 @@
 		<!-- Toolbar. stopPropagation prevents TipTap from stealing focus -->
 		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
-			class="flex items-center justify-between mt-0.5 mb-2.5 mx-0.5"
+			class="composer-toolbar flex items-center justify-between mt-0.5 mb-2.5 mx-0.5"
 			onmousedown={(e) => e.stopPropagation()}
 		>
 			<div class="ml-0.5 self-end flex items-center gap-1">
@@ -1715,9 +1715,24 @@
 
 	/* ── ProseMirror editor ───────────────────────── */
 
+	.composer-shell {
+		border-color: color-mix(in oklab, var(--app-accent) 16%, var(--app-border));
+		box-shadow:
+			0 1rem 3rem -1.75rem var(--app-shadow-color),
+			inset 0 1px 0 color-mix(in oklab, var(--app-fg) 4%, transparent);
+	}
+
+	.composer-shell:focus-within {
+		border-color: color-mix(in oklab, var(--app-accent) 42%, transparent);
+		box-shadow:
+			0 1.25rem 3.25rem -1.75rem var(--app-shadow-color),
+			0 0 0 3px color-mix(in oklab, var(--app-accent) 10%, transparent);
+	}
+
 	.chat-editor-mount :global(.chat-prosemirror) {
 		@apply pt-2.5 pb-2 px-1 min-h-6 max-h-96 overflow-y-auto text-[0.8125rem] leading-relaxed outline-none break-words;
 		font-size: 0.8125rem;
+		line-height: 1.55;
 		color: var(--app-fg);
 	}
 
@@ -1821,5 +1836,25 @@
 	}
 	.chat-editor-mount :global(.hljs-built_in) {
 		color: #e5c07b;
+	}
+
+	@media (max-width: 767px) {
+		.composer-shell {
+			border-radius: 1.4rem;
+		}
+
+		.composer-toolbar {
+			min-height: 2.75rem;
+			margin-bottom: 0.375rem;
+		}
+
+		.chat-editor-mount :global(.chat-prosemirror) {
+			min-height: 2.75rem;
+			max-height: 42dvh;
+			font-size: 1rem;
+			line-height: 1.5;
+			padding-top: 0.75rem;
+			padding-bottom: 0.5rem;
+		}
 	}
 </style>

@@ -315,6 +315,7 @@ async def get_models(request: Request):
                     "id": prefixed_id,
                     "name": model_id,
                     "provider": conn.get("provider", ""),
+                    "source_name": conn.get("name") or conn.get("provider", ""),
                     "connection_id": conn["id"],
                 }
             )

@@ -285,6 +285,9 @@ export interface ChatModel {
 	name: string;
 	provider: string;
 	connection_id: string;
+	source_name?: string;
+	agent_id?: string;
+	profile_id?: string;
 }
 
 export const chatModels = writable<ChatModel[]>([]);

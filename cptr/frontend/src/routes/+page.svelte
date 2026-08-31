@@ -1078,11 +1078,11 @@
 					</div>
 				{/each}
 				{#if homeTab?.type === 'home'}
-					<div class="h-full overflow-y-auto px-6">
-						<div class="mx-auto flex min-h-full w-full max-w-md flex-col justify-center py-5">
+					<div class="home-scroll h-full overflow-y-auto px-4 sm:px-6">
+						<div class="home-dashboard mx-auto flex min-h-full w-full max-w-2xl flex-col justify-center py-8 sm:py-10">
 							<div class="mb-4">
 								<div class="flex items-baseline gap-2">
-									<h1 class="text-lg font-medium tracking-tight text-gray-900 dark:text-white">
+									<h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-gray-900 dark:text-white">
 										{#if welcomeName}
 											{@const greeting = $t(`home.greeting.${greetingTime}.${greetingVariant}`, {
 												name: greetingNameMarker
@@ -1116,14 +1116,14 @@
 									{$t('home.start')}
 								</h2>
 								<button
-									class="text-xs text-gray-600 transition-colors duration-100 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
+									class="home-action app-interactive inline-flex min-h-9 items-center rounded-xl border px-3 text-xs font-medium text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
 									onclick={() => (showPicker = true)}
 								>
 									{$t('home.openWorkspace')}
 								</button>
 								{#if $chatEnabled}
 									<button
-										class="mt-1 block text-xs text-gray-600 transition-colors duration-100 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
+										class="home-action app-interactive ml-1 inline-flex min-h-9 items-center rounded-xl border px-3 text-xs font-medium text-gray-600 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white"
 										onclick={() => openHomeChat(undefined, homePane.id)}
 									>
 										{$t('bar.newChat')}
@@ -1140,7 +1140,7 @@
 										{$t('home.continue')}
 									</h2>
 									<button
-										class="group w-full min-w-0 py-1 text-left transition-colors duration-100"
+										class="home-workspace-row app-interactive group -mx-2.5 w-[calc(100%+1.25rem)] min-w-0 rounded-xl px-2.5 py-2 text-left transition-colors duration-100"
 										onclick={() => quickOpen(continuation.path)}
 									>
 										<span class="flex min-w-0 items-baseline gap-2">
@@ -1197,7 +1197,7 @@
 												$workspaceList.find((workspace) => workspace.path === item.path)
 													?.unread_count ?? 0}
 											<button
-												class="group w-full min-w-0 py-1 text-left transition-colors duration-100"
+												class="home-workspace-row app-interactive group -mx-2.5 w-[calc(100%+1.25rem)] min-w-0 rounded-xl px-2.5 py-2 text-left transition-colors duration-100"
 												onclick={() => quickOpen(item.path)}
 											>
 												<span class="flex min-w-0 items-baseline gap-2">
@@ -1676,5 +1676,58 @@
 
 	.git-review-panel {
 		z-index: 2;
+	}
+
+	.home-scroll {
+		background:
+			radial-gradient(circle at 50% 12%, color-mix(in oklab, var(--app-accent) 7%, transparent), transparent 28rem),
+			var(--app-bg);
+	}
+
+	.home-dashboard {
+		animation: home-enter 220ms ease-out both;
+	}
+
+	.home-action {
+		background: var(--app-surface);
+		border-color: var(--app-border);
+		box-shadow: 0 0.5rem 1.5rem -1.25rem var(--app-shadow-color);
+	}
+
+	.home-action:hover,
+	.home-workspace-row:hover {
+		background: var(--app-hover);
+	}
+
+	.home-action:hover {
+		border-color: color-mix(in oklab, var(--app-accent) 20%, transparent);
+	}
+
+	@keyframes home-enter {
+		from {
+			opacity: 0;
+			transform: translateY(0.35rem);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
+	}
+
+	@media (max-width: 767px) {
+		.home-scroll {
+			padding-left: max(1rem, env(safe-area-inset-left, 0px));
+			padding-right: max(1rem, env(safe-area-inset-right, 0px));
+		}
+
+		.home-dashboard {
+			justify-content: flex-start;
+			padding-top: 2.5rem;
+			padding-bottom: max(2rem, env(safe-area-inset-bottom, 0px));
+		}
+
+		.home-action {
+			min-height: 2.75rem;
+		}
 	}
 </style>

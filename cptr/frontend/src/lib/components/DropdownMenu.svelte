@@ -16,6 +16,10 @@
 		image?: string;
 		/** Optional check mark on the right when active. */
 		check?: boolean;
+		/** Optional non-interactive section heading rendered above this item group. */
+		section?: string;
+		/** Allow long labels to wrap instead of truncating to one line. */
+		wrapLabel?: boolean;
 		/** Optional keyboard shortcut hint displayed as a single pill on the right. */
 		shortcut?: string;
 		/** Optional trailing action button, e.g. row options. */
@@ -360,9 +364,9 @@
 <div
 	use:portal={!inlineAbove}
 	bind:this={menuEl}
-	class="{inlineAbove
+	class="dropdown-surface {inlineAbove
 		? `absolute bottom-full mb-1 ${align === 'end' ? 'right-0' : 'left-0'}`
-		: 'fixed'} app-theme app-surface z-[1001] min-w-36 rounded-xl border shadow-xl p-0.5 flex flex-col overflow-hidden {className}"
+		: 'fixed'} app-theme app-raised-surface z-[1001] min-w-36 rounded-2xl border shadow-xl p-1 flex flex-col overflow-hidden {className}"
 	style="{inlineAbove
 		? ''
 		: `left: ${pos.x}px; ${pos.bottom != null ? `bottom: ${pos.bottom}px;` : `top: ${pos.top ?? -9999}px;`} ${
@@ -392,12 +396,17 @@
 		{:else if items.length === 0 && empty}
 			{@render empty()}
 		{:else}
-			{#each items as item}
+			{#each items as item, index}
 				{#if item.divider}
 					<div class="app-divider h-px mx-1 my-0.5"></div>
 				{:else}
+					{#if item.section && (index === 0 || items[index - 1]?.section !== item.section)}
+						<div class="menu-section px-2.5 pt-2 pb-1 text-[0.6875rem] font-medium tracking-wide">
+							{item.section}
+						</div>
+					{/if}
 					<div
-						class="group menu-row flex items-center gap-1 w-full h-6 rounded-xl text-xs transition-colors duration-75 {item.active ||
+						class="group menu-row app-interactive flex items-center gap-1 w-full min-h-8 rounded-xl text-xs transition-colors duration-75 {item.active ||
 						item.highlighted
 							? 'app-interactive-active'
 							: ''}"
@@ -405,7 +414,7 @@
 						data-menu-active={item.active ? 'true' : undefined}
 					>
 						<button
-							class="flex items-center gap-2 min-w-0 flex-1 h-full px-2 text-inherit"
+							class="touch-target flex items-center gap-2.5 min-w-0 flex-1 h-full px-2.5 text-inherit"
 							use:tooltip={item.tooltip ? { content: item.tooltip, placement: 'top' } : null}
 							onclick={() => {
 								item.onclick();
@@ -417,7 +426,12 @@
 							{:else if item.icon}
 								<Icon name={item.icon} size={14} />
 							{/if}
-							<span class="flex-1 text-left truncate">{item.label}</span>
+							<span
+								class="flex-1 text-left {item.wrapLabel
+									? 'whitespace-normal break-words leading-snug py-1 text-sm sm:text-xs'
+									: 'truncate'}"
+								>{item.label}</span
+							>
 							{#if item.shortcut}
 								<KeyPill text={item.shortcut} class="ml-auto shrink-0" />
 							{/if}
@@ -464,12 +478,36 @@
 </div>
 
 <style>
+	.dropdown-surface {
+		box-shadow: 0 1.25rem 3.5rem -1.5rem var(--app-shadow-color);
+	}
+
+	.menu-section {
+		position: sticky;
+		top: 0;
+		z-index: 1;
+		background: color-mix(in oklab, var(--app-surface-raised) 96%, transparent);
+		color: var(--app-fg-subtle);
+		backdrop-filter: blur(10px);
+		-webkit-backdrop-filter: blur(10px);
+	}
+
 	.menu-row {
-		color: color-mix(in oklab, var(--app-fg) 62%, var(--app-bg));
+		color: var(--app-fg-muted);
 	}
 
 	.menu-row:hover {
-		background: color-mix(in oklab, var(--app-fg) 6%, transparent);
+		background: var(--app-hover);
 		color: var(--app-fg);
+	}
+
+	@media (max-width: 767px) {
+		.dropdown-surface {
+			max-width: calc(100vw - 1rem);
+		}
+
+		.menu-row {
+			min-height: 2.75rem;
+		}
 	}
 </style>

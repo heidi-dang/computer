@@ -25,15 +25,43 @@
 
 :root {
 	--app-text-scale: 1;
-	--app-bg: #ffffff;
-	--app-fg: #525252;
-	--app-fg-muted: color-mix(in oklab, var(--app-fg) 62%, var(--app-bg));
-	--app-fg-subtle: color-mix(in oklab, var(--app-fg) 48%, var(--app-bg));
-	--app-border: color-mix(in oklab, var(--app-fg) 1.5%, transparent);
-	--app-divider: color-mix(in oklab, var(--app-fg) 0.875%, transparent);
-	--app-hover: color-mix(in oklab, var(--app-fg) 6%, transparent);
-	--app-active: color-mix(in oklab, var(--app-fg) 7%, transparent);
+	--app-bg: #f8fafc;
+	--app-fg: #1f2937;
+	--app-surface: color-mix(in oklab, var(--app-bg) 96%, var(--app-fg));
+	--app-surface-raised: color-mix(in oklab, var(--app-bg) 92%, var(--app-fg));
+	--app-surface-subtle: color-mix(in oklab, var(--app-bg) 97.5%, var(--app-fg));
+	--app-fg-muted: color-mix(in oklab, var(--app-fg) 66%, var(--app-bg));
+	--app-fg-subtle: color-mix(in oklab, var(--app-fg) 50%, var(--app-bg));
+	--app-border: color-mix(in oklab, var(--app-fg) 8%, transparent);
+	--app-divider: color-mix(in oklab, var(--app-fg) 4.5%, transparent);
+	--app-hover: color-mix(in oklab, var(--app-fg) 5%, transparent);
+	--app-active: color-mix(in oklab, #3159c6 13%, transparent);
+	--app-accent: #3159c6;
+	--app-accent-strong: #2346a8;
+	--app-accent-soft: color-mix(in oklab, var(--app-accent) 12%, transparent);
+	--app-focus-ring: color-mix(in oklab, var(--app-accent) 55%, transparent);
+	--app-shadow-color: rgb(15 23 42 / 0.14);
 	--app-ui-font: var(--font-sans);
+	--safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.dark {
+	--app-bg: #011627;
+	--app-fg: #d6deeb;
+	--app-surface: color-mix(in oklab, var(--app-bg) 95%, var(--app-fg));
+	--app-surface-raised: color-mix(in oklab, var(--app-bg) 90%, var(--app-fg));
+	--app-surface-subtle: color-mix(in oklab, var(--app-bg) 97%, var(--app-fg));
+	--app-fg-muted: #8fa8bd;
+	--app-fg-subtle: #637b91;
+	--app-border: rgb(130 170 255 / 0.14);
+	--app-divider: rgb(130 170 255 / 0.08);
+	--app-hover: rgb(130 170 255 / 0.075);
+	--app-active: rgb(130 170 255 / 0.14);
+	--app-accent: #82aaff;
+	--app-accent-strong: #9bbaff;
+	--app-accent-soft: rgb(130 170 255 / 0.14);
+	--app-focus-ring: rgb(130 170 255 / 0.58);
+	--app-shadow-color: rgb(0 8 18 / 0.48);
 }
 
 @layer base {
@@ -71,6 +99,21 @@
 
 	button {
 		@apply cursor-pointer;
+		font: inherit;
+	}
+
+	button:disabled {
+		cursor: default;
+	}
+
+	:where(button, a, input, textarea, select, [role='button'], [tabindex]):focus-visible {
+		outline: 2px solid var(--app-focus-ring);
+		outline-offset: 2px;
+	}
+
+	::selection {
+		background: var(--app-accent-soft);
+		color: var(--app-fg);
 	}
 }
 
@@ -115,13 +158,20 @@
 }
 
 .app-surface {
-	background: var(--app-bg);
+	background: var(--app-surface);
 	color: var(--app-fg);
 	border-color: var(--app-border);
 }
 
+.app-raised-surface {
+	background: var(--app-surface-raised);
+	color: var(--app-fg);
+	border-color: var(--app-border);
+	box-shadow: 0 1rem 3rem -1.5rem var(--app-shadow-color);
+}
+
 .app-subtle-surface {
-	background: var(--app-bg);
+	background: var(--app-surface-subtle);
 	color: var(--app-fg);
 	border-color: var(--app-border);
 }
@@ -138,6 +188,15 @@
 	color: var(--app-fg-subtle);
 }
 
+.app-interactive {
+	transition:
+		background-color 120ms ease,
+		color 120ms ease,
+		border-color 120ms ease,
+		box-shadow 120ms ease,
+		transform 120ms ease;
+}
+
 .app-interactive:hover {
 	background: var(--app-hover);
 	color: var(--app-fg);
@@ -146,6 +205,16 @@
 .app-interactive-active {
 	background: var(--app-active);
 	color: var(--app-fg);
+}
+
+.app-accent {
+	color: var(--app-accent);
+}
+
+.app-accent-surface {
+	background: var(--app-accent-soft);
+	color: var(--app-accent-strong);
+	border-color: color-mix(in oklab, var(--app-accent) 24%, transparent);
 }
 
 .app-theme :where(option) {
@@ -302,6 +371,20 @@
 	background-color: var(--app-hover) !important;
 }
 
+.dark .cm-cursor,
+.dark .cm-dropCursor {
+	border-left-color: var(--app-accent) !important;
+}
+
+.dark .cm-selectionBackground,
+.dark .cm-content ::selection {
+	background: var(--app-accent-soft) !important;
+}
+
+.dark .cm-gutterElement.cm-activeLineGutter {
+	color: var(--app-accent-strong) !important;
+}
+
 :not(.dark) .cm-gutters {
 	border: none !important;
 }
@@ -356,8 +439,69 @@
 
 /* Tippy tooltip theme */
 .tippy-box[data-theme~='cptr'] {
-	@apply rounded-lg text-xs border shadow-xl;
-	background: var(--app-bg);
+	@apply rounded-xl text-xs border shadow-xl;
+	background: var(--app-surface-raised);
 	color: var(--app-fg);
 	border-color: var(--app-border);
+	box-shadow: 0 0.75rem 2.5rem -1.25rem var(--app-shadow-color);
+}
+
+.file-toolbar {
+	background: color-mix(in oklab, var(--app-surface) 94%, transparent);
+	border-color: var(--app-border);
+}
+
+.file-toolbar-action:hover {
+	background: var(--app-hover);
+}
+
+.file-search {
+	background: var(--app-surface-subtle);
+	border-color: var(--app-border);
+}
+
+@media (max-width: 767px) {
+	.file-toolbar {
+		height: 3rem;
+		padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
+		padding-right: max(0.5rem, env(safe-area-inset-right, 0px));
+	}
+
+	.file-toolbar-action {
+		width: 2.5rem;
+		height: 2.5rem;
+	}
+
+	.file-search {
+		height: 2.75rem;
+	}
+
+	.file-search-input {
+		font-size: 1rem;
+	}
+
+	.touch-target {
+		min-width: 2.75rem;
+		min-height: 2.75rem;
+	}
+
+	.mobile-safe-bottom {
+		padding-bottom: max(0.75rem, var(--safe-bottom));
+	}
+
+	.mobile-edge-padding {
+		padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
+		padding-right: max(0.75rem, env(safe-area-inset-right, 0px));
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		scroll-behavior: auto !important;
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
 }
