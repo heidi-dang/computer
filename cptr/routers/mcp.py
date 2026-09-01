@@ -28,12 +28,13 @@ import json
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from cptr.routers.admin import require_admin
 from cptr.services.control_auth import authenticate_control_request
 from cptr.services.mcp_activity import McpActivityBatch, mcp_activity_store
 from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
+from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
 from cptr.utils.crypto import decrypt_key
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,30 @@ class ResourceReadRequest(BaseModel):
     uri: str
 
 
+class McpTopologyConfigUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aliases: dict[str, str | None]
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+@router.get("/topology/config")
+async def get_mcp_topology_config(request: Request):
+    """Return canonical topology names and admin-managed display aliases."""
+    require_admin(request)
+    return await get_topology_config()
+
+
+@router.put("/topology/config")
+async def put_mcp_topology_config(request: Request, body: McpTopologyConfigUpdate):
+    """Partially update or reset admin-managed topology display aliases."""
+    require_admin(request)
+    try:
+        return await update_topology_aliases(body.aliases)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/activity/events")
