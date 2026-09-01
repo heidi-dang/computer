@@ -28,6 +28,7 @@ export type McpTrafficSessionState = {
 
 export type McpTrafficActiveRequest = {
 	requestId: string;
+	correlationId: string | null;
 	clientId: string;
 	startedAt: number;
 	method: string | null;
@@ -38,6 +39,7 @@ export type McpTrafficActiveRequest = {
 
 export type McpRecentRequestRow = {
 	requestId: string;
+	correlationId: string | null;
 	clientId: string;
 	clientLabel: string;
 	clientVersion: string | null;
@@ -176,6 +178,7 @@ function activeRequestFrom(event: McpTrafficEvent): McpTrafficActiveRequest | nu
 	if (!event.request_id) return null;
 	return {
 		requestId: event.request_id,
+		correlationId: event.correlation_id,
 		clientId: event.client.id,
 		startedAt: event.timestamp_ms,
 		method: event.method,
@@ -191,6 +194,7 @@ function activeRow(
 ): McpRecentRequestRow {
 	return {
 		requestId: request.requestId,
+		correlationId: request.correlationId,
 		clientId: request.clientId,
 		clientLabel: client.label,
 		clientVersion: client.version,
@@ -216,6 +220,7 @@ function terminalRow(
 	const startedAt = active?.startedAt ?? Math.max(0, event.timestamp_ms - (event.duration_ms ?? 0));
 	return {
 		requestId: event.request_id,
+		correlationId: event.correlation_id ?? active?.correlationId ?? null,
 		clientId: event.client.id,
 		clientLabel: client.label,
 		clientVersion: client.version,

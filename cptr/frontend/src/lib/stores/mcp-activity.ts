@@ -10,6 +10,7 @@ export type McpActivitySource = 'plugin' | 'console';
 export type McpActivityRow = {
 	id: string;
 	correlationKey: string;
+	correlationId?: string | null;
 	source: McpActivitySource;
 	sequence: number;
 	clientId: string | null;
@@ -58,6 +59,7 @@ function rowFromEvent(event: McpActivityEvent, current?: McpActivityRow): McpAct
 	return {
 		id: current?.id ?? event.event_id,
 		correlationKey: current?.correlationKey ?? correlationKey(event),
+		correlationId: event.correlation_id ?? current?.correlationId ?? null,
 		source: 'plugin',
 		sequence: event.ingestion_sequence,
 		clientId: event.client.id,

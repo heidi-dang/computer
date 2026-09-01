@@ -34,6 +34,7 @@ const trafficEvent = (sequence, eventType, overrides = {}) => ({
 	session_id: 'session-1',
 	client: { id: 'chatgpt', label: 'ChatGPT', version: '1' },
 	request_id: `request-${sequence}`,
+	correlation_id: null,
 	method: 'tools/call',
 	tool_name: 'cptr_list_workspaces',
 	status: eventType.endsWith('failed')
@@ -70,6 +71,159 @@ test('MCP traffic reducer handles request lifecycle idempotently', async () => {
 	assert.match(store, /request_failed/);
 	assert.match(store, /ingestion_sequence\s*<=\s*state\.sequence/);
 	assert.match(store, /seenEventIds/);
+});
+
+test('MCP topology config and diagnostics API use typed cookie-authenticated helpers', async () => {
+	const api = await read('lib/apis/mcp.ts');
+
+	assert.match(api, /export interface McpTopologyConfig/);
+	assert.match(api, /getMcpTopologyConfig/);
+	assert.match(api, /updateMcpTopologyConfig/);
+	assert.match(api, /export interface McpDiagnosticsSnapshot/);
+	assert.match(api, /getMcpDiagnosticsSnapshot/);
+	assert.match(api, /openMcpDiagnosticsStream/);
+	assert.match(api, /new EventSource\(['"]\/api\/mcp\/diagnostics\/stream['"]\)/);
+	assert.doesNotMatch(api, /diagnostics\/stream[^\n]*(token|authorization|bearer)/i);
+});
+
+test('topology aliases preserve canonical ids while changing display labels', async () => {
+	const topologyStoreSource = await read('lib/stores/mcp-topology.ts').catch(() => '');
+	assert.match(topologyStoreSource, /export type McpTopologySelection/);
+	assert.match(topologyStoreSource, /export function displayTopologyLabel/);
+
+	const topologyStore = await import(
+		new URL('../src/lib/stores/mcp-topology.ts', import.meta.url)
+	).catch(() => ({}));
+	assert.equal(typeof topologyStore.displayTopologyLabel, 'function');
+	assert.equal(
+		topologyStore.displayTopologyLabel('cptr-backend', 'CPTR Backend', {
+			'cptr-backend': 'Workstation'
+		}),
+		'Workstation'
+	);
+	assert.equal(
+		topologyStore.displayTopologyLabel('cptr-backend', 'CPTR Backend', {}),
+		'CPTR Backend'
+	);
+});
+
+test('diagnostics reducer hydrates bounded state and ignores stale incremental events', async () => {
+	const diagnostics = await import(
+		new URL('../src/lib/stores/mcp-diagnostics.ts', import.meta.url)
+	).catch(() => ({}));
+	assert.equal(typeof diagnostics.hydrateMcpDiagnostics, 'function');
+	assert.equal(typeof diagnostics.applyMcpDiagnosticsEvent, 'function');
+
+	const failure = (sequence, id) => ({
+		kind: 'failure',
+		version: 1,
+		diagnostic_id: id,
+		request_id: 'request-1',
+		correlation_id: 'corr-1',
+		session_id: 'session-1',
+		client_id: 'chatgpt',
+		method: 'tools/call',
+		tool_name: 'cptr_list_workspaces',
+		stage: 'cptr_backend',
+		error_code: 'backend_unavailable',
+		http_status: 503,
+		retryable: true,
+		started_at_ms: 100,
+		completed_at_ms: 125,
+		duration_ms: 25,
+		request_bytes: 10,
+		response_bytes: 20,
+		summary: 'Backend unavailable.',
+		ingestion_sequence: sequence
+	});
+	const system = (sequence, timestamp) => ({
+		kind: 'system',
+		version: 1,
+		timestamp_ms: timestamp,
+		cpu_usage_percent: 25,
+		cpu_count: 8,
+		load_avg: [0.5],
+		memory_total_bytes: 1000,
+		memory_available_bytes: 400,
+		disk_total_bytes: 2000,
+		disk_used_bytes: 1000,
+		disk_free_bytes: 1000,
+		disk_read_bytes_per_s: 10,
+		disk_write_bytes_per_s: 20,
+		disk_read_ops_per_s: 1,
+		disk_write_ops_per_s: 2,
+		network_rx_bytes_per_s: 30,
+		network_tx_bytes_per_s: 40,
+		uptime_seconds: 50,
+		gpu_status: 'unavailable',
+		gpus: [],
+		cptr_process: null,
+		processes: [],
+		ingestion_sequence: sequence
+	});
+	const snapshot = {
+		version: 1,
+		sequence: 5,
+		latency: {
+			'cptr-mcp-cptr-backend': {
+				metric_type: 'backend_api_rtt',
+				latest_ms: 25,
+				average_ms: 20,
+				p50_ms: 20,
+				p95_ms: 25,
+				max_ms: 25,
+				sample_count: 2,
+				last_updated_ms: 125,
+				latest_status: 'ok',
+				health: 'healthy'
+			}
+		},
+		failures: [failure(0, 'failure-001')],
+		system: [system(0, 100)],
+		stream_health: {
+			subscriber_count: 0,
+			slow_subscriber_drops: 0,
+			latency_sample_capacity_per_edge: 120,
+			failure_capacity: 2,
+			system_sample_capacity: 2,
+			subscriber_queue_capacity: 64
+		}
+	};
+	let state = diagnostics.hydrateMcpDiagnostics(snapshot);
+	assert.equal(state.sequence, 5);
+	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestMs, 25);
+	assert.equal(state.failures.length, 1);
+	assert.equal(state.system.length, 1);
+
+	const stale = diagnostics.applyMcpDiagnosticsEvent(state, failure(5, 'failure-stale'));
+	assert.equal(stale, state);
+	state = diagnostics.applyMcpDiagnosticsEvent(state, failure(6, 'failure-002'));
+	state = diagnostics.applyMcpDiagnosticsEvent(state, failure(7, 'failure-003'));
+	assert.deepEqual(
+		state.failures.map((item) => item.diagnosticId),
+		['failure-002', 'failure-003']
+	);
+	state = diagnostics.applyMcpDiagnosticsEvent(state, system(8, 200));
+	state = diagnostics.applyMcpDiagnosticsEvent(state, system(9, 300));
+	assert.deepEqual(
+		state.system.map((item) => item.timestampMs),
+		[200, 300]
+	);
+	state = diagnostics.applyMcpDiagnosticsEvent(state, {
+		kind: 'latency',
+		version: 1,
+		event_id: 'latency-001',
+		timestamp_ms: 400,
+		request_id: 'request-1',
+		correlation_id: 'corr-1',
+		edge_id: 'cptr-mcp-cptr-backend',
+		metric_type: 'backend_api_rtt',
+		duration_ms: 55,
+		status: 'error',
+		ingestion_sequence: 10
+	});
+	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestMs, 55);
+	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestStatus, 'error');
 });
 
 test('topology projection uses stable client ordering and deterministic radial positions', async () => {
@@ -342,6 +496,7 @@ const activityEvent = (sequence, phase, overrides = {}) => ({
 	client: { id: 'chatgpt', label: 'ChatGPT', version: '1' },
 	session_id: 'session-1',
 	request_id: 'request-1',
+	correlation_id: null,
 	tool_name: 'cptr_list_workspaces',
 	title: 'List workspaces',
 	phase,
@@ -408,6 +563,38 @@ test('MCP Activity reducer folds started and complete into one bounded row with 
 	assert.equal(row.errorJson, null);
 	assert.equal(row.durationMs, 25);
 	assert.equal(row.source, 'plugin');
+});
+
+test('traffic and activity rows expose correlation metadata without changing row identity', async () => {
+	let trafficState = reducer.hydrateMcpTraffic(snapshot());
+	trafficState = reducer.applyMcpTrafficEvent(
+		trafficState,
+		trafficEvent(1, 'request_started', {
+			request_id: 'request-correlated',
+			correlation_id: 'corr-1'
+		})
+	);
+	trafficState = reducer.applyMcpTrafficEvent(
+		trafficState,
+		trafficEvent(2, 'request_finished', {
+			request_id: 'request-correlated',
+			correlation_id: 'corr-1',
+			status: 'complete'
+		})
+	);
+	assert.equal(reducer.recentRequestRows(trafficState)[0].correlationId, 'corr-1');
+
+	const activityReducer = await import(
+		new URL('../src/lib/stores/mcp-activity.ts', import.meta.url)
+	);
+	const activityState = activityReducer.hydrateMcpActivity(
+		activitySnapshot([
+			activityEvent(1, 'started', { correlation_id: 'corr-1' }),
+			activityEvent(2, 'complete', { correlation_id: 'corr-1' })
+		])
+	);
+	assert.equal(activityState.rows[0].correlationId, 'corr-1');
+	assert.equal(activityState.rows[0].correlationKey, 'plugin:request-1:cptr_list_workspaces');
 });
 
 test('MCP Activity reducer preserves started input for failed terminal event and ignores duplicates', async () => {

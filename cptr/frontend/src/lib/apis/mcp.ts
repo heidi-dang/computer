@@ -50,6 +50,7 @@ export interface McpActivityEvent {
 	client: McpTrafficClient;
 	session_id: string | null;
 	request_id: string | null;
+	correlation_id: string | null;
 	tool_name: string;
 	title: string | null;
 	phase: McpActivityPhase;
@@ -115,6 +116,7 @@ export interface McpTrafficEvent {
 	session_id: string | null;
 	client: McpTrafficClient;
 	request_id: string | null;
+	correlation_id: string | null;
 	method: string | null;
 	tool_name: string | null;
 	status: McpTrafficStatus;
@@ -166,6 +168,186 @@ export interface McpTrafficStreamCallbacks {
 	onTraffic: (event: McpTrafficEvent) => void;
 	onOpen?: () => void;
 	onError?: (error: unknown) => void;
+}
+
+export interface McpTopologyConfig {
+	version: 1;
+	canonical_labels: Record<string, string>;
+	aliases: Record<string, string>;
+}
+
+export type McpLatencyEdge =
+	| 'client-mcp-connector'
+	| 'mcp-connector-cptr-mcp'
+	| 'cptr-mcp-cptr-backend';
+export type McpLatencyMetric = 'observed_request_time' | 'adapter_handoff' | 'backend_api_rtt';
+export type McpFailureStage =
+	| 'client_transport'
+	| 'mcp_connector'
+	| 'cptr_mcp'
+	| 'cptr_backend'
+	| 'activity_delivery'
+	| 'traffic_delivery';
+
+export interface McpLatencySample {
+	kind: 'latency';
+	version: 1;
+	event_id: string;
+	timestamp_ms: number;
+	request_id: string | null;
+	correlation_id: string | null;
+	edge_id: McpLatencyEdge;
+	metric_type: McpLatencyMetric;
+	duration_ms: number;
+	status: 'ok' | 'error';
+}
+
+export interface McpLatencyAggregate {
+	metric_type: McpLatencyMetric;
+	latest_ms: number;
+	average_ms: number;
+	p50_ms: number;
+	p95_ms: number;
+	max_ms: number;
+	sample_count: number;
+	last_updated_ms: number;
+	latest_status: 'ok' | 'error';
+	health: 'healthy' | 'degraded' | 'error';
+}
+
+export interface McpFailureDiagnostic {
+	kind: 'failure';
+	version: 1;
+	diagnostic_id: string;
+	request_id: string | null;
+	correlation_id: string | null;
+	session_id: string | null;
+	client_id: string;
+	method: string | null;
+	tool_name: string | null;
+	stage: McpFailureStage;
+	error_code: string;
+	http_status: number | null;
+	retryable: boolean | null;
+	started_at_ms: number | null;
+	completed_at_ms: number;
+	duration_ms: number | null;
+	request_bytes: number | null;
+	response_bytes: number | null;
+	summary: string;
+}
+
+export interface McpGpuMetrics {
+	index: number;
+	name: string;
+	utilization_percent: number;
+	memory_used_bytes: number;
+	memory_total_bytes: number;
+	temperature_c: number | null;
+}
+
+export interface McpProcessMetrics {
+	pid: number;
+	cpu_percent: number | null;
+	memory_percent: number | null;
+	name: string;
+}
+
+export interface McpBackendMetricsSample {
+	kind: 'system';
+	version: 1;
+	timestamp_ms: number;
+	cpu_usage_percent: number | null;
+	cpu_count: number;
+	load_avg: number[];
+	memory_total_bytes: number | null;
+	memory_available_bytes: number | null;
+	disk_total_bytes: number | null;
+	disk_used_bytes: number | null;
+	disk_free_bytes: number | null;
+	disk_read_bytes_per_s: number | null;
+	disk_write_bytes_per_s: number | null;
+	disk_read_ops_per_s: number | null;
+	disk_write_ops_per_s: number | null;
+	network_rx_bytes_per_s: number | null;
+	network_tx_bytes_per_s: number | null;
+	uptime_seconds: number | null;
+	gpu_status: 'available' | 'unavailable' | 'error';
+	gpus: McpGpuMetrics[];
+	cptr_process: McpProcessMetrics | null;
+	processes: McpProcessMetrics[];
+}
+
+export type McpDiagnosticsEvent = (
+	| McpLatencySample
+	| McpFailureDiagnostic
+	| McpBackendMetricsSample
+) & { ingestion_sequence: number };
+
+export interface McpDiagnosticsSnapshot {
+	version: 1;
+	sequence: number;
+	latency: Partial<Record<McpLatencyEdge, McpLatencyAggregate>>;
+	failures: McpFailureDiagnostic[];
+	system: McpBackendMetricsSample[];
+	stream_health: {
+		subscriber_count: number;
+		slow_subscriber_drops: number;
+		latency_sample_capacity_per_edge: number;
+		failure_capacity: number;
+		system_sample_capacity: number;
+		subscriber_queue_capacity: number;
+	};
+}
+
+export interface McpDiagnosticsStreamCallbacks {
+	onSnapshot: (snapshot: McpDiagnosticsSnapshot) => void;
+	onLatency: (event: McpLatencySample & { ingestion_sequence: number }) => void;
+	onFailure: (event: McpFailureDiagnostic & { ingestion_sequence: number }) => void;
+	onSystem: (event: McpBackendMetricsSample & { ingestion_sequence: number }) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown) => void;
+}
+
+// ── Topology config + diagnostics ────────────────────────────────────────────
+
+export const getMcpTopologyConfig = () => fetchJSON<McpTopologyConfig>('/api/mcp/topology/config');
+
+export const updateMcpTopologyConfig = (aliases: Record<string, string | null>) =>
+	fetchJSON<McpTopologyConfig>('/api/mcp/topology/config', {
+		...jsonBody({ aliases }),
+		method: 'PUT'
+	});
+
+export const getMcpDiagnosticsSnapshot = () =>
+	fetchJSON<McpDiagnosticsSnapshot>('/api/mcp/diagnostics/snapshot');
+
+export function openMcpDiagnosticsStream(callbacks: McpDiagnosticsStreamCallbacks): () => void {
+	const source = new EventSource('/api/mcp/diagnostics/stream');
+	const parse = <T>(message: MessageEvent<string>, callback: (value: T) => void) => {
+		try {
+			callback(JSON.parse(message.data) as T);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+
+	source.addEventListener('snapshot', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onSnapshot)
+	);
+	source.addEventListener('latency', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onLatency)
+	);
+	source.addEventListener('failure', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onFailure)
+	);
+	source.addEventListener('system', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onSystem)
+	);
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+
+	return () => source.close();
 }
 
 // ── Live tool activity ───────────────────────────────────────────────────────
