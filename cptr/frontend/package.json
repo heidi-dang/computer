@@ -6,6 +6,7 @@
 	"scripts": {
 		"dev": "vite dev",
 		"build": "vite build",
+		"build:clean": "node scripts/check-production-build.mjs",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",
 		"format": "npm run format:frontend && cd ../.. && uv run ruff format cptr",
