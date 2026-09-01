@@ -38,6 +38,46 @@ export interface McpResource {
 	mimeType?: string;
 }
 
+export type McpActivityPhase = 'started' | 'complete' | 'failed';
+
+export interface McpActivityEvent {
+	version: 1;
+	event_id: string;
+	sequence: number;
+	ingestion_sequence: number;
+	timestamp_ms: number;
+	client: McpTrafficClient;
+	session_id: string | null;
+	request_id: string | null;
+	tool_name: string;
+	title: string | null;
+	phase: McpActivityPhase;
+	summary: string;
+	arguments_json: string | null;
+	result_json: string | null;
+	error_json: string | null;
+	duration_ms: number | null;
+}
+
+export interface McpActivitySnapshot {
+	version: 1;
+	sequence: number;
+	events: McpActivityEvent[];
+	stream_health: {
+		subscriber_count: number;
+		slow_subscriber_drops: number;
+		event_capacity: number;
+		subscriber_queue_capacity?: number;
+	};
+}
+
+export interface McpActivityStreamCallbacks {
+	onSnapshot: (snapshot: McpActivitySnapshot) => void;
+	onActivity: (event: McpActivityEvent) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown) => void;
+}
+
 export type McpTrafficEventType =
 	| 'session_opened'
 	| 'session_closed'
@@ -125,6 +165,34 @@ export interface McpTrafficStreamCallbacks {
 	onTraffic: (event: McpTrafficEvent) => void;
 	onOpen?: () => void;
 	onError?: (error: unknown) => void;
+}
+
+// ── Live tool activity ───────────────────────────────────────────────────────
+
+export const getMcpActivitySnapshot = () =>
+	fetchJSON<McpActivitySnapshot>('/api/mcp/activity/snapshot');
+
+export function openMcpActivityStream(callbacks: McpActivityStreamCallbacks): () => void {
+	const source = new EventSource('/api/mcp/activity/stream');
+
+	const parse = <T>(message: MessageEvent<string>, callback: (value: T) => void) => {
+		try {
+			callback(JSON.parse(message.data) as T);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+
+	source.addEventListener('snapshot', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onSnapshot)
+	);
+	source.addEventListener('activity', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onActivity)
+	);
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+
+	return () => source.close();
 }
 
 // ── Traffic topology ─────────────────────────────────────────────────────────

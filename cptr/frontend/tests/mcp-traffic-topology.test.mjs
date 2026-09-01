@@ -253,3 +253,135 @@ test('reducer ignores duplicate and stale ingestion sequences', () => {
 	assert.equal(duplicate, once);
 	assert.equal(stale, once);
 });
+
+const activityEvent = (sequence, phase, overrides = {}) => ({
+	version: 1,
+	event_id: `activity-${String(sequence).padStart(3, '0')}`,
+	sequence,
+	ingestion_sequence: sequence,
+	timestamp_ms: 1_788_000_100_000 + sequence,
+	client: { id: 'chatgpt', label: 'ChatGPT', version: '1' },
+	session_id: 'session-1',
+	request_id: 'request-1',
+	tool_name: 'cptr_list_workspaces',
+	title: 'List workspaces',
+	phase,
+	summary: phase === 'started' ? 'Working: List workspaces.' : 'Completed: List workspaces.',
+	arguments_json: phase === 'started' ? '{"include_unavailable":false}' : null,
+	result_json: phase === 'complete' ? '{"workspaces":[]}' : null,
+	error_json: phase === 'failed' ? '{"code":"mcp_tool_error"}' : null,
+	duration_ms: phase === 'started' ? null : 25,
+	...overrides
+});
+
+const activitySnapshot = (events = [], eventCapacity = 8) => ({
+	version: 1,
+	sequence: events.at(-1)?.ingestion_sequence ?? 0,
+	events,
+	stream_health: {
+		subscriber_count: 0,
+		slow_subscriber_drops: 0,
+		event_capacity: eventCapacity,
+		subscriber_queue_capacity: 8
+	}
+});
+
+test('MCP Activity API and Console feed use snapshot/SSE with presentation-only clear', async () => {
+	const [api, console, feed, card] = await Promise.all([
+		read('lib/apis/mcp.ts'),
+		read('lib/components/mcp/McpConsole.svelte'),
+		read('lib/components/mcp/McpActivityFeed.svelte'),
+		read('lib/components/mcp/McpCallCard.svelte')
+	]);
+
+	assert.match(api, /export interface McpActivityEvent/);
+	assert.match(api, /export interface McpActivitySnapshot/);
+	assert.match(api, /getMcpActivitySnapshot/);
+	assert.match(api, /openMcpActivityStream/);
+	assert.match(api, /new EventSource\(['"]\/api\/mcp\/activity\/stream['"]\)/);
+	assert.match(console, /McpActivityFeed/);
+	assert.match(console, /Console invocation/);
+	assert.match(console, />\s*Servers\s*</);
+	assert.match(console, />\s*Activity\s*</);
+	assert.match(console, />\s*Tool\s*</);
+	assert.match(feed, /hiddenBeforeSequence/);
+	assert.match(feed, /onClearConsole/);
+	assert.match(feed, /Refresh/);
+	assert.match(feed, /1000,\s*2000,\s*4000,\s*8000/);
+	assert.match(card, />\s*Input\s*</);
+	assert.match(card, />\s*Output\s*</);
+	assert.match(card, />\s*Error\s*</);
+});
+
+test('MCP Activity reducer folds started and complete into one bounded row with preserved input', async () => {
+	const activityReducer = await import(
+		new URL('../src/lib/stores/mcp-activity.ts', import.meta.url)
+	);
+	const state = activityReducer.hydrateMcpActivity(
+		activitySnapshot([activityEvent(1, 'started'), activityEvent(2, 'complete')], 4)
+	);
+	assert.equal(state.rows.length, 1);
+	const row = state.rows[0];
+	assert.equal(row.phase, 'complete');
+	assert.equal(row.clientLabel, 'ChatGPT');
+	assert.equal(row.argumentsJson, '{"include_unavailable":false}');
+	assert.equal(row.resultJson, '{"workspaces":[]}');
+	assert.equal(row.errorJson, null);
+	assert.equal(row.durationMs, 25);
+	assert.equal(row.source, 'plugin');
+});
+
+test('MCP Activity reducer preserves started input for failed terminal event and ignores duplicates', async () => {
+	const activityReducer = await import(
+		new URL('../src/lib/stores/mcp-activity.ts', import.meta.url)
+	);
+	let state = activityReducer.hydrateMcpActivity(activitySnapshot([], 2));
+	state = activityReducer.applyMcpActivityEvent(
+		state,
+		activityEvent(1, 'started', { request_id: 'request-failed' })
+	);
+	state = activityReducer.applyMcpActivityEvent(
+		state,
+		activityEvent(2, 'failed', {
+			request_id: 'request-failed',
+			summary: 'Failed: List workspaces.'
+		})
+	);
+	const same = activityReducer.applyMcpActivityEvent(state, activityEvent(2, 'failed'));
+	assert.equal(same, state);
+	assert.equal(state.rows.length, 1);
+	assert.equal(state.rows[0].phase, 'failed');
+	assert.equal(state.rows[0].argumentsJson, '{"include_unavailable":false}');
+	assert.equal(state.rows[0].errorJson, '{"code":"mcp_tool_error"}');
+});
+
+test('MCP Activity reducer merges a local Console invocation without forging plugin origin', async () => {
+	const activityReducer = await import(
+		new URL('../src/lib/stores/mcp-activity.ts', import.meta.url)
+	);
+	const state = activityReducer.hydrateMcpActivity(activitySnapshot([], 2));
+	const local = activityReducer.mergeConsoleActivityRow(state, {
+		id: 'console-1',
+		correlationKey: 'console:console-1',
+		source: 'console',
+		sequence: 0,
+		clientId: null,
+		clientLabel: 'Console invocation',
+		clientVersion: null,
+		toolName: 'local_tool',
+		title: 'local_tool',
+		phase: 'started',
+		summary: 'Console invocation',
+		startedAt: 1,
+		completedAt: null,
+		durationMs: null,
+		argumentsJson: '{}',
+		resultJson: null,
+		errorJson: null,
+		requestId: null,
+		sessionId: null
+	});
+	assert.equal(local.rows.length, 1);
+	assert.equal(local.rows[0].source, 'console');
+	assert.equal(local.rows[0].clientLabel, 'Console invocation');
+});
