@@ -224,10 +224,10 @@
 							class="block w-full bg-transparent text-[0.8125rem] font-mono text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 						/>
 						<datalist id="setup-base-url-suggestions">
-							<option value="https://api.openai.com/v1" />
-							<option value="https://api.anthropic.com/v1" />
-							<option value="https://openrouter.ai/api/v1" />
-							<option value="http://localhost:11434/v1" />
+							<option value="https://api.openai.com/v1"></option>
+							<option value="https://api.anthropic.com/v1"></option>
+							<option value="https://openrouter.ai/api/v1"></option>
+							<option value="http://localhost:11434/v1"></option>
 						</datalist>
 					</div>
 

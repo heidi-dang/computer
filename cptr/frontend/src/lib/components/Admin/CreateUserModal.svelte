@@ -20,6 +20,11 @@
 	let displayName = $state('');
 	let role = $state<string>('user');
 	let creating = $state(false);
+	let usernameInput: HTMLInputElement | undefined = $state();
+
+	$effect(() => {
+		if (usernameInput) usernameInput.focus();
+	});
 
 	async function create() {
 		if (!username.trim()) {
@@ -52,22 +57,25 @@
 		}}
 	>
 		<h2 class="text-sm font-medium text-gray-900 dark:text-white mb-2">{$t('admin.newUser')}</h2>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
+		<label for="create-user-username" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
 			>{$t('admin.username')}</label
 		>
 		<input
+			id="create-user-username"
+			bind:this={usernameInput}
 			type="text"
 			placeholder={$t('admin.enterUsername')}
 			bind:value={username}
-			autofocus
 			autocomplete="off"
 			spellcheck="false"
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 		/>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
-			>{$t('admin.displayName')}</label
+		<label
+			for="create-user-display-name"
+			class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1">{$t('admin.displayName')}</label
 		>
 		<input
+			id="create-user-display-name"
 			type="text"
 			placeholder={$t('admin.optional')}
 			bind:value={displayName}
@@ -75,18 +83,22 @@
 			spellcheck="false"
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 		/>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
+		<label for="create-user-password" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
 			>{$t('admin.passwordLabel')}</label
 		>
 		<input
+			id="create-user-password"
 			type="password"
 			placeholder={$t('admin.minChars')}
 			bind:value={password}
 			autocomplete="new-password"
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 		/>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1">{$t('admin.role')}</label>
+		<label for="create-user-role" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
+			>{$t('admin.role')}</label
+		>
 		<select
+			id="create-user-role"
 			bind:value={role}
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer"
 		>

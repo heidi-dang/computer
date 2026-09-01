@@ -22,14 +22,20 @@
 	}
 
 	let { bot = null, onclose, onsave }: Props = $props();
+	const initialBot = () => bot;
 
-	let platform = $state(bot?.platform || 'telegram');
-	let name = $state(bot?.name || '');
+	let platform = $state(initialBot()?.platform || 'telegram');
+	let name = $state(initialBot()?.name || '');
 	let token = $state('');
-	let modelId = $state(bot?.model_id || $defaultModel || '');
-	let workspace = $state(bot?.workspace || '');
-	let allowedSenders = $state(bot?.allowed_senders?.join(', ') || '');
+	let modelId = $state(initialBot()?.model_id || $defaultModel || '');
+	let workspace = $state(initialBot()?.workspace || '');
+	let allowedSenders = $state(initialBot()?.allowed_senders?.join(', ') || '');
 	let saving = $state(false);
+	let nameInput: HTMLInputElement | undefined = $state();
+
+	$effect(() => {
+		if (nameInput) nameInput.focus();
+	});
 
 	// Token verification
 	let verifying = $state(false);
@@ -143,24 +149,26 @@
 			<!-- Platform + Name on same row -->
 			<div class="flex gap-3">
 				<div class="flex-1">
-					<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+					<label for="bot-name" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 						>{$t('messaging.name')}</label
 					>
 					<input
+						id="bot-name"
+						bind:this={nameInput}
 						type="text"
 						bind:value={name}
 						placeholder={$t('messaging.namePlaceholder')}
-						autofocus
 						autocomplete="off"
 						spellcheck="false"
 						class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 					/>
 				</div>
 				<div class="w-28 shrink-0">
-					<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+					<label for="bot-platform" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 						>{$t('messaging.platform')}</label
 					>
 					<select
+						id="bot-platform"
 						bind:value={platform}
 						onchange={() => {
 							verifyResult = null;
@@ -177,12 +185,15 @@
 			</div>
 		{:else}
 			<!-- Edit mode: just name -->
-			<label class="text-[0.625rem] text-gray-400 dark:text-gray-600">{$t('messaging.name')}</label>
+			<label for="bot-name" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+				>{$t('messaging.name')}</label
+			>
 			<input
+				id="bot-name"
+				bind:this={nameInput}
 				type="text"
 				bind:value={name}
 				placeholder={$t('messaging.namePlaceholder')}
-				autofocus
 				autocomplete="off"
 				spellcheck="false"
 				class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
@@ -190,12 +201,13 @@
 		{/if}
 
 		<!-- Token -->
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600">
+		<label for="bot-token" class="text-[0.625rem] text-gray-400 dark:text-gray-600">
 			{$t('messaging.token')}
 			{#if bot}<span class="text-gray-300 dark:text-gray-700">({bot.token_masked})</span>{/if}
 		</label>
 		<div class="flex gap-2 items-center mb-0.5">
 			<input
+				id="bot-token"
 				type="password"
 				bind:value={token}
 				placeholder={bot
@@ -233,13 +245,14 @@
 		{/if}
 
 		<!-- Allowed senders -->
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
+		<label for="bot-allowed-senders" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
 			>{$t('messaging.allowedSenders')}</label
 		>
 		<p class="text-[0.625rem] text-gray-300 dark:text-gray-700 mb-0.5">
 			{$t('messaging.allowedSendersHint')}
 		</p>
 		<input
+			id="bot-allowed-senders"
 			type="text"
 			bind:value={allowedSenders}
 			placeholder="123456789, 987654321"

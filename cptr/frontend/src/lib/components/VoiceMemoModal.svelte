@@ -279,10 +279,11 @@
 				</p>
 			{/if}
 
-			<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+			<label for="voice-memo-filename" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 				>{$t('voiceMemo.filename')}</label
 			>
 			<input
+				id="voice-memo-filename"
 				bind:this={filenameInput}
 				type="text"
 				bind:value={fileName}

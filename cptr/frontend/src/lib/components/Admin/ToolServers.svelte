@@ -40,6 +40,11 @@
 
 	let saving = $state(false);
 	let verifying = $state(false);
+	let idInput: HTMLInputElement | undefined = $state();
+
+	$effect(() => {
+		if (showModal && idInput) idInput.focus();
+	});
 
 	// Verify result
 	let verifyResult = $state<{ ok: boolean; tools?: any[]; message?: string } | null>(null);
@@ -321,14 +326,15 @@
 			<!-- ID + Type -->
 			<div class="flex gap-3">
 				<div class="flex-1">
-					<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+					<label for="tool-server-id" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 						>{$t('toolServers.id')}</label
 					>
 					<input
+						id="tool-server-id"
+						bind:this={idInput}
 						type="text"
 						placeholder={$t('toolServers.idPlaceholder')}
 						bind:value={formId}
-						autofocus
 						autocomplete="off"
 						spellcheck="false"
 						disabled={!!editServer}
@@ -336,10 +342,11 @@
 					/>
 				</div>
 				<div class="w-28 shrink-0">
-					<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+					<label for="tool-server-type" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 						>{$t('toolServers.type')}</label
 					>
 					<select
+						id="tool-server-type"
 						bind:value={formType}
 						class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer"
 					>
@@ -351,10 +358,11 @@
 			</div>
 
 			<!-- Name -->
-			<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+			<label for="tool-server-name" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 				>{$t('toolServers.name')}</label
 			>
 			<input
+				id="tool-server-name"
 				type="text"
 				placeholder={$t('toolServers.namePlaceholder')}
 				bind:value={formName}
@@ -365,10 +373,11 @@
 
 			<!-- URL (openapi/mcp only) -->
 			{#if formType !== 'mcp_stdio'}
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+				<label for="tool-server-url" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 					>{$t('toolServers.url')}</label
 				>
 				<input
+					id="tool-server-url"
 					type="text"
 					placeholder={formType === 'mcp'
 						? 'https://mcp.example.com/mcp'
@@ -382,10 +391,13 @@
 
 			<!-- Command + Args (mcp_stdio only) -->
 			{#if formType === 'mcp_stdio'}
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+				<label
+					for="tool-server-command"
+					class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 					>{$t('toolServers.command')}</label
 				>
 				<input
+					id="tool-server-command"
 					type="text"
 					placeholder="npx"
 					bind:value={formCommand}
@@ -393,10 +405,11 @@
 					spellcheck="false"
 					class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5 font-mono"
 				/>
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+				<label for="tool-server-args" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 					>{$t('toolServers.args')}</label
 				>
 				<input
+					id="tool-server-args"
 					type="text"
 					placeholder="-y @modelcontextprotocol/server-filesystem /tmp"
 					bind:value={formArgs}
@@ -404,10 +417,11 @@
 					spellcheck="false"
 					class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5 font-mono"
 				/>
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+				<label for="tool-server-cwd" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 					>{$t('toolServers.cwd')}</label
 				>
 				<input
+					id="tool-server-cwd"
 					type="text"
 					placeholder={$t('toolServers.cwdPlaceholder')}
 					bind:value={formCwd}
@@ -434,10 +448,13 @@
 
 			<!-- Spec path (OpenAPI only) -->
 			{#if formType === 'openapi'}
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+				<label
+					for="tool-server-spec-path"
+					class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 					>{$t('toolServers.specPath')}</label
 				>
 				<input
+					id="tool-server-spec-path"
 					type="text"
 					placeholder="openapi.json"
 					bind:value={formPath}
@@ -451,10 +468,11 @@
 			{#if formType !== 'mcp_stdio'}
 				<div class="flex gap-3 mt-2">
 					<div class="w-28 shrink-0">
-						<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+						<label for="tool-server-auth" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 							>{$t('toolServers.auth')}</label
 						>
 						<select
+							id="tool-server-auth"
 							bind:value={formAuthType}
 							class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer"
 						>
@@ -464,10 +482,13 @@
 					</div>
 					{#if formAuthType === 'bearer'}
 						<div class="flex-1">
-							<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+							<label
+								for="tool-server-api-key"
+								class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 								>{$t('toolServers.apiKey')}</label
 							>
 							<input
+								id="tool-server-api-key"
 								type="password"
 								placeholder={editServer ? $t('toolServers.apiKeyKeep') : 'sk-...'}
 								bind:value={formKey}
@@ -480,10 +501,13 @@
 			{/if}
 
 			<!-- Description -->
-			<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+			<label
+				for="tool-server-description"
+				class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 				>{$t('toolServers.description')}</label
 			>
 			<input
+				id="tool-server-description"
 				type="text"
 				placeholder={$t('toolServers.descriptionPlaceholder')}
 				bind:value={formDescription}
@@ -493,13 +517,14 @@
 			/>
 
 			<!-- Headers -->
-			<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+			<label for="tool-server-headers" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 				>{$t('toolServers.headers')}</label
 			>
 			<p class="text-[0.625rem] text-gray-300 dark:text-gray-700 mb-0.5">
 				{$t('toolServers.headersHint')}
 			</p>
 			<textarea
+				id="tool-server-headers"
 				placeholder={'{"X-Custom-Header": "value"}'}
 				bind:value={formHeaders}
 				autocomplete="off"

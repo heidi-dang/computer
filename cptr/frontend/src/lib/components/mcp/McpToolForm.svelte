@@ -122,10 +122,13 @@
 		<div class="flex-1 space-y-3 overflow-y-auto px-4 py-3">
 			{#if rawJsonMode}
 				<div>
-					<label class="mb-1.5 block text-[0.65rem] uppercase tracking-wider app-muted"
+					<label
+						for="mcp-arguments-json"
+						class="mb-1.5 block text-[0.65rem] uppercase tracking-wider app-muted"
 						>Arguments (JSON)</label
 					>
 					<textarea
+						id="mcp-arguments-json"
 						class="{inputClass} min-h-32 resize-y font-mono"
 						bind:value={rawJson}
 						onkeydown={handleKeydown}
@@ -145,7 +148,7 @@
 					{@const desc = propSchema.description ?? ''}
 					{@const enumVals = propSchema.enum ?? null}
 					<div>
-						<label class="mb-1 block text-xs font-medium">
+						<label for={`mcp-argument-${key}`} class="mb-1 block text-xs font-medium">
 							<span class="font-mono">{key}</span>
 							{#if isRequired}<span class="ml-0.5 text-red-400">*</span>{/if}
 							<span class="ml-1 text-[0.6rem] font-normal app-muted">({ptype})</span>
@@ -154,18 +157,29 @@
 							<p class="mb-1 text-[0.65rem] leading-relaxed app-muted">{desc}</p>
 						{/if}
 						{#if enumVals}
-							<select class={inputClass} bind:value={formValues[key]} {disabled}>
+							<select
+								id={`mcp-argument-${key}`}
+								class={inputClass}
+								bind:value={formValues[key]}
+								{disabled}
+							>
 								<option value="">— choose —</option>
 								{#each enumVals as opt}<option value={opt}>{opt}</option>{/each}
 							</select>
 						{:else if ptype === 'boolean'}
-							<select class={inputClass} bind:value={formValues[key]} {disabled}>
+							<select
+								id={`mcp-argument-${key}`}
+								class={inputClass}
+								bind:value={formValues[key]}
+								{disabled}
+							>
 								<option value="">— choose —</option>
 								<option value="true">true</option>
 								<option value="false">false</option>
 							</select>
 						{:else if ptype === 'object' || ptype === 'array'}
 							<textarea
+								id={`mcp-argument-${key}`}
 								class="{inputClass} min-h-20 resize-y font-mono"
 								bind:value={formValues[key]}
 								placeholder={ptype === 'array' ? '[]' : '{}'}
@@ -173,9 +187,16 @@
 								{disabled}
 							></textarea>
 						{:else if ptype === 'number' || ptype === 'integer'}
-							<input type="number" class={inputClass} bind:value={formValues[key]} {disabled} />
+							<input
+								id={`mcp-argument-${key}`}
+								type="number"
+								class={inputClass}
+								bind:value={formValues[key]}
+								{disabled}
+							/>
 						{:else if propSchema.maxLength > 100 || !propSchema.maxLength}
 							<textarea
+								id={`mcp-argument-${key}`}
 								class="{inputClass} min-h-16 resize-y"
 								bind:value={formValues[key]}
 								placeholder={propSchema.examples?.[0] ?? ''}
@@ -184,6 +205,7 @@
 							></textarea>
 						{:else}
 							<input
+								id={`mcp-argument-${key}`}
 								type="text"
 								class={inputClass}
 								bind:value={formValues[key]}

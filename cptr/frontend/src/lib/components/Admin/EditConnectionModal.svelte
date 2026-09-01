@@ -19,23 +19,29 @@
 	}
 
 	let { connection, onclose, onchanged }: Props = $props();
+	const initialConnection = () => connection;
 
-	let formName = $state(connection.name || '');
+	let formName = $state(initialConnection().name || '');
 	let formProvider = $state<'anthropic' | 'openai'>(
-		connection.provider === 'openai' ? 'openai' : 'anthropic'
+		initialConnection().provider === 'openai' ? 'openai' : 'anthropic'
 	);
 	let formApiType = $state<'chat_completions' | 'responses'>(
-		connection.api_type === 'responses' ? 'responses' : 'chat_completions'
+		initialConnection().api_type === 'responses' ? 'responses' : 'chat_completions'
 	);
 	let formProviderType = $state<'default' | 'llama.cpp'>(
-		connection.provider_type === 'llama.cpp' ? 'llama.cpp' : 'default'
+		initialConnection().provider_type === 'llama.cpp' ? 'llama.cpp' : 'default'
 	);
-	let formBaseUrl = $state(connection.base_url || '');
+	let formBaseUrl = $state(initialConnection().base_url || '');
 	let formApiKey = $state('');
-	let formPrefixId = $state(connection.prefix_id || '');
-	let formModels = $state(connection.data?.models?.join(', ') || '');
+	let formPrefixId = $state(initialConnection().prefix_id || '');
+	let formModels = $state(initialConnection().data?.models?.join(', ') || '');
 	let saving = $state(false);
 	let verifying = $state(false);
+	let nameInput: HTMLInputElement | undefined = $state();
+
+	$effect(() => {
+		if (nameInput) nameInput.focus();
+	});
 
 	async function save() {
 		if (!formBaseUrl.trim()) {
@@ -117,24 +123,29 @@
 
 		<div class="flex gap-3">
 			<div class="flex-1">
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+				<label for="edit-connection-name" class="text-[0.625rem] text-gray-400 dark:text-gray-600"
 					>{$t('connections.name')}</label
 				>
 				<input
+					id="edit-connection-name"
+					bind:this={nameInput}
 					type="text"
 					placeholder={$t('connections.optional')}
 					bind:value={formName}
-					autofocus
 					autocomplete="off"
 					spellcheck="false"
 					class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 				/>
 			</div>
 			<div class="w-28 shrink-0">
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600">
+				<label
+					for="edit-connection-provider"
+					class="text-[0.625rem] text-gray-400 dark:text-gray-600"
+				>
 					{$t('connections.provider')}
 				</label>
 				<select
+					id="edit-connection-provider"
 					bind:value={formProvider}
 					class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer"
 				>
@@ -145,10 +156,14 @@
 		</div>
 
 		{#if formProvider === 'openai'}
-			<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2">
+			<label
+				for="edit-connection-api-type"
+				class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+			>
 				{$t('connections.apiType')}
 			</label>
 			<select
+				id="edit-connection-api-type"
 				bind:value={formApiType}
 				class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer"
 			>
@@ -169,10 +184,13 @@
 			</select>
 		{/if}
 
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+		<label
+			for="edit-connection-base-url"
+			class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 			>{$t('connections.baseUrl')}</label
 		>
 		<input
+			id="edit-connection-base-url"
 			type="text"
 			placeholder="https://api.openai.com/v1"
 			bind:value={formBaseUrl}
@@ -182,16 +200,19 @@
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5 font-mono"
 		/>
 		<datalist id="base-url-suggestions-edit">
-			<option value="https://api.anthropic.com/v1" />
-			<option value="https://api.openai.com/v1" />
-			<option value="https://openrouter.ai/api/v1" />
-			<option value="http://localhost:11434/v1" />
+			<option value="https://api.anthropic.com/v1"></option>
+			<option value="https://api.openai.com/v1"></option>
+			<option value="https://openrouter.ai/api/v1"></option>
+			<option value="http://localhost:11434/v1"></option>
 		</datalist>
 
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+		<label
+			for="edit-connection-api-key"
+			class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 			>{$t('connections.apiKey')}</label
 		>
 		<input
+			id="edit-connection-api-key"
 			type="password"
 			placeholder={$t('connections.leaveBlankPlaceholder')}
 			bind:value={formApiKey}
@@ -199,10 +220,13 @@
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5 font-mono"
 		/>
 
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+		<label
+			for="edit-connection-prefix-id"
+			class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 			>{$t('connections.prefixId')}</label
 		>
 		<input
+			id="edit-connection-prefix-id"
 			type="text"
 			placeholder={$t('connections.prefixPlaceholder')}
 			bind:value={formPrefixId}
@@ -211,13 +235,16 @@
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5 font-mono"
 		/>
 
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+		<label
+			for="edit-connection-models"
+			class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
 			>{$t('connections.models')}</label
 		>
 		<p class="text-[0.625rem] text-gray-300 dark:text-gray-700 mb-0.5">
 			{$t('connections.modelsHint')}
 		</p>
 		<input
+			id="edit-connection-models"
 			type="text"
 			placeholder="claude-sonnet-4-20250514, claude-opus-4-20250514"
 			bind:value={formModels}

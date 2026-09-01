@@ -181,7 +181,7 @@
 						rows="4"
 						placeholder={$t('admin.subagentsSystemPromptPlaceholder')}
 						class="w-full mt-1 px-2 py-1.5 rounded-lg text-xs bg-gray-100 dark:bg-white/6 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-white/8 outline-none focus:border-blue-400 dark:focus:border-blue-500 transition-colors resize-y font-mono"
-					/>
+					></textarea>
 					<p class="text-[0.6875rem] text-gray-400 dark:text-gray-600 mt-0.5">
 						{$t('admin.subagentsSystemPromptHint')}
 					</p>

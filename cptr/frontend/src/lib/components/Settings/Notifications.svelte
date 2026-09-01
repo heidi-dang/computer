@@ -44,6 +44,7 @@
 	let savingTarget = $state(false);
 	let editingId = $state<string | null>(null);
 	let formOpen = $state(false);
+	let targetIdInput: HTMLInputElement | undefined = $state();
 	let form = $state({
 		id: '',
 		type: 'webhook' as NotificationTargetType,
@@ -57,6 +58,10 @@
 	let targetTypes = $derived<NotificationTargetType[]>(
 		botOptions.length ? ['webhook', 'bot'] : ['webhook']
 	);
+
+	$effect(() => {
+		if (formOpen && targetIdInput) targetIdInput.focus();
+	});
 
 	onMount(() => {
 		void loadNotificationTargets();
@@ -162,7 +167,9 @@
 			formOpen = false;
 			toast.success($t('settings.saved'));
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed'));
+			toast.error(
+				error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed')
+			);
 		} finally {
 			savingTarget = false;
 		}
@@ -173,7 +180,9 @@
 			await updateNotificationTarget(target.id, patch as any);
 			await loadNotificationTargets();
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed'));
+			toast.error(
+				error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed')
+			);
 		}
 	}
 
@@ -182,7 +191,9 @@
 			await deleteNotificationTarget(target.id);
 			await loadNotificationTargets();
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed'));
+			toast.error(
+				error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed')
+			);
 		}
 	}
 
@@ -191,7 +202,9 @@
 			await setDefaultNotificationTarget(target.id);
 			await loadNotificationTargets();
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed'));
+			toast.error(
+				error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed')
+			);
 		}
 	}
 
@@ -200,7 +213,9 @@
 			await testNotificationTarget(target.id);
 			toast.success($t('general.testSent'));
 		} catch (error) {
-			toast.error(error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed'));
+			toast.error(
+				error instanceof Error ? error.message : $t('general.notificationTargetSaveFailed')
+			);
 		}
 	}
 </script>
@@ -253,7 +268,9 @@
 				<div class="flex flex-col">
 					{#each targets as target}
 						{@const targetDestination =
-							target.type === 'webhook' ? target.config.url_masked : target.config.destination_chat_id}
+							target.type === 'webhook'
+								? target.config.url_masked
+								: target.config.destination_chat_id}
 						{@const alertLabels = eventOptions
 							.filter((event) => target.events.includes(event.event))
 							.map((event) => event.label)
@@ -273,13 +290,19 @@
 										</span>
 									{/if}
 								</div>
-								<div class="truncate text-[0.625rem] text-gray-400 dark:text-gray-600 leading-tight">
+								<div
+									class="truncate text-[0.625rem] text-gray-400 dark:text-gray-600 leading-tight"
+								>
 									{targetDestination}
 								</div>
-								<div class="truncate text-[0.625rem] text-gray-400 dark:text-gray-600 leading-tight">
+								<div
+									class="truncate text-[0.625rem] text-gray-400 dark:text-gray-600 leading-tight"
+								>
 									{alertLabels || $t('general.noChatAlerts')}
 									{#if target.events.length}
-										· {target.delivery === 'away' ? $t('general.onlyWhenAway') : $t('general.always')}
+										· {target.delivery === 'away'
+											? $t('general.onlyWhenAway')
+											: $t('general.always')}
 									{/if}
 								</div>
 							</div>
@@ -348,35 +371,43 @@
 				{/each}
 			</div>
 
-			<label class="text-[0.625rem] text-gray-400 dark:text-gray-600">
+			<label for="notification-target-id" class="text-[0.625rem] text-gray-400 dark:text-gray-600">
 				{$t('general.targetIdForNotify')}
 			</label>
 			<input
+				id="notification-target-id"
+				bind:this={targetIdInput}
 				bind:value={form.id}
 				placeholder={$t('general.targetId')}
-				autofocus
 				autocomplete="off"
 				spellcheck="false"
 				class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5 font-mono"
 			/>
 
 			{#if form.type === 'webhook'}
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2">
+				<label
+					for="notification-webhook-url"
+					class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+				>
 					{$t('general.webhook')}
 				</label>
 				<input
+					id="notification-webhook-url"
 					type="url"
 					bind:value={form.url}
-					placeholder={editingId ? $t('general.keepWebhookUrl') : 'https://hooks.slack.com/services/...'}
+					placeholder={editingId
+						? $t('general.keepWebhookUrl')
+						: 'https://hooks.slack.com/services/...'}
 					autocomplete="off"
 					spellcheck="false"
 					class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5 font-mono"
 				/>
 			{:else}
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2">
+				<label for="notification-bot" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2">
 					{$t('general.bot')}
 				</label>
 				<select
+					id="notification-bot"
 					bind:value={form.bot_id}
 					class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer"
 				>
@@ -387,10 +418,14 @@
 					{/each}
 				</select>
 
-				<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2">
+				<label
+					for="notification-destination-id"
+					class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-2"
+				>
 					{$t('general.platformDestinationId')}
 				</label>
 				<input
+					id="notification-destination-id"
 					bind:value={form.destination_chat_id}
 					placeholder={$t('general.platformDestinationId')}
 					autocomplete="off"
@@ -399,9 +434,9 @@
 				/>
 			{/if}
 
-			<label class="block text-[0.625rem] text-gray-400 dark:text-gray-600 mt-3 mb-1">
+			<div class="block text-[0.625rem] text-gray-400 dark:text-gray-600 mt-3 mb-1">
 				{$t('general.automaticEvents')}
-			</label>
+			</div>
 			<div class="flex flex-wrap gap-1">
 				{#each eventOptions as event}
 					<button
@@ -417,9 +452,9 @@
 			</div>
 
 			{#if form.events.length}
-				<label class="block text-[0.625rem] text-gray-400 dark:text-gray-600 mt-3 mb-1">
+				<div class="block text-[0.625rem] text-gray-400 dark:text-gray-600 mt-3 mb-1">
 					{$t('general.automaticDelivery')}
-				</label>
+				</div>
 				<div class="flex gap-1">
 					{#each ['away', 'always'] as mode}
 						<button

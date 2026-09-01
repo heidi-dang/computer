@@ -31,13 +31,14 @@
 	const ROLES = ['admin', 'user', 'pending'] as const;
 
 	let { user, adminCount, currentUserId, onclose, onchanged }: Props = $props();
+	const initialUser = () => user;
 
 	let isSelf = $derived(user.user_id === currentUserId);
 
-	let username = $state(user.username);
-	let displayName = $state(user.display_name ?? '');
+	let username = $state(initialUser().username);
+	let displayName = $state(initialUser().display_name ?? '');
 	let newPassword = $state('');
-	let role = $state(user.role);
+	let role = $state(initialUser().role);
 	let saving = $state(false);
 
 	async function save() {
@@ -91,36 +92,43 @@
 <Modal {onclose} class="w-full max-w-sm mx-4">
 	<div class="p-4">
 		<h2 class="text-sm font-medium text-gray-900 dark:text-white mb-2">{$t('admin.editUser')}</h2>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
+		<label for="edit-user-username" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
 			>{$t('admin.username')}</label
 		>
 		<input
+			id="edit-user-username"
 			type="text"
 			placeholder={$t('admin.username')}
 			bind:value={username}
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 		/>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
-			>{$t('admin.displayName')}</label
+		<label
+			for="edit-user-display-name"
+			class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1">{$t('admin.displayName')}</label
 		>
 		<input
+			id="edit-user-display-name"
 			type="text"
 			placeholder={$t('admin.optional')}
 			bind:value={displayName}
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 		/>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
+		<label for="edit-user-password" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
 			>{$t('admin.newPasswordLabel')}</label
 		>
 		<input
+			id="edit-user-password"
 			type="password"
 			placeholder={$t('admin.leaveBlank')}
 			bind:value={newPassword}
 			autocomplete="new-password"
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 placeholder:text-gray-300 dark:placeholder:text-gray-700 outline-none py-0.5"
 		/>
-		<label class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1">{$t('admin.role')}</label>
+		<label for="edit-user-role" class="text-[0.625rem] text-gray-400 dark:text-gray-600 mt-1"
+			>{$t('admin.role')}</label
+		>
 		<select
+			id="edit-user-role"
 			bind:value={role}
 			disabled={isSelf}
 			class="block w-full bg-transparent text-[0.8125rem] text-gray-700 dark:text-gray-300 outline-none py-0.5 cursor-pointer disabled:opacity-50"
