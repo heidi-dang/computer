@@ -53,7 +53,7 @@
 	let edit = $state(false);
 	let editedContent = $state('');
 	let copied = $state(false);
-	let textareaEl: HTMLTextAreaElement;
+	let textareaEl: HTMLTextAreaElement | undefined = $state();
 	let asyncExpanded = $state(false);
 	let timerExpanded = $state(false);
 	const isAsyncSubagentResult = $derived(

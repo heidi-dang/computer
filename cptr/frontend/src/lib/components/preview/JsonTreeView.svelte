@@ -1,4 +1,6 @@
 <script lang="ts">
+	import JsonTreeView from './JsonTreeView.svelte';
+
 	interface Props {
 		data: unknown;
 		key?: string;
@@ -7,8 +9,9 @@
 	}
 
 	let { data, key = '', depth = 0, maxExpandDepth = 2 }: Props = $props();
+	const initialExpanded = () => depth < maxExpandDepth;
 
-	let expanded = $state(depth < maxExpandDepth);
+	let expanded = $state(initialExpanded());
 
 	let isObject = $derived(data !== null && typeof data === 'object' && !Array.isArray(data));
 	let isArray = $derived(Array.isArray(data));
@@ -63,7 +66,7 @@
 	{#if expanded}
 		{#each entries() as [k, v]}
 			{#if v !== null && typeof v === 'object'}
-				<svelte:self data={v} key={k} depth={depth + 1} {maxExpandDepth} />
+				<JsonTreeView data={v} key={k} depth={depth + 1} {maxExpandDepth} />
 			{:else}
 				{@const fmt = formatValue(v)}
 				<div class="tree-node" style="padding-left: {(depth + 1) * 16}px">

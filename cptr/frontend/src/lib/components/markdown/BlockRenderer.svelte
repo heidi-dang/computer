@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { type Token, type Tokens } from 'marked';
 
+	import BlockRenderer from './BlockRenderer.svelte';
 	import CodeBlock from './CodeBlock.svelte';
 	import MermaidBlock from './MermaidBlock.svelte';
 	import InlineRenderer from './InlineRenderer.svelte';
@@ -29,7 +30,7 @@
 		{/if}
 	{:else if token.type === 'blockquote'}
 		<blockquote>
-			<svelte:self tokens={(token as Tokens.Blockquote).tokens} />
+			<BlockRenderer tokens={(token as Tokens.Blockquote).tokens} />
 		</blockquote>
 	{:else if token.type === 'list'}
 		{@const list = token as Tokens.List}
@@ -40,7 +41,7 @@
 						<input type="checkbox" checked={item.checked} disabled />
 					{/if}
 					{#if item.tokens}
-						<svelte:self tokens={item.tokens} />
+						<BlockRenderer tokens={item.tokens} />
 					{/if}
 				</li>
 			{/each}

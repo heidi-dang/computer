@@ -11,7 +11,8 @@
 	}
 
 	let { title, summary = '', open = false, indent = false, children }: Props = $props();
-	let expanded = $state(open);
+	const initialOpen = () => open;
+	let expanded = $state(initialOpen());
 </script>
 
 <div>

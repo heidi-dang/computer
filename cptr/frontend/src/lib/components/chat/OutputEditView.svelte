@@ -20,7 +20,7 @@
 
 	// ── CodeMirror ──────────────────────────────────────────────
 
-	let cmContainer: HTMLDivElement;
+	let cmContainer: HTMLDivElement | undefined = $state();
 	let cmEditor: EditorView | null = null;
 	let editorTheme = new Compartment();
 
@@ -294,6 +294,7 @@
 						<button
 							class="invisible group-hover:visible p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition rounded-lg"
 							onclick={() => deleteIndices(di.indices)}
+							aria-label={$t('common.remove')}
 						>
 							<svg
 								xmlns="http://www.w3.org/2000/svg"

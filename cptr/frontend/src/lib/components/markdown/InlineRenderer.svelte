@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { Token } from 'marked';
+	import InlineRenderer from './InlineRenderer.svelte';
 	import { openFileTab, setFileBrowserCwd, setActiveTab } from '$lib/stores';
 	import { t } from '$lib/i18n';
 
@@ -30,36 +31,36 @@
 {#each items as item}
 	{#if item.type === 'text'}
 		{#if 'tokens' in item && item.tokens}
-			<svelte:self items={item.tokens} />
+			<InlineRenderer items={item.tokens} />
 		{:else}
 			{decodeEntities('text' in item ? item.text : item.raw)}
 		{/if}
 	{:else if item.type === 'strong'}
 		<strong
-			>{#if 'tokens' in item && item.tokens}<svelte:self
+			>{#if 'tokens' in item && item.tokens}<InlineRenderer
 					items={item.tokens}
 				/>{:else}{item.raw}{/if}</strong
 		>
 	{:else if item.type === 'em'}
 		<em
-			>{#if 'tokens' in item && item.tokens}<svelte:self
+			>{#if 'tokens' in item && item.tokens}<InlineRenderer
 					items={item.tokens}
 				/>{:else}{item.raw}{/if}</em
 		>
 	{:else if item.type === 'del'}
 		<del
-			>{#if 'tokens' in item && item.tokens}<svelte:self
+			>{#if 'tokens' in item && item.tokens}<InlineRenderer
 					items={item.tokens}
 				/>{:else}{item.raw}{/if}</del
 		>
 	{:else if item.type === 'codespan'}
-		<!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-		<code
+		<button
+			type="button"
 			class="codespan cursor-pointer"
 			onclick={() => {
 				const text = 'text' in item ? item.text : item.raw;
 				navigator.clipboard.writeText(text);
-			}}>{'text' in item ? item.text : item.raw}</code
+			}}>{'text' in item ? item.text : item.raw}</button
 		>
 	{:else if item.type === 'link'}
 		{@const href = 'href' in item ? item.href : ''}
@@ -117,7 +118,7 @@
 		{:else}
 			<a href={href || '#'} target="_blank" rel="noopener noreferrer">
 				{#if 'tokens' in item && item.tokens}
-					<svelte:self items={item.tokens} />
+					<InlineRenderer items={item.tokens} />
 				{:else}
 					{'text' in item ? item.text : item.raw}
 				{/if}

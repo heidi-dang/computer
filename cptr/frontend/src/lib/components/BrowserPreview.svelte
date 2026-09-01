@@ -37,10 +37,13 @@
 		onTabUpdate,
 		onOpenBrowser
 	}: Props = $props();
+	const initialFrameSrc = () => browserBlankUrl(sessionId);
+	const initialUrlInput = () => initialUrl ?? '';
+
 	let iframeEl: HTMLIFrameElement | undefined = $state();
 	let chromeEl: ChromeBrowser | undefined = $state();
-	let frameSrc = $state(browserBlankUrl(sessionId));
-	let urlInput = $state(initialUrl ?? '');
+	let frameSrc = $state(initialFrameSrc());
+	let urlInput = $state(initialUrlInput());
 	let title = $state('');
 	let error = $state('');
 	let modeError = $state('');

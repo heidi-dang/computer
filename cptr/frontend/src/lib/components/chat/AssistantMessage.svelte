@@ -60,7 +60,7 @@
 	let copied = $state(false);
 	let showUsageTooltip = $state(false);
 	let collapsedFiles = $state<Record<string, boolean>>({});
-	let textareaEl: HTMLTextAreaElement;
+	let textareaEl: HTMLTextAreaElement | undefined = $state();
 
 	async function startEdit() {
 		edit = true;

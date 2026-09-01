@@ -172,7 +172,7 @@
 	let diffMode = $state(false);
 	let diffFiles = $state<DiffFileEntry[]>([]);
 	let diffLoading = $state(false);
-	let diffScrollEl: HTMLDivElement | undefined;
+	let diffScrollEl: HTMLDivElement | undefined = $state();
 	let hasGitChanges = $state(false);
 	let gitLineChanges: GitLineChange[] = [];
 	let gitBaseContent: string | null = null;
@@ -1161,8 +1161,11 @@
 						class="toolbar-btn {saved ? 'saved' : ''}"
 						onclick={saveFile}
 						disabled={saving}
-						use:tooltip={saving ? $t('settings.saving') : saved ? $t('settings.saved') : $t('settings.save')}
-						><Icon name={saved ? 'check' : 'save'} size={11} /></button
+						use:tooltip={saving
+							? $t('settings.saving')
+							: saved
+								? $t('settings.saved')
+								: $t('settings.save')}><Icon name={saved ? 'check' : 'save'} size={11} /></button
 					>
 				{/if}
 				{#if !isUntitled && hasGitChanges}
@@ -1175,8 +1178,10 @@
 					>
 				{/if}
 				{#if !isUntitled}
-					<button class="toolbar-btn" onclick={() => loadFile(filePath)} use:tooltip={$t('files.refresh')}
-						><Icon name="refresh" size={11} /></button
+					<button
+						class="toolbar-btn"
+						onclick={() => loadFile(filePath)}
+						use:tooltip={$t('files.refresh')}><Icon name="refresh" size={11} /></button
 					>
 				{/if}
 			</div>
@@ -1245,8 +1250,7 @@
 				</div>
 			{:else if markdownMode === 'editor' && RichTextEditor}
 				{@const wsPath = $activeWorkspace?.path ?? ''}
-				<svelte:component
-					this={RichTextEditor}
+				<RichTextEditor
 					bind:this={richTextRef}
 					content={fileData.content}
 					filePath={fileData.path}

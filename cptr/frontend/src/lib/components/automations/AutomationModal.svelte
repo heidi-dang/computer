@@ -23,12 +23,13 @@
 	}
 
 	let { automation = null, onclose, onsave }: Props = $props();
+	const initialAutomation = () => automation;
 
-	let name = $state(automation?.name || '');
-	let prompt = $state(automation?.prompt || '');
-	let modelId = $state(automation?.model_id || $defaultModel || '');
-	let workspace = $state(automation?.workspace || '');
-	let rrule = $state(automation?.rrule || 'RRULE:FREQ=DAILY;BYHOUR=9;BYMINUTE=0');
+	let name = $state(initialAutomation()?.name || '');
+	let prompt = $state(initialAutomation()?.prompt || '');
+	let modelId = $state(initialAutomation()?.model_id || $defaultModel || '');
+	let workspace = $state(initialAutomation()?.workspace || '');
+	let rrule = $state(initialAutomation()?.rrule || 'RRULE:FREQ=DAILY;BYHOUR=9;BYMINUTE=0');
 	let saving = $state(false);
 
 	// Workspaces

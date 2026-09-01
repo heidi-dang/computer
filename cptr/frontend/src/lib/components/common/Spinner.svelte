@@ -11,8 +11,8 @@
 	}
 	let { size = 16, borderWidth, class: className = '' }: Props = $props();
 
-	const px = typeof size === 'number' ? size : parseFloat(size) * 4;
-	const bw = borderWidth ?? (px <= 12 ? 1.5 : 2);
+	const px = $derived(typeof size === 'number' ? size : parseFloat(size) * 4);
+	const bw = $derived(borderWidth ?? (px <= 12 ? 1.5 : 2));
 </script>
 
 <div

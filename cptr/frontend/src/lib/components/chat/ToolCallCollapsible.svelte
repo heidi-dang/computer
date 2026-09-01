@@ -16,7 +16,7 @@
 
 	let { item, pairedOutput, done, chatId, messageId, toolLabel, onapprove }: Props = $props();
 
-	let expanded = $state($expandToolDetails || item.name === 'ask_user');
+	let expanded = $state(false);
 	$effect(() => {
 		expanded = $expandToolDetails || item.name === 'ask_user';
 	});

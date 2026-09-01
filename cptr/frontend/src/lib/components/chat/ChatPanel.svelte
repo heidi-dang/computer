@@ -91,9 +91,10 @@
 		ontabupdate,
 		onopenchat
 	}: Props = $props();
+	const initialChat = () => initialChatId;
 
 	let inputText = $state('');
-	let chatId = $state<string | null>(initialChatId ?? null);
+	let chatId = $state<string | null>(initialChat() ?? null);
 	let selectedModel = $state('');
 	let toolApprovalMode = $state<ToolApprovalMode>('auto');
 	let planMode = $state(false);
@@ -131,13 +132,13 @@
 	let commandSessions = $state<CommandSession[]>([]);
 	let initialCommandSessionId = $state<string | null>(null);
 	let previousChats = $state<ChatInfo[]>([]);
-	let messagesEl: HTMLDivElement;
-	let chatInputEl: ChatInput;
+	let messagesEl: HTMLDivElement | undefined = $state();
+	let chatInputEl: ChatInput | undefined = $state();
 	let statusButtonEl: HTMLButtonElement | undefined = $state();
 	let sending = $state(false);
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
-	let loading = $state(!!initialChatId);
+	let loading = $state(!!initialChat());
 	let chatTitle = $state('');
 	let ttsQueue: string[] = [];
 	let ttsBuffer = '';
@@ -297,7 +298,7 @@
 		hasHiddenMessages ? activePath.slice(activePath.length - visibleCount) : activePath
 	);
 
-	let loadSentinelEl: HTMLDivElement;
+	let loadSentinelEl: HTMLDivElement | undefined = $state();
 	let loadObserver: IntersectionObserver | null = null;
 	let loadingMore = false;
 
@@ -1789,13 +1790,16 @@
 		<!-- Landing: input + recent chats -->
 		<div class="flex-1 overflow-y-auto flex flex-col">
 			<div
-				class="chat-landing max-w-2xl w-full mx-auto px-4 sm:px-6 flex flex-col my-auto pt-8 {previousChats.length === 0
+				class="chat-landing max-w-2xl w-full mx-auto px-4 sm:px-6 flex flex-col my-auto pt-8 {previousChats.length ===
+				0
 					? 'pb-20'
 					: 'pb-8'}"
 			>
 				<!-- Greeting -->
 				<div class="mb-8 text-center">
-					<h1 class="text-xl sm:text-2xl font-medium text-gray-800 dark:text-gray-200 tracking-tight">
+					<h1
+						class="text-xl sm:text-2xl font-medium text-gray-800 dark:text-gray-200 tracking-tight"
+					>
 						{$t('chat.greeting')}
 					</h1>
 				</div>
@@ -1898,7 +1902,10 @@
 		{/if}
 
 		<!-- Input area -->
-		<div class="chat-input-dock mobile-safe-bottom px-3 sm:px-4 pt-2.5 pb-3" style="background: var(--app-bg);">
+		<div
+			class="chat-input-dock mobile-safe-bottom px-3 sm:px-4 pt-2.5 pb-3"
+			style="background: var(--app-bg);"
+		>
 			<div class="{$widescreenMode ? 'max-w-full' : 'max-w-3xl'} mx-auto w-full relative">
 				{#if !autoScroll && activePath.length > 0}
 					<div

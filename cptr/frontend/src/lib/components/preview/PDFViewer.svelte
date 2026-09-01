@@ -17,7 +17,7 @@
 	let error = $state('');
 	let pzInstance: PanZoom | null = null;
 	let zoomLevel = $state(1);
-	let pdfDoc: any = null;
+	let pdfDoc = $state<any>(null);
 	let lastRenderedZoom = 1;
 	let rerenderTimer: ReturnType<typeof setTimeout> | null = null;
 	let textLayers: any[] = [];

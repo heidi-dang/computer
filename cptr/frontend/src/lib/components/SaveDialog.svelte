@@ -19,6 +19,7 @@
 	}
 
 	let { defaultName = 'Untitled', initialDir, onclose, onsave }: Props = $props();
+	const initialFileName = () => defaultName;
 
 	let currentPath = $state('~');
 	let directories = $state<DirEntry[]>([]);
@@ -28,7 +29,7 @@
 	let showHidden = $state(false);
 	let listEl: HTMLDivElement | undefined = $state();
 	let history = $state<string[]>([]);
-	let fileName = $state(defaultName);
+	let fileName = $state(initialFileName());
 	let fileNameInput: HTMLInputElement | undefined = $state();
 
 	const filteredDirs = $derived.by(() => {
