@@ -1,12 +1,16 @@
 <script lang="ts">
+	import type { McpFailureState } from '$lib/stores/mcp-diagnostics';
 	import type { McpRecentRequestRow } from '$lib/stores/mcp-traffic';
+	import McpDiagnosticDetail from './McpDiagnosticDetail.svelte';
 
 	type Props = {
 		rows: McpRecentRequestRow[];
 		selectedClientId?: string | null;
+		failures?: McpFailureState[];
+		onrevealactivity?: (requestId: string | null, correlationId: string | null) => void;
 	};
 
-	let { rows, selectedClientId = null }: Props = $props();
+	let { rows, selectedClientId = null, failures = [], onrevealactivity }: Props = $props();
 	let selectedRequestId = $state<string | null>(null);
 
 	const visibleRows = $derived(
@@ -15,6 +19,7 @@
 	const selected = $derived(
 		selectedRequestId ? (rows.find((row) => row.requestId === selectedRequestId) ?? null) : null
 	);
+	const selectedDiagnostic = $derived(selected ? diagnosticFor(selected) : null);
 
 	function bytes(value: number | null): string {
 		if (value == null) return '—';
@@ -39,6 +44,19 @@
 
 	function methodTool(row: McpRecentRequestRow): string {
 		return row.toolName || row.method || 'MCP request';
+	}
+
+	function diagnosticFor(row: McpRecentRequestRow): McpFailureState | null {
+		const requestMatch = failures
+			.filter((failure) => failure.requestId === row.requestId)
+			.sort((left, right) => right.completedAtMs - left.completedAtMs)[0];
+		if (requestMatch) return requestMatch;
+		if (!row.correlationId) return null;
+		return (
+			failures
+				.filter((failure) => failure.correlationId === row.correlationId)
+				.sort((left, right) => right.completedAtMs - left.completedAtMs)[0] ?? null
+		);
 	}
 
 	function toggle(row: McpRecentRequestRow) {
@@ -225,6 +243,12 @@
 					<dd class="mt-0.5 font-mono">{shortId(selected.sessionId)}</dd>
 				</div>
 				<div>
+					<dt class="app-muted">Correlation ID</dt>
+					<dd class="mt-0.5 font-mono" title={selected.correlationId ?? undefined}>
+						{shortId(selected.correlationId)}
+					</dd>
+				</div>
+				<div>
 					<dt class="app-muted">Started</dt>
 					<dd class="mt-0.5">{new Date(selected.startedAt).toLocaleString()}</dd>
 				</div>
@@ -235,6 +259,22 @@
 					</dd>
 				</div>
 			</dl>
+
+			{#if selected.status === 'error'}
+				<div class="mt-4">
+					{#if selectedDiagnostic}
+						<McpDiagnosticDetail diagnostic={selectedDiagnostic} {onrevealactivity} />
+					{:else}
+						<div class="app-surface rounded-xl border p-3 text-[0.7rem]">
+							<p class="font-medium">No deeper diagnostic was captured.</p>
+							<p class="mt-1 leading-5 app-muted">
+								The traffic record still preserves the safe error code, timing, byte counts, request
+								ID, and correlation ID shown above.
+							</p>
+						</div>
+					{/if}
+				</div>
+			{/if}
 		</div>
 	{/if}
 </section>

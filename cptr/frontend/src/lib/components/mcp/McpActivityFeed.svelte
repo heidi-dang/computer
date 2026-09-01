@@ -12,10 +12,17 @@
 	type StreamStatus = 'loading' | 'live' | 'reconnecting';
 	type Props = {
 		consoleRows?: McpActivityRow[];
+		focusRequestId?: string | null;
+		focusCorrelationId?: string | null;
 		onClearConsole?: () => void;
 	};
 
-	let { consoleRows = [], onClearConsole }: Props = $props();
+	let {
+		consoleRows = [],
+		focusRequestId = null,
+		focusCorrelationId = null,
+		onClearConsole
+	}: Props = $props();
 	let state = $state<McpActivityState | null>(null);
 	let status = $state<StreamStatus>('loading');
 	let hiddenBeforeSequence = $state(0);
@@ -38,6 +45,13 @@
 		)
 	);
 	const revision = $derived(rows.map((row) => `${row.id}:${row.phase}:${row.sequence}`).join('|'));
+	const focusedRowId = $derived(
+		rows.find(
+			(row) =>
+				(Boolean(focusRequestId) && row.requestId === focusRequestId) ||
+				(Boolean(focusCorrelationId) && row.correlationId === focusCorrelationId)
+		)?.id ?? null
+	);
 
 	$effect(() => {
 		revision;
@@ -45,6 +59,18 @@
 		void tick().then(() => {
 			if (!scrollEl) return;
 			scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: 'smooth' });
+		});
+	});
+
+	$effect(() => {
+		revision;
+		const targetId = focusedRowId;
+		if (!targetId || typeof document === 'undefined') return;
+		autoFollow = false;
+		void tick().then(() => {
+			document
+				.getElementById(`mcp-activity-${targetId}`)
+				?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 		});
 	});
 
@@ -177,7 +203,14 @@
 			</div>
 		{:else}
 			{#each rows as record (record.id)}
-				<McpCallCard {record} />
+				<div
+					id={`mcp-activity-${record.id}`}
+					class="rounded-xl {focusedRowId === record.id
+						? 'app-accent-surface ring-1 ring-[var(--app-focus-ring)]'
+						: ''}"
+				>
+					<McpCallCard {record} />
+				</div>
 			{/each}
 		{/if}
 	</div>

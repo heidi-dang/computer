@@ -1,17 +1,30 @@
 <script lang="ts">
 	import type { McpTopologyNode } from '$lib/stores/mcp-traffic';
+	import type { McpLatencySummaryState } from '$lib/stores/mcp-diagnostics';
+	import { displayTopologyLabel, type McpTopologySelection } from '$lib/stores/mcp-topology';
+
+	type LatencyMap = Partial<
+		Record<
+			'client-mcp-connector' | 'mcp-connector-cptr-mcp' | 'cptr-mcp-cptr-backend',
+			McpLatencySummaryState
+		>
+	>;
 
 	type Props = {
 		nodes: McpTopologyNode[];
-		selectedClientId?: string | null;
+		selection?: McpTopologySelection;
+		aliases?: Record<string, string>;
+		latency?: LatencyMap;
 		pulseClientIds?: Set<string>;
 		errorClientIds?: Set<string>;
-		onselect?: (clientId: string) => void;
+		onselect?: (selection: NonNullable<McpTopologySelection>) => void;
 	};
 
 	let {
 		nodes,
-		selectedClientId = null,
+		selection = null,
+		aliases = {},
+		latency = {},
 		pulseClientIds = new Set<string>(),
 		errorClientIds = new Set<string>(),
 		onselect
@@ -42,11 +55,34 @@
 		return `M ${nodeX} ${nodeY + 42} C ${nodeX} ${controlY}, ${centerX} ${controlY}, ${centerX} ${connectorY - 44}`;
 	}
 
-	function handleKey(event: KeyboardEvent, clientId: string) {
+	function choose(next: NonNullable<McpTopologySelection>) {
+		onselect?.(next);
+	}
+
+	function handleKey(event: KeyboardEvent, next: NonNullable<McpTopologySelection>) {
 		if (event.key === 'Enter' || event.key === ' ') {
 			event.preventDefault();
-			onselect?.(clientId);
+			choose(next);
 		}
+	}
+
+	function selected(kind: 'client' | 'node' | 'edge', id: string): boolean {
+		return selection?.kind === kind && selection.id === id;
+	}
+
+	function metricName(edgeId: keyof LatencyMap): string {
+		if (edgeId === 'client-mcp-connector') return 'Observed request time';
+		if (edgeId === 'mcp-connector-cptr-mcp') return 'Adapter handoff';
+		return 'Backend API RTT';
+	}
+
+	function edgeValue(edgeId: keyof LatencyMap): string {
+		const sample = latency[edgeId];
+		return sample ? `${sample.latestMs} ms` : '—';
+	}
+
+	function nodeLabel(id: string, canonical: string): string {
+		return displayTopologyLabel(id, canonical, aliases);
 	}
 </script>
 
@@ -78,62 +114,131 @@
 			</filter>
 		</defs>
 
-		<!-- Dynamic MCP clients terminate at the fixed connector. -->
-		{#each nodes as node (node.id)}
-			<path
-				d={clientPath(node)}
-				class:edge-active={node.active || pulseClientIds.has(node.id)}
-				class:edge-error={errorClientIds.has(node.id)}
-				class="topology-edge"
+		<!-- The client-facing metric is adapter-observed request time, never fabricated internet RTT. -->
+		<g
+			role="button"
+			tabindex="0"
+			class:topology-selected={selected('edge', 'client-mcp-connector')}
+			aria-label={`${metricName('client-mcp-connector')}: ${edgeValue('client-mcp-connector')}`}
+			onclick={() => choose({ kind: 'edge', id: 'client-mcp-connector' })}
+			onkeydown={(event) => handleKey(event, { kind: 'edge', id: 'client-mcp-connector' })}
+		>
+			{#each nodes as node (node.id)}
+				<path d={clientPath(node)} class="edge-hit" />
+				<path
+					d={clientPath(node)}
+					class:edge-active={node.active || pulseClientIds.has(node.id)}
+					class:edge-error={errorClientIds.has(node.id)}
+					class="topology-edge"
+				/>
+			{/each}
+			<g class="edge-badge" transform={`translate(${centerX + 92} ${connectorY - 50})`}>
+				<rect x="-70" y="-13" width="140" height="26" rx="13" />
+				<text text-anchor="middle" y="3"
+					>Observed request time · {edgeValue('client-mcp-connector')}</text
+				>
+			</g>
+		</g>
+
+		<g
+			role="button"
+			tabindex="0"
+			class:topology-selected={selected('edge', 'mcp-connector-cptr-mcp')}
+			aria-label={`${metricName('mcp-connector-cptr-mcp')}: ${edgeValue('mcp-connector-cptr-mcp')}`}
+			onclick={() => choose({ kind: 'edge', id: 'mcp-connector-cptr-mcp' })}
+			onkeydown={(event) => handleKey(event, { kind: 'edge', id: 'mcp-connector-cptr-mcp' })}
+		>
+			<line x1={centerX} y1={connectorY + 44} x2={centerX} y2={centerY - 47} class="edge-hit" />
+			<line
+				x1={centerX}
+				y1={connectorY + 44}
+				x2={centerX}
+				y2={centerY - 47}
+				class:edge-active={anyActive}
+				class:edge-error={anyError}
+				class="topology-edge infrastructure-edge"
 			/>
-		{/each}
+			<g class="edge-badge" transform={`translate(${centerX + 82} ${centerY - 60})`}>
+				<rect x="-60" y="-13" width="120" height="26" rx="13" />
+				<text text-anchor="middle" y="3"
+					>Adapter handoff · {edgeValue('mcp-connector-cptr-mcp')}</text
+				>
+			</g>
+		</g>
 
-		<!-- Fixed infrastructure path: MCP Connector → CPTR MCP → CPTR Backend. -->
-		<line
-			x1={centerX}
-			y1={connectorY + 44}
-			x2={centerX}
-			y2={centerY - 47}
-			class:edge-active={anyActive}
-			class:edge-error={anyError}
-			class="topology-edge infrastructure-edge"
-		/>
-		<line
-			x1={centerX}
-			y1={centerY + 47}
-			x2={centerX}
-			y2={backendY - 40}
-			class:edge-active={anyActive}
-			class:edge-error={anyError}
-			class="topology-edge infrastructure-edge"
-		/>
+		<g
+			role="button"
+			tabindex="0"
+			class:topology-selected={selected('edge', 'cptr-mcp-cptr-backend')}
+			aria-label={`${metricName('cptr-mcp-cptr-backend')}: ${edgeValue('cptr-mcp-cptr-backend')}`}
+			onclick={() => choose({ kind: 'edge', id: 'cptr-mcp-cptr-backend' })}
+			onkeydown={(event) => handleKey(event, { kind: 'edge', id: 'cptr-mcp-cptr-backend' })}
+		>
+			<line x1={centerX} y1={centerY + 47} x2={centerX} y2={backendY - 40} class="edge-hit" />
+			<line
+				x1={centerX}
+				y1={centerY + 47}
+				x2={centerX}
+				y2={backendY - 40}
+				class:edge-active={anyActive}
+				class:edge-error={anyError}
+				class="topology-edge infrastructure-edge"
+			/>
+			<g class="edge-badge" transform={`translate(${centerX + 82} ${centerY + 60})`}>
+				<rect x="-62" y="-13" width="124" height="26" rx="13" />
+				<text text-anchor="middle" y="3"
+					>Backend API RTT · {edgeValue('cptr-mcp-cptr-backend')}</text
+				>
+			</g>
+		</g>
 
-		<!-- MCP Connector -->
-		<g class="infrastructure-node connector-node" aria-label="MCP Connector">
+		<g
+			class="infrastructure-node connector-node"
+			class:node-selected={selected('node', 'mcp-connector')}
+			role="button"
+			tabindex="0"
+			aria-label={`${nodeLabel('mcp-connector', 'MCP Connector')} transport node`}
+			onclick={() => choose({ kind: 'node', id: 'mcp-connector' })}
+			onkeydown={(event) => handleKey(event, { kind: 'node', id: 'mcp-connector' })}
+		>
 			<circle cx={centerX} cy={connectorY} r="51" class="infra-halo" />
 			<circle cx={centerX} cy={connectorY} r="41" class="infra-core" />
 			<text x={centerX} y={connectorY - 2} text-anchor="middle" class="infra-title"
-				>MCP Connector</text
+				>{nodeLabel('mcp-connector', 'MCP Connector')}</text
 			>
 			<text x={centerX} y={connectorY + 17} text-anchor="middle" class="infra-subtitle"
 				>TRANSPORT</text
 			>
 		</g>
 
-		<!-- CPTR MCP center -->
 		<circle cx={centerX} cy={centerY} r="98" class="center-glow" />
-		{#if anyActive}
-			<circle cx={centerX} cy={centerY} r="59" class="center-ripple" />
-		{/if}
-		<g class="center-node" aria-label="CPTR MCP server">
+		{#if anyActive}<circle cx={centerX} cy={centerY} r="59" class="center-ripple" />{/if}
+		<g
+			class="center-node"
+			class:node-selected={selected('node', 'cptr-mcp')}
+			role="button"
+			tabindex="0"
+			aria-label={`${nodeLabel('cptr-mcp', 'CPTR MCP')} server node`}
+			onclick={() => choose({ kind: 'node', id: 'cptr-mcp' })}
+			onkeydown={(event) => handleKey(event, { kind: 'node', id: 'cptr-mcp' })}
+		>
 			<circle cx={centerX} cy={centerY} r="57" />
 			<circle cx={centerX} cy={centerY} r="46" class="center-node-inner" />
-			<text x={centerX} y={centerY - 3} text-anchor="middle" class="center-title">CPTR MCP</text>
+			<text x={centerX} y={centerY - 3} text-anchor="middle" class="center-title"
+				>{nodeLabel('cptr-mcp', 'CPTR MCP')}</text
+			>
 			<text x={centerX} y={centerY + 18} text-anchor="middle" class="center-subtitle">SERVER</text>
 		</g>
 
-		<!-- CPTR Backend -->
-		<g class="infrastructure-node backend-node" aria-label="CPTR Backend">
+		<g
+			class="infrastructure-node backend-node"
+			class:node-selected={selected('node', 'cptr-backend')}
+			role="button"
+			tabindex="0"
+			aria-label={`${nodeLabel('cptr-backend', 'CPTR Backend')} control API node`}
+			onclick={() => choose({ kind: 'node', id: 'cptr-backend' })}
+			onkeydown={(event) => handleKey(event, { kind: 'node', id: 'cptr-backend' })}
+		>
 			<rect
 				x={centerX - 65}
 				y={backendY - 37}
@@ -142,32 +247,32 @@
 				rx="23"
 				class="backend-core"
 			/>
-			<text x={centerX} y={backendY - 2} text-anchor="middle" class="infra-title">CPTR Backend</text
+			<text x={centerX} y={backendY - 2} text-anchor="middle" class="infra-title"
+				>{nodeLabel('cptr-backend', 'CPTR Backend')}</text
 			>
 			<text x={centerX} y={backendY + 17} text-anchor="middle" class="infra-subtitle"
 				>CONTROL API</text
 			>
 		</g>
 
-		<!-- Dynamic client labels come only from telemetry node data. -->
 		{#each nodes as node (node.id)}
 			<g
 				class="client-node"
 				class:client-connected={node.connected}
 				class:client-active={node.active || pulseClientIds.has(node.id)}
 				class:client-error={errorClientIds.has(node.id)}
-				class:client-selected={selectedClientId === node.id}
+				class:client-selected={selected('client', node.id)}
 				role="button"
 				tabindex="0"
-				aria-label={`${node.label}: ${node.connected ? 'connected' : 'idle'}, ${node.activeRequests} active requests`}
-				onclick={() => onselect?.(node.id)}
-				onkeydown={(event) => handleKey(event, node.id)}
+				aria-label={`${nodeLabel(node.id, node.label)}: ${node.connected ? 'connected' : 'idle'}, ${node.activeRequests} active requests`}
+				onclick={() => choose({ kind: 'client', id: node.id })}
+				onkeydown={(event) => handleKey(event, { kind: 'client', id: node.id })}
 			>
 				<circle cx={x(node)} cy={y(node)} r="43" class="client-halo" />
 				<circle cx={x(node)} cy={y(node)} r="34" class="client-core" />
 				<circle cx={x(node) + 25} cy={y(node) - 25} r="6" class="client-status" />
 				<text x={x(node)} y={y(node) + 57} text-anchor="middle" class="client-label"
-					>{node.label}</text
+					>{nodeLabel(node.id, node.label)}</text
 				>
 				<text x={x(node)} y={y(node) + 73} text-anchor="middle" class="client-meta">
 					{node.activeRequests > 0
@@ -179,34 +284,33 @@
 			</g>
 		{/each}
 
-		<!-- Active request particles traverse the complete client → connector → MCP → backend path. -->
 		{#each nodes.filter((node) => node.active || pulseClientIds.has(node.id)) as node (node.id)}
-			<circle r="6" class="traffic-particle client-particle">
-				<animateMotion dur="0.8s" repeatCount="indefinite" path={clientPath(node)} />
-			</circle>
-			<circle r="6" class="traffic-particle connector-particle">
-				<animateMotion
+			<circle r="6" class="traffic-particle client-particle"
+				><animateMotion dur="0.8s" repeatCount="indefinite" path={clientPath(node)} /></circle
+			>
+			<circle r="6" class="traffic-particle connector-particle"
+				><animateMotion
 					dur="0.8s"
 					begin="0.22s"
 					repeatCount="indefinite"
 					path={`M ${centerX} ${connectorY + 44} L ${centerX} ${centerY - 47}`}
-				/>
-			</circle>
-			<circle r="6" class="traffic-particle backend-particle">
-				<animateMotion
+				/></circle
+			>
+			<circle r="6" class="traffic-particle backend-particle"
+				><animateMotion
 					dur="0.8s"
 					begin="0.44s"
 					repeatCount="indefinite"
 					path={`M ${centerX} ${centerY + 47} L ${centerX} ${backendY - 40}`}
-				/>
-			</circle>
+				/></circle
+			>
 		{/each}
 	</svg>
 </div>
 
 <style>
 	.topology-frame {
-		color: var(--app-accent, #60a5fa);
+		color: var(--app-accent);
 		background-image:
 			radial-gradient(
 				circle at 50% 42%,
@@ -224,7 +328,6 @@
 			28px 28px,
 			28px 28px;
 	}
-
 	.topology-edge {
 		fill: none;
 		stroke: color-mix(in oklab, var(--app-fg) 16%, transparent);
@@ -232,37 +335,66 @@
 		stroke-dasharray: 6 9;
 		transition:
 			stroke 180ms ease,
-			stroke-width 180ms ease,
-			opacity 180ms ease;
+			stroke-width 180ms ease;
+		pointer-events: none;
 	}
-
 	.infrastructure-edge {
 		stroke-dasharray: 4 7;
 	}
-
 	.topology-edge.edge-active {
 		stroke: color-mix(in oklab, var(--app-accent) 84%, white 8%);
 		stroke-width: 3;
 		stroke-dasharray: 0;
 	}
-
 	.topology-edge.edge-error {
 		stroke: #ef4444;
 		stroke-width: 3;
 	}
-
+	.edge-hit {
+		fill: none;
+		stroke: transparent;
+		stroke-width: 22;
+		cursor: pointer;
+	}
+	.edge-badge {
+		cursor: pointer;
+	}
+	.edge-badge rect {
+		fill: var(--app-surface-raised);
+		stroke: var(--app-border);
+	}
+	.edge-badge text {
+		fill: var(--app-fg-muted);
+		font-size: 8px;
+		font-weight: 650;
+		pointer-events: none;
+	}
+	.topology-selected .edge-badge rect {
+		stroke: var(--app-accent);
+		stroke-width: 2;
+	}
+	.topology-selected .topology-edge {
+		stroke: var(--app-accent);
+		stroke-width: 3;
+	}
 	.center-glow {
 		fill: url(#cptr-center-glow);
 		color: var(--app-accent);
+		pointer-events: none;
 	}
-
 	.center-ripple {
 		fill: none;
 		stroke: color-mix(in oklab, var(--app-accent) 80%, white 5%);
 		stroke-width: 3;
 		animation: center-ripple 1.2s ease-out infinite;
+		pointer-events: none;
 	}
-
+	.center-node,
+	.infrastructure-node,
+	.client-node {
+		cursor: pointer;
+		outline: none;
+	}
 	.center-node circle:first-child,
 	.infra-core,
 	.backend-core {
@@ -270,23 +402,26 @@
 		stroke: color-mix(in oklab, var(--app-accent) 56%, var(--app-border));
 		stroke-width: 2;
 	}
-
 	.center-node circle:first-child {
 		filter: url(#soft-glow);
 	}
-
 	.center-node-inner {
 		fill: var(--app-surface-raised);
 		stroke: var(--app-border);
 		stroke-width: 1;
 	}
-
 	.infra-halo {
 		fill: color-mix(in oklab, var(--app-accent) 5%, transparent);
 		stroke: color-mix(in oklab, var(--app-accent) 24%, var(--app-border));
 		stroke-width: 1.5;
 	}
-
+	.node-selected .infra-halo,
+	.node-selected .backend-core,
+	.node-selected circle:first-child {
+		stroke: var(--app-accent);
+		stroke-width: 4;
+		filter: url(#soft-glow);
+	}
 	.center-title,
 	.infra-title,
 	.client-label {
@@ -294,15 +429,12 @@
 		font-weight: 700;
 		pointer-events: none;
 	}
-
 	.center-title {
 		font-size: 16px;
 	}
-
 	.infra-title {
 		font-size: 13px;
 	}
-
 	.center-subtitle,
 	.infra-subtitle,
 	.client-meta {
@@ -310,84 +442,63 @@
 		font-weight: 650;
 		pointer-events: none;
 	}
-
 	.center-subtitle,
 	.infra-subtitle {
 		font-size: 8px;
 		letter-spacing: 0.15em;
 	}
-
-	.client-node {
-		cursor: pointer;
-		outline: none;
-	}
-
 	.client-halo {
 		fill: transparent;
 		stroke: color-mix(in oklab, var(--app-fg) 12%, transparent);
 		stroke-width: 1.5;
-		transition:
-			fill 180ms ease,
-			stroke 180ms ease,
-			stroke-width 180ms ease;
 	}
-
 	.client-core {
 		fill: var(--app-surface-raised);
 		stroke: color-mix(in oklab, var(--app-fg) 20%, var(--app-border));
 		stroke-width: 2;
-		transition:
-			stroke 180ms ease,
-			filter 180ms ease;
 	}
-
 	.client-status {
 		fill: #6b7280;
 		stroke: var(--app-surface-raised);
 		stroke-width: 3;
 	}
-
 	.client-connected .client-status {
 		fill: #22c55e;
 	}
-
 	.client-active .client-halo,
 	.client-selected .client-halo {
 		fill: color-mix(in oklab, var(--app-accent) 8%, transparent);
-		stroke: color-mix(in oklab, var(--app-accent) 72%, white 4%);
+		stroke: var(--app-accent);
 		stroke-width: 2.5;
 	}
-
 	.client-active .client-core,
 	.client-selected .client-core {
-		stroke: color-mix(in oklab, var(--app-accent) 78%, white 4%);
+		stroke: var(--app-accent);
 		filter: url(#soft-glow);
 	}
-
 	.client-error .client-halo,
 	.client-error .client-core {
 		stroke: #ef4444;
 	}
-
-	.client-node:focus-visible .client-halo {
-		stroke: var(--app-focus-ring, var(--app-accent));
+	.client-node:focus-visible .client-halo,
+	.center-node:focus-visible circle:first-child,
+	.infrastructure-node:focus-visible .infra-halo,
+	.infrastructure-node:focus-visible .backend-core,
+	g[role='button']:focus-visible .edge-badge rect {
+		stroke: var(--app-focus-ring);
 		stroke-width: 4;
 	}
-
 	.client-label {
 		font-size: 13px;
 	}
-
 	.client-meta {
 		font-size: 9px;
 	}
-
 	.traffic-particle {
 		fill: color-mix(in oklab, var(--app-accent) 88%, white 12%);
 		filter: url(#soft-glow);
 		pointer-events: none;
 	}
-
 	@keyframes center-ripple {
 		0% {
 			opacity: 0.9;
@@ -400,7 +511,6 @@
 			transform: scale(1.55);
 		}
 	}
-
 	@media (prefers-reduced-motion: reduce) {
 		.traffic-particle,
 		.center-ripple {

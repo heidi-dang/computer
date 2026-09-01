@@ -4,6 +4,14 @@
 
 	type McpView = 'topology' | 'console';
 	let view = $state<McpView>('topology');
+	let focusRequestId = $state<string | null>(null);
+	let focusCorrelationId = $state<string | null>(null);
+
+	function revealActivity(requestId: string | null, correlationId: string | null) {
+		focusRequestId = requestId;
+		focusCorrelationId = correlationId;
+		view = 'console';
+	}
 </script>
 
 <svelte:head>
@@ -91,9 +99,9 @@
 
 	<div class="min-h-0 flex-1 overflow-hidden">
 		{#if view === 'topology'}
-			<McpTopology />
+			<McpTopology onrevealactivity={revealActivity} />
 		{:else}
-			<McpConsole />
+			<McpConsole {focusRequestId} {focusCorrelationId} />
 		{/if}
 	</div>
 </div>

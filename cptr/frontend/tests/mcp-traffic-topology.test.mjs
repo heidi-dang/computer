@@ -654,6 +654,117 @@ test('MCP route and topology use NightOwl tokens, Back navigation, compact mobil
 	}
 });
 
+test('all MCP topology nodes and measured edges are selectable, aliasable, and keyboard accessible', async () => {
+	const [topology, graph, detail] = await Promise.all([
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpTopologyGraph.svelte'),
+		read('lib/components/mcp/McpTopologyDetail.svelte').catch(() => '')
+	]);
+
+	assert.match(topology, /getMcpTopologyConfig/);
+	assert.match(topology, /getMcpDiagnosticsSnapshot/);
+	assert.match(topology, /openMcpDiagnosticsStream/);
+	assert.match(topology, /McpTopologyDetail/);
+	assert.match(graph, /mcp-connector/);
+	assert.match(graph, /cptr-mcp/);
+	assert.match(graph, /cptr-backend/);
+	assert.match(graph, /client-mcp-connector/);
+	assert.match(graph, /mcp-connector-cptr-mcp/);
+	assert.match(graph, /cptr-mcp-cptr-backend/);
+	assert.match(graph, /role=["']button["']/);
+	assert.match(graph, /tabindex=["']0["']/);
+	assert.match(graph, /Enter/);
+	assert.match(graph, /event\.key === ' '/);
+	assert.match(graph, /Observed request time/);
+	assert.match(graph, /Adapter handoff/);
+	assert.match(graph, /Backend API RTT/);
+	assert.match(detail, /updateMcpTopologyConfig/);
+	assert.match(detail, /Save/);
+	assert.match(detail, /Reset to default/);
+	assert.match(detail, /Canonical ID/);
+	assert.match(detail, /Canonical name/);
+	assert.match(detail, /average/i);
+	assert.match(detail, /p50/i);
+	assert.match(detail, /p95/i);
+	assert.match(detail, /max/i);
+});
+
+test('CPTR Backend detail exposes bounded live system monitoring and sparklines', async () => {
+	const [topology, detail, monitor] = await Promise.all([
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpTopologyDetail.svelte').catch(() => ''),
+		read('lib/components/mcp/McpBackendMonitor.svelte').catch(() => '')
+	]);
+
+	assert.match(detail, /McpBackendMonitor/);
+	assert.match(detail, /cptr-backend/);
+	for (const label of [
+		'CPU',
+		'RAM',
+		'Disk',
+		'Disk read',
+		'Disk write',
+		'Disk IOPS',
+		'Network RX',
+		'Network TX',
+		'GPU',
+		'GPU memory',
+		'GPU temperature',
+		'Uptime',
+		'Processes',
+		'Telemetry health'
+	]) {
+		assert.ok(monitor.includes(label), `backend monitor must show ${label}`);
+	}
+	assert.match(monitor, /Unavailable/);
+	assert.match(monitor, /<svg/);
+	assert.match(monitor, /polyline/);
+	assert.match(monitor, /app-surface|app-subtle-surface/);
+	assert.doesNotMatch(monitor, /chart\.js|recharts|echarts|highcharts/i);
+	assert.match(topology, /diagnostics/);
+});
+
+test('failed MCP requests show safe structured diagnostics and can reveal matching Activity', async () => {
+	const [page, topology, recent, diagnostic, console, activity] = await Promise.all([
+		read('routes/mcp/+page.svelte'),
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpRecentRequests.svelte'),
+		read('lib/components/mcp/McpDiagnosticDetail.svelte').catch(() => ''),
+		read('lib/components/mcp/McpConsole.svelte'),
+		read('lib/components/mcp/McpActivityFeed.svelte')
+	]);
+
+	assert.match(recent, /McpDiagnosticDetail/);
+	assert.match(recent, /correlationId/);
+	assert.match(recent, /requestId/);
+	assert.match(recent, /No deeper diagnostic was captured/);
+	for (const label of [
+		'Stage',
+		'Error code',
+		'HTTP status',
+		'Retryable',
+		'Duration',
+		'Request ID',
+		'Correlation ID',
+		'Summary'
+	]) {
+		assert.ok(diagnostic.includes(label), `diagnostic detail must show ${label}`);
+	}
+	assert.match(diagnostic, /Show Activity/);
+	assert.doesNotMatch(diagnostic, /stack|headers|authorization|cookie|arguments_json|result_json/i);
+	assert.match(topology, /onrevealactivity/);
+	assert.match(page, /focusRequestId/);
+	assert.match(page, /focusCorrelationId/);
+	assert.match(page, /view = 'console'/);
+	assert.match(console, /focusRequestId/);
+	assert.match(console, /focusCorrelationId/);
+	assert.match(activity, /focusRequestId/);
+	assert.match(activity, /focusCorrelationId/);
+	assert.match(activity, /scrollIntoView/);
+	assert.match(recent, /sm:hidden/);
+	assert.doesNotMatch(recent, /min-w-\[39rem\]/);
+});
+
 test('MCP Activity reducer merges a local Console invocation without forging plugin origin', async () => {
 	const activityReducer = await import(
 		new URL('../src/lib/stores/mcp-activity.ts', import.meta.url)

@@ -7,12 +7,21 @@
 	import { toast } from 'svelte-sonner';
 
 	type MobileConsoleView = 'servers' | 'console' | 'tool';
+	type Props = {
+		focusRequestId?: string | null;
+		focusCorrelationId?: string | null;
+	};
 
+	let { focusRequestId = null, focusCorrelationId = null }: Props = $props();
 	let consoleRows = $state<McpActivityRow[]>([]);
 	let selectedServerId = $state<string | null>(null);
 	let selectedTool = $state<McpToolSpec | null>(null);
 	let isInvoking = $state(false);
 	let mobileView = $state<MobileConsoleView>('servers');
+
+	$effect(() => {
+		if (focusRequestId || focusCorrelationId) mobileView = 'console';
+	});
 
 	function boundedJson(value: unknown): string {
 		try {
@@ -168,7 +177,12 @@
 			? 'flex'
 			: 'hidden'} app-surface min-h-0 min-w-0 flex-1 flex-col overflow-hidden lg:flex"
 	>
-		<McpActivityFeed {consoleRows} onClearConsole={clearConsoleRows} />
+		<McpActivityFeed
+			{consoleRows}
+			{focusRequestId}
+			{focusCorrelationId}
+			onClearConsole={clearConsoleRows}
+		/>
 	</main>
 
 	<aside
