@@ -8,7 +8,9 @@ import type {
 	McpLatencyAggregate,
 	McpLatencyEdge,
 	McpLatencyMetric,
-	McpProcessMetrics
+	McpProcessMetrics,
+	McpPricingStatus,
+	McpUsageDiagnostic
 } from '$lib/apis/mcp';
 
 export type McpLatencySummaryState = {
@@ -84,14 +86,68 @@ export type McpBackendMetricsState = {
 	processes: McpProcessMetricsState[];
 };
 
+export type McpUsageState = {
+	eventId: string;
+	timestampMs: number;
+	requestId: string | null;
+	correlationId: string | null;
+	sessionId: string | null;
+	clientId: string;
+	modelReported: string | null;
+	modelCanonical: string | null;
+	modelSource: 'self_reported' | 'unavailable';
+	toolName: string;
+	inputTokensEstimated: number;
+	outputTokensEstimated: number;
+	cachedInputTokensEstimated: null;
+	estimatorMethod: string;
+	estimatorExactForModel: boolean;
+	status: 'complete' | 'error';
+	pricingStatus: McpPricingStatus;
+	pricingVersion: string;
+	pricingVerifiedAt: string;
+	pricingValidThrough: string | null;
+	pricingSourceLabel: string;
+	pricingSourceUrl: string;
+	inputUsdPerMillion: string | null;
+	cachedInputUsdPerMillion: string | null;
+	outputUsdPerMillion: string | null;
+	inputCostUsd: number | null;
+	cachedInputCostUsd: null;
+	outputCostUsd: number | null;
+	simulatedCostUsd: number | null;
+};
+
+export type McpUsageTotalsState = {
+	inputTokensEstimated: number;
+	outputTokensEstimated: number;
+	totalTokensEstimated: number;
+	simulatedCostUsd: number;
+	pricedEvents: number;
+	staleEvents: number;
+	unpricedEvents: number;
+};
+
+export type McpUsageTimelineBucket = {
+	startMs: number;
+	endMs: number;
+	inputTokens: number;
+	outputTokens: number;
+	totalTokens: number;
+	simulatedCostUsd: number;
+	requests: number;
+};
+
 export type McpDiagnosticsState = {
 	sequence: number;
 	latency: Partial<Record<McpLatencyEdge, McpLatencySummaryState>>;
 	failures: McpFailureState[];
 	system: McpBackendMetricsState[];
+	usage: McpUsageState[];
 	latencyCapacityPerEdge: number;
 	failureCapacity: number;
 	systemCapacity: number;
+	usageCapacity: number;
 	subscriberQueueCapacity: number;
 	streamHealth: {
 		subscriberCount: number;
@@ -189,6 +245,46 @@ function systemState(sample: McpBackendMetricsSample): McpBackendMetricsState {
 	};
 }
 
+function decimalNumber(value: string | null): number | null {
+	if (value == null) return null;
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : null;
+}
+
+function usageState(event: McpUsageDiagnostic): McpUsageState {
+	return {
+		eventId: event.event_id,
+		timestampMs: event.timestamp_ms,
+		requestId: event.request_id,
+		correlationId: event.correlation_id,
+		sessionId: event.session_id,
+		clientId: event.client_id,
+		modelReported: event.model_reported,
+		modelCanonical: event.model_canonical,
+		modelSource: event.model_source,
+		toolName: event.tool_name,
+		inputTokensEstimated: event.input_tokens_estimated,
+		outputTokensEstimated: event.output_tokens_estimated,
+		cachedInputTokensEstimated: event.cached_input_tokens_estimated,
+		estimatorMethod: event.estimator_method,
+		estimatorExactForModel: event.estimator_exact_for_model,
+		status: event.status,
+		pricingStatus: event.pricing_status,
+		pricingVersion: event.pricing_version,
+		pricingVerifiedAt: event.pricing_verified_at,
+		pricingValidThrough: event.pricing_valid_through,
+		pricingSourceLabel: event.pricing_source_label,
+		pricingSourceUrl: event.pricing_source_url,
+		inputUsdPerMillion: event.input_usd_per_million,
+		cachedInputUsdPerMillion: event.cached_input_usd_per_million,
+		outputUsdPerMillion: event.output_usd_per_million,
+		inputCostUsd: decimalNumber(event.input_cost_usd),
+		cachedInputCostUsd: event.cached_input_cost_usd,
+		outputCostUsd: decimalNumber(event.output_cost_usd),
+		simulatedCostUsd: decimalNumber(event.simulated_cost_usd)
+	};
+}
+
 export function hydrateMcpDiagnostics(snapshot: McpDiagnosticsSnapshot): McpDiagnosticsState {
 	const latency: Partial<Record<McpLatencyEdge, McpLatencySummaryState>> = {};
 	for (const [edgeId, aggregate] of Object.entries(snapshot.latency)) {
@@ -197,17 +293,20 @@ export function hydrateMcpDiagnostics(snapshot: McpDiagnosticsSnapshot): McpDiag
 	}
 	const failureCapacity = Math.max(1, snapshot.stream_health.failure_capacity || 1);
 	const systemCapacity = Math.max(1, snapshot.stream_health.system_sample_capacity || 1);
+	const usageCapacity = Math.max(1, snapshot.stream_health.usage_capacity || 1);
 	return {
 		sequence: snapshot.sequence,
 		latency,
 		failures: boundedTail(snapshot.failures.map(failureState), failureCapacity),
 		system: boundedTail(snapshot.system.map(systemState), systemCapacity),
+		usage: boundedTail((snapshot.usage ?? []).map(usageState), usageCapacity),
 		latencyCapacityPerEdge: Math.max(
 			1,
 			snapshot.stream_health.latency_sample_capacity_per_edge || 1
 		),
 		failureCapacity,
 		systemCapacity,
+		usageCapacity,
 		subscriberQueueCapacity: Math.max(1, snapshot.stream_health.subscriber_queue_capacity || 1),
 		streamHealth: {
 			subscriberCount: snapshot.stream_health.subscriber_count,
@@ -235,6 +334,14 @@ export function applyMcpDiagnosticsEvent(
 			...state,
 			sequence: event.ingestion_sequence,
 			system: boundedTail([...state.system, systemState(event)], state.systemCapacity)
+		};
+	}
+
+	if (event.kind === 'usage') {
+		return {
+			...state,
+			sequence: event.ingestion_sequence,
+			usage: boundedTail([...state.usage, usageState(event)], state.usageCapacity)
 		};
 	}
 
@@ -267,4 +374,75 @@ export function latestBackendMetrics(
 	state: McpDiagnosticsState | null
 ): McpBackendMetricsState | null {
 	return state?.system.at(-1) ?? null;
+}
+
+export function currentUsageModel(state: McpDiagnosticsState | null): McpUsageState | null {
+	return state?.usage.at(-1) ?? null;
+}
+
+export function usageTotals(state: McpDiagnosticsState): McpUsageTotalsState {
+	let inputTokensEstimated = 0;
+	let outputTokensEstimated = 0;
+	let simulatedCostUsd = 0;
+	let pricedEvents = 0;
+	let staleEvents = 0;
+	let unpricedEvents = 0;
+	for (const event of state.usage) {
+		inputTokensEstimated += event.inputTokensEstimated;
+		outputTokensEstimated += event.outputTokensEstimated;
+		if (event.simulatedCostUsd != null) simulatedCostUsd += event.simulatedCostUsd;
+		if (event.pricingStatus === 'current') pricedEvents += 1;
+		else if (event.pricingStatus === 'stale') staleEvents += 1;
+		else unpricedEvents += 1;
+	}
+	return {
+		inputTokensEstimated,
+		outputTokensEstimated,
+		totalTokensEstimated: inputTokensEstimated + outputTokensEstimated,
+		simulatedCostUsd,
+		pricedEvents,
+		staleEvents,
+		unpricedEvents
+	};
+}
+
+export function usageTimeline(
+	state: McpDiagnosticsState,
+	nowMs: number,
+	options: { windowMs?: number; bucketMs?: number } = {}
+): McpUsageTimelineBucket[] {
+	const requestedWindow = Number.isFinite(options.windowMs)
+		? Math.floor(options.windowMs ?? 60_000)
+		: 60_000;
+	const requestedBucket = Number.isFinite(options.bucketMs)
+		? Math.floor(options.bucketMs ?? 5_000)
+		: 5_000;
+	const windowMs = Math.min(3_600_000, Math.max(1_000, requestedWindow));
+	const bucketMs = Math.min(windowMs, Math.max(1_000, requestedBucket));
+	const bucketCount = Math.min(120, Math.max(1, Math.ceil(windowMs / bucketMs)));
+	const effectiveWindow = bucketCount * bucketMs;
+	const endMs = Math.max(0, Math.floor(nowMs));
+	const startMs = endMs - effectiveWindow;
+	const buckets: McpUsageTimelineBucket[] = Array.from({ length: bucketCount }, (_, index) => ({
+		startMs: startMs + index * bucketMs,
+		endMs: startMs + (index + 1) * bucketMs,
+		inputTokens: 0,
+		outputTokens: 0,
+		totalTokens: 0,
+		simulatedCostUsd: 0,
+		requests: 0
+	}));
+
+	for (const event of state.usage) {
+		if (event.timestampMs < startMs || event.timestampMs > endMs) continue;
+		const rawIndex = Math.floor((event.timestampMs - startMs) / bucketMs);
+		const index = Math.min(bucketCount - 1, Math.max(0, rawIndex));
+		const bucket = buckets[index];
+		bucket.inputTokens += event.inputTokensEstimated;
+		bucket.outputTokens += event.outputTokensEstimated;
+		bucket.totalTokens += event.inputTokensEstimated + event.outputTokensEstimated;
+		bucket.simulatedCostUsd += event.simulatedCostUsd ?? 0;
+		bucket.requests += 1;
+	}
+	return buckets;
 }

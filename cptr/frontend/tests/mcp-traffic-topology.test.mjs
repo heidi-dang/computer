@@ -82,6 +82,9 @@ test('MCP topology config and diagnostics API use typed cookie-authenticated hel
 	assert.match(api, /export interface McpDiagnosticsSnapshot/);
 	assert.match(api, /getMcpDiagnosticsSnapshot/);
 	assert.match(api, /openMcpDiagnosticsStream/);
+	assert.match(api, /export interface McpUsageDiagnostic/);
+	assert.match(api, /onUsage/);
+	assert.match(api, /addEventListener\(['"]usage['"]/);
 	assert.match(api, /new EventSource\(['"]\/api\/mcp\/diagnostics\/stream['"]\)/);
 	assert.doesNotMatch(api, /diagnostics\/stream[^\n]*(token|authorization|bearer)/i);
 });
@@ -224,6 +227,128 @@ test('diagnostics reducer hydrates bounded state and ignores stale incremental e
 	});
 	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestMs, 55);
 	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestStatus, 'error');
+});
+
+test('usage diagnostics hydrate bounded model state and project 60-second token/cost buckets', async () => {
+	const diagnostics = await import(
+		new URL('../src/lib/stores/mcp-diagnostics.ts', import.meta.url)
+	);
+	assert.equal(typeof diagnostics.usageTimeline, 'function');
+	assert.equal(typeof diagnostics.usageTotals, 'function');
+	assert.equal(typeof diagnostics.currentUsageModel, 'function');
+
+	const base = 1_788_000_500_000;
+	const usage = (sequence, timestamp, inputTokens, outputTokens, cost, overrides = {}) => ({
+		kind: 'usage',
+		version: 1,
+		event_id: `usage-${String(sequence).padStart(4, '0')}`,
+		timestamp_ms: timestamp,
+		request_id: `request-${sequence}`,
+		correlation_id: `corr-${sequence}`,
+		session_id: 'session-1',
+		client_id: 'chatgpt',
+		model_reported: 'GPT-5.6 Sol',
+		model_canonical: 'gpt-5.6-sol',
+		model_source: 'self_reported',
+		tool_name: 'cptr_list_workspaces',
+		input_tokens_estimated: inputTokens,
+		output_tokens_estimated: outputTokens,
+		cached_input_tokens_estimated: null,
+		estimator_method: 'o200k_base:fallback',
+		estimator_exact_for_model: false,
+		status: 'complete',
+		pricing_status: 'current',
+		pricing_version: 'openai-2026-08-21-promo',
+		pricing_verified_at: '2026-09-02',
+		pricing_valid_through: '2026-11-21',
+		pricing_source_label: 'OpenAI API model pricing',
+		pricing_source_url: 'https://developers.openai.com/api/docs/models/compare',
+		input_usd_per_million: '4.00',
+		cached_input_usd_per_million: '0.40',
+		output_usd_per_million: '20.00',
+		input_cost_usd: '0.0004',
+		cached_input_cost_usd: null,
+		output_cost_usd: '0.0004',
+		simulated_cost_usd: cost,
+		ingestion_sequence: sequence,
+		...overrides
+	});
+	const first = usage(5, base + 1_000, 100, 20, '0.0008');
+	const snapshot = {
+		version: 1,
+		sequence: 5,
+		latency: {},
+		failures: [],
+		system: [],
+		usage: [first],
+		current_model: first,
+		usage_totals: {
+			input_tokens_estimated: 100,
+			output_tokens_estimated: 20,
+			total_tokens_estimated: 120,
+			simulated_cost_usd: '0.0008',
+			priced_events: 1,
+			stale_events: 0,
+			unpriced_events: 0,
+			by_model: {}
+		},
+		stream_health: {
+			subscriber_count: 0,
+			slow_subscriber_drops: 0,
+			latency_sample_capacity_per_edge: 120,
+			failure_capacity: 2,
+			system_sample_capacity: 2,
+			usage_capacity: 2,
+			subscriber_queue_capacity: 64
+		}
+	};
+	let state = diagnostics.hydrateMcpDiagnostics(snapshot);
+	assert.equal(state.usage.length, 1);
+	assert.equal(diagnostics.currentUsageModel(state).modelReported, 'GPT-5.6 Sol');
+	assert.deepEqual(diagnostics.usageTotals(state), {
+		inputTokensEstimated: 100,
+		outputTokensEstimated: 20,
+		totalTokensEstimated: 120,
+		simulatedCostUsd: 0.0008,
+		pricedEvents: 1,
+		staleEvents: 0,
+		unpricedEvents: 0
+	});
+
+	state = diagnostics.applyMcpDiagnosticsEvent(state, usage(6, base + 6_000, 200, 40, '0.0016'));
+	const timeline = diagnostics.usageTimeline(state, base + 10_000, {
+		windowMs: 10_000,
+		bucketMs: 5_000
+	});
+	assert.deepEqual(
+		timeline.map((bucket) => ({
+			input: bucket.inputTokens,
+			output: bucket.outputTokens,
+			cost: bucket.simulatedCostUsd
+		})),
+		[
+			{ input: 100, output: 20, cost: 0.0008 },
+			{ input: 200, output: 40, cost: 0.0016 }
+		]
+	);
+
+	state = diagnostics.applyMcpDiagnosticsEvent(
+		state,
+		usage(7, base + 9_000, 50, 10, null, {
+			model_reported: null,
+			model_canonical: null,
+			model_source: 'unavailable',
+			pricing_status: 'model_not_reported',
+			input_usd_per_million: null,
+			cached_input_usd_per_million: null,
+			output_usd_per_million: null,
+			input_cost_usd: null,
+			output_cost_usd: null,
+			simulated_cost_usd: null
+		})
+	);
+	assert.equal(state.usage.length, 2);
+	assert.equal(diagnostics.currentUsageModel(state).modelReported, null);
 });
 
 test('topology projection uses stable client ordering and deterministic radial positions', async () => {
@@ -422,6 +547,54 @@ test('MCP topology renders a responsive live request success and failure chart',
 	assert.match(chart, /<svg/);
 	assert.match(chart, /requestTimeline/);
 	assert.doesNotMatch(chart, /chart\.js|recharts|echarts|highcharts/i);
+});
+
+test('MCP topology renders estimated model token usage and API-equivalent simulated cost analytics', async () => {
+	const [topology, panel] = await Promise.all([
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpUsageCostPanel.svelte').catch(() => '')
+	]);
+
+	assert.match(topology, /McpUsageCostPanel/);
+	assert.match(topology, /onUsage:\s*applyDiagnosticEvent/);
+	for (const label of [
+		'Model usage & simulated cost',
+		'Estimated · MCP-visible tokens',
+		'Current model',
+		'Estimated input',
+		'Estimated output',
+		'Estimated total',
+		'Simulated cost (USD)',
+		'Avg simulated cost/request',
+		'Pricing status',
+		'Self-reported',
+		'Model not reported',
+		'Unpriced',
+		'Stale pricing',
+		'Last 60 seconds',
+		'Input tokens',
+		'Output tokens',
+		'Pricing details',
+		'Input rate',
+		'Cached input rate',
+		'Output rate'
+	]) {
+		assert.ok(panel.includes(label), `usage panel must show ${label}`);
+	}
+	assert.match(panel, /usageTimeline/);
+	assert.match(panel, /usageTotals/);
+	assert.match(panel, /currentUsageModel/);
+	assert.match(panel, /pricingVersion/);
+	assert.match(panel, /Not your ChatGPT bill/);
+	assert.match(panel, /reasoning/);
+	assert.match(panel, /cache usage/);
+	assert.match(panel, /final-answer tokens/);
+	assert.match(panel, /Long-context multiplier not inferable from MCP-visible tokens/);
+	assert.ok(
+		(panel.match(/<svg/g) ?? []).length >= 2,
+		'usage panel must render token and cost charts'
+	);
+	assert.doesNotMatch(panel, /chart\.js|recharts|echarts|highcharts/i);
 });
 
 test('topology UI exposes live graph, safe request table, responsive layout and console switch', async () => {

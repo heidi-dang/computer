@@ -35,6 +35,7 @@
 	import McpTopologyDetail from './McpTopologyDetail.svelte';
 	import McpRecentRequests from './McpRecentRequests.svelte';
 	import McpRequestChart from './McpRequestChart.svelte';
+	import McpUsageCostPanel from './McpUsageCostPanel.svelte';
 
 	type StreamStatus = 'loading' | 'live' | 'reconnecting' | 'error';
 	type Props = {
@@ -212,6 +213,7 @@
 				onLatency: applyDiagnosticEvent,
 				onFailure: applyDiagnosticEvent,
 				onSystem: applyDiagnosticEvent,
+				onUsage: applyDiagnosticEvent,
 				onOpen() {
 					diagnosticsReconnectAttempt = 0;
 					diagnosticsStatus = 'live';
@@ -378,6 +380,7 @@
 		</div>
 
 		<McpRequestChart state={traffic} />
+		<McpUsageCostPanel state={diagnostics} />
 
 		<div
 			class="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.45fr)_minmax(22rem,0.85fr)] lg:gap-4"

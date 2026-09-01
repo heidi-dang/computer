@@ -278,10 +278,66 @@ export interface McpBackendMetricsSample {
 	processes: McpProcessMetrics[];
 }
 
+export type McpPricingStatus = 'current' | 'stale' | 'unknown_model' | 'model_not_reported';
+
+export interface McpUsageDiagnostic {
+	kind: 'usage';
+	version: 1;
+	event_id: string;
+	timestamp_ms: number;
+	request_id: string | null;
+	correlation_id: string | null;
+	session_id: string | null;
+	client_id: string;
+	model_reported: string | null;
+	model_canonical: string | null;
+	model_source: 'self_reported' | 'unavailable';
+	tool_name: string;
+	input_tokens_estimated: number;
+	output_tokens_estimated: number;
+	cached_input_tokens_estimated: null;
+	estimator_method: string;
+	estimator_exact_for_model: boolean;
+	status: 'complete' | 'error';
+	pricing_status: McpPricingStatus;
+	pricing_version: string;
+	pricing_verified_at: string;
+	pricing_valid_through: string | null;
+	pricing_source_label: string;
+	pricing_source_url: string;
+	input_usd_per_million: string | null;
+	cached_input_usd_per_million: string | null;
+	output_usd_per_million: string | null;
+	input_cost_usd: string | null;
+	cached_input_cost_usd: null;
+	output_cost_usd: string | null;
+	simulated_cost_usd: string | null;
+}
+
+export interface McpUsageModelTotals {
+	events: number;
+	input_tokens_estimated: number;
+	output_tokens_estimated: number;
+	total_tokens_estimated: number;
+	simulated_cost_usd: string;
+}
+
+export interface McpUsageTotals {
+	input_tokens_estimated: number;
+	output_tokens_estimated: number;
+	total_tokens_estimated: number;
+	simulated_cost_usd: string;
+	priced_events: number;
+	stale_events: number;
+	unpriced_events: number;
+	by_model: Record<string, McpUsageModelTotals>;
+}
+
 export type McpDiagnosticsEvent = (
 	| McpLatencySample
 	| McpFailureDiagnostic
 	| McpBackendMetricsSample
+	| McpUsageDiagnostic
 ) & { ingestion_sequence: number };
 
 export interface McpDiagnosticsSnapshot {
@@ -290,12 +346,16 @@ export interface McpDiagnosticsSnapshot {
 	latency: Partial<Record<McpLatencyEdge, McpLatencyAggregate>>;
 	failures: McpFailureDiagnostic[];
 	system: McpBackendMetricsSample[];
+	usage: McpUsageDiagnostic[];
+	current_model: McpUsageDiagnostic | null;
+	usage_totals: McpUsageTotals;
 	stream_health: {
 		subscriber_count: number;
 		slow_subscriber_drops: number;
 		latency_sample_capacity_per_edge: number;
 		failure_capacity: number;
 		system_sample_capacity: number;
+		usage_capacity: number;
 		subscriber_queue_capacity: number;
 	};
 }
@@ -305,6 +365,7 @@ export interface McpDiagnosticsStreamCallbacks {
 	onLatency: (event: McpLatencySample & { ingestion_sequence: number }) => void;
 	onFailure: (event: McpFailureDiagnostic & { ingestion_sequence: number }) => void;
 	onSystem: (event: McpBackendMetricsSample & { ingestion_sequence: number }) => void;
+	onUsage: (event: McpUsageDiagnostic & { ingestion_sequence: number }) => void;
 	onOpen?: () => void;
 	onError?: (error: unknown) => void;
 }
@@ -343,6 +404,9 @@ export function openMcpDiagnosticsStream(callbacks: McpDiagnosticsStreamCallback
 	);
 	source.addEventListener('system', (event) =>
 		parse(event as MessageEvent<string>, callbacks.onSystem)
+	);
+	source.addEventListener('usage', (event) =>
+		parse(event as MessageEvent<string>, callbacks.onUsage)
 	);
 	source.onopen = () => callbacks.onOpen?.();
 	source.onerror = (event) => callbacks.onError?.(event);
