@@ -74,6 +74,21 @@ export type McpTopologyNode = McpTrafficClientState & {
 	active: boolean;
 };
 
+export type McpRequestOutcomeTotals = {
+	total: number;
+	success: number;
+	failed: number;
+	active: number;
+};
+
+export type McpRequestTimelineBucket = {
+	startMs: number;
+	endMs: number;
+	success: number;
+	failed: number;
+	total: number;
+};
+
 function clientFromSnapshot(client: McpTrafficClientSnapshot): McpTrafficClientState {
 	return {
 		id: client.id,
@@ -402,6 +417,56 @@ export function applyMcpTrafficEvent(
 		recentRequests,
 		seenEventIds: boundedTail([...state.seenEventIds, event.event_id], state.eventCapacity * 2)
 	};
+}
+
+export function requestOutcomeTotals(state: McpTrafficState): McpRequestOutcomeTotals {
+	const total = Object.values(state.clients).reduce((sum, client) => sum + client.totalRequests, 0);
+	const failed = Object.values(state.clients).reduce((sum, client) => sum + client.errors, 0);
+	return {
+		total,
+		success: Math.max(0, total - failed),
+		failed,
+		active: Object.keys(state.activeRequests).length
+	};
+}
+
+export function requestTimeline(
+	state: McpTrafficState,
+	nowMs: number,
+	options: { windowMs?: number; bucketMs?: number } = {}
+): McpRequestTimelineBucket[] {
+	const requestedWindow = Number.isFinite(options.windowMs)
+		? Math.floor(options.windowMs ?? 60_000)
+		: 60_000;
+	const requestedBucket = Number.isFinite(options.bucketMs)
+		? Math.floor(options.bucketMs ?? 5_000)
+		: 5_000;
+	const windowMs = Math.min(3_600_000, Math.max(1_000, requestedWindow));
+	const bucketMs = Math.min(windowMs, Math.max(1_000, requestedBucket));
+	const bucketCount = Math.min(120, Math.max(1, Math.ceil(windowMs / bucketMs)));
+	const effectiveWindow = bucketCount * bucketMs;
+	const endMs = Math.max(0, Math.floor(nowMs));
+	const startMs = endMs - effectiveWindow;
+	const buckets: McpRequestTimelineBucket[] = Array.from({ length: bucketCount }, (_, index) => ({
+		startMs: startMs + index * bucketMs,
+		endMs: startMs + (index + 1) * bucketMs,
+		success: 0,
+		failed: 0,
+		total: 0
+	}));
+
+	for (const event of state.events) {
+		if (event.event_type !== 'request_finished' && event.event_type !== 'request_failed') continue;
+		if (event.timestamp_ms < startMs || event.timestamp_ms > endMs) continue;
+		const rawIndex = Math.floor((event.timestamp_ms - startMs) / bucketMs);
+		const index = Math.min(bucketCount - 1, Math.max(0, rawIndex));
+		const bucket = buckets[index];
+		bucket.total += 1;
+		if (event.event_type === 'request_failed') bucket.failed += 1;
+		else bucket.success += 1;
+	}
+
+	return buckets;
 }
 
 export function topologyNodes(state: McpTrafficState): McpTopologyNode[] {

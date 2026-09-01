@@ -191,6 +191,85 @@ test('reducer projects request completion and failure without unsafe payload fie
 	assert.equal(row.errorCode, 'tool_error');
 });
 
+test('request statistics distinguish success, failure, active work and rolling time buckets', () => {
+	assert.equal(typeof reducer.requestOutcomeTotals, 'function');
+	assert.equal(typeof reducer.requestTimeline, 'function');
+
+	const base = 1_788_000_200_000;
+	let state = reducer.hydrateMcpTraffic(snapshot(16, 4));
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(1, 'request_started', {
+			timestamp_ms: base + 500,
+			request_id: 'request-success'
+		})
+	);
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(2, 'request_finished', {
+			timestamp_ms: base + 2_000,
+			request_id: 'request-success',
+			status: 'complete'
+		})
+	);
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(3, 'request_started', {
+			timestamp_ms: base + 5_500,
+			request_id: 'request-failed'
+		})
+	);
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(4, 'request_failed', {
+			timestamp_ms: base + 7_000,
+			request_id: 'request-failed',
+			status: 'error',
+			error_code: 'tool_error'
+		})
+	);
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(5, 'request_started', {
+			timestamp_ms: base + 9_000,
+			request_id: 'request-active'
+		})
+	);
+
+	assert.deepEqual(reducer.requestOutcomeTotals(state), {
+		total: 2,
+		success: 1,
+		failed: 1,
+		active: 1
+	});
+	assert.deepEqual(
+		reducer
+			.requestTimeline(state, base + 10_000, { windowMs: 10_000, bucketMs: 5_000 })
+			.map((bucket) => ({ success: bucket.success, failed: bucket.failed, total: bucket.total })),
+		[
+			{ success: 1, failed: 0, total: 1 },
+			{ success: 0, failed: 1, total: 1 }
+		]
+	);
+});
+
+test('MCP topology renders a responsive live request success and failure chart', async () => {
+	const [topology, chart] = await Promise.all([
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpRequestChart.svelte').catch(() => '')
+	]);
+
+	assert.match(topology, /McpRequestChart/);
+	assert.match(chart, /Live request statistics/);
+	assert.match(chart, /Successful/);
+	assert.match(chart, /Failed/);
+	assert.match(chart, /Active/);
+	assert.match(chart, /Last 60 seconds/);
+	assert.match(chart, /<svg/);
+	assert.match(chart, /requestTimeline/);
+	assert.doesNotMatch(chart, /chart\.js|recharts|echarts|highcharts/i);
+});
+
 test('topology UI exposes live graph, safe request table, responsive layout and console switch', async () => {
 	const [page, topology, graph, recent] = await Promise.all([
 		read('routes/mcp/+page.svelte'),

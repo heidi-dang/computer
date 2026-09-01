@@ -15,6 +15,7 @@
 	} from '$lib/stores/mcp-traffic';
 	import McpTopologyGraph from './McpTopologyGraph.svelte';
 	import McpRecentRequests from './McpRecentRequests.svelte';
+	import McpRequestChart from './McpRequestChart.svelte';
 
 	type StreamStatus = 'loading' | 'live' | 'reconnecting' | 'error';
 
@@ -199,6 +200,8 @@
 				</div>
 			</div>
 		</div>
+
+		<McpRequestChart {state} />
 
 		<div
 			class="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.45fr)_minmax(22rem,0.85fr)] lg:gap-4"
