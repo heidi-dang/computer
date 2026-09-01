@@ -40,9 +40,7 @@
 	import { deleteSharePayload, getSharePayload } from '$lib/intents/payloadStore';
 	import type { LaunchIntent, ShareBehavior, SharePayload } from '$lib/intents/types';
 	import FileBrowser from '$lib/components/FileBrowser.svelte';
-	import FileEditor from '$lib/components/FileEditor.svelte';
 	import GitView from '$lib/components/GitView.svelte';
-	import Terminal from '$lib/components/Terminal.svelte';
 	import BrowserPreview from '$lib/components/BrowserPreview.svelte';
 	import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
 	import DirectoryPicker from '$lib/components/DirectoryPicker.svelte';
@@ -53,10 +51,48 @@
 	import { TAB_DRAG_MIME } from '$lib/constants';
 	import { isSupportedWorkspacePath } from '$lib/utils/paths';
 
+	type FileEditorComponent = typeof import('$lib/components/FileEditor.svelte').default;
+	type TerminalComponent = typeof import('$lib/components/Terminal.svelte').default;
+
 	let showPicker = $state(false);
 	let pendingIntent = $state<LaunchIntent | null>(null);
 	let folderPickerIntent = $state<LaunchIntent | null>(null);
 	let folderPickerWorkspace = $state<string | null>(null);
+	let LazyFileEditor = $state<FileEditorComponent | null>(null);
+	let LazyTerminal = $state<TerminalComponent | null>(null);
+	let fileEditorLoad: Promise<FileEditorComponent> | null = null;
+	let terminalLoad: Promise<TerminalComponent> | null = null;
+
+	function ensureFileEditor(): Promise<FileEditorComponent> {
+		fileEditorLoad ??= import('$lib/components/FileEditor.svelte').then(
+			({ default: component }) => {
+				LazyFileEditor = component;
+				return component;
+			}
+		);
+		return fileEditorLoad;
+	}
+
+	function ensureTerminal(): Promise<TerminalComponent> {
+		terminalLoad ??= import('$lib/components/Terminal.svelte').then(({ default: component }) => {
+			LazyTerminal = component;
+			return component;
+		});
+		return terminalLoad;
+	}
+
+	$effect(() => {
+		const groups = [...$homeState.groups, ...($currentWorkspace?.groups ?? [])];
+		if (!LazyFileEditor && groups.some((group) => group.tabs.some((tab) => tab.type === 'file'))) {
+			void ensureFileEditor();
+		}
+		if (
+			!LazyTerminal &&
+			groups.some((group) => group.tabs.some((tab) => tab.type === 'terminal'))
+		) {
+			void ensureTerminal();
+		}
+	});
 	const welcomeName = $derived($session?.display_name || $session?.username);
 	const greetingTime = $derived.by(() => {
 		const hour = new Date().getHours();
@@ -1051,17 +1087,25 @@
 				{/each}
 				{#each homePane.tabs.filter((tab) => tab.type === 'file' && tab.filePath) as tab (tab.id)}
 					<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== homePane.activeTabId}>
-						<FileEditor
-							filePath={tab.filePath!}
-							tabId={tab.id}
-							edit={tab.edit === true}
-							searchTarget={tab.searchTarget}
-						/>
+						{#if LazyFileEditor}
+							<LazyFileEditor
+								filePath={tab.filePath!}
+								tabId={tab.id}
+								edit={tab.edit === true}
+								searchTarget={tab.searchTarget}
+							/>
+						{:else}
+							<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+						{/if}
 					</div>
 				{/each}
 				{#each homePane.tabs.filter((tab) => tab.type === 'terminal' && tab.sessionId) as tab (tab.id)}
 					<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== homePane.activeTabId}>
-						<Terminal sessionId={tab.sessionId!} />
+						{#if LazyTerminal}
+							<LazyTerminal sessionId={tab.sessionId!} />
+						{:else}
+							<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+						{/if}
 					</div>
 				{/each}
 				{#each homePane.tabs.filter((tab) => tab.type === 'browser' && tab.browserSessionId) as tab (tab.id)}
@@ -1079,10 +1123,14 @@
 				{/each}
 				{#if homeTab?.type === 'home'}
 					<div class="home-scroll h-full overflow-y-auto px-4 sm:px-6">
-						<div class="home-dashboard mx-auto flex min-h-full w-full max-w-2xl flex-col justify-center py-8 sm:py-10">
+						<div
+							class="home-dashboard mx-auto flex min-h-full w-full max-w-2xl flex-col justify-center py-8 sm:py-10"
+						>
 							<div class="mb-4">
 								<div class="flex items-baseline gap-2">
-									<h1 class="text-xl sm:text-2xl font-semibold tracking-tight text-gray-900 dark:text-white">
+									<h1
+										class="text-xl sm:text-2xl font-semibold tracking-tight text-gray-900 dark:text-white"
+									>
 										{#if welcomeName}
 											{@const greeting = $t(`home.greeting.${greetingTime}.${greetingVariant}`, {
 												name: greetingNameMarker
@@ -1413,12 +1461,16 @@
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'file' && tab.filePath) as tab (tab.id)}
 				<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== group.activeTabId}>
-					<FileEditor
-						filePath={tab.filePath!}
-						tabId={tab.id}
-						edit={tab.edit === true}
-						searchTarget={tab.searchTarget}
-					/>
+					{#if LazyFileEditor}
+						<LazyFileEditor
+							filePath={tab.filePath!}
+							tabId={tab.id}
+							edit={tab.edit === true}
+							searchTarget={tab.searchTarget}
+						/>
+					{:else}
+						<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+					{/if}
 				</div>
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'chat') as tab (tab.id)}
@@ -1436,7 +1488,11 @@
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'terminal' && tab.sessionId) as tab (tab.id)}
 				<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== group.activeTabId}>
-					<Terminal sessionId={tab.sessionId!} />
+					{#if LazyTerminal}
+						<LazyTerminal sessionId={tab.sessionId!} />
+					{:else}
+						<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+					{/if}
 				</div>
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'browser' && tab.browserSessionId) as tab (tab.id)}
@@ -1680,7 +1736,11 @@
 
 	.home-scroll {
 		background:
-			radial-gradient(circle at 50% 12%, color-mix(in oklab, var(--app-accent) 7%, transparent), transparent 28rem),
+			radial-gradient(
+				circle at 50% 12%,
+				color-mix(in oklab, var(--app-accent) 7%, transparent),
+				transparent 28rem
+			),
 			var(--app-bg);
 	}
 

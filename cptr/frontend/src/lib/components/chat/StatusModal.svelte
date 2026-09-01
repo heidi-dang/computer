@@ -1,6 +1,5 @@
 <script lang="ts">
 	import Modal from '../Modal.svelte';
-	import Terminal from '../Terminal.svelte';
 	import DropdownMenu from '../DropdownMenu.svelte';
 	import Icon from '../Icon.svelte';
 	import type { ContextUsage } from '$lib/apis/chat';
@@ -27,8 +26,12 @@
 		onclose
 	}: Props = $props();
 
+	type TerminalComponent = typeof import('../Terminal.svelte').default;
+
 	let copied = $state(false);
 	let selectedSessionId = $state<string | null>(null);
+	let LazyTerminal = $state<TerminalComponent | null>(null);
+	let terminalLoad: Promise<TerminalComponent> | null = null;
 	let appliedInitialSessionId = $state<string | null>(null);
 	let missingSessionId = $state<string | null>(null);
 	let forceStopSignal = $state(0);
@@ -96,6 +99,18 @@
 		forceStopSignal += 1;
 	}
 
+	function ensureTerminal(): Promise<TerminalComponent> {
+		terminalLoad ??= import('../Terminal.svelte').then(({ default: component }) => {
+			LazyTerminal = component;
+			return component;
+		});
+		return terminalLoad;
+	}
+
+	$effect(() => {
+		if (selectedSession && !LazyTerminal) void ensureTerminal();
+	});
+
 	$effect(() => {
 		if (!initialCommandSessionId) return;
 		const exists = runningSessions.some(
@@ -146,13 +161,15 @@
 				</button>
 			</div>
 			<div class="min-h-0 flex-1" style="background: var(--app-bg); color: var(--app-fg);">
-				<Terminal
-					wsPath={`/api/terminal/sessions/${selectedSession.command_session_id}/ws`}
-					initialOutput={selectedSession.output ?? ''}
-					initialOffset={selectedSession.total_bytes ?? 0}
-					{forceStopSignal}
-					readOnly={true}
-				/>
+				{#if LazyTerminal}
+					<LazyTerminal
+						wsPath={`/api/terminal/sessions/${selectedSession.command_session_id}/ws`}
+						initialOutput={selectedSession.output ?? ''}
+						initialOffset={selectedSession.total_bytes ?? 0}
+						{forceStopSignal}
+						readOnly={true}
+					/>
+				{/if}
 			</div>
 		</div>
 	</Modal>

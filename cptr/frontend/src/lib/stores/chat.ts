@@ -1,6 +1,7 @@
 /**
  * Chat state: tracks whether chat is available (at least one connection configured).
  */
+import { goto } from '$app/navigation';
 import { writable, get } from 'svelte/store';
 import { toast } from 'svelte-sonner';
 import { fetchJSON } from '$lib/apis';
@@ -234,7 +235,6 @@ export function bindGlobalChatListener() {
 						? i18next.t('chat.notification.inputBody')
 						: i18next.t('chat.notification.finishedBody'));
 			const openChat = async () => {
-				const { goto } = await import('$app/navigation');
 				const workspaceQuery = workspacePath
 					? `workspace=${encodeURIComponent(workspacePath)}&`
 					: '';

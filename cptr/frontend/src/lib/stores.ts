@@ -23,7 +23,8 @@ import {
 	savePreferences,
 	getWorkspaceList,
 	getWorkspaceState,
-	saveWorkspaceState
+	saveWorkspaceState,
+	deleteWorkspace
 } from '$lib/apis/state';
 import { listSessions, createSession, deleteSession } from '$lib/apis/terminal';
 import { createBrowserSession, deleteBrowserSession, listBrowserSessions } from '$lib/apis/browser';
@@ -926,8 +927,7 @@ export function addWorkspace(path: string): void {
 }
 
 export async function removeWorkspace(path: string): Promise<void> {
-	const { deleteWorkspace: deleteWs } = await import('$lib/apis/state');
-	await deleteWs(path);
+	await deleteWorkspace(path);
 	workspaceList.update((list) => list.filter((w) => w.path !== path));
 	workspaceOrder.update((order) => order.filter((p) => p !== path));
 
