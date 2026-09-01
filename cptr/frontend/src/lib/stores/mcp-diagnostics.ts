@@ -10,7 +10,8 @@ import type {
 	McpLatencyMetric,
 	McpProcessMetrics,
 	McpPricingStatus,
-	McpUsageDiagnostic
+	McpUsageDiagnostic,
+	McpUsageTotals
 } from '$lib/apis/mcp';
 
 export type McpLatencySummaryState = {
@@ -144,6 +145,7 @@ export type McpDiagnosticsState = {
 	failures: McpFailureState[];
 	system: McpBackendMetricsState[];
 	usage: McpUsageState[];
+	usageTotalsState: McpUsageTotalsState;
 	latencyCapacityPerEdge: number;
 	failureCapacity: number;
 	systemCapacity: number;
@@ -251,6 +253,46 @@ function decimalNumber(value: string | null): number | null {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
+function usageTotalsState(
+	totals: McpUsageTotals | undefined,
+	retainedUsage: McpUsageState[]
+): McpUsageTotalsState {
+	if (totals) {
+		return {
+			inputTokensEstimated: totals.input_tokens_estimated,
+			outputTokensEstimated: totals.output_tokens_estimated,
+			totalTokensEstimated: totals.total_tokens_estimated,
+			simulatedCostUsd: decimalNumber(totals.simulated_cost_usd) ?? 0,
+			pricedEvents: totals.priced_events,
+			staleEvents: totals.stale_events,
+			unpricedEvents: totals.unpriced_events
+		};
+	}
+	let inputTokensEstimated = 0;
+	let outputTokensEstimated = 0;
+	let simulatedCostUsd = 0;
+	let pricedEvents = 0;
+	let staleEvents = 0;
+	let unpricedEvents = 0;
+	for (const event of retainedUsage) {
+		inputTokensEstimated += event.inputTokensEstimated;
+		outputTokensEstimated += event.outputTokensEstimated;
+		simulatedCostUsd += event.simulatedCostUsd ?? 0;
+		if (event.pricingStatus === 'current') pricedEvents += 1;
+		else if (event.pricingStatus === 'stale') staleEvents += 1;
+		else unpricedEvents += 1;
+	}
+	return {
+		inputTokensEstimated,
+		outputTokensEstimated,
+		totalTokensEstimated: inputTokensEstimated + outputTokensEstimated,
+		simulatedCostUsd,
+		pricedEvents,
+		staleEvents,
+		unpricedEvents
+	};
+}
+
 function usageState(event: McpUsageDiagnostic): McpUsageState {
 	return {
 		eventId: event.event_id,
@@ -294,12 +336,14 @@ export function hydrateMcpDiagnostics(snapshot: McpDiagnosticsSnapshot): McpDiag
 	const failureCapacity = Math.max(1, snapshot.stream_health.failure_capacity || 1);
 	const systemCapacity = Math.max(1, snapshot.stream_health.system_sample_capacity || 1);
 	const usageCapacity = Math.max(1, snapshot.stream_health.usage_capacity || 1);
+	const retainedUsage = boundedTail((snapshot.usage ?? []).map(usageState), usageCapacity);
 	return {
 		sequence: snapshot.sequence,
 		latency,
 		failures: boundedTail(snapshot.failures.map(failureState), failureCapacity),
 		system: boundedTail(snapshot.system.map(systemState), systemCapacity),
-		usage: boundedTail((snapshot.usage ?? []).map(usageState), usageCapacity),
+		usage: retainedUsage,
+		usageTotalsState: usageTotalsState(snapshot.usage_totals, retainedUsage),
 		latencyCapacityPerEdge: Math.max(
 			1,
 			snapshot.stream_health.latency_sample_capacity_per_edge || 1
@@ -338,10 +382,28 @@ export function applyMcpDiagnosticsEvent(
 	}
 
 	if (event.kind === 'usage') {
+		const inputTokensEstimated =
+			state.usageTotalsState.inputTokensEstimated + event.input_tokens_estimated;
+		const outputTokensEstimated =
+			state.usageTotalsState.outputTokensEstimated + event.output_tokens_estimated;
 		return {
 			...state,
 			sequence: event.ingestion_sequence,
-			usage: boundedTail([...state.usage, usageState(event)], state.usageCapacity)
+			usage: boundedTail([...state.usage, usageState(event)], state.usageCapacity),
+			usageTotalsState: {
+				inputTokensEstimated,
+				outputTokensEstimated,
+				totalTokensEstimated: inputTokensEstimated + outputTokensEstimated,
+				simulatedCostUsd:
+					state.usageTotalsState.simulatedCostUsd + (decimalNumber(event.simulated_cost_usd) ?? 0),
+				pricedEvents:
+					state.usageTotalsState.pricedEvents + (event.pricing_status === 'current' ? 1 : 0),
+				staleEvents:
+					state.usageTotalsState.staleEvents + (event.pricing_status === 'stale' ? 1 : 0),
+				unpricedEvents:
+					state.usageTotalsState.unpricedEvents +
+					(event.pricing_status === 'current' || event.pricing_status === 'stale' ? 0 : 1)
+			}
 		};
 	}
 
@@ -381,29 +443,7 @@ export function currentUsageModel(state: McpDiagnosticsState | null): McpUsageSt
 }
 
 export function usageTotals(state: McpDiagnosticsState): McpUsageTotalsState {
-	let inputTokensEstimated = 0;
-	let outputTokensEstimated = 0;
-	let simulatedCostUsd = 0;
-	let pricedEvents = 0;
-	let staleEvents = 0;
-	let unpricedEvents = 0;
-	for (const event of state.usage) {
-		inputTokensEstimated += event.inputTokensEstimated;
-		outputTokensEstimated += event.outputTokensEstimated;
-		if (event.simulatedCostUsd != null) simulatedCostUsd += event.simulatedCostUsd;
-		if (event.pricingStatus === 'current') pricedEvents += 1;
-		else if (event.pricingStatus === 'stale') staleEvents += 1;
-		else unpricedEvents += 1;
-	}
-	return {
-		inputTokensEstimated,
-		outputTokensEstimated,
-		totalTokensEstimated: inputTokensEstimated + outputTokensEstimated,
-		simulatedCostUsd,
-		pricedEvents,
-		staleEvents,
-		unpricedEvents
-	};
+	return state.usageTotalsState;
 }
 
 export function usageTimeline(

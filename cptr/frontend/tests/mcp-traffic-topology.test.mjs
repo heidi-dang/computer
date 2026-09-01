@@ -316,6 +316,15 @@ test('usage diagnostics hydrate bounded model state and project 60-second token/
 	});
 
 	state = diagnostics.applyMcpDiagnosticsEvent(state, usage(6, base + 6_000, 200, 40, '0.0016'));
+	assert.deepEqual(diagnostics.usageTotals(state), {
+		inputTokensEstimated: 300,
+		outputTokensEstimated: 60,
+		totalTokensEstimated: 360,
+		simulatedCostUsd: 0.0024000000000000002,
+		pricedEvents: 2,
+		staleEvents: 0,
+		unpricedEvents: 0
+	});
 	const timeline = diagnostics.usageTimeline(state, base + 10_000, {
 		windowMs: 10_000,
 		bucketMs: 5_000
@@ -349,6 +358,15 @@ test('usage diagnostics hydrate bounded model state and project 60-second token/
 	);
 	assert.equal(state.usage.length, 2);
 	assert.equal(diagnostics.currentUsageModel(state).modelReported, null);
+	assert.deepEqual(diagnostics.usageTotals(state), {
+		inputTokensEstimated: 350,
+		outputTokensEstimated: 70,
+		totalTokensEstimated: 420,
+		simulatedCostUsd: 0.0024000000000000002,
+		pricedEvents: 2,
+		staleEvents: 0,
+		unpricedEvents: 1
+	});
 });
 
 test('topology projection uses stable client ordering and deterministic radial positions', async () => {

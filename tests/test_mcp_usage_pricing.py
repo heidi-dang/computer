@@ -122,11 +122,14 @@ class McpUsageStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["stream_health"]["usage_capacity"], 2)
         self.assertEqual(snapshot["current_model"]["pricing_status"], "model_not_reported")
         self.assertIsNone(snapshot["current_model"]["model_reported"])
-        self.assertEqual(snapshot["usage_totals"]["input_tokens_estimated"], 500)
-        self.assertEqual(snapshot["usage_totals"]["output_tokens_estimated"], 50)
-        self.assertEqual(snapshot["usage_totals"]["total_tokens_estimated"], 550)
-        self.assertEqual(snapshot["usage_totals"]["priced_events"], 1)
+        # Totals are cumulative for the backend process even after the bounded
+        # Usage event ring evicts the oldest event.
+        self.assertEqual(snapshot["usage_totals"]["input_tokens_estimated"], 600)
+        self.assertEqual(snapshot["usage_totals"]["output_tokens_estimated"], 60)
+        self.assertEqual(snapshot["usage_totals"]["total_tokens_estimated"], 660)
+        self.assertEqual(snapshot["usage_totals"]["priced_events"], 2)
         self.assertEqual(snapshot["usage_totals"]["unpriced_events"], 1)
+        self.assertIn("gpt-5.6-sol", snapshot["usage_totals"]["by_model"])
         self.assertIn("gpt-5.6-terra", snapshot["usage_totals"]["by_model"])
 
 

@@ -204,6 +204,16 @@ class McpDiagnosticsStore:
         self._failures: deque[dict[str, object]] = deque(maxlen=self.max_failures)
         self._system: deque[dict[str, object]] = deque(maxlen=self.max_system_samples)
         self._usage: deque[dict[str, object]] = deque(maxlen=self.max_usage)
+        # Keep the event history bounded while preserving process-lifetime cumulative
+        # counters. This makes the dashboard totals genuinely cumulative without
+        # allowing telemetry memory to grow with request volume.
+        self._usage_total_input_tokens = 0
+        self._usage_total_output_tokens = 0
+        self._usage_total_simulated_cost = Decimal("0")
+        self._usage_priced_events = 0
+        self._usage_stale_events = 0
+        self._usage_unpriced_events = 0
+        self._usage_by_model: dict[str, dict[str, object]] = {}
         self._seen_ids: deque[str] = deque()
         self._seen_id_set: set[str] = set()
         self._dedupe_capacity = max(
@@ -251,6 +261,7 @@ class McpDiagnosticsStore:
                     bucket.append(projected)
                 elif isinstance(event, McpUsageDiagnostic):
                     projected = project_usage_cost(event)
+                    self._accumulate_usage(projected)
                     self._usage.append(projected)
                 else:
                     safe_summary = redact_external_text(event.summary).strip()[:500]
@@ -300,65 +311,62 @@ class McpDiagnosticsStore:
                 },
             }
 
+    def _accumulate_usage(self, item: dict[str, object]) -> None:
+        item_input = int(item.get("input_tokens_estimated") or 0)
+        item_output = int(item.get("output_tokens_estimated") or 0)
+        self._usage_total_input_tokens += item_input
+        self._usage_total_output_tokens += item_output
+
+        status = str(item.get("pricing_status") or "unknown_model")
+        if status == "current":
+            self._usage_priced_events += 1
+        elif status == "stale":
+            self._usage_stale_events += 1
+        else:
+            self._usage_unpriced_events += 1
+
+        raw_cost = item.get("simulated_cost_usd")
+        item_cost = Decimal(str(raw_cost)) if raw_cost is not None else Decimal("0")
+        self._usage_total_simulated_cost += item_cost
+
+        model_id = item.get("model_canonical")
+        if not isinstance(model_id, str) or not model_id:
+            return
+        group = self._usage_by_model.setdefault(
+            model_id,
+            {
+                "events": 0,
+                "input_tokens_estimated": 0,
+                "output_tokens_estimated": 0,
+                "total_tokens_estimated": 0,
+                "simulated_cost_usd": Decimal("0"),
+            },
+        )
+        group["events"] = int(group["events"]) + 1
+        group["input_tokens_estimated"] = int(group["input_tokens_estimated"]) + item_input
+        group["output_tokens_estimated"] = int(group["output_tokens_estimated"]) + item_output
+        group["total_tokens_estimated"] = (
+            int(group["total_tokens_estimated"]) + item_input + item_output
+        )
+        group["simulated_cost_usd"] = Decimal(str(group["simulated_cost_usd"])) + item_cost
+
     def _usage_totals(self) -> dict[str, object]:
-        input_tokens = 0
-        output_tokens = 0
-        total_cost = Decimal("0")
-        priced_events = 0
-        stale_events = 0
-        unpriced_events = 0
-        by_model: dict[str, dict[str, object]] = {}
-        for item in self._usage:
-            item_input = int(item.get("input_tokens_estimated") or 0)
-            item_output = int(item.get("output_tokens_estimated") or 0)
-            input_tokens += item_input
-            output_tokens += item_output
-            status = str(item.get("pricing_status") or "unknown_model")
-            if status == "current":
-                priced_events += 1
-            elif status == "stale":
-                stale_events += 1
-            else:
-                unpriced_events += 1
-            raw_cost = item.get("simulated_cost_usd")
-            item_cost = Decimal(str(raw_cost)) if raw_cost is not None else Decimal("0")
-            total_cost += item_cost
-            model_id = item.get("model_canonical")
-            if isinstance(model_id, str) and model_id:
-                group = by_model.setdefault(
-                    model_id,
-                    {
-                        "events": 0,
-                        "input_tokens_estimated": 0,
-                        "output_tokens_estimated": 0,
-                        "total_tokens_estimated": 0,
-                        "simulated_cost_usd": Decimal("0"),
-                    },
-                )
-                group["events"] = int(group["events"]) + 1
-                group["input_tokens_estimated"] = int(group["input_tokens_estimated"]) + item_input
-                group["output_tokens_estimated"] = (
-                    int(group["output_tokens_estimated"]) + item_output
-                )
-                group["total_tokens_estimated"] = (
-                    int(group["total_tokens_estimated"]) + item_input + item_output
-                )
-                group["simulated_cost_usd"] = Decimal(str(group["simulated_cost_usd"])) + item_cost
         serialized_by_model = {
             model_id: {
                 **values,
                 "simulated_cost_usd": format(Decimal(str(values["simulated_cost_usd"])), "f"),
             }
-            for model_id, values in sorted(by_model.items())
+            for model_id, values in sorted(self._usage_by_model.items())
         }
         return {
-            "input_tokens_estimated": input_tokens,
-            "output_tokens_estimated": output_tokens,
-            "total_tokens_estimated": input_tokens + output_tokens,
-            "simulated_cost_usd": format(total_cost, "f"),
-            "priced_events": priced_events,
-            "stale_events": stale_events,
-            "unpriced_events": unpriced_events,
+            "input_tokens_estimated": self._usage_total_input_tokens,
+            "output_tokens_estimated": self._usage_total_output_tokens,
+            "total_tokens_estimated": self._usage_total_input_tokens
+            + self._usage_total_output_tokens,
+            "simulated_cost_usd": format(self._usage_total_simulated_cost, "f"),
+            "priced_events": self._usage_priced_events,
+            "stale_events": self._usage_stale_events,
+            "unpriced_events": self._usage_unpriced_events,
             "by_model": serialized_by_model,
         }
 

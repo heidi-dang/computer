@@ -36,9 +36,7 @@
 	const recentInput = $derived(buckets.reduce((sum, bucket) => sum + bucket.inputTokens, 0));
 	const recentOutput = $derived(buckets.reduce((sum, bucket) => sum + bucket.outputTokens, 0));
 	const recentCost = $derived(buckets.reduce((sum, bucket) => sum + bucket.simulatedCostUsd, 0));
-	const pricedRequestCount = $derived(
-		diagnosticsState?.usage.filter((event) => event.simulatedCostUsd != null).length ?? 0
-	);
+	const pricedRequestCount = $derived(totals.pricedEvents + totals.staleEvents);
 	const avgCost = $derived(
 		pricedRequestCount > 0 ? totals.simulatedCostUsd / pricedRequestCount : null
 	);
@@ -173,28 +171,28 @@
 			<p class="mt-1 text-lg font-semibold tabular-nums">
 				{formatTokens(totals.inputTokensEstimated)}
 			</p>
-			<p class="text-[0.58rem] app-muted">tool results → model</p>
+			<p class="text-[0.58rem] app-muted">tool results → model · cumulative</p>
 		</div>
 		<div class="border-b border-r px-3 py-2.5 sm:px-4 lg:border-b-0">
 			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Estimated output</p>
 			<p class="mt-1 text-lg font-semibold tabular-nums">
 				{formatTokens(totals.outputTokensEstimated)}
 			</p>
-			<p class="text-[0.58rem] app-muted">model → tool calls</p>
+			<p class="text-[0.58rem] app-muted">model → tool calls · cumulative</p>
 		</div>
 		<div class="border-b px-3 py-2.5 sm:border-r sm:px-4 lg:border-b-0">
 			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Estimated total</p>
 			<p class="mt-1 text-lg font-semibold tabular-nums">
 				{formatTokens(totals.totalTokensEstimated)}
 			</p>
-			<p class="text-[0.58rem] app-muted">retained Usage window</p>
+			<p class="text-[0.58rem] app-muted">since backend start</p>
 		</div>
 		<div class="border-r px-3 py-2.5 sm:px-4">
 			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Simulated cost (USD)</p>
 			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">
 				{formatUsd(totals.simulatedCostUsd)}
 			</p>
-			<p class="text-[0.58rem] app-muted">retained priced events</p>
+			<p class="text-[0.58rem] app-muted">since backend start</p>
 		</div>
 		<div class="px-3 py-2.5 sm:px-4">
 			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Avg simulated cost/request</p>
