@@ -816,6 +816,7 @@ DEFAULT_CONTROL_SCOPES = (
     "command:execute",
     "mcp:traffic:write",
     "mcp:activity:write",
+    "mcp:diagnostics:write",
 )
 OPTIONAL_CONTROL_SCOPES = ("command:external",)
 ALLOWED_CONTROL_SCOPES = frozenset((*DEFAULT_CONTROL_SCOPES, *OPTIONAL_CONTROL_SCOPES))

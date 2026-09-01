@@ -238,7 +238,12 @@ async def auth_middleware(request: Request, call_next):
         or path == "/manifest.json"
         or (
             request.method == "POST"
-            and path in {"/api/mcp/traffic/events", "/api/mcp/activity/events"}
+            and path
+            in {
+                "/api/mcp/traffic/events",
+                "/api/mcp/activity/events",
+                "/api/mcp/diagnostics/events",
+            }
         )
     ):
         return await call_next(request)

@@ -33,8 +33,10 @@ from pydantic import BaseModel, ConfigDict
 from cptr.routers.admin import require_admin
 from cptr.services.control_auth import authenticate_control_request
 from cptr.services.mcp_activity import McpActivityBatch, mcp_activity_store
+from cptr.services.mcp_diagnostics import McpDiagnosticsBatch, mcp_diagnostics_store
 from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
 from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
+from cptr.services.system_metrics import mcp_metrics_sampler
 from cptr.utils.crypto import decrypt_key
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,20 @@ async def _require_activity_writer(request: Request) -> str:
 
 
 def _activity_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+async def _require_diagnostics_writer(request: Request) -> str:
+    """Authenticate the plugin Diagnostics writer with its dedicated scope."""
+    try:
+        return await authenticate_control_request(request, "mcp:diagnostics:write")
+    except PermissionError as exc:
+        if str(exc).startswith("missing required scope"):
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc
+
+
+def _diagnostics_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
 
 
@@ -160,6 +176,54 @@ class McpTopologyConfigUpdate(BaseModel):
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+@router.post("/diagnostics/events")
+async def ingest_mcp_diagnostics(request: Request, body: McpDiagnosticsBatch):
+    """Accept one bounded allowlisted diagnostics batch from the MCP adapter."""
+    await _require_diagnostics_writer(request)
+    return await mcp_diagnostics_store.ingest(body.events)
+
+
+@router.get("/diagnostics/snapshot")
+async def get_mcp_diagnostics_snapshot(request: Request):
+    """Return the admin-only bounded MCP diagnostics snapshot."""
+    require_admin(request)
+    await mcp_metrics_sampler.ensure_started()
+    return await mcp_diagnostics_store.snapshot()
+
+
+@router.get("/diagnostics/stream")
+async def stream_mcp_diagnostics(request: Request):
+    """Stream bounded MCP diagnostics to an authenticated admin browser."""
+    require_admin(request)
+    await mcp_metrics_sampler.ensure_started()
+
+    async def _event_stream():
+        queue = mcp_diagnostics_store.subscribe()
+        try:
+            yield _diagnostics_sse("snapshot", await mcp_diagnostics_store.snapshot())
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+                event_name = str(event.get("kind") or "diagnostics")
+                yield _diagnostics_sse(event_name, event)
+        finally:
+            mcp_diagnostics_store.unsubscribe(queue)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/topology/config")
