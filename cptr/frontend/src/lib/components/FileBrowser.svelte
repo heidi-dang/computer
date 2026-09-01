@@ -61,6 +61,7 @@
 	let draggedItem = $state<string | null>(null);
 	let showNewInput = $state<'file' | 'folder' | null>(null);
 	let newName = $state('');
+	let newNameInput: HTMLInputElement | undefined = $state();
 	let dropzoneActive = $state(false);
 	let addMenuOpen = $state(false);
 	let showHidden = $state(
@@ -90,6 +91,7 @@
 	let directoryMenu = $state<{ x: number; y: number } | null>(null);
 	let renamingEntry = $state<string | null>(null);
 	let renameValue = $state('');
+	let renameInput: HTMLInputElement | undefined = $state();
 
 	let cwd = $derived($activeWorkspace?.fileBrowserCwd ?? $activeWorkspace?.path ?? '/');
 	let workspacePath = $derived($activeWorkspace?.path ?? '/');
@@ -108,6 +110,24 @@
 				$activeWorkspace?.groups.some((g) => g.tabs.some((t) => t.sessionId === p.session_id))
 		)
 	);
+
+	$effect(() => {
+		if (showNewInput && newNameInput) {
+			requestAnimationFrame(() => {
+				newNameInput?.focus();
+				newNameInput?.select();
+			});
+		}
+	});
+
+	$effect(() => {
+		if (renamingEntry && renameInput) {
+			requestAnimationFrame(() => {
+				renameInput?.focus();
+				renameInput?.select();
+			});
+		}
+	});
 
 	let breadcrumbs = $derived(() => {
 		if (!cwd || !workspacePath) return [];
@@ -1215,6 +1235,7 @@
 					class="text-gray-400 shrink-0"
 				/>
 				<input
+					bind:this={newNameInput}
 					type="text"
 					class="flex-1 border-none outline-none bg-transparent text-xs text-gray-900 dark:text-white"
 					placeholder={showNewInput === 'folder'
@@ -1225,7 +1246,6 @@
 						if (e.key === 'Enter') confirmNew();
 						if (e.key === 'Escape') cancelNew();
 					}}
-					autofocus
 				/>
 				<button
 					class="flex items-center justify-center w-5 h-5 rounded text-green-500 hover:bg-green-50 dark:hover:bg-green-500/10 transition-colors duration-75"
@@ -1365,6 +1385,7 @@
 							class="text-gray-400 shrink-0"
 						/>
 						<input
+							bind:this={renameInput}
 							type="text"
 							class="flex-1 border-none outline-none bg-transparent text-xs text-gray-900 dark:text-white"
 							bind:value={renameValue}
@@ -1373,7 +1394,6 @@
 								if (e.key === 'Escape') renamingEntry = null;
 							}}
 							onblur={() => confirmRename(entry.path)}
-							autofocus
 						/>
 					</div>
 				{:else}

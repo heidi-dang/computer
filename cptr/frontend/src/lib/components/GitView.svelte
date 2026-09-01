@@ -497,9 +497,17 @@
 					{#each reviewFiles as file (file.key)}
 						{@const parts = pathParts(file.path)}
 						<section class="overflow-hidden rounded-lg">
-							<button
+							<div
 								class="flex h-8 w-full min-w-0 items-center gap-1.5 rounded-lg px-2 text-left transition-colors hover:bg-gray-100 dark:hover:bg-white/4"
+								role="button"
+								tabindex="0"
 								onclick={() => toggleFile(file.key)}
+								onkeydown={(event) => {
+									if (event.key === 'Enter' || event.key === ' ') {
+										event.preventDefault();
+										toggleFile(file.key);
+									}
+								}}
 							>
 								<Icon
 									name="chevron-right"
@@ -510,13 +518,13 @@
 								/>
 								<Icon name="git-diff" size={13} class="shrink-0 text-gray-400 dark:text-gray-600" />
 								<div class="flex min-w-0 flex-1 items-baseline gap-2">
-									<!-- svelte-ignore a11y_no_static_element_interactions -->
-									<span
+									<button
+										type="button"
 										class="truncate text-xs font-medium text-gray-800 dark:text-gray-200 hover:underline"
 										onclick={(e) => {
 											e.stopPropagation();
 											openFile(file.path);
-										}}>{parts.name}</span
+										}}>{parts.name}</button
 									>
 									{#if parts.dir}
 										<span
@@ -548,7 +556,7 @@
 										{file.staged ? $t('git.staged') : $t('git.uncommittedChanges')}
 									</span>
 								{/if}
-							</button>
+							</div>
 
 							{#if file.expanded}
 								<div

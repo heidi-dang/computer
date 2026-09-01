@@ -35,6 +35,7 @@
 	let history = $state<string[]>([]);
 	let creatingFolder = $state(false);
 	let folderName = $state('');
+	let folderNameInput: HTMLInputElement | undefined = $state();
 
 	// ── Editable path bar ───────────────────────────────────────
 	let editingPath = $state(false);
@@ -81,6 +82,15 @@
 			requestAnimationFrame(() => {
 				pathInputEl?.focus();
 				pathInputEl?.select();
+			});
+		}
+	});
+
+	$effect(() => {
+		if (creatingFolder && folderNameInput) {
+			requestAnimationFrame(() => {
+				folderNameInput?.focus();
+				folderNameInput?.select();
 			});
 		}
 	});
@@ -425,6 +435,7 @@
 			<div class="flex items-center gap-2 h-7 px-2">
 				<Icon name="folder" size={14} class="text-gray-400 shrink-0" />
 				<input
+					bind:this={folderNameInput}
 					type="text"
 					class="flex-1 border-none outline-none bg-transparent text-xs text-gray-900 dark:text-white"
 					placeholder={$t('files.folderNamePlaceholder')}
@@ -433,7 +444,6 @@
 						if (e.key === 'Enter') createFolder();
 						if (e.key === 'Escape') cancelCreatingFolder();
 					}}
-					autofocus
 				/>
 				<button
 					class="flex items-center justify-center w-5 h-5 rounded text-green-500 hover:bg-green-50 dark:hover:bg-green-500/10 transition-colors duration-75"

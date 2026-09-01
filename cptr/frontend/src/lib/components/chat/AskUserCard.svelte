@@ -110,7 +110,6 @@
 									] === option.label
 										? 'bg-white shadow-sm dark:bg-white/[0.1]'
 										: 'hover:bg-white/70 dark:hover:bg-white/[0.06]'}"
-									onclick={() => selections[question.id] === option.label && advance(selections)}
 								>
 									<input
 										class="sr-only"
@@ -118,6 +117,7 @@
 										name={question.id}
 										value={option.label}
 										checked={selections[question.id] === option.label}
+										onclick={() => selections[question.id] === option.label && advance(selections)}
 										onchange={() => selectAnswer(question.id, option.label)}
 									/>
 									<span

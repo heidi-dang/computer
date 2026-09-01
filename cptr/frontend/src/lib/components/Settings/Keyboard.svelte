@@ -203,8 +203,4 @@
 			opacity: 0.6;
 		}
 	}
-
-	.kbd-inline {
-		@apply inline px-0.5 py-px rounded text-[0.5625rem] font-mono bg-gray-100 dark:bg-white/6 text-gray-500;
-	}
 </style>

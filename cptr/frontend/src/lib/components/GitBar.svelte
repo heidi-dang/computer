@@ -1,11 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import {
-		activeWorkspace,
-		addWorkspace,
-		openChatTab,
-		openFileTab
-	} from '$lib/stores';
+	import { activeWorkspace, addWorkspace, openChatTab, openFileTab } from '$lib/stores';
 	import {
 		getGitCompareDiff,
 		getGitCurrentPr,
@@ -309,10 +304,7 @@
 		const head = prCreateHead.trim();
 		const ignoreWhitespace = $hideWhitespaceChanges;
 		const active =
-			expanded &&
-			view === 'pullRequests' &&
-			prCapabilities?.authenticated === true &&
-			!selectedPr;
+			expanded && view === 'pullRequests' && prCapabilities?.authenticated === true && !selectedPr;
 		if (!active || !workspacePath || !base || !head) {
 			if (prCreateDiffTimer) clearTimeout(prCreateDiffTimer);
 			prCreateDiff = [];
@@ -482,8 +474,7 @@
 			currentPr = current.found ? (current.pr ?? null) : null;
 			prs = list.items ?? [];
 			if (selectedPr) {
-				selectedPr =
-					[currentPr, ...prs].find((pr) => pr?.number === selectedPr?.number) ?? null;
+				selectedPr = [currentPr, ...prs].find((pr) => pr?.number === selectedPr?.number) ?? null;
 				if (!selectedPr) {
 					selectedPrDetail = null;
 					prChecks = [];
@@ -923,7 +914,9 @@
 		prCreateHead = prCreateHead || gitStatus?.branch || '';
 		if (!prCreateBase) {
 			const upstream = gitStatus?.upstream || '';
-			const upstreamBranch = upstream.includes('/') ? upstream.split('/').slice(1).join('/') : upstream;
+			const upstreamBranch = upstream.includes('/')
+				? upstream.split('/').slice(1).join('/')
+				: upstream;
 			if (upstreamBranch && upstreamBranch !== gitStatus?.branch) {
 				prCreateBase = upstreamBranch;
 			} else if (prCapabilities?.default_branch) {
@@ -932,7 +925,10 @@
 		}
 	}
 
-	function branchOptions(selected: string, includeDefault: boolean): { value: string; label: string }[] {
+	function branchOptions(
+		selected: string,
+		includeDefault: boolean
+	): { value: string; label: string }[] {
 		const options: { value: string; label: string }[] = [];
 		const seen = new Set<string>();
 		const add = (value: string, label = value) => {
@@ -1359,9 +1355,16 @@
 
 	function activityBody(item: unknown): string {
 		if (!item || typeof item !== 'object') return '';
-		const value = item as { body?: unknown; state?: unknown; author?: unknown; createdAt?: unknown };
+		const value = item as {
+			body?: unknown;
+			state?: unknown;
+			author?: unknown;
+			createdAt?: unknown;
+		};
 		const author = prPersonName(value.author);
-		const state = String(value.state || '').toLowerCase().replace(/_/g, ' ');
+		const state = String(value.state || '')
+			.toLowerCase()
+			.replace(/_/g, ' ');
 		const body = String(value.body || '').trim();
 		return [author, state, body].filter(Boolean).join(' · ');
 	}
@@ -1454,6 +1457,17 @@
 		<div
 			class="flex min-w-0 items-center h-7 px-3 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/3 transition-colors duration-75"
 			onclick={() => {
+				expanded = !expanded;
+				if (expanded) {
+					refresh();
+					if (view === 'history') loadHistory();
+					if (view === 'pullRequests') loadPullRequests();
+				}
+			}}
+			onkeydown={(event) => {
+				if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' '))
+					return;
+				event.preventDefault();
 				expanded = !expanded;
 				if (expanded) {
 					refresh();
@@ -1916,7 +1930,6 @@
 					>
 						<Icon name="settings" size={12} />
 					</button>
-
 				</div>
 
 				{#if showDiffSettings && diffSettingsBtnEl}
@@ -1968,15 +1981,23 @@
 								{#each gitStatus?.files ?? [] as file (file.path)}
 									{@const fp = fPath(file.path)}
 									{@const sc = statusChar(file.status)}
-									<button
+									<div
 										class="group flex min-w-0 items-center gap-1.5 w-full h-7 px-2.5 text-left transition-colors duration-75
 											{selectedFile === file.path
 											? 'bg-gray-100 dark:bg-white/8'
 											: 'hover:bg-gray-50 dark:hover:bg-white/3'}"
+										role="button"
+										tabindex="0"
 										onclick={() => selectFile(file.path, file.staged, file.status === 'untracked')}
+										onkeydown={(event) => {
+											if (event.key === 'Enter' || event.key === ' ') {
+												event.preventDefault();
+												selectFile(file.path, file.staged, file.status === 'untracked');
+											}
+										}}
 									>
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<span
+										<button
+											type="button"
 											class="flex items-center justify-center w-3 h-3 rounded border shrink-0 cursor-pointer
 												{file.staged
 												? 'border-gray-300 dark:border-gray-600 bg-gray-800 dark:bg-white'
@@ -1985,11 +2006,12 @@
 												e.stopPropagation();
 												toggleStage(e, file);
 											}}
+											aria-label={file.staged ? 'Unstage file' : 'Stage file'}
 										>
 											{#if file.staged}
 												<Icon name="check" size={7} class="text-white dark:text-black" />
 											{/if}
-										</span>
+										</button>
 										<span class="flex min-w-0 flex-1 items-baseline gap-1.5">
 											{#if fp.dir}
 												<span
@@ -1997,13 +2019,13 @@
 													>{fp.dir}</span
 												>
 											{/if}
-											<!-- svelte-ignore a11y_no_static_element_interactions -->
-											<span
+											<button
+												type="button"
 												class="min-w-0 max-w-[55%] shrink-0 truncate text-[0.6875rem] text-gray-800 dark:text-gray-200 hover:underline cursor-pointer"
 												onclick={(e) => {
 													e.stopPropagation();
 													openFileTab(workspacePath.replace(/\/$/, '') + '/' + file.path);
-												}}>{fp.name}</span
+												}}>{fp.name}</button
 											>
 										</span>
 										{#if file.binary}
@@ -2020,17 +2042,15 @@
 												<span class="text-red-500 dark:text-red-400">-{file.deletions ?? 0}</span>
 											</span>
 										{/if}
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<span
+										<button
+											type="button"
 											class="flex items-center justify-center w-5 h-5 rounded shrink-0 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-white/10 transition-all duration-75"
-											role="button"
-											tabindex="-1"
 											onclick={(e) => openFileMenu(e, file)}
 											aria-label={$t('files.moreActions')}
 										>
 											<Icon name="three-dots" size={12} />
-										</span>
-									</button>
+										</button>
+									</div>
 								{/each}
 							</div>
 
@@ -2107,12 +2127,20 @@
 											</span>
 										</div>
 									{/if}
-									<button
+									<div
 										class="group flex items-center gap-1.5 w-full px-2.5 py-1.5 text-left border-b border-gray-50 dark:border-white/3 transition-colors duration-75
 											{selectedCommit?.hash === c.hash
 											? 'bg-gray-100 dark:bg-white/8'
 											: 'hover:bg-gray-50 dark:hover:bg-white/3'}"
+										role="button"
+										tabindex="0"
 										onclick={() => selectCommit(c)}
+										onkeydown={(event) => {
+											if (event.key === 'Enter' || event.key === ' ') {
+												event.preventDefault();
+												selectCommit(c);
+											}
+										}}
 									>
 										{#if i < unpushedCount}
 											<span
@@ -2128,17 +2156,15 @@
 												>{c.short_hash} · {c.author} · {relTime(c.date)}</span
 											>
 										</div>
-										<!-- svelte-ignore a11y_no_static_element_interactions -->
-										<span
+										<button
+											type="button"
 											class="flex items-center justify-center w-5 h-5 rounded shrink-0 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 hover:bg-gray-200 dark:hover:bg-white/10 transition-all duration-75"
-											role="button"
-											tabindex="-1"
 											onclick={(e) => openCommitMenu(e, c, i === 0)}
 											aria-label={$t('files.moreActions')}
 										>
 											<Icon name="three-dots" size={12} />
-										</span>
-									</button>
+										</button>
+									</div>
 								{/each}
 								{#if !commits.length}
 									<div
@@ -2186,27 +2212,31 @@
 									</div>
 								{:else}
 									<div class="border-b border-gray-100 p-2 dark:border-white/4">
-											<div class="flex min-w-0 items-center gap-1">
-												{#each prStates as state}
-													<button
-														class="h-6 rounded-md px-2 text-[0.6875rem] font-medium transition-colors duration-75
+										<div class="flex min-w-0 items-center gap-1">
+											{#each prStates as state}
+												<button
+													class="h-6 rounded-md px-2 text-[0.6875rem] font-medium transition-colors duration-75
 															{prState === state
-															? 'bg-gray-200/50 text-gray-900 dark:bg-white/8 dark:text-white'
-															: 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300'}"
-														onclick={() => setPrState(state)}
-													>
-														{state[0].toUpperCase() + state.slice(1)}
-													</button>
-												{/each}
+														? 'bg-gray-200/50 text-gray-900 dark:bg-white/8 dark:text-white'
+														: 'text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-300'}"
+													onclick={() => setPrState(state)}
+												>
+													{state[0].toUpperCase() + state.slice(1)}
+												</button>
+											{/each}
 										</div>
 										<div class="mt-1.5 flex min-w-0 items-center gap-1.5">
 											<div
 												class="flex h-6 min-w-0 flex-1 items-center gap-1.5 rounded-md border border-gray-200 px-1.5 dark:border-white/8"
 											>
-												<Icon name="search" size={11} class="shrink-0 text-gray-300 dark:text-gray-600" />
+												<Icon
+													name="search"
+													size={11}
+													class="shrink-0 text-gray-300 dark:text-gray-600"
+												/>
 												<input
-														class="min-w-0 flex-1 bg-transparent text-[0.6875rem] text-gray-700 outline-none placeholder:text-gray-300 dark:text-gray-300 dark:placeholder:text-gray-600"
-														placeholder="Search pull requests"
+													class="min-w-0 flex-1 bg-transparent text-[0.6875rem] text-gray-700 outline-none placeholder:text-gray-300 dark:text-gray-300 dark:placeholder:text-gray-600"
+													placeholder="Search pull requests"
 													bind:value={prSearch}
 													oninput={onPrSearchInput}
 												/>
@@ -2218,10 +2248,10 @@
 											>
 												<Icon name="plus" size={12} />
 											</button>
-											</div>
 										</div>
-										<div class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
-											{#each prs as pr (pr.number)}
+									</div>
+									<div class="min-h-0 flex-1 overflow-x-hidden overflow-y-auto">
+										{#each prs as pr (pr.number)}
 											{@const checks = prCheckSignal(pr)}
 											<button
 												class="group flex w-full min-w-0 items-center gap-1.5 border-b border-gray-50 px-2.5 py-1.5 text-left transition-colors duration-75 dark:border-white/3
@@ -2230,10 +2260,15 @@
 													: 'hover:bg-gray-50 dark:hover:bg-white/3'}"
 												onclick={() => selectPullRequest(pr)}
 											>
-												<Icon name="git-diff" size={12} class="shrink-0 text-gray-400 dark:text-gray-600" />
+												<Icon
+													name="git-diff"
+													size={12}
+													class="shrink-0 text-gray-400 dark:text-gray-600"
+												/>
 												<div class="flex min-w-0 flex-1 flex-col">
 													<div class="flex min-w-0 items-center gap-1.5">
-														<span class="min-w-0 flex-1 truncate text-xs text-gray-800 dark:text-gray-200"
+														<span
+															class="min-w-0 flex-1 truncate text-xs text-gray-800 dark:text-gray-200"
 															>#{pr.number} {pr.title}</span
 														>
 														{#if prReviewSignal(pr)}
@@ -2252,30 +2287,32 @@
 														{/if}
 													</div>
 												</div>
-												<span class="shrink-0 font-mono text-[0.625rem] text-green-600 dark:text-green-400"
+												<span
+													class="shrink-0 font-mono text-[0.625rem] text-green-600 dark:text-green-400"
 													>+{pr.additions ?? 0}</span
 												>
-												<span class="shrink-0 font-mono text-[0.625rem] text-red-500 dark:text-red-400"
+												<span
+													class="shrink-0 font-mono text-[0.625rem] text-red-500 dark:text-red-400"
 													>-{pr.deletions ?? 0}</span
 												>
 											</button>
 										{/each}
-											{#if !prs.length}
-												<div
-													class="px-3 py-4 text-center text-[0.6875rem] text-gray-400 dark:text-gray-600"
-												>
-													No pull requests
-												</div>
-											{/if}
-											{#if prs.length >= prLimit}
-												<button
-													class="h-7 w-full text-[0.6875rem] text-gray-400 transition-colors hover:bg-gray-50 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/3 dark:hover:text-gray-300"
-													onclick={loadMorePullRequests}
-												>
-													Load more
-												</button>
-											{/if}
-										</div>
+										{#if !prs.length}
+											<div
+												class="px-3 py-4 text-center text-[0.6875rem] text-gray-400 dark:text-gray-600"
+											>
+												No pull requests
+											</div>
+										{/if}
+										{#if prs.length >= prLimit}
+											<button
+												class="h-7 w-full text-[0.6875rem] text-gray-400 transition-colors hover:bg-gray-50 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/3 dark:hover:text-gray-300"
+												onclick={loadMorePullRequests}
+											>
+												Load more
+											</button>
+										{/if}
+									</div>
 								{/if}
 							</div>
 						{/if}
@@ -2307,12 +2344,21 @@
 									</div>
 								{:else if selectedPr}
 									{@const detail = selectedPrInfo}
-									<div class="flex h-7 shrink-0 items-center gap-2 border-b border-gray-100 px-2 dark:border-white/4">
-										<span class="min-w-0 flex-1 truncate text-xs font-medium text-gray-800 dark:text-gray-200">
-											#{selectedPr.number} {detail?.title ?? selectedPr.title}
+									<div
+										class="flex h-7 shrink-0 items-center gap-2 border-b border-gray-100 px-2 dark:border-white/4"
+									>
+										<span
+											class="min-w-0 flex-1 truncate text-xs font-medium text-gray-800 dark:text-gray-200"
+										>
+											#{selectedPr.number}
+											{detail?.title ?? selectedPr.title}
 										</span>
-										<span class="font-mono text-[0.625rem] text-green-600 dark:text-green-400">+{detail?.additions ?? selectedPr.additions ?? 0}</span>
-										<span class="font-mono text-[0.625rem] text-red-500 dark:text-red-400">-{detail?.deletions ?? selectedPr.deletions ?? 0}</span>
+										<span class="font-mono text-[0.625rem] text-green-600 dark:text-green-400"
+											>+{detail?.additions ?? selectedPr.additions ?? 0}</span
+										>
+										<span class="font-mono text-[0.625rem] text-red-500 dark:text-red-400"
+											>-{detail?.deletions ?? selectedPr.deletions ?? 0}</span
+										>
 										<button
 											class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/6 dark:hover:text-gray-300"
 											onclick={editSelectedPrTitleBody}
@@ -2337,7 +2383,9 @@
 											<Icon name="external-link" size={11} />
 										</a>
 									</div>
-									<div class="flex h-7 shrink-0 items-center gap-1 border-b border-gray-50 px-2 dark:border-white/3">
+									<div
+										class="flex h-7 shrink-0 items-center gap-1 border-b border-gray-50 px-2 dark:border-white/3"
+									>
 										{#each prSubviews as subview}
 											<button
 												class="h-5 rounded px-1.5 text-[0.625rem] font-medium transition-colors
@@ -2349,8 +2397,11 @@
 												{subview[0].toUpperCase() + subview.slice(1)}
 											</button>
 										{/each}
-										<span class="ml-auto min-w-0 truncate font-mono text-[0.625rem] text-gray-400 dark:text-gray-600">
-											{detail?.headRefName ?? selectedPr.headRefName} → {detail?.baseRefName ?? selectedPr.baseRefName}
+										<span
+											class="ml-auto min-w-0 truncate font-mono text-[0.625rem] text-gray-400 dark:text-gray-600"
+										>
+											{detail?.headRefName ?? selectedPr.headRefName} → {detail?.baseRefName ??
+												selectedPr.baseRefName}
 										</span>
 										<button
 											class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/6 dark:hover:text-gray-300"
@@ -2361,94 +2412,163 @@
 										</button>
 									</div>
 									{#if prSubview === 'summary'}
-										<div class="min-h-0 flex-1 overflow-auto p-2 text-[0.6875rem] text-gray-600 dark:text-gray-400">
+										<div
+											class="min-h-0 flex-1 overflow-auto p-2 text-[0.6875rem] text-gray-600 dark:text-gray-400"
+										>
 											{#if prDetailLoading}
-												<div class="flex h-full items-center justify-center"><Spinner size={14} /></div>
+												<div class="flex h-full items-center justify-center">
+													<Spinner size={14} />
+												</div>
 											{:else}
 												<div class="grid grid-cols-[5rem_minmax(0,1fr)] gap-x-3 gap-y-1">
 													<span class="text-gray-400 dark:text-gray-600">Author</span>
 													<span class="truncate">{prPersonName(detail?.author) || 'unknown'}</span>
 													<span class="text-gray-400 dark:text-gray-600">Status</span>
-													<span class="truncate">{detail?.isDraft ? 'Draft' : detail?.state ?? 'Open'} · {prReviewSignal(detail)}</span>
+													<span class="truncate"
+														>{detail?.isDraft ? 'Draft' : (detail?.state ?? 'Open')} · {prReviewSignal(
+															detail
+														)}</span
+													>
 													<span class="text-gray-400 dark:text-gray-600">Reviewers</span>
-													<span class="truncate">{prNames(detail?.reviewRequests as unknown[]) || 'none'}</span>
+													<span class="truncate"
+														>{prNames(detail?.reviewRequests as unknown[]) || 'none'}</span
+													>
 													<span class="text-gray-400 dark:text-gray-600">Assignees</span>
-													<span class="truncate">{prNames(detail?.assignees as unknown[]) || 'none'}</span>
+													<span class="truncate"
+														>{prNames(detail?.assignees as unknown[]) || 'none'}</span
+													>
 													<span class="text-gray-400 dark:text-gray-600">Labels</span>
 													<span class="truncate">{prLabelNames(detail?.labels) || 'none'}</span>
 													<span class="text-gray-400 dark:text-gray-600">Merge</span>
-													<span class="truncate">{detail?.mergeStateStatus || detail?.mergeable || 'unknown'}</span>
+													<span class="truncate"
+														>{detail?.mergeStateStatus || detail?.mergeable || 'unknown'}</span
+													>
 												</div>
 												<div class="mt-2 border-t border-gray-100 pt-2 dark:border-white/4">
-													<div class="mb-1 text-[0.625rem] uppercase text-gray-300 dark:text-gray-600">Description</div>
-													<div class="max-h-28 overflow-auto whitespace-pre-wrap text-xs leading-5 text-gray-800 dark:text-gray-200">
+													<div
+														class="mb-1 text-[0.625rem] uppercase text-gray-300 dark:text-gray-600"
+													>
+														Description
+													</div>
+													<div
+														class="max-h-28 overflow-auto whitespace-pre-wrap text-xs leading-5 text-gray-800 dark:text-gray-200"
+													>
 														{prBodyText(detail) || 'No description'}
 													</div>
 												</div>
-													<div class="mt-2 flex flex-wrap gap-1 border-t border-gray-100 pt-2 dark:border-white/4">
-														<button class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white" onclick={() => updateSelectedPrBranch(false)}>Update</button>
-														<button class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white" onclick={() => updateSelectedPrReady(!detail?.isDraft)}>{detail?.isDraft ? 'Ready' : 'Draft'}</button>
-														<button class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white" onclick={() => mergeSelectedPr('squash')}>Squash</button>
-														<button class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white" onclick={() => mergeSelectedPr('merge')}>Merge</button>
-														<button class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white" onclick={() => mergeSelectedPr('rebase')}>Rebase</button>
-														<button class="h-6 rounded-md px-2 text-[0.625rem] text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10" onclick={detail?.state === 'CLOSED' ? reopenSelectedPr : closeSelectedPr}>{detail?.state === 'CLOSED' ? 'Reopen' : 'Close'}</button>
-													</div>
-													<div class="mt-2 grid grid-cols-2 gap-1 border-t border-gray-100 pt-2 dark:border-white/4">
-														<input
-															class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
-															placeholder="Base"
-															bind:value={prEditBase}
-														/>
-														<input
-															class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
-															placeholder="Reviewers (+name, -name)"
-															bind:value={prEditReviewers}
-														/>
-														<input
-															class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
-															placeholder="Assignees (+name, -name)"
-															bind:value={prEditAssignees}
-														/>
-														<input
-															class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
-															placeholder="Labels (+label, -label)"
-															bind:value={prEditLabels}
-														/>
-														<input
-															class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
-															placeholder="Milestone (- to remove)"
-															bind:value={prEditMilestone}
-														/>
-														<button
-															class="h-7 rounded-md bg-gray-100 px-2 text-[0.6875rem] font-medium text-gray-600 transition-colors hover:bg-gray-200 hover:text-gray-900 dark:bg-white/6 dark:text-gray-300 dark:hover:bg-white/10 dark:hover:text-white"
-															onclick={applySelectedPrMetadata}
-														>
-															Apply
-														</button>
-													</div>
-													<div class="mt-2 overflow-hidden rounded-lg border border-gray-200 dark:border-white/8">
+												<div
+													class="mt-2 flex flex-wrap gap-1 border-t border-gray-100 pt-2 dark:border-white/4"
+												>
+													<button
+														class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white"
+														onclick={() => updateSelectedPrBranch(false)}>Update</button
+													>
+													<button
+														class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white"
+														onclick={() => updateSelectedPrReady(!detail?.isDraft)}
+														>{detail?.isDraft ? 'Ready' : 'Draft'}</button
+													>
+													<button
+														class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white"
+														onclick={() => mergeSelectedPr('squash')}>Squash</button
+													>
+													<button
+														class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white"
+														onclick={() => mergeSelectedPr('merge')}>Merge</button
+													>
+													<button
+														class="h-6 rounded-md px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-white/6 dark:hover:text-white"
+														onclick={() => mergeSelectedPr('rebase')}>Rebase</button
+													>
+													<button
+														class="h-6 rounded-md px-2 text-[0.625rem] text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+														onclick={detail?.state === 'CLOSED'
+															? reopenSelectedPr
+															: closeSelectedPr}
+														>{detail?.state === 'CLOSED' ? 'Reopen' : 'Close'}</button
+													>
+												</div>
+												<div
+													class="mt-2 grid grid-cols-2 gap-1 border-t border-gray-100 pt-2 dark:border-white/4"
+												>
+													<input
+														class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
+														placeholder="Base"
+														bind:value={prEditBase}
+													/>
+													<input
+														class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
+														placeholder="Reviewers (+name, -name)"
+														bind:value={prEditReviewers}
+													/>
+													<input
+														class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
+														placeholder="Assignees (+name, -name)"
+														bind:value={prEditAssignees}
+													/>
+													<input
+														class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
+														placeholder="Labels (+label, -label)"
+														bind:value={prEditLabels}
+													/>
+													<input
+														class="h-7 rounded-md border border-gray-200 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/8 dark:text-white dark:placeholder:text-gray-600"
+														placeholder="Milestone (- to remove)"
+														bind:value={prEditMilestone}
+													/>
+													<button
+														class="h-7 rounded-md bg-gray-100 px-2 text-[0.6875rem] font-medium text-gray-600 transition-colors hover:bg-gray-200 hover:text-gray-900 dark:bg-white/6 dark:text-gray-300 dark:hover:bg-white/10 dark:hover:text-white"
+														onclick={applySelectedPrMetadata}
+													>
+														Apply
+													</button>
+												</div>
+												<div
+													class="mt-2 overflow-hidden rounded-lg border border-gray-200 dark:border-white/8"
+												>
 													<textarea
 														class="h-16 w-full resize-none bg-transparent px-2 py-1.5 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-600"
 														placeholder="Leave a review note"
 														bind:value={prReviewBody}
 													></textarea>
-													<div class="flex items-center justify-end gap-1 border-t border-gray-100 p-1 dark:border-white/4">
-														<button class="h-6 rounded px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-white/6" onclick={() => submitPrReview('comment')}>Comment</button>
-														<button class="h-6 rounded px-2 text-[0.625rem] text-green-600 hover:bg-green-50 dark:text-green-400 dark:hover:bg-green-500/10" onclick={() => submitPrReview('approve')}>Approve</button>
-														<button class="h-6 rounded px-2 text-[0.625rem] text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10" onclick={() => submitPrReview('request_changes')}>Request</button>
+													<div
+														class="flex items-center justify-end gap-1 border-t border-gray-100 p-1 dark:border-white/4"
+													>
+														<button
+															class="h-6 rounded px-2 text-[0.625rem] text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-white/6"
+															onclick={() => submitPrReview('comment')}>Comment</button
+														>
+														<button
+															class="h-6 rounded px-2 text-[0.625rem] text-green-600 hover:bg-green-50 dark:text-green-400 dark:hover:bg-green-500/10"
+															onclick={() => submitPrReview('approve')}>Approve</button
+														>
+														<button
+															class="h-6 rounded px-2 text-[0.625rem] text-red-500 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+															onclick={() => submitPrReview('request_changes')}>Request</button
+														>
 													</div>
 												</div>
 											{/if}
 										</div>
 									{:else if prSubview === 'code'}
-										<div class="min-h-0 flex-1 overflow-auto font-mono text-[0.6875rem] leading-[1.125rem]">
+										<div
+											class="min-h-0 flex-1 overflow-auto font-mono text-[0.6875rem] leading-[1.125rem]"
+										>
 											{#if prDiffLoading}
-												<div class="flex h-full items-center justify-center"><Spinner size={14} /></div>
+												<div class="flex h-full items-center justify-center">
+													<Spinner size={14} />
+												</div>
 											{:else if fileDiff.length}
-												<div class="diff-content" class:diff-content-split={$diffDisplayMode === 'split'}>
+												<div
+													class="diff-content"
+													class:diff-content-split={$diffDisplayMode === 'split'}
+												>
 													{#each fileDiff as df}
 														{#if fileDiff.length > 1}
-															<div class="sticky top-0 z-10 border-b border-gray-100 px-2 py-1 text-[0.625rem] font-medium text-gray-500 dark:border-white/4 dark:text-gray-400" style="background: var(--app-bg); border-color: var(--app-border);">
+															<div
+																class="sticky top-0 z-10 border-b border-gray-100 px-2 py-1 text-[0.625rem] font-medium text-gray-500 dark:border-white/4 dark:text-gray-400"
+																style="background: var(--app-bg); border-color: var(--app-border);"
+															>
 																{df.path}
 															</div>
 														{/if}
@@ -2456,7 +2576,11 @@
 													{/each}
 												</div>
 											{:else}
-												<div class="flex h-full items-center justify-center font-sans text-[0.6875rem] text-gray-400 dark:text-gray-600">No pull request changes</div>
+												<div
+													class="flex h-full items-center justify-center font-sans text-[0.6875rem] text-gray-400 dark:text-gray-600"
+												>
+													No pull request changes
+												</div>
 											{/if}
 										</div>
 									{:else if prSubview === 'checks'}
@@ -2468,141 +2592,207 @@
 													rel="noopener noreferrer"
 													class="flex min-w-0 items-center gap-2 border-b border-gray-50 px-2.5 py-1.5 text-[0.6875rem] transition-colors hover:bg-gray-50 dark:border-white/3 dark:hover:bg-white/3"
 												>
-													<span class="h-1.5 w-1.5 shrink-0 rounded-full bg-current {checkTone(check)}"></span>
-													<span class="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-300">{check.name || check.workflow}</span>
-													<span class="shrink-0 font-mono text-[0.625rem] {checkTone(check)}">{check.bucket || check.state}</span>
+													<span
+														class="h-1.5 w-1.5 shrink-0 rounded-full bg-current {checkTone(check)}"
+													></span>
+													<span class="min-w-0 flex-1 truncate text-gray-700 dark:text-gray-300"
+														>{check.name || check.workflow}</span
+													>
+													<span class="shrink-0 font-mono text-[0.625rem] {checkTone(check)}"
+														>{check.bucket || check.state}</span
+													>
 												</a>
 											{/each}
 											{#if !prChecks.length}
-												<div class="flex h-full items-center justify-center text-[0.6875rem] text-gray-400 dark:text-gray-600">No checks</div>
+												<div
+													class="flex h-full items-center justify-center text-[0.6875rem] text-gray-400 dark:text-gray-600"
+												>
+													No checks
+												</div>
 											{/if}
 										</div>
 									{:else}
 										<div class="min-h-0 flex-1 overflow-auto">
 											{#each prActivityItems(detail) as item, i}
-												<div class="border-b border-gray-50 px-2.5 py-1.5 text-[0.6875rem] text-gray-600 dark:border-white/3 dark:text-gray-400">
+												<div
+													class="border-b border-gray-50 px-2.5 py-1.5 text-[0.6875rem] text-gray-600 dark:border-white/3 dark:text-gray-400"
+												>
 													{activityBody(item) || `Activity ${i + 1}`}
 												</div>
 											{/each}
 											{#if !prActivityItems(detail).length}
-												<div class="flex h-full items-center justify-center text-[0.6875rem] text-gray-400 dark:text-gray-600">No activity</div>
+												<div
+													class="flex h-full items-center justify-center text-[0.6875rem] text-gray-400 dark:text-gray-600"
+												>
+													No activity
+												</div>
 											{/if}
 										</div>
 									{/if}
-									{:else}
-										<div class="flex h-7 shrink-0 items-center gap-2 border-b border-gray-100 px-2 dark:border-white/4">
-											<span class="min-w-0 flex-1 truncate text-xs font-medium text-gray-800 dark:text-gray-200">Create pull request</span>
-											<span class="shrink-0 font-mono text-[0.625rem] text-gray-400 dark:text-gray-600">{gitStatus.branch}</span>
+								{:else}
+									<div
+										class="flex h-7 shrink-0 items-center gap-2 border-b border-gray-100 px-2 dark:border-white/4"
+									>
+										<span
+											class="min-w-0 flex-1 truncate text-xs font-medium text-gray-800 dark:text-gray-200"
+											>Create pull request</span
+										>
+										<span
+											class="shrink-0 font-mono text-[0.625rem] text-gray-400 dark:text-gray-600"
+											>{gitStatus.branch}</span
+										>
+									</div>
+									<div class="min-h-0 flex-1 overflow-auto p-2">
+										<div
+											class="overflow-hidden rounded-lg border border-gray-200 dark:border-white/8"
+										>
+											<div
+												class="grid h-7 grid-cols-[5.25rem_minmax(0,1fr)] items-center border-b border-gray-100 dark:border-white/4"
+											>
+												<span
+													class="px-2 text-[0.625rem] uppercase text-gray-300 dark:text-gray-600"
+													>Base</span
+												>
+												<select
+													class="min-w-0 bg-transparent px-2 font-mono text-[0.6875rem] text-gray-900 outline-none dark:text-white"
+													bind:value={prCreateBase}
+												>
+													{#each prBaseBranchOptions as branch}
+														<option value={branch.value}>{branch.label}</option>
+													{/each}
+												</select>
+											</div>
+											<div
+												class="grid h-7 grid-cols-[5.25rem_minmax(0,1fr)] items-center border-b border-gray-100 dark:border-white/4"
+											>
+												<span
+													class="px-2 text-[0.625rem] uppercase text-gray-300 dark:text-gray-600"
+													>Compare</span
+												>
+												<select
+													class="min-w-0 bg-transparent px-2 font-mono text-[0.6875rem] text-gray-900 outline-none dark:text-white"
+													bind:value={prCreateHead}
+												>
+													{#each prCompareBranchOptions as branch}
+														<option value={branch.value}>{branch.label}</option>
+													{/each}
+												</select>
+											</div>
+											<input
+												class="h-7 w-full border-b border-gray-100 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/4 dark:text-white dark:placeholder:text-gray-600"
+												placeholder="Title"
+												bind:value={prCreateTitle}
+											/>
+											<textarea
+												class="h-20 w-full resize-none bg-transparent px-2 py-1.5 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-600"
+												placeholder="Description"
+												bind:value={prCreateBody}
+											></textarea>
 										</div>
-											<div class="min-h-0 flex-1 overflow-auto p-2">
-												<div class="overflow-hidden rounded-lg border border-gray-200 dark:border-white/8">
-													<div class="grid h-7 grid-cols-[5.25rem_minmax(0,1fr)] items-center border-b border-gray-100 dark:border-white/4">
-														<span class="px-2 text-[0.625rem] uppercase text-gray-300 dark:text-gray-600">Base</span>
-														<select
-															class="min-w-0 bg-transparent px-2 font-mono text-[0.6875rem] text-gray-900 outline-none dark:text-white"
-															bind:value={prCreateBase}
-														>
-															{#each prBaseBranchOptions as branch}
-																<option value={branch.value}>{branch.label}</option>
-															{/each}
-														</select>
-													</div>
-													<div class="grid h-7 grid-cols-[5.25rem_minmax(0,1fr)] items-center border-b border-gray-100 dark:border-white/4">
-														<span class="px-2 text-[0.625rem] uppercase text-gray-300 dark:text-gray-600">Compare</span>
-														<select
-															class="min-w-0 bg-transparent px-2 font-mono text-[0.6875rem] text-gray-900 outline-none dark:text-white"
-															bind:value={prCreateHead}
-														>
-															{#each prCompareBranchOptions as branch}
-																<option value={branch.value}>{branch.label}</option>
-															{/each}
-														</select>
-													</div>
-													<input
-														class="h-7 w-full border-b border-gray-100 bg-transparent px-2 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:border-white/4 dark:text-white dark:placeholder:text-gray-600"
-														placeholder="Title"
-														bind:value={prCreateTitle}
-													/>
-													<textarea
-														class="h-20 w-full resize-none bg-transparent px-2 py-1.5 text-[0.6875rem] text-gray-900 outline-none placeholder:text-gray-400 dark:text-white dark:placeholder:text-gray-600"
-														placeholder="Description"
-														bind:value={prCreateBody}
-													></textarea>
-												</div>
-												<div class="mt-1.5 flex min-w-0 items-center gap-1">
-													<div class="flex h-6 shrink-0 overflow-hidden rounded-md border border-gray-200 dark:border-white/8">
-														<button
-															class="px-2 text-[0.625rem] transition-colors
+										<div class="mt-1.5 flex min-w-0 items-center gap-1">
+											<div
+												class="flex h-6 shrink-0 overflow-hidden rounded-md border border-gray-200 dark:border-white/8"
+											>
+												<button
+													class="px-2 text-[0.625rem] transition-colors
 																{!prCreateDraft
-																? 'bg-gray-100 text-gray-800 dark:bg-white/8 dark:text-gray-200'
-																: 'text-gray-400 hover:bg-gray-50 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/4 dark:hover:text-gray-300'}"
-															onclick={() => (prCreateDraft = false)}
-														>
-															Ready
-														</button>
-														<button
-															class="border-l border-gray-200 px-2 text-[0.625rem] transition-colors dark:border-white/8
+														? 'bg-gray-100 text-gray-800 dark:bg-white/8 dark:text-gray-200'
+														: 'text-gray-400 hover:bg-gray-50 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/4 dark:hover:text-gray-300'}"
+													onclick={() => (prCreateDraft = false)}
+												>
+													Ready
+												</button>
+												<button
+													class="border-l border-gray-200 px-2 text-[0.625rem] transition-colors dark:border-white/8
 																{prCreateDraft
-																? 'bg-gray-100 text-gray-800 dark:bg-white/8 dark:text-gray-200'
-																: 'text-gray-400 hover:bg-gray-50 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/4 dark:hover:text-gray-300'}"
-															onclick={() => (prCreateDraft = true)}
-														>
-															Draft
-														</button>
+														? 'bg-gray-100 text-gray-800 dark:bg-white/8 dark:text-gray-200'
+														: 'text-gray-400 hover:bg-gray-50 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/4 dark:hover:text-gray-300'}"
+													onclick={() => (prCreateDraft = true)}
+												>
+													Draft
+												</button>
+											</div>
+										</div>
+										{#if needsPublish}
+											<div
+												class="mt-1.5 flex items-center gap-2 rounded-md border border-gray-200 px-2 py-1 text-[0.625rem] text-gray-500 dark:border-white/8 dark:text-gray-400"
+											>
+												<span class="min-w-0 flex-1 truncate"
+													>Publish branch before creating a pull request</span
+												>
+												<button
+													class="h-6 rounded px-2 text-[0.625rem] text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/6 dark:hover:text-white"
+													onclick={doPush}>Publish</button
+												>
+											</div>
+										{/if}
+										<button
+											class="mt-1.5 h-7 rounded-lg bg-gray-900 px-3 text-[0.6875rem] font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-default disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-white/90"
+											disabled={!prCreateTitle.trim() ||
+												!prCreateBase.trim() ||
+												!prCreateHead.trim() ||
+												needsPublish ||
+												loading}
+											onclick={createPullRequest}
+										>
+											Create PR
+										</button>
+										<div class="mt-2 border-t border-gray-100 pt-2 dark:border-white/4">
+											<div class="mb-1 flex h-5 min-w-0 items-center gap-2">
+												<span
+													class="min-w-0 flex-1 truncate text-[0.625rem] font-medium text-gray-400 dark:text-gray-600"
+												>
+													Changes {prCreateBase || 'base'} → {prCreateHead || 'compare'}
+												</span>
+												{#if prCreateDiff.length}
+													<span class="font-mono text-[0.625rem] text-green-600 dark:text-green-400"
+														>+{prCreateDiffStats.additions}</span
+													>
+													<span class="font-mono text-[0.625rem] text-red-500 dark:text-red-400"
+														>-{prCreateDiffStats.deletions}</span
+													>
+												{/if}
+											</div>
+											{#if prCreateDiffLoading}
+												<div class="flex h-16 items-center justify-center">
+													<Spinner size={14} />
+												</div>
+											{:else if prCreateDiffError}
+												<div
+													class="py-4 text-center text-[0.6875rem] text-gray-400 dark:text-gray-600"
+												>
+													{prCreateDiffError}
+												</div>
+											{:else if prCreateDiff.length}
+												<div
+													class="overflow-hidden rounded-lg border border-gray-200 font-mono text-[0.6875rem] leading-[1.125rem] dark:border-white/8"
+												>
+													<div
+														class="diff-content"
+														class:diff-content-split={$diffDisplayMode === 'split'}
+													>
+														{#each prCreateDiff as df}
+															{#if prCreateDiff.length > 1}
+																<div
+																	class="sticky top-0 z-10 border-b border-gray-100 px-2 py-1 text-[0.625rem] font-medium text-gray-500 dark:border-white/4 dark:text-gray-400"
+																	style="background: var(--app-bg); border-color: var(--app-border);"
+																>
+																	{df.path}
+																</div>
+															{/if}
+															<DiffHunkList hunks={df.hunks} path={df.path} />
+														{/each}
 													</div>
 												</div>
-											{#if needsPublish}
-												<div class="mt-1.5 flex items-center gap-2 rounded-md border border-gray-200 px-2 py-1 text-[0.625rem] text-gray-500 dark:border-white/8 dark:text-gray-400">
-													<span class="min-w-0 flex-1 truncate">Publish branch before creating a pull request</span>
-													<button class="h-6 rounded px-2 text-[0.625rem] text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-300 dark:hover:bg-white/6 dark:hover:text-white" onclick={doPush}>Publish</button>
+											{:else}
+												<div
+													class="py-4 text-center text-[0.6875rem] text-gray-400 dark:text-gray-600"
+												>
+													No compare changes
 												</div>
 											{/if}
-												<button
-													class="mt-1.5 h-7 rounded-lg bg-gray-900 px-3 text-[0.6875rem] font-medium text-white transition-colors hover:bg-gray-800 disabled:cursor-default disabled:opacity-50 dark:bg-white dark:text-black dark:hover:bg-white/90"
-													disabled={!prCreateTitle.trim() || !prCreateBase.trim() || !prCreateHead.trim() || needsPublish || loading}
-													onclick={createPullRequest}
-												>
-													Create PR
-												</button>
-												<div class="mt-2 border-t border-gray-100 pt-2 dark:border-white/4">
-													<div class="mb-1 flex h-5 min-w-0 items-center gap-2">
-														<span class="min-w-0 flex-1 truncate text-[0.625rem] font-medium text-gray-400 dark:text-gray-600">
-															Changes {prCreateBase || 'base'} → {prCreateHead || 'compare'}
-														</span>
-														{#if prCreateDiff.length}
-															<span class="font-mono text-[0.625rem] text-green-600 dark:text-green-400">+{prCreateDiffStats.additions}</span>
-															<span class="font-mono text-[0.625rem] text-red-500 dark:text-red-400">-{prCreateDiffStats.deletions}</span>
-														{/if}
-													</div>
-													{#if prCreateDiffLoading}
-														<div class="flex h-16 items-center justify-center"><Spinner size={14} /></div>
-													{:else if prCreateDiffError}
-														<div class="py-4 text-center text-[0.6875rem] text-gray-400 dark:text-gray-600">
-															{prCreateDiffError}
-														</div>
-													{:else if prCreateDiff.length}
-														<div class="overflow-hidden rounded-lg border border-gray-200 font-mono text-[0.6875rem] leading-[1.125rem] dark:border-white/8">
-															<div class="diff-content" class:diff-content-split={$diffDisplayMode === 'split'}>
-																{#each prCreateDiff as df}
-																	{#if prCreateDiff.length > 1}
-																		<div
-																			class="sticky top-0 z-10 border-b border-gray-100 px-2 py-1 text-[0.625rem] font-medium text-gray-500 dark:border-white/4 dark:text-gray-400"
-																			style="background: var(--app-bg); border-color: var(--app-border);"
-																		>
-																			{df.path}
-																		</div>
-																	{/if}
-																	<DiffHunkList hunks={df.hunks} path={df.path} />
-																{/each}
-															</div>
-														</div>
-													{:else}
-														<div class="py-4 text-center text-[0.6875rem] text-gray-400 dark:text-gray-600">
-															No compare changes
-														</div>
-													{/if}
-												</div>
 										</div>
+									</div>
 								{/if}
 							</div>
 						{:else if fileDiff.length}

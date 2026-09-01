@@ -27,31 +27,35 @@
 </script>
 
 <div class="relative px-1.5 pb-1.5 shrink-0">
-	<button
-		bind:this={menuButtonEl}
-		class="touch-target app-interactive footer-profile flex items-center gap-2.5 w-full min-h-9 px-2.5 rounded-xl text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100"
-		onclick={() => (showMenu = !showMenu)}
+	<div
+		class="footer-profile app-interactive flex w-full items-center rounded-xl transition-colors duration-100"
 	>
-		<img
-			src={$session?.profile_image_url || '/user.png'}
-			alt="Avatar"
-			class="w-5 h-5 rounded-full object-cover shrink-0"
-		/>
-		<span class="truncate"
-			>{$session?.display_name || $session?.username || $t('sidebar.settings')}</span
+		<button
+			bind:this={menuButtonEl}
+			class="touch-target flex min-w-0 flex-1 items-center gap-2.5 min-h-9 px-2.5 text-xs font-medium text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
+			onclick={() => (showMenu = !showMenu)}
+			aria-label={$t('sidebar.settings')}
 		>
+			<img
+				src={$session?.profile_image_url || '/user.png'}
+				alt="Avatar"
+				class="w-5 h-5 rounded-full object-cover shrink-0"
+			/>
+			<span class="truncate"
+				>{$session?.display_name || $session?.username || $t('sidebar.settings')}</span
+			>
+		</button>
 		{#if $appVersion}
 			<button
-				onclick={(e) => {
-					e.stopPropagation();
-					showChangelog.set(true);
-				}}
-				class="ml-auto text-[0.625rem] text-gray-400 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 font-mono hover:underline cursor-pointer"
+				type="button"
+				onclick={() => showChangelog.set(true)}
+				class="mr-2 shrink-0 text-[0.625rem] text-gray-400 dark:text-gray-600 hover:text-gray-500 dark:hover:text-gray-400 font-mono hover:underline cursor-pointer"
+				aria-label={`Version ${$appVersion}`}
 			>
 				v{$appVersion}
 			</button>
 		{/if}
-	</button>
+	</div>
 </div>
 
 {#if showMenu && menuButtonEl}

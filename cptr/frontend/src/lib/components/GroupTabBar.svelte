@@ -378,20 +378,26 @@
 	});
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-	class="group-tab-shell flex items-center h-10 px-1.5 gap-1 shrink-0 select-none border-b transition-colors duration-100
+	class="group-tab-shell relative flex items-center h-10 px-1.5 gap-1 shrink-0 select-none border-b transition-colors duration-100
 		{dropHighlight ? 'tab-reorder-drop-preview' : 'border-gray-200 dark:border-white/6'}
 		{isActiveGroup ? '' : 'opacity-50'}"
-	onclick={handlePaneClick}
+	role="group"
 	ondragover={handleBarDragOver}
 	ondragleave={handleBarDragLeave}
 	ondrop={handleBarDrop}
 >
+	<button
+		type="button"
+		class="absolute inset-0 z-0 cursor-default border-0 bg-transparent p-0"
+		onclick={handlePaneClick}
+		aria-label="Activate pane"
+	></button>
+
 	<!-- Sidebar toggle (only in primary group when sidebar is closed) -->
 	{#if isPrimary && !$sidebarOpen}
 		<button
-			class="touch-target app-interactive flex items-center justify-center w-8 h-8 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100"
+			class="touch-target app-interactive relative z-10 flex items-center justify-center w-8 h-8 rounded-xl text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100"
 			onclick={toggleSidebar}
 			aria-label={$t('bar.toggleSidebar')}
 			use:tooltip={$t('bar.sidebar')}
@@ -401,7 +407,9 @@
 	{/if}
 
 	<!-- Tabs -->
-	<div class="flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto group-tabs-row py-0.5">
+	<div
+		class="relative z-10 flex items-center gap-0.5 flex-1 min-w-0 overflow-x-auto group-tabs-row py-0.5"
+	>
 		<div bind:this={tabsEl} class="flex items-center gap-0.5 shrink-0">
 			{#each displayTabs as tab (tab.id)}
 				{@const isActive = tab.id === group.activeTabId}
@@ -462,7 +470,7 @@
 	</div>
 
 	<!-- Right-side controls -->
-	<div class="flex items-center gap-0.5 shrink-0">
+	<div class="relative z-10 flex items-center gap-0.5 shrink-0">
 		<!-- Split button (wide screens) -->
 		{#if isWideScreen}
 			<button
@@ -542,7 +550,7 @@
 		display: none;
 	}
 
-	.tab-reorder-preview {
+	:global(.tab-reorder-preview) {
 		background: color-mix(in oklab, var(--app-fg) 6%, transparent) !important;
 		box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--app-fg) 16%, transparent);
 		opacity: 1 !important;

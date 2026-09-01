@@ -353,8 +353,14 @@
 						<span
 							class="ws-icon-toggle shrink-0"
 							role="button"
-							tabindex="-1"
+							tabindex="0"
 							onclick={(e) => {
+								e.stopPropagation();
+								e.preventDefault();
+								toggleWorkspaceExpand(ws.path);
+							}}
+							onkeydown={(e) => {
+								if (e.key !== 'Enter' && e.key !== ' ') return;
 								e.stopPropagation();
 								e.preventDefault();
 								toggleWorkspaceExpand(ws.path);
@@ -387,8 +393,11 @@
 				<span
 					class="flex items-center justify-center w-4 h-4 shrink-0 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-gray-600 dark:hover:text-gray-300 transition-all duration-75"
 					role="button"
-					tabindex="-1"
+					tabindex="0"
 					onclick={(e) => openWsMenu(e, ws.path)}
+					onkeydown={(e) => {
+						if (e.key === 'Enter' || e.key === ' ') openWsMenu(e, ws.path);
+					}}
 					aria-label={$t('sidebar.workspaceOptions')}
 				>
 					<Icon name="three-dots" size={11} />
@@ -397,8 +406,11 @@
 					<span
 						class="flex items-center justify-center w-4 h-4 shrink-0 text-gray-400 opacity-0 group-hover:opacity-100 hover:text-gray-600 dark:hover:text-gray-300 transition-all duration-75"
 						role="button"
-						tabindex="-1"
+						tabindex="0"
 						onclick={() => newChat(ws.path)}
+						onkeydown={(e) => {
+							if (e.key === 'Enter' || e.key === ' ') newChat(ws.path);
+						}}
 						aria-label={$t('bar.newChat')}
 						use:tooltip={$t('bar.newChat')}
 					>

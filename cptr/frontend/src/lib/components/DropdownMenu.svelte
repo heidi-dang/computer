@@ -349,18 +349,19 @@
 	});
 </script>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
-<div
+<button
+	type="button"
+	tabindex="-1"
 	use:portal={!inlineAbove}
-	class="fixed inset-0 z-[1000]"
+	class="fixed inset-0 z-[1000] cursor-default border-0 bg-transparent p-0"
 	onclick={onclose}
+	aria-label="Close menu"
 	oncontextmenu={(e) => {
 		e.preventDefault();
 		onclose();
 	}}
-></div>
+></button>
 
-<!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
 	use:portal={!inlineAbove}
 	bind:this={menuEl}
@@ -374,8 +375,6 @@
 			}`} {anchorWidth ? `width: ${anchorWidth}px;` : ''} opacity: {ready
 		? 1
 		: 0}; pointer-events: {ready ? 'auto' : 'none'};"
-	onclick={(e) => e.stopPropagation()}
-	onmousedown={(e) => e.stopPropagation()}
 >
 	{#if header}
 		<div class="flex-none">
@@ -429,8 +428,7 @@
 							<span
 								class="flex-1 text-left {item.wrapLabel
 									? 'whitespace-normal break-words leading-snug py-1 text-sm sm:text-xs'
-									: 'truncate'}"
-								>{item.label}</span
+									: 'truncate'}">{item.label}</span
 							>
 							{#if item.shortcut}
 								<KeyPill text={item.shortcut} class="ml-auto shrink-0" />

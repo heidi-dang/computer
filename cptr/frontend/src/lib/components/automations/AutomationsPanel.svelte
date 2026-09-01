@@ -521,7 +521,7 @@
 							>{parseFrequency(a.rrule)}</span
 						>
 
-						<div class="flex items-center gap-2 shrink-0" onclick={(e) => e.stopPropagation()}>
+						<div class="flex items-center gap-2 shrink-0">
 							<button
 								class="flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors duration-75"
 								onclick={() => handleRunNow(a)}
@@ -529,7 +529,7 @@
 							>
 								<Icon name="play" size={11} />
 							</button>
-							<div class="flex items-center" onclick={(e) => e.stopPropagation()}>
+							<div class="flex items-center">
 								<ToggleSwitch value={a.is_active} onchange={() => handleToggle(a)} />
 							</div>
 						</div>

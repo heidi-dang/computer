@@ -225,6 +225,7 @@
 	type="button"
 	class="flex items-center justify-center w-6 h-6 rounded-full text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors duration-100 cursor-pointer"
 	onclick={toggle}
+	aria-label={$t('files.moreActions')}
 	aria-expanded={open}
 	aria-haspopup="menu"
 >
@@ -244,17 +245,20 @@
 </button>
 
 {#if open}
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
-	<div class="fixed inset-0 z-[100]" onclick={close}></div>
+	<button
+		type="button"
+		tabindex="-1"
+		class="fixed inset-0 z-[100] cursor-default border-0 bg-transparent p-0"
+		onclick={close}
+		aria-label="Close menu"
+	></button>
 
-	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<div
 		bind:this={menuEl}
 		class="app-theme app-surface fixed z-[101] w-56 rounded-xl border shadow-xl p-0.5 overflow-hidden"
 		style="left: {pos.x}px; bottom: {pos.bottom}px; opacity: {ready ? 1 : 0}; pointer-events: {ready
 			? 'auto'
 			: 'none'};"
-		onclick={(e) => e.stopPropagation()}
 	>
 		{#if tab === ''}
 			<!-- Main menu -->
