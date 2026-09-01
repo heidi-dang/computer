@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { McpToolSpec } from '$lib/apis/mcp';
+	import { coerceMcpToolArguments, formatMcpToolArguments } from '$lib/utils/mcp-console';
 
 	interface Props {
 		tool: McpToolSpec | null;
@@ -29,62 +30,36 @@
 	const propEntries = $derived(Object.entries(properties) as [string, any][]);
 
 	function buildArgs(): Record<string, unknown> | null {
-		if (rawJsonMode) {
-			try {
-				const parsed = JSON.parse(rawJson);
-				jsonError = '';
-				return parsed;
-			} catch (e: any) {
-				jsonError = e.message;
-				return null;
-			}
-		}
+		const result = coerceMcpToolArguments({
+			rawJsonMode,
+			rawJson,
+			formValues,
+			properties,
+			required
+		});
+		jsonError = result.error ?? '';
+		return result.args;
+	}
 
-		const args: Record<string, unknown> = {};
-		for (const [key, propSchema] of propEntries) {
-			const raw = formValues[key] ?? '';
-			if (raw === '' && !required.includes(key)) continue;
-			const type = propSchema.type;
-			if (type === 'number' || type === 'integer') {
-				args[key] = Number(raw);
-			} else if (type === 'boolean') {
-				args[key] = raw === 'true';
-			} else if (type === 'object' || type === 'array') {
-				try {
-					args[key] = JSON.parse(raw);
-				} catch {
-					args[key] = raw;
-				}
-			} else {
-				args[key] = raw;
-			}
-		}
-		return args;
+	function submitCurrent() {
+		if (!tool || !serverId) return;
+		const args = buildArgs();
+		if (args === null) return;
+		onInvoke(serverId, tool.name, args);
+		formValues = {};
+		rawJson = '{}';
+		jsonError = '';
 	}
 
 	function handleSubmit(e: SubmitEvent) {
 		e.preventDefault();
-		if (!tool || !serverId) return;
-		const args = buildArgs();
-		if (args === null) return;
-		onInvoke(serverId, tool.name, args);
-		formValues = {};
-		rawJson = '{}';
-	}
-
-	function handle_submit_keydown() {
-		if (!tool || !serverId) return;
-		const args = buildArgs();
-		if (args === null) return;
-		onInvoke(serverId, tool.name, args);
-		formValues = {};
-		rawJson = '{}';
+		submitCurrent();
 	}
 
 	function handleKeydown(e: KeyboardEvent) {
 		if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
 			e.preventDefault();
-			handle_submit_keydown();
+			submitCurrent();
 		}
 	}
 
@@ -132,9 +107,11 @@
 					onclick={() => {
 						if (!rawJsonMode) {
 							const args = buildArgs();
-							if (args) rawJson = JSON.stringify(args, null, 2);
+							if (!args) return;
+							rawJson = formatMcpToolArguments(args);
 						}
 						rawJsonMode = !rawJsonMode;
+						jsonError = '';
 					}}
 				>
 					{rawJsonMode ? '← Form' : 'JSON →'}
@@ -216,6 +193,9 @@
 						{/if}
 					</div>
 				{/each}
+			{/if}
+			{#if !rawJsonMode && jsonError}
+				<p class="text-[0.65rem] text-red-400">{jsonError}</p>
 			{/if}
 		</div>
 

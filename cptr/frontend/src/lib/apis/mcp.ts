@@ -2,6 +2,7 @@
  * MCP (Model Context Protocol) API — typed wrappers for /api/mcp/* endpoints.
  */
 import { fetchJSON, fetchHandler, jsonBody } from '$lib/apis';
+import { consumeMcpSseBuffer } from '$lib/utils/mcp-console';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -314,40 +315,33 @@ export async function invokeToolStreaming(
 
 	const decoder = new TextDecoder();
 	let buffer = '';
-	const DOUBLE_NEWLINE = '\n\n';
-	const SINGLE_NEWLINE = '\n';
+
+	const dispatchFrames = (frames: ReturnType<typeof consumeMcpSseBuffer>['frames']) => {
+		for (const frame of frames) {
+			if (frame.event === 'tool_chunk') {
+				callbacks.onChunk?.(frame.data as McpContentItem);
+			} else if (frame.event === 'tool_done') {
+				const payload = frame.data as { result?: McpContentItem[] };
+				callbacks.onDone?.(payload.result ?? []);
+			} else if (frame.event === 'tool_error') {
+				const payload = frame.data as { message?: string };
+				callbacks.onError?.(payload.message ?? 'Unknown error');
+			}
+		}
+	};
 
 	while (true) {
 		const { done, value } = await reader.read();
-		if (done) break;
-		buffer += decoder.decode(value, { stream: true });
-
-		// Split on SSE double-newline boundaries
-		const parts = buffer.split(DOUBLE_NEWLINE);
-		buffer = parts.pop() ?? '';
-
-		for (const part of parts) {
-			const lines = part.trim().split(SINGLE_NEWLINE);
-			let evtName = '';
-			let evtData = '';
-			for (const line of lines) {
-				if (line.startsWith('event: ')) evtName = line.slice(7).trim();
-				if (line.startsWith('data: ')) evtData = line.slice(6).trim();
-			}
-			if (!evtData) continue;
-			try {
-				const payload = JSON.parse(evtData);
-				if (evtName === 'tool_chunk') {
-					callbacks.onChunk?.(payload as McpContentItem);
-				} else if (evtName === 'tool_done') {
-					callbacks.onDone?.((payload.result ?? []) as McpContentItem[]);
-				} else if (evtName === 'tool_error') {
-					callbacks.onError?.(payload.message ?? 'Unknown error');
-				}
-			} catch {
-				// malformed SSE chunk — skip
-			}
+		if (done) {
+			buffer += decoder.decode();
+			const consumed = consumeMcpSseBuffer(buffer, true);
+			dispatchFrames(consumed.frames);
+			break;
 		}
+		buffer += decoder.decode(value, { stream: true });
+		const consumed = consumeMcpSseBuffer(buffer);
+		buffer = consumed.remainder;
+		dispatchFrames(consumed.frames);
 	}
 }
 

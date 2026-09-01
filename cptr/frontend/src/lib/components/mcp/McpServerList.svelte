@@ -30,16 +30,40 @@
 	let loadingTools = $state<Set<string>>(new Set());
 	let reconnecting = $state<Set<string>>(new Set());
 
-	onMount(loadServers);
+	onMount(() => {
+		void loadServers(true);
+	});
 
-	async function loadServers() {
+	async function loadTools(server: McpServer) {
+		if (toolsByServer[server.id]) return;
+		loadingTools = new Set([...loadingTools, server.id]);
+		try {
+			toolsByServer[server.id] = await listServerTools(server.id);
+			toolsByServer = { ...toolsByServer };
+		} catch (e: any) {
+			toast.error(`Failed to load tools for ${server.name}: ${e.message}`);
+		} finally {
+			loadingTools.delete(server.id);
+			loadingTools = new Set(loadingTools);
+		}
+	}
+
+	async function ensureServerExpanded(server: McpServer) {
+		if (!expandedServers.has(server.id)) {
+			expandedServers = new Set([...expandedServers, server.id]);
+		}
+		await loadTools(server);
+	}
+
+	async function loadServers(autoExpand: boolean) {
 		loadingServers = true;
 		try {
 			servers = await listMcpServers();
-			// Auto-expand connected servers
-			for (const s of servers) {
-				if (s.health === 'connected' || s.health === 'http') {
-					await toggleServer(s);
+			if (autoExpand) {
+				for (const server of servers) {
+					if (server.health === 'connected' || server.health === 'http') {
+						await ensureServerExpanded(server);
+					}
 				}
 			}
 		} catch (e: any) {
@@ -55,32 +79,21 @@
 			expandedServers = new Set(expandedServers);
 			return;
 		}
-		expandedServers = new Set([...expandedServers, server.id]);
-		if (!toolsByServer[server.id]) {
-			loadingTools = new Set([...loadingTools, server.id]);
-			try {
-				toolsByServer[server.id] = await listServerTools(server.id);
-				toolsByServer = { ...toolsByServer };
-			} catch (e: any) {
-				toast.error(`Failed to load tools for ${server.name}: ${e.message}`);
-			} finally {
-				loadingTools.delete(server.id);
-				loadingTools = new Set(loadingTools);
-			}
-		}
+		await ensureServerExpanded(server);
 	}
 
 	async function handleReconnect(e: MouseEvent, server: McpServer) {
 		e.stopPropagation();
+		const wasExpanded = expandedServers.has(server.id);
 		reconnecting = new Set([...reconnecting, server.id]);
 		try {
 			await reconnectMcpServer(server.id);
 			toast.success(`Reconnected ${server.name}`);
-			// Reload tools
 			delete toolsByServer[server.id];
 			toolsByServer = { ...toolsByServer };
-			if (expandedServers.has(server.id)) await toggleServer(server);
-			await loadServers();
+			await loadServers(false);
+			const refreshedServer = servers.find((candidate) => candidate.id === server.id) ?? server;
+			if (wasExpanded) await ensureServerExpanded(refreshedServer);
 		} catch (e: any) {
 			toast.error(`Reconnect failed: ${e.message}`);
 		} finally {
@@ -102,7 +115,7 @@
 		<span class="text-xs font-medium uppercase tracking-wider app-muted">MCP Servers</span>
 		<button
 			class="app-interactive min-h-9 min-w-9 rounded-lg app-muted"
-			onclick={loadServers}
+			onclick={() => void loadServers(false)}
 			title="Refresh servers"
 		>
 			<Icon name="refresh" size={13} />
