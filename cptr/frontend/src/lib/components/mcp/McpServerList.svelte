@@ -17,7 +17,11 @@
 		onSelectTool: (serverId: string, tool: McpToolSpec) => void;
 	}
 
-	let { selectedServerId = $bindable(null), selectedTool = $bindable(null), onSelectTool }: Props = $props();
+	let {
+		selectedServerId = $bindable(null),
+		selectedTool = $bindable(null),
+		onSelectTool
+	}: Props = $props();
 
 	let servers = $state<McpServer[]>([]);
 	let toolsByServer = $state<Record<string, McpToolSpec[]>>({});
@@ -92,12 +96,12 @@
 	}
 </script>
 
-<div class="flex flex-col h-full">
+<div class="app-theme flex h-full flex-col">
 	<!-- Header -->
-	<div class="flex items-center justify-between px-3 py-2.5 border-b border-gray-100 dark:border-gray-800 shrink-0">
-		<span class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">MCP Servers</span>
+	<div class="app-surface flex shrink-0 items-center justify-between border-b px-3 py-2.5">
+		<span class="text-xs font-medium uppercase tracking-wider app-muted">MCP Servers</span>
 		<button
-			class="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+			class="app-interactive min-h-9 min-w-9 rounded-lg app-muted"
 			onclick={loadServers}
 			title="Refresh servers"
 		>
@@ -112,9 +116,11 @@
 				<Spinner size="sm" />
 			</div>
 		{:else if servers.length === 0}
-			<div class="px-3 py-6 text-center text-xs text-gray-400 dark:text-gray-500">
+			<div class="px-3 py-6 text-center text-xs app-muted">
 				<p>No MCP servers configured.</p>
-				<a href="/admin" class="text-blue-500 hover:underline mt-1 block">Configure in Admin → Tool Servers</a>
+				<a href="/admin" class="app-accent mt-1 block hover:underline"
+					>Configure in Admin → Tool Servers</a
+				>
 			</div>
 		{:else}
 			{#each servers as server (server.id)}
@@ -129,25 +135,29 @@
 					<div
 						role="button"
 						tabindex="0"
-						class="w-full flex items-center gap-2 px-3 py-1.5 text-left hover:bg-gray-50 dark:hover:bg-gray-800/50 transition-colors group cursor-pointer"
+						class="app-interactive group flex w-full cursor-pointer items-center gap-2 px-3 py-2 text-left"
 						onclick={() => isMcp && toggleServer(server)}
 						onkeydown={(e) => (e.key === 'Enter' || e.key === ' ') && isMcp && toggleServer(server)}
 					>
 						<!-- Health dot -->
-						<span class="shrink-0 size-1.5 rounded-full {
-							server.health === 'connected' ? 'bg-emerald-400' :
-							server.health === 'http' ? 'bg-blue-400' :
-							server.health === 'timeout' ? 'bg-amber-400' :
-							server.health === 'n/a' ? 'bg-gray-300 dark:bg-gray-600' :
-							'bg-red-400'
-						}"></span>
+						<span
+							class="shrink-0 size-1.5 rounded-full {server.health === 'connected'
+								? 'bg-emerald-400'
+								: server.health === 'http'
+									? 'bg-blue-400'
+									: server.health === 'timeout'
+										? 'bg-amber-400'
+										: server.health === 'n/a'
+											? 'bg-current opacity-40'
+											: 'bg-red-400'}"
+						></span>
 
-						<span class="flex-1 text-xs font-medium text-gray-700 dark:text-gray-200 truncate">{server.name}</span>
+						<span class="flex-1 truncate text-xs font-medium">{server.name}</span>
 
 						<!-- Reconnect button for failed servers -->
 						{#if isMcp && (server.health === 'disconnected' || server.health?.startsWith('error'))}
 							<button
-								class="opacity-0 group-hover:opacity-100 text-[0.6rem] px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-all"
+								class="app-subtle-surface rounded border px-1.5 py-1 text-[0.6rem] app-muted opacity-0 transition-all group-hover:opacity-100"
 								onclick={(e) => handleReconnect(e, server)}
 								disabled={isReconnecting}
 							>
@@ -158,10 +168,19 @@
 						<!-- Expand chevron -->
 						{#if isMcp}
 							<svg
-								viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
-								class="size-2.5 text-gray-400 shrink-0 transition-transform duration-150 {expanded ? 'rotate-180' : ''}"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="3"
+								class="size-2.5 shrink-0 transition-transform duration-150 app-muted {expanded
+									? 'rotate-180'
+									: ''}"
 							>
-								<path stroke-linecap="round" stroke-linejoin="round" d="m19.5 8.25-7.5 7.5-7.5-7.5" />
+								<path
+									stroke-linecap="round"
+									stroke-linejoin="round"
+									d="m19.5 8.25-7.5 7.5-7.5-7.5"
+								/>
 							</svg>
 						{/if}
 					</div>
@@ -172,18 +191,17 @@
 							{#if isLoadingTools}
 								<div class="py-2 flex justify-center"><Spinner size="xs" /></div>
 							{:else if tools.length === 0}
-								<p class="text-[0.65rem] text-gray-400 dark:text-gray-500 px-2 py-1">No tools found</p>
+								<p class="px-2 py-1 text-[0.65rem] app-muted">No tools found</p>
 							{:else}
 								{#each tools as tool (tool.name)}
 									<button
-										class="w-full flex items-center gap-1.5 px-2 py-1 text-left rounded-lg hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors group/tool {
-											selectedTool?.name === tool.name && selectedServerId === server.id
-												? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
-												: 'text-gray-600 dark:text-gray-300'
-										}"
+										class="app-interactive group/tool flex w-full items-center gap-1.5 rounded-lg px-2 py-1.5 text-left {selectedTool?.name ===
+											tool.name && selectedServerId === server.id
+											? 'app-interactive-active app-accent'
+											: 'app-muted'}"
 										onclick={() => selectTool(server.id, tool)}
 									>
-										<Icon name="tools" size={11} class="shrink-0 text-gray-400 dark:text-gray-500" />
+										<Icon name="tools" size={11} class="shrink-0 app-muted" />
 										<span class="text-[0.7rem] font-mono truncate">{tool.name}</span>
 									</button>
 								{/each}
@@ -196,10 +214,10 @@
 	</div>
 
 	<!-- Footer: admin link -->
-	<div class="shrink-0 border-t border-gray-100 dark:border-gray-800 px-3 py-2">
+	<div class="app-surface shrink-0 border-t px-3 py-2">
 		<a
 			href="/admin"
-			class="text-[0.65rem] text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+			class="app-interactive inline-flex min-h-9 items-center rounded-lg px-1.5 text-[0.65rem] app-muted"
 		>
 			+ Add server in Admin
 		</a>

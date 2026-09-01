@@ -40,30 +40,73 @@
 	function methodTool(row: McpRecentRequestRow): string {
 		return row.toolName || row.method || 'MCP request';
 	}
+
+	function toggle(row: McpRecentRequestRow) {
+		selectedRequestId = selectedRequestId === row.requestId ? null : row.requestId;
+	}
 </script>
 
 <section
-	class="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm dark:border-white/10 dark:bg-gray-950/75"
+	class="app-raised-surface flex min-h-0 flex-col overflow-hidden rounded-2xl border shadow-sm"
 >
-	<div
-		class="flex items-center justify-between border-b border-gray-100 px-4 py-3 dark:border-white/8"
-	>
-		<div>
-			<h2 class="text-sm font-semibold text-gray-800 dark:text-gray-100">Recent requests</h2>
-			<p class="mt-0.5 text-[0.6875rem] text-gray-400 dark:text-gray-500">
+	<div class="app-surface flex items-center justify-between border-b px-3 py-2.5 sm:px-4 sm:py-3">
+		<div class="min-w-0">
+			<h2 class="text-sm font-semibold">Recent requests</h2>
+			<p class="mt-0.5 truncate text-[0.6875rem] app-muted">
 				{selectedClientId ? 'Filtered to selected client' : 'Live inbound MCP traffic'}
 			</p>
 		</div>
 		<span
-			class="rounded-full bg-gray-100 px-2 py-1 text-[0.65rem] tabular-nums text-gray-500 dark:bg-white/7 dark:text-gray-400"
+			class="app-subtle-surface rounded-full border px-2 py-1 text-[0.65rem] tabular-nums app-muted"
 			>{visibleRows.length}</span
 		>
 	</div>
 
-	<div class="min-h-0 overflow-auto">
-		<table class="w-full min-w-[39rem] border-collapse text-left text-xs">
+	<!-- Compact mobile list: no horizontal table overflow. -->
+	<div class="min-h-0 flex-1 overflow-y-auto sm:hidden">
+		{#if visibleRows.length === 0}
+			<div class="px-4 py-10 text-center text-xs app-muted">No MCP requests observed yet.</div>
+		{:else}
+			{#each visibleRows as row (row.requestId)}
+				<button
+					type="button"
+					class="app-interactive w-full min-h-11 border-b px-3 py-2.5 text-left {selectedRequestId ===
+					row.requestId
+						? 'app-interactive-active'
+						: ''}"
+					onclick={() => toggle(row)}
+				>
+					<div class="flex min-w-0 items-center justify-between gap-3">
+						<span class="truncate text-xs font-semibold">{row.clientLabel}</span>
+						<span class="flex shrink-0 items-center gap-1.5 text-[0.62rem] app-muted">
+							<span
+								class="size-1.5 rounded-full {row.status === 'active'
+									? 'animate-pulse bg-blue-500'
+									: row.status === 'error'
+										? 'bg-red-500'
+										: 'bg-emerald-500'}"
+							></span>
+							{row.status} · {when(row.completedAt ?? row.startedAt)}
+						</span>
+					</div>
+					<div class="mt-1 flex min-w-0 items-center justify-between gap-3 text-[0.68rem]">
+						<span class="min-w-0 truncate font-mono app-muted" title={methodTool(row)}
+							>{methodTool(row)}</span
+						>
+						<span class="shrink-0 font-mono tabular-nums app-muted"
+							>{bytes(row.requestBytes)} / {bytes(row.responseBytes)}</span
+						>
+					</div>
+				</button>
+			{/each}
+		{/if}
+	</div>
+
+	<!-- Desktop table. -->
+	<div class="hidden min-h-0 flex-1 overflow-auto sm:block">
+		<table class="w-full border-collapse text-left text-xs">
 			<thead
-				class="sticky top-0 z-10 bg-gray-50/95 text-[0.65rem] font-medium uppercase tracking-wide text-gray-400 backdrop-blur dark:bg-gray-900/95 dark:text-gray-500"
+				class="app-subtle-surface sticky top-0 z-10 text-[0.65rem] font-medium uppercase tracking-wide app-muted backdrop-blur"
 			>
 				<tr>
 					<th class="px-3 py-2.5">Client</th>
@@ -73,54 +116,48 @@
 					<th class="px-3 py-2.5 text-right">When</th>
 				</tr>
 			</thead>
-			<tbody class="divide-y divide-gray-100 dark:divide-white/7">
+			<tbody class="divide-y">
 				{#if visibleRows.length === 0}
-					<tr>
-						<td colspan="5" class="px-4 py-10 text-center text-xs text-gray-400 dark:text-gray-500">
-							No MCP requests observed yet.
-						</td>
-					</tr>
+					<tr
+						><td colspan="5" class="px-4 py-10 text-center text-xs app-muted"
+							>No MCP requests observed yet.</td
+						></tr
+					>
 				{:else}
 					{#each visibleRows as row (row.requestId)}
 						<tr
-							class="cursor-pointer transition-colors hover:bg-gray-50 dark:hover:bg-white/4 {selectedRequestId ===
-							row.requestId
-								? 'bg-blue-50/70 dark:bg-blue-500/8'
+							class="app-interactive cursor-pointer {selectedRequestId === row.requestId
+								? 'app-interactive-active'
 								: ''}"
-							onclick={() =>
-								(selectedRequestId = selectedRequestId === row.requestId ? null : row.requestId)}
+							onclick={() => toggle(row)}
 						>
 							<td class="px-3 py-2.5">
-								<div class="font-medium text-gray-700 dark:text-gray-200">{row.clientLabel}</div>
-								{#if row.clientVersion}<div class="mt-0.5 text-[0.65rem] text-gray-400">
+								<div class="font-medium">{row.clientLabel}</div>
+								{#if row.clientVersion}<div class="mt-0.5 text-[0.65rem] app-muted">
 										v{row.clientVersion}
 									</div>{/if}
 							</td>
 							<td class="max-w-56 px-3 py-2.5">
-								<div
-									class="truncate font-mono text-[0.7rem] text-gray-600 dark:text-gray-300"
-									title={methodTool(row)}
-								>
+								<div class="truncate font-mono text-[0.7rem]" title={methodTool(row)}>
 									{methodTool(row)}
 								</div>
 								{#if row.toolName && row.method}<div
-										class="mt-0.5 truncate text-[0.62rem] text-gray-400"
+										class="mt-0.5 truncate text-[0.62rem] app-muted"
 									>
 										{row.method}
 									</div>{/if}
 							</td>
-							<td
-								class="px-3 py-2.5 font-mono text-[0.68rem] tabular-nums text-gray-500 dark:text-gray-400"
+							<td class="px-3 py-2.5 font-mono text-[0.68rem] tabular-nums app-muted"
 								>{bytes(row.requestBytes)} / {bytes(row.responseBytes)}</td
 							>
 							<td class="px-3 py-2.5">
 								<span
 									class="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[0.65rem] font-medium {row.status ===
 									'active'
-										? 'bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-300'
+										? 'bg-blue-500/10 text-blue-400'
 										: row.status === 'error'
-											? 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300'
-											: 'bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300'}"
+											? 'bg-red-500/10 text-red-400'
+											: 'bg-emerald-500/10 text-emerald-400'}"
 								>
 									<span
 										class="size-1.5 rounded-full {row.status === 'active'
@@ -132,7 +169,7 @@
 									{row.status}
 								</span>
 							</td>
-							<td class="px-3 py-2.5 text-right text-[0.68rem] tabular-nums text-gray-400"
+							<td class="px-3 py-2.5 text-right text-[0.68rem] tabular-nums app-muted"
 								>{when(row.completedAt ?? row.startedAt)}</td
 							>
 						</tr>
@@ -143,69 +180,57 @@
 	</div>
 
 	{#if selected}
-		<div class="border-t border-gray-100 bg-gray-50/70 p-4 dark:border-white/8 dark:bg-white/3">
+		<div class="app-subtle-surface border-t p-3 sm:p-4">
 			<div class="mb-3 flex items-center justify-between gap-3">
-				<div>
-					<p class="text-xs font-semibold text-gray-700 dark:text-gray-200">Request detail</p>
-					<p class="mt-0.5 font-mono text-[0.65rem] text-gray-400">{shortId(selected.requestId)}</p>
+				<div class="min-w-0">
+					<p class="text-xs font-semibold">Request detail</p>
+					<p class="mt-0.5 truncate font-mono text-[0.65rem] app-muted">
+						{shortId(selected.requestId)}
+					</p>
 				</div>
 				<button
-					class="min-h-11 rounded-lg px-3 text-xs text-gray-500 hover:bg-gray-100 dark:text-gray-400 dark:hover:bg-white/7 sm:min-h-0 sm:py-1.5"
+					class="app-interactive min-h-11 rounded-lg px-3 text-xs app-muted sm:min-h-0 sm:py-1.5"
 					onclick={() => (selectedRequestId = null)}>Close</button
 				>
 			</div>
 			<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-[0.7rem] sm:grid-cols-3">
 				<div>
-					<dt class="text-gray-400">Client</dt>
-					<dd class="mt-0.5 text-gray-700 dark:text-gray-200">
+					<dt class="app-muted">Client</dt>
+					<dd class="mt-0.5">
 						{selected.clientLabel}{selected.clientVersion ? ` · ${selected.clientVersion}` : ''}
 					</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Method</dt>
-					<dd class="mt-0.5 break-all font-mono text-gray-700 dark:text-gray-200">
-						{selected.method ?? '—'}
-					</dd>
+					<dt class="app-muted">Method</dt>
+					<dd class="mt-0.5 break-all font-mono">{selected.method ?? '—'}</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Tool</dt>
-					<dd class="mt-0.5 break-all font-mono text-gray-700 dark:text-gray-200">
-						{selected.toolName ?? '—'}
-					</dd>
+					<dt class="app-muted">Tool</dt>
+					<dd class="mt-0.5 break-all font-mono">{selected.toolName ?? '—'}</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Duration</dt>
-					<dd class="mt-0.5 text-gray-700 dark:text-gray-200">
-						{selected.durationMs == null ? '—' : `${selected.durationMs} ms`}
-					</dd>
+					<dt class="app-muted">Duration</dt>
+					<dd class="mt-0.5">{selected.durationMs == null ? '—' : `${selected.durationMs} ms`}</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Bytes</dt>
-					<dd class="mt-0.5 text-gray-700 dark:text-gray-200">
-						{bytes(selected.requestBytes)} / {bytes(selected.responseBytes)}
-					</dd>
+					<dt class="app-muted">Bytes</dt>
+					<dd class="mt-0.5">{bytes(selected.requestBytes)} / {bytes(selected.responseBytes)}</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Error code</dt>
-					<dd class="mt-0.5 font-mono text-gray-700 dark:text-gray-200">
-						{selected.errorCode ?? '—'}
-					</dd>
+					<dt class="app-muted">Error code</dt>
+					<dd class="mt-0.5 font-mono">{selected.errorCode ?? '—'}</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Session</dt>
-					<dd class="mt-0.5 font-mono text-gray-700 dark:text-gray-200">
-						{shortId(selected.sessionId)}
-					</dd>
+					<dt class="app-muted">Session</dt>
+					<dd class="mt-0.5 font-mono">{shortId(selected.sessionId)}</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Started</dt>
-					<dd class="mt-0.5 text-gray-700 dark:text-gray-200">
-						{new Date(selected.startedAt).toLocaleString()}
-					</dd>
+					<dt class="app-muted">Started</dt>
+					<dd class="mt-0.5">{new Date(selected.startedAt).toLocaleString()}</dd>
 				</div>
 				<div>
-					<dt class="text-gray-400">Completed</dt>
-					<dd class="mt-0.5 text-gray-700 dark:text-gray-200">
+					<dt class="app-muted">Completed</dt>
+					<dd class="mt-0.5">
 						{selected.completedAt ? new Date(selected.completedAt).toLocaleString() : '—'}
 					</dd>
 				</div>

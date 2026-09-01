@@ -355,6 +355,39 @@ test('MCP Activity reducer preserves started input for failed terminal event and
 	assert.equal(state.rows[0].errorJson, '{"code":"mcp_tool_error"}');
 });
 
+test('MCP route and topology use NightOwl tokens, Back navigation, compact mobile requests, and full infrastructure path', async () => {
+	const [page, topology, graph, recent, serverList, toolForm, card] = await Promise.all([
+		read('routes/mcp/+page.svelte'),
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpTopologyGraph.svelte'),
+		read('lib/components/mcp/McpRecentRequests.svelte'),
+		read('lib/components/mcp/McpServerList.svelte'),
+		read('lib/components/mcp/McpToolForm.svelte'),
+		read('lib/components/mcp/McpCallCard.svelte')
+	]);
+
+	assert.match(page, /href=["']\/["']/);
+	assert.match(page, /aria-label=["']Back to CPTR Home["']/);
+	assert.match(page, /app-theme/);
+	assert.match(page, /app-surface/);
+	assert.match(graph, /MCP Connector/);
+	assert.match(graph, /CPTR MCP/);
+	assert.match(graph, /CPTR Backend/);
+	assert.match(graph, /connectorY/);
+	assert.match(graph, /backendY/);
+	assert.match(graph, /traffic-particle/);
+	assert.doesNotMatch(graph, /Unknown MCP Client/);
+	assert.match(recent, /sm:hidden/);
+	assert.match(recent, /hidden[^"\n]*sm:block/);
+	assert.doesNotMatch(recent, /min-w-\[39rem\]/);
+	assert.match(recent, /min-h-11/);
+
+	const themedSource = [page, topology, graph, recent, serverList, toolForm, card].join('\n');
+	for (const legacy of ['bg-white/80', 'bg-white/70', 'bg-gray-50/70', 'min-w-[39rem]']) {
+		assert.equal(themedSource.includes(legacy), false, `must remove ${legacy}`);
+	}
+});
+
 test('MCP Activity reducer merges a local Console invocation without forging plugin origin', async () => {
 	const activityReducer = await import(
 		new URL('../src/lib/stores/mcp-activity.ts', import.meta.url)

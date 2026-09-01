@@ -160,50 +160,42 @@
 	});
 </script>
 
-<div
-	class="flex h-full min-h-0 flex-col overflow-auto bg-gray-50/70 p-3 dark:bg-gray-950/60 sm:p-4"
->
+<div class="app-theme flex h-full min-h-0 flex-col overflow-auto p-3 sm:p-4">
 	<div class="mx-auto flex w-full max-w-[100rem] flex-1 flex-col gap-3 sm:gap-4">
 		<div
-			class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-gray-200/80 bg-white/80 px-4 py-3 shadow-sm dark:border-white/10 dark:bg-gray-950/75"
+			class="app-raised-surface flex flex-wrap items-center justify-between gap-3 rounded-2xl border px-4 py-3 shadow-sm"
 		>
 			<div>
 				<div class="flex items-center gap-2">
-					<h2 class="text-sm font-semibold text-gray-800 dark:text-gray-100">
-						MCP traffic topology
-					</h2>
+					<h2 class="text-sm font-semibold">MCP traffic topology</h2>
 					<span
 						class="inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[0.65rem] font-medium {status ===
 						'live'
 							? 'bg-emerald-50 text-emerald-600 dark:bg-emerald-500/10 dark:text-emerald-300'
 							: status === 'reconnecting'
 								? 'bg-amber-50 text-amber-600 dark:bg-amber-500/10 dark:text-amber-300'
-								: 'bg-gray-100 text-gray-500 dark:bg-white/7 dark:text-gray-400'}"
+								: 'app-subtle-surface app-muted'}"
 					>
 						<span
 							class="size-1.5 rounded-full {status === 'live'
 								? 'bg-emerald-500'
 								: status === 'reconnecting'
 									? 'animate-pulse bg-amber-500'
-									: 'bg-gray-400'}"
+									: 'bg-current opacity-60'}"
 						></span>
 						{status}
 					</span>
 				</div>
-				<p class="mt-1 text-[0.7rem] text-gray-400 dark:text-gray-500">
-					Real inbound MCP requests animate from connected clients into CPTR MCP.
+				<p class="mt-1 text-[0.7rem] app-muted">
+					Real inbound MCP requests animate through MCP Connector → CPTR MCP → CPTR Backend.
 				</p>
 			</div>
-			<div
-				class="flex items-center gap-4 text-[0.7rem] tabular-nums text-gray-500 dark:text-gray-400"
-			>
+			<div class="flex items-center gap-4 text-[0.7rem] tabular-nums app-muted">
 				<div>
-					<span class="font-semibold text-gray-700 dark:text-gray-200">{nodes.length}</span> clients
+					<span class="font-semibold">{nodes.length}</span> clients
 				</div>
 				<div>
-					<span class="font-semibold text-gray-700 dark:text-gray-200"
-						>{state ? Object.keys(state.activeRequests).length : 0}</span
-					> active
+					<span class="font-semibold">{state ? Object.keys(state.activeRequests).length : 0}</span> active
 				</div>
 			</div>
 		</div>
@@ -223,35 +215,35 @@
 
 				{#if selectedClient}
 					<div
-						class="grid grid-cols-2 gap-3 rounded-2xl border border-gray-200/80 bg-white/80 p-4 text-xs shadow-sm dark:border-white/10 dark:bg-gray-950/75 sm:grid-cols-5"
+						class="app-raised-surface grid grid-cols-2 gap-3 rounded-2xl border p-4 text-xs shadow-sm sm:grid-cols-5"
 					>
 						<div class="col-span-2 sm:col-span-1">
-							<p class="text-[0.65rem] uppercase tracking-wide text-gray-400">Client</p>
-							<p class="mt-1 truncate font-semibold text-gray-700 dark:text-gray-200">
+							<p class="text-[0.65rem] uppercase tracking-wide app-muted">Client</p>
+							<p class="mt-1 truncate font-semibold">
 								{selectedClient.label}
 							</p>
 						</div>
 						<div>
-							<p class="text-[0.65rem] uppercase tracking-wide text-gray-400">Sessions</p>
-							<p class="mt-1 font-semibold text-gray-700 dark:text-gray-200">
+							<p class="text-[0.65rem] uppercase tracking-wide app-muted">Sessions</p>
+							<p class="mt-1 font-semibold">
 								{selectedClient.activeSessions}
 							</p>
 						</div>
 						<div>
-							<p class="text-[0.65rem] uppercase tracking-wide text-gray-400">Active</p>
-							<p class="mt-1 font-semibold text-gray-700 dark:text-gray-200">
+							<p class="text-[0.65rem] uppercase tracking-wide app-muted">Active</p>
+							<p class="mt-1 font-semibold">
 								{selectedClient.activeRequests}
 							</p>
 						</div>
 						<div>
-							<p class="text-[0.65rem] uppercase tracking-wide text-gray-400">Requests</p>
-							<p class="mt-1 font-semibold text-gray-700 dark:text-gray-200">
+							<p class="text-[0.65rem] uppercase tracking-wide app-muted">Requests</p>
+							<p class="mt-1 font-semibold">
 								{selectedClient.totalRequests}
 							</p>
 						</div>
 						<div>
-							<p class="text-[0.65rem] uppercase tracking-wide text-gray-400">Errors</p>
-							<p class="mt-1 font-semibold text-gray-700 dark:text-gray-200">
+							<p class="text-[0.65rem] uppercase tracking-wide app-muted">Errors</p>
+							<p class="mt-1 font-semibold">
 								{selectedClient.errors}
 							</p>
 						</div>
