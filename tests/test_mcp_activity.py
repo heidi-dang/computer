@@ -36,6 +36,11 @@ class McpActivitySchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             McpActivityEvent(**base, authorization="Bearer secret")
 
+        correlated = McpActivityEvent.model_validate({**base, "correlation_id": "corr-1"})
+        self.assertEqual(correlated.correlation_id, "corr-1")
+        with self.assertRaises(ValidationError):
+            McpActivityEvent.model_validate({**base, "correlation_id": "x" * 129})
+
         for field, value in (
             ("tool_name", "x" * 257),
             ("title", "x" * 161),

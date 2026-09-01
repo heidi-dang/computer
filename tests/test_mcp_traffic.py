@@ -236,6 +236,19 @@ class McpTrafficSchemaTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             McpTrafficEvent.model_validate(payload)
 
+    def test_correlation_id_is_optional_bounded_metadata_only(self):
+        payload = traffic_event("event-001", "request_started").model_dump()
+        payload["correlation_id"] = "corr-1"
+        event = McpTrafficEvent.model_validate(payload)
+        self.assertEqual(event.correlation_id, "corr-1")
+        encoded = event.model_dump()
+        for unsafe in ("arguments_json", "result_json", "authorization", "headers"):
+            self.assertNotIn(unsafe, encoded)
+
+        payload["correlation_id"] = "x" * 129
+        with self.assertRaises(ValidationError):
+            McpTrafficEvent.model_validate(payload)
+
 
 if __name__ == "__main__":
     unittest.main()

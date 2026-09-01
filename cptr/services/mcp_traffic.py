@@ -44,6 +44,7 @@ class McpTrafficEvent(BaseModel):
     session_id: str | None = Field(default=None, max_length=128)
     client: McpTrafficClient
     request_id: str | None = Field(default=None, max_length=128)
+    correlation_id: str | None = Field(default=None, max_length=128)
     method: str | None = Field(default=None, max_length=128)
     tool_name: str | None = Field(default=None, max_length=256)
     status: Literal["started", "complete", "error", "connected", "disconnected"]

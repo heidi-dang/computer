@@ -33,6 +33,7 @@ class McpActivityEvent(BaseModel):
     client: McpActivityClient
     session_id: str | None = Field(default=None, max_length=128)
     request_id: str | None = Field(default=None, max_length=128)
+    correlation_id: str | None = Field(default=None, max_length=128)
     tool_name: str = Field(min_length=1, max_length=256)
     title: str | None = Field(default=None, max_length=160)
     phase: Literal["started", "complete", "failed"]
