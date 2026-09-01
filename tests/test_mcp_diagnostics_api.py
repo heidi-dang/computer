@@ -14,6 +14,7 @@ from cptr.services.mcp_diagnostics import (
     McpDiagnosticsStore,
     McpFailureDiagnostic,
     McpLatencySample,
+    McpUsageDiagnostic,
 )
 from cptr.services.mcp_traffic import McpTrafficEvent, McpTrafficStore
 
@@ -62,6 +63,27 @@ def failure(diagnostic_id: str = "failure-001") -> McpFailureDiagnostic:
         request_bytes=120,
         response_bytes=64,
         summary="Backend unavailable.",
+    )
+
+
+def usage(event_id: str = "usage-0001") -> McpUsageDiagnostic:
+    return McpUsageDiagnostic(
+        event_id=event_id,
+        timestamp_ms=BASE_TS + 30,
+        request_id="request-1",
+        correlation_id="corr-1",
+        session_id="session-1",
+        client_id="chatgpt",
+        model_reported="GPT-5.6 Sol",
+        model_canonical="gpt-5.6-sol",
+        model_source="self_reported",
+        tool_name="cptr_list_workspaces",
+        input_tokens_estimated=100,
+        output_tokens_estimated=20,
+        cached_input_tokens_estimated=None,
+        estimator_method="output=o200k_base:fallback;input=o200k_base:fallback",
+        estimator_exact_for_model=False,
+        status="complete",
     )
 
 
@@ -133,7 +155,7 @@ class McpDiagnosticsApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sampler.ensure_started.await_count, 2)
         self.assertEqual((await store.snapshot())["stream_health"]["subscriber_count"], 0)
 
-    async def test_sse_emits_named_latency_failure_and_system_events(self):
+    async def test_sse_emits_named_latency_failure_usage_and_system_events(self):
         self.assertTrue(hasattr(mcp_router, "stream_mcp_diagnostics"))
         store = McpDiagnosticsStore(
             max_latency_samples_per_edge=8,
@@ -160,6 +182,11 @@ class McpDiagnosticsApiTests(unittest.IsolatedAsyncioTestCase):
             await store.ingest([failure("failure-002")])
             failure_event = await asyncio.wait_for(iterator.__anext__(), timeout=1)
             self.assertIn("event: failure", failure_event)
+
+            await store.ingest([usage("usage-0002")])
+            usage_event = await asyncio.wait_for(iterator.__anext__(), timeout=1)
+            self.assertIn("event: usage", usage_event)
+            self.assertIn('"model_reported":"GPT-5.6 Sol"', usage_event)
 
             await store.record_system_sample(
                 McpBackendMetricsSample(timestamp_ms=BASE_TS + 50, cpu_count=8)

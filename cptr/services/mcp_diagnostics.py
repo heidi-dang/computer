@@ -6,10 +6,12 @@ import asyncio
 import math
 import os
 from collections import deque
+from decimal import Decimal
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cptr.services.mcp_pricing import project_usage_cost
 from cptr.utils.redaction import redact_external_text
 
 LatencyEdge = Literal[
@@ -45,6 +47,29 @@ class McpLatencySample(BaseModel):
     metric_type: LatencyMetric
     duration_ms: int = Field(ge=0, le=86_400_000)
     status: Literal["ok", "error"] = "ok"
+
+
+class McpUsageDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["usage"] = "usage"
+    version: Literal[1] = 1
+    event_id: str = Field(min_length=8, max_length=128)
+    timestamp_ms: int = Field(ge=0)
+    request_id: str | None = Field(default=None, max_length=128)
+    correlation_id: str | None = Field(default=None, max_length=128)
+    session_id: str | None = Field(default=None, max_length=128)
+    client_id: str = Field(min_length=1, max_length=128)
+    model_reported: str | None = Field(default=None, max_length=120)
+    model_canonical: str | None = Field(default=None, max_length=64)
+    model_source: Literal["self_reported", "unavailable"]
+    tool_name: str = Field(min_length=1, max_length=256)
+    input_tokens_estimated: int = Field(ge=0, le=100_000_000)
+    output_tokens_estimated: int = Field(ge=0, le=100_000_000)
+    cached_input_tokens_estimated: None = None
+    estimator_method: str = Field(min_length=1, max_length=160)
+    estimator_exact_for_model: bool
+    status: Literal["complete", "error"]
 
 
 class McpFailureDiagnostic(BaseModel):
@@ -121,7 +146,9 @@ class McpBackendMetricsSample(BaseModel):
 class McpDiagnosticsBatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    events: list[McpLatencySample | McpFailureDiagnostic] = Field(min_length=1, max_length=100)
+    events: list[McpLatencySample | McpFailureDiagnostic | McpUsageDiagnostic] = Field(
+        min_length=1, max_length=100
+    )
 
 
 def _bounded_env_int(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -152,6 +179,7 @@ class McpDiagnosticsStore:
         max_latency_samples_per_edge: int = 120,
         max_failures: int = 250,
         max_system_samples: int = 60,
+        max_usage: int = 500,
         subscriber_queue_size: int = 64,
         observed_degraded_ms: int | None = None,
         handoff_degraded_ms: int | None = None,
@@ -160,6 +188,7 @@ class McpDiagnosticsStore:
         self.max_latency_samples_per_edge = max(1, int(max_latency_samples_per_edge))
         self.max_failures = max(1, int(max_failures))
         self.max_system_samples = max(1, int(max_system_samples))
+        self.max_usage = max(1, int(max_usage))
         self.subscriber_queue_size = max(1, int(subscriber_queue_size))
         self._thresholds: dict[str, int] = {
             "observed_request_time": observed_degraded_ms
@@ -174,11 +203,12 @@ class McpDiagnosticsStore:
         self._latency: dict[str, deque[dict[str, object]]] = {}
         self._failures: deque[dict[str, object]] = deque(maxlen=self.max_failures)
         self._system: deque[dict[str, object]] = deque(maxlen=self.max_system_samples)
+        self._usage: deque[dict[str, object]] = deque(maxlen=self.max_usage)
         self._seen_ids: deque[str] = deque()
         self._seen_id_set: set[str] = set()
         self._dedupe_capacity = max(
             64,
-            (self.max_latency_samples_per_edge * 3 + self.max_failures) * 4,
+            (self.max_latency_samples_per_edge * 3 + self.max_failures + self.max_usage) * 4,
         )
         self._subscribers: set[asyncio.Queue[dict[str, object]]] = set()
         self._lock = asyncio.Lock()
@@ -193,14 +223,18 @@ class McpDiagnosticsStore:
     def unsubscribe(self, queue: asyncio.Queue[dict[str, object]]) -> None:
         self._subscribers.discard(queue)
 
-    async def ingest(self, events: list[McpLatencySample | McpFailureDiagnostic]) -> dict[str, int]:
+    async def ingest(
+        self, events: list[McpLatencySample | McpFailureDiagnostic | McpUsageDiagnostic]
+    ) -> dict[str, int]:
         accepted = 0
         duplicates = 0
         dropped = 0
         async with self._lock:
             for event in events:
                 event_id = (
-                    event.event_id if isinstance(event, McpLatencySample) else event.diagnostic_id
+                    event.event_id
+                    if isinstance(event, (McpLatencySample, McpUsageDiagnostic))
+                    else event.diagnostic_id
                 )
                 if event_id in self._seen_id_set:
                     duplicates += 1
@@ -215,6 +249,9 @@ class McpDiagnosticsStore:
                         deque(maxlen=self.max_latency_samples_per_edge),
                     )
                     bucket.append(projected)
+                elif isinstance(event, McpUsageDiagnostic):
+                    projected = project_usage_cost(event)
+                    self._usage.append(projected)
                 else:
                     safe_summary = redact_external_text(event.summary).strip()[:500]
                     if not safe_summary:
@@ -249,15 +286,81 @@ class McpDiagnosticsStore:
                 "latency": latency,
                 "failures": list(self._failures),
                 "system": list(self._system),
+                "usage": list(self._usage),
+                "current_model": dict(self._usage[-1]) if self._usage else None,
+                "usage_totals": self._usage_totals(),
                 "stream_health": {
                     "subscriber_count": len(self._subscribers),
                     "slow_subscriber_drops": self._slow_subscriber_drops,
                     "latency_sample_capacity_per_edge": self.max_latency_samples_per_edge,
                     "failure_capacity": self.max_failures,
                     "system_sample_capacity": self.max_system_samples,
+                    "usage_capacity": self.max_usage,
                     "subscriber_queue_capacity": self.subscriber_queue_size,
                 },
             }
+
+    def _usage_totals(self) -> dict[str, object]:
+        input_tokens = 0
+        output_tokens = 0
+        total_cost = Decimal("0")
+        priced_events = 0
+        stale_events = 0
+        unpriced_events = 0
+        by_model: dict[str, dict[str, object]] = {}
+        for item in self._usage:
+            item_input = int(item.get("input_tokens_estimated") or 0)
+            item_output = int(item.get("output_tokens_estimated") or 0)
+            input_tokens += item_input
+            output_tokens += item_output
+            status = str(item.get("pricing_status") or "unknown_model")
+            if status == "current":
+                priced_events += 1
+            elif status == "stale":
+                stale_events += 1
+            else:
+                unpriced_events += 1
+            raw_cost = item.get("simulated_cost_usd")
+            item_cost = Decimal(str(raw_cost)) if raw_cost is not None else Decimal("0")
+            total_cost += item_cost
+            model_id = item.get("model_canonical")
+            if isinstance(model_id, str) and model_id:
+                group = by_model.setdefault(
+                    model_id,
+                    {
+                        "events": 0,
+                        "input_tokens_estimated": 0,
+                        "output_tokens_estimated": 0,
+                        "total_tokens_estimated": 0,
+                        "simulated_cost_usd": Decimal("0"),
+                    },
+                )
+                group["events"] = int(group["events"]) + 1
+                group["input_tokens_estimated"] = int(group["input_tokens_estimated"]) + item_input
+                group["output_tokens_estimated"] = (
+                    int(group["output_tokens_estimated"]) + item_output
+                )
+                group["total_tokens_estimated"] = (
+                    int(group["total_tokens_estimated"]) + item_input + item_output
+                )
+                group["simulated_cost_usd"] = Decimal(str(group["simulated_cost_usd"])) + item_cost
+        serialized_by_model = {
+            model_id: {
+                **values,
+                "simulated_cost_usd": format(Decimal(str(values["simulated_cost_usd"])), "f"),
+            }
+            for model_id, values in sorted(by_model.items())
+        }
+        return {
+            "input_tokens_estimated": input_tokens,
+            "output_tokens_estimated": output_tokens,
+            "total_tokens_estimated": input_tokens + output_tokens,
+            "simulated_cost_usd": format(total_cost, "f"),
+            "priced_events": priced_events,
+            "stale_events": stale_events,
+            "unpriced_events": unpriced_events,
+            "by_model": serialized_by_model,
+        }
 
     def _latency_aggregate(self, samples: deque[dict[str, object]]) -> dict[str, object]:
         values = [int(sample["duration_ms"]) for sample in samples]
@@ -314,5 +417,6 @@ mcp_diagnostics_store = McpDiagnosticsStore(
     ),
     max_failures=_bounded_env_int("CPTR_MCP_DIAGNOSTICS_MAX_FAILURES", 250, 10, 5000),
     max_system_samples=_bounded_env_int("CPTR_MCP_DIAGNOSTICS_MAX_SYSTEM_SAMPLES", 60, 10, 600),
+    max_usage=_bounded_env_int("CPTR_MCP_DIAGNOSTICS_MAX_USAGE", 500, 10, 10_000),
     subscriber_queue_size=_bounded_env_int("CPTR_MCP_DIAGNOSTICS_SUBSCRIBER_QUEUE", 64, 8, 512),
 )
