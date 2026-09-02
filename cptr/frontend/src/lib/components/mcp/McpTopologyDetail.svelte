@@ -104,6 +104,26 @@
 		</div>
 	</div>
 
+	{#if client && (client.sessionName || client.model || client.workspaceName)}
+		<div class="app-surface rounded-xl border p-3">
+			<p class="text-[0.68rem] font-medium">ChatGPT session identity</p>
+			<dl class="mt-3 grid gap-3 text-[0.7rem] sm:grid-cols-3">
+				<div>
+					<dt class="app-muted">Session</dt>
+					<dd class="mt-1 break-words font-medium">{client.sessionName ?? 'Unavailable'}</dd>
+				</div>
+				<div>
+					<dt class="app-muted">Model</dt>
+					<dd class="mt-1 break-words font-medium">{client.model ?? 'Unavailable'}</dd>
+				</div>
+				<div>
+					<dt class="app-muted">Workspace</dt>
+					<dd class="mt-1 break-words font-medium">{client.workspaceName ?? 'Unavailable'}</dd>
+				</div>
+			</dl>
+		</div>
+	{/if}
+
 	<div class="app-surface rounded-xl border p-3">
 		<label for="topology-alias" class="text-[0.68rem] font-medium">Display alias</label>
 		<div class="mt-2 flex flex-col gap-2 sm:flex-row">

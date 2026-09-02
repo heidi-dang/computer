@@ -107,6 +107,11 @@
 							{row.status} · {when(row.completedAt ?? row.startedAt)}
 						</span>
 					</div>
+					{#if row.clientModel || row.clientWorkspaceName}
+						<div class="mt-0.5 truncate text-[0.62rem] app-muted">
+							{[row.clientModel, row.clientWorkspaceName].filter(Boolean).join(' · ')}
+						</div>
+					{/if}
 					<div class="mt-1 flex min-w-0 items-center justify-between gap-3 text-[0.68rem]">
 						<span class="min-w-0 truncate font-mono app-muted" title={methodTool(row)}
 							>{methodTool(row)}</span
@@ -151,7 +156,11 @@
 						>
 							<td class="px-3 py-2.5">
 								<div class="font-medium">{row.clientLabel}</div>
-								{#if row.clientVersion}<div class="mt-0.5 text-[0.65rem] app-muted">
+								{#if row.clientModel || row.clientWorkspaceName}<div
+										class="mt-0.5 max-w-52 truncate text-[0.65rem] app-muted"
+									>
+										{[row.clientModel, row.clientWorkspaceName].filter(Boolean).join(' · ')}
+									</div>{:else if row.clientVersion}<div class="mt-0.5 text-[0.65rem] app-muted">
 										v{row.clientVersion}
 									</div>{/if}
 							</td>

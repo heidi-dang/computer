@@ -41,13 +41,19 @@ export interface McpResource {
 
 export type McpActivityPhase = 'started' | 'complete' | 'failed';
 
+export interface McpActivityClient {
+	id: string;
+	label: string;
+	version: string | null;
+}
+
 export interface McpActivityEvent {
 	version: 1;
 	event_id: string;
 	sequence: number;
 	ingestion_sequence: number;
 	timestamp_ms: number;
-	client: McpTrafficClient;
+	client: McpActivityClient;
 	session_id: string | null;
 	request_id: string | null;
 	correlation_id: string | null;
@@ -104,6 +110,10 @@ export interface McpTrafficClient {
 	id: string;
 	label: string;
 	version: string | null;
+	session_name: string | null;
+	model: string | null;
+	workspace_id: string | null;
+	workspace_name: string | null;
 }
 
 export interface McpTrafficEvent {
@@ -130,6 +140,10 @@ export interface McpTrafficClientSnapshot {
 	id: string;
 	label: string;
 	version: string | null;
+	session_name: string | null;
+	model: string | null;
+	workspace_id: string | null;
+	workspace_name: string | null;
 	active_sessions: number;
 	active_requests: number;
 	total_requests: number;

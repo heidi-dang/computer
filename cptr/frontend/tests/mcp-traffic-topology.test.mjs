@@ -414,6 +414,55 @@ test('topology projection uses stable client ordering and deterministic radial p
 	);
 });
 
+test('snapshot hydration does not resurrect a pruned generic ChatGPT connector from event history', () => {
+	const enrichedClient = {
+		id: 'chatgpt-session-session-1',
+		label: 'ChatGPT · MCP topology identity',
+		version: '1',
+		session_name: 'MCP topology identity',
+		model: 'GPT-5.6 Sol',
+		workspace_id: 'workspace-123',
+		workspace_name: 'Desktop'
+	};
+	const state = reducer.hydrateMcpTraffic({
+		...snapshot(8, 2),
+		sequence: 2,
+		clients: [
+			{
+				...enrichedClient,
+				active_sessions: 1,
+				active_requests: 0,
+				total_requests: 1,
+				errors: 0,
+				last_seen: 1_788_000_000_002,
+				last_tool: 'cptr_open_live_workbench'
+			}
+		],
+		sessions: [
+			{
+				session_id: 'session-1',
+				client_id: enrichedClient.id,
+				connected_at: 1_788_000_000_000,
+				last_seen: 1_788_000_000_002
+			}
+		],
+		events: [
+			trafficEvent(1, 'request_started', { request_id: 'request-1' }),
+			trafficEvent(2, 'request_finished', {
+				request_id: 'request-1',
+				status: 'complete',
+				client: enrichedClient
+			})
+		]
+	});
+
+	assert.deepEqual(
+		reducer.topologyNodes(state).map((node) => node.id),
+		[enrichedClient.id]
+	);
+	assert.equal(state.clients.chatgpt, undefined);
+});
+
 test('reducer keeps active request and session maps bounded under missing terminal events', () => {
 	let state = reducer.hydrateMcpTraffic(snapshot(2, 1));
 	state = reducer.applyMcpTrafficEvent(state, trafficEvent(1, 'request_started'));
@@ -486,6 +535,55 @@ test('reducer projects request completion and failure without unsafe payload fie
 	row = reducer.recentRequestRows(state)[0];
 	assert.equal(row.status, 'error');
 	assert.equal(row.errorCode, 'tool_error');
+});
+
+test('recent requests are capped to the latest 10 rows', () => {
+	let state = reducer.hydrateMcpTraffic(snapshot(40, 4));
+	let sequence = 1;
+	for (let index = 1; index <= 12; index += 1) {
+		const requestId = `request-${index}`;
+		state = reducer.applyMcpTrafficEvent(
+			state,
+			trafficEvent(sequence++, 'request_started', { request_id: requestId })
+		);
+		state = reducer.applyMcpTrafficEvent(
+			state,
+			trafficEvent(sequence++, 'request_finished', {
+				request_id: requestId,
+				status: 'complete'
+			})
+		);
+	}
+	const rows = reducer.recentRequestRows(state);
+	assert.equal(rows.length, 10);
+	assert.equal(rows[0].requestId, 'request-12');
+	assert.equal(rows.at(-1).requestId, 'request-3');
+});
+
+test('topology client state preserves session model and workspace identity metadata', () => {
+	const enrichedClient = {
+		id: 'chatgpt-session-session-1',
+		label: 'ChatGPT · MCP topology identity',
+		version: '1',
+		session_name: 'MCP topology identity',
+		model: 'GPT-5.6 Sol',
+		workspace_id: 'workspace-123',
+		workspace_name: 'Desktop'
+	};
+	let state = reducer.hydrateMcpTraffic(snapshot(8, 2));
+	state = reducer.applyMcpTrafficEvent(
+		state,
+		trafficEvent(1, 'session_opened', {
+			request_id: null,
+			status: 'connected',
+			client: enrichedClient
+		})
+	);
+	const node = reducer.topologyNodes(state)[0];
+	assert.equal(node.sessionName, 'MCP topology identity');
+	assert.equal(node.model, 'GPT-5.6 Sol');
+	assert.equal(node.workspaceId, 'workspace-123');
+	assert.equal(node.workspaceName, 'Desktop');
 });
 
 test('request statistics distinguish success, failure, active work and rolling time buckets', () => {
@@ -648,11 +746,15 @@ test('topology UI exposes live graph, safe request table, responsive layout and 
 	assert.match(graph, /traffic-particle/);
 	assert.match(graph, /center-ripple/);
 	assert.match(graph, /prefers-reduced-motion:\s*reduce/);
+	assert.match(graph, /node\.model/);
+	assert.match(graph, /node\.workspaceName/);
 	assert.match(recent, /Client/);
 	assert.match(recent, /Method \/ Tool/);
 	assert.match(recent, /In \/ Out/);
 	assert.match(recent, /Status/);
 	assert.match(recent, /When/);
+	assert.match(recent, /clientModel/);
+	assert.match(recent, /clientWorkspaceName/);
 	assert.doesNotMatch(recent, /record\.arguments|record\.result|authorization|bearer token/i);
 });
 

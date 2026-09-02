@@ -22,6 +22,10 @@ class McpTrafficClient(BaseModel):
     id: str = Field(min_length=1, max_length=128)
     label: str = Field(min_length=1, max_length=80)
     version: str | None = Field(default=None, max_length=64)
+    session_name: str | None = Field(default=None, max_length=160)
+    model: str | None = Field(default=None, max_length=120)
+    workspace_id: str | None = Field(default=None, max_length=200)
+    workspace_name: str | None = Field(default=None, max_length=160)
 
 
 class McpTrafficEvent(BaseModel):
@@ -141,6 +145,7 @@ class McpTrafficStore:
                 self._fan_out(projected)
                 accepted += 1
 
+            self._prune_empty_placeholders()
             self._prune_clients()
         return {"accepted": accepted, "duplicates": duplicates, "dropped": dropped}
 
@@ -154,6 +159,10 @@ class McpTrafficStore:
                         "id": client_id,
                         "label": client["label"],
                         "version": client["version"],
+                        "session_name": client["session_name"],
+                        "model": client["model"],
+                        "workspace_id": client["workspace_id"],
+                        "workspace_name": client["workspace_name"],
                         "active_sessions": self._active_session_count(client_id),
                         "active_requests": self._active_request_count(client_id),
                         "total_requests": client["total_requests"],
@@ -219,6 +228,10 @@ class McpTrafficStore:
             state = {
                 "label": event.client.label,
                 "version": event.client.version,
+                "session_name": event.client.session_name,
+                "model": event.client.model,
+                "workspace_id": event.client.workspace_id,
+                "workspace_name": event.client.workspace_name,
                 "total_requests": 0,
                 "errors": 0,
                 "last_seen": event.timestamp_ms,
@@ -228,6 +241,10 @@ class McpTrafficStore:
         else:
             state["label"] = event.client.label
             state["version"] = event.client.version
+            state["session_name"] = event.client.session_name or state["session_name"]
+            state["model"] = event.client.model or state["model"]
+            state["workspace_id"] = event.client.workspace_id or state["workspace_id"]
+            state["workspace_name"] = event.client.workspace_name or state["workspace_name"]
             state["last_seen"] = max(int(state["last_seen"]), event.timestamp_ms)
         if event.tool_name:
             state["last_tool"] = event.tool_name
@@ -239,6 +256,7 @@ class McpTrafficStore:
             self._sessions[event.session_id]["last_seen"] = max(
                 int(self._sessions[event.session_id]["last_seen"]), event.timestamp_ms
             )
+            self._sessions[event.session_id]["client_id"] = event.client.id
 
         if event.event_type == "session_opened" and event.session_id:
             if event.session_id not in self._sessions and len(self._sessions) >= self.max_sessions:
@@ -303,6 +321,18 @@ class McpTrafficStore:
         return sum(
             1 for request in self._active_requests.values() if request["client_id"] == client_id
         )
+
+    def _prune_empty_placeholders(self) -> None:
+        removable = [
+            client_id
+            for client_id, state in self._clients.items()
+            if int(state["total_requests"]) == 0
+            and int(state["errors"]) == 0
+            and self._active_session_count(client_id) == 0
+            and self._active_request_count(client_id) == 0
+        ]
+        for client_id in removable:
+            self._clients.pop(client_id, None)
 
     def _prune_clients(self) -> None:
         if len(self._clients) <= self.max_clients:

@@ -11,6 +11,10 @@ export type McpTrafficClientState = {
 	id: string;
 	label: string;
 	version: string | null;
+	sessionName: string | null;
+	model: string | null;
+	workspaceId: string | null;
+	workspaceName: string | null;
 	activeSessions: number;
 	activeRequests: number;
 	totalRequests: number;
@@ -43,6 +47,9 @@ export type McpRecentRequestRow = {
 	clientId: string;
 	clientLabel: string;
 	clientVersion: string | null;
+	clientSessionName: string | null;
+	clientModel: string | null;
+	clientWorkspaceName: string | null;
 	method: string | null;
 	toolName: string | null;
 	status: 'active' | 'complete' | 'error';
@@ -96,6 +103,10 @@ function clientFromSnapshot(client: McpTrafficClientSnapshot): McpTrafficClientS
 		id: client.id,
 		label: client.label,
 		version: client.version,
+		sessionName: client.session_name,
+		model: client.model,
+		workspaceId: client.workspace_id,
+		workspaceName: client.workspace_name,
 		activeSessions: client.active_sessions,
 		activeRequests: client.active_requests,
 		totalRequests: client.total_requests,
@@ -119,6 +130,10 @@ function defaultClient(client: McpTrafficClient, timestamp: number): McpTrafficC
 		id: client.id,
 		label: client.label,
 		version: client.version,
+		sessionName: client.session_name,
+		model: client.model,
+		workspaceId: client.workspace_id,
+		workspaceName: client.workspace_name,
 		activeSessions: 0,
 		activeRequests: 0,
 		totalRequests: 0,
@@ -167,6 +182,10 @@ function upsertClient(
 		...current,
 		label: event.client.label,
 		version: event.client.version,
+		sessionName: event.client.session_name ?? current.sessionName,
+		model: event.client.model ?? current.model,
+		workspaceId: event.client.workspace_id ?? current.workspaceId,
+		workspaceName: event.client.workspace_name ?? current.workspaceName,
 		lastSeen: Math.max(current.lastSeen, event.timestamp_ms),
 		lastTool: event.tool_name ?? current.lastTool
 	};
@@ -198,6 +217,9 @@ function activeRow(
 		clientId: request.clientId,
 		clientLabel: client.label,
 		clientVersion: client.version,
+		clientSessionName: client.sessionName,
+		clientModel: client.model,
+		clientWorkspaceName: client.workspaceName,
 		method: request.method,
 		toolName: request.toolName,
 		status: 'active',
@@ -224,6 +246,9 @@ function terminalRow(
 		clientId: event.client.id,
 		clientLabel: client.label,
 		clientVersion: client.version,
+		clientSessionName: client.sessionName,
+		clientModel: client.model,
+		clientWorkspaceName: client.workspaceName,
 		method: event.method ?? active?.method ?? null,
 		toolName: event.tool_name ?? active?.toolName ?? null,
 		status: event.event_type === 'request_failed' ? 'error' : 'complete',
@@ -258,7 +283,6 @@ function reconstructDerivedState(
 
 	for (const event of events) {
 		const client = clients[event.client.id] ?? defaultClient(event.client, event.timestamp_ms);
-		clients[event.client.id] = client;
 		if (event.event_type === 'request_started') {
 			const request = activeRequestFrom(event);
 			if (!request) continue;
@@ -493,7 +517,7 @@ export function topologyNodes(state: McpTrafficState): McpTopologyNode[] {
 }
 
 export function recentRequestRows(state: McpTrafficState): McpRecentRequestRow[] {
-	return [...state.recentRequests].sort(
-		(a, b) => (b.completedAt ?? b.startedAt) - (a.completedAt ?? a.startedAt)
-	);
+	return [...state.recentRequests]
+		.sort((a, b) => (b.completedAt ?? b.startedAt) - (a.completedAt ?? a.startedAt))
+		.slice(0, 10);
 }

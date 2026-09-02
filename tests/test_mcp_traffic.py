@@ -187,6 +187,41 @@ class McpTrafficStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["clients"][0]["active_requests"], 2)
         self.assertEqual(snapshot["stream_health"]["request_evictions"], 1)
 
+    async def test_session_identity_rebinds_and_prunes_empty_generic_chatgpt_placeholder(self):
+        store = McpTrafficStore(max_events=16, max_sessions=4, subscriber_queue_size=2)
+        await store.ingest(
+            [
+                traffic_event(
+                    "event-001",
+                    "session_opened",
+                    session_id="session-1",
+                    request_id=None,
+                    status="connected",
+                    tool_name=None,
+                ),
+                McpTrafficEvent.model_validate(
+                    {
+                        **traffic_event("event-002", "request_started").model_dump(),
+                        "client": {
+                            "id": "chatgpt-session-session-1",
+                            "label": "ChatGPT · MCP topology identity",
+                            "version": "1.0",
+                            "session_name": "MCP topology identity",
+                            "model": "GPT-5.6 Sol",
+                            "workspace_id": "workspace-123",
+                            "workspace_name": "Desktop",
+                        },
+                    }
+                ),
+            ]
+        )
+
+        snapshot = await store.snapshot()
+        self.assertEqual(snapshot["sessions"][0]["client_id"], "chatgpt-session-session-1")
+        self.assertEqual([client["id"] for client in snapshot["clients"]], ["chatgpt-session-session-1"])
+        self.assertEqual(snapshot["clients"][0]["model"], "GPT-5.6 Sol")
+        self.assertEqual(snapshot["clients"][0]["workspace_name"], "Desktop")
+
     async def test_max_sessions_evicts_oldest_session_state_only(self):
         store = McpTrafficStore(max_events=8, max_sessions=1, subscriber_queue_size=2)
         await store.ingest(
@@ -227,6 +262,25 @@ class McpTrafficSchemaTests(unittest.TestCase):
     def test_client_label_is_bounded(self):
         payload = traffic_event("event-001", "request_started").model_dump()
         payload["client"]["label"] = "x" * 81
+        with self.assertRaises(ValidationError):
+            McpTrafficEvent.model_validate(payload)
+
+    def test_client_identity_metadata_is_allowlisted_and_bounded(self):
+        payload = traffic_event("event-001", "request_started").model_dump()
+        payload["client"].update(
+            {
+                "session_name": "MCP topology identity + 10 recent requests",
+                "model": "GPT-5.6 Sol",
+                "workspace_id": "workspace-123",
+                "workspace_name": "Desktop",
+            }
+        )
+        event = McpTrafficEvent.model_validate(payload)
+        self.assertEqual(event.client.session_name, "MCP topology identity + 10 recent requests")
+        self.assertEqual(event.client.model, "GPT-5.6 Sol")
+        self.assertEqual(event.client.workspace_name, "Desktop")
+
+        payload["client"]["session_name"] = "x" * 161
         with self.assertRaises(ValidationError):
             McpTrafficEvent.model_validate(payload)
 

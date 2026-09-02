@@ -81,6 +81,24 @@
 		return sample ? `${sample.latestMs} ms` : '—';
 	}
 
+	function clientIdentityMeta(node: McpTopologyNode): string {
+		const identity = [node.model, node.workspaceName].filter(Boolean).join(' · ');
+		if (identity) return identity;
+		if (node.activeRequests > 0) return `${node.activeRequests} active`;
+		return node.connected ? 'connected' : 'recent';
+	}
+
+	function clientAriaLabel(node: McpTopologyNode): string {
+		const parts = [
+			nodeLabel(node.id, node.label),
+			node.model,
+			node.workspaceName,
+			node.connected ? 'connected' : 'idle',
+			`${node.activeRequests} active requests`
+		].filter(Boolean);
+		return parts.join(', ');
+	}
+
 	function latencyTone(edgeId: keyof LatencyMap): string {
 		const health = latency[edgeId]?.health;
 		if (health === 'error') return 'edge-health edge-health--error';
@@ -312,7 +330,7 @@
 				class:client-selected={selected('client', node.id)}
 				role="button"
 				tabindex="0"
-				aria-label={`${nodeLabel(node.id, node.label)}: ${node.connected ? 'connected' : 'idle'}, ${node.activeRequests} active requests`}
+				aria-label={clientAriaLabel(node)}
 				onclick={() => choose({ kind: 'client', id: node.id })}
 				onkeydown={(event) => handleKey(event, { kind: 'client', id: node.id })}
 			>
@@ -324,11 +342,7 @@
 					>{nodeLabel(node.id, node.label)}</text
 				>
 				<text x={x(node)} y={y(node) + 73} text-anchor="middle" class="client-meta">
-					{node.activeRequests > 0
-						? `${node.activeRequests} active`
-						: node.connected
-							? 'connected'
-							: 'recent'}
+					{clientIdentityMeta(node)}
 				</text>
 			</g>
 		{/each}
