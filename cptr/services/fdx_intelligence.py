@@ -69,6 +69,7 @@ FDX_GATEWAY_ACTIONS = (
     "plan",
 )
 _DAEMON_ACTION_TO_OP = {
+    "read": "read",
     "search": "search",
     "outline": "outline",
     "impact": "impact",
@@ -90,7 +91,7 @@ _REPOSITORY_BOUND_ACTIONS = frozenset(
     }
 )
 _REF_RE = re.compile(r"^[A-Za-z0-9._/@{}~^:+-]+$")
-_UNIX_ABS_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9._~+-]+/)*[A-Za-z0-9._~+-]+")
+_UNIX_ABS_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9._~+-]+/)+[A-Za-z0-9._~+-]+")
 _WINDOWS_ABS_RE = re.compile(r"\b[A-Za-z]:\\(?:[^\\\s\"'<>]+\\)*[^\\\s\"'<>]*")
 _MAX_COLLECTION_ITEMS = 100
 _MAX_STRING_CHARS = 24_000
@@ -467,7 +468,22 @@ class FdxIntelligenceService:
     @staticmethod
     def _daemon_args(action: str, options: dict[str, Any]) -> dict[str, Any]:
         args: dict[str, Any] = {}
-        if action == "search":
+        if action == "read":
+            path = options.get("path")
+            if not path:
+                raise FdxIntelligenceError(
+                    "FDX_INVALID_ARGUMENT", "read requires path", retriable=False
+                )
+            args = {
+                "path": path,
+                "mode": options.get("mode") or "auto",
+                "symbol": options.get("symbol"),
+                "limit": options.get("limit"),
+                "offset": options.get("offset"),
+                "with_deps": options.get("with_deps", True),
+                "no_cache": bool(options.get("no_cache")),
+            }
+        elif action == "search":
             args = {
                 "pattern": options.get("query") or options.get("pattern"),
                 "paths": options.get("paths")
@@ -551,6 +567,7 @@ class FdxIntelligenceService:
                 str(options.get("max_matches") or 50),
                 "--format",
                 "json",
+                "--no-tee",
             ]
             if options.get("fixed_strings"):
                 argv.append("--fixed-strings")
@@ -654,6 +671,7 @@ class FdxIntelligenceService:
                 resolved_path = exact_path.resolve()
                 if resolved_path.is_relative_to(resolved_root):
                     return resolved_path.relative_to(resolved_root).as_posix() or "."
+                return "<redacted-path>"
         except (OSError, ValueError):
             pass
 
@@ -756,16 +774,20 @@ class FdxIntelligenceService:
 
         try:
             if action == "status":
-                binary = self._resolve_binary(identity)
-                version = await self._run_cli(root=root, identity=identity, argv=["--version"])
                 daemon = await self._daemon(
                     user_id=user_id, workspace_id=workspace_id, root=root, identity=identity
+                )
+                version_value = await daemon.request("version", {})
+                version_text = (
+                    str(version_value.get("version") or "")
+                    if isinstance(version_value, dict)
+                    else str(version_value or "")
                 )
                 negotiated = await daemon.request("health", {})
                 capabilities = await daemon.negotiate()
                 data: Any = {
-                    "binary": Path(binary).name,
-                    "version": version,
+                    "binary": Path(daemon.binary).name,
+                    "version": {"text": f"fdx {version_text}" if version_text else "fdx unknown"},
                     "health": negotiated,
                     "daemon": capabilities,
                     "gateway_actions": list(FDX_GATEWAY_ACTIONS),
@@ -777,6 +799,17 @@ class FdxIntelligenceService:
                 data = await daemon.request(
                     _DAEMON_ACTION_TO_OP[action], self._daemon_args(action, options)
                 )
+                # Older FDX daemons exposed a text-only `read` response and ignored
+                # mode/symbol/dependency options. Preserve rolling-upgrade compatibility:
+                # use the resident fast path only for the structured read contract.
+                if action == "read" and not (
+                    isinstance(data, dict) and isinstance(data.get("mode"), str)
+                ):
+                    data = await self._run_cli(
+                        root=root,
+                        identity=identity,
+                        argv=self._cli_argv(action, options),
+                    )
             else:
                 data = await self._run_cli(
                     root=root,
@@ -788,17 +821,38 @@ class FdxIntelligenceService:
                 raw_assurance = data.get("assurance") or data.get("assurance_level")
                 if raw_assurance is not None:
                     assurance = str(raw_assurance)
+            degraded_evidence = bool(
+                assurance and assurance.upper() in {"DEGRADED", "UNVERIFIED"}
+            )
+            if action == "semantic_references" and isinstance(data, dict):
+                semantic_text = data.get("text")
+                if isinstance(semantic_text, str) and "degraded=true" in semantic_text.lower():
+                    degraded_evidence = True
             bounded, truncated = self._bound_result(data, root)
-            return {
+            degraded_evidence = degraded_evidence or truncated
+            response: dict[str, Any] = {
                 "workspace_id": workspace_id,
                 "action": action,
                 "provider": "fdx_native",
-                "status": "ok",
-                "fallback_recommended": False,
+                "status": "degraded" if degraded_evidence else "ok",
+                "fallback_recommended": degraded_evidence,
                 "truncated": truncated,
                 **({"assurance": assurance} if assurance else {}),
                 "data": bounded,
             }
+            if degraded_evidence:
+                response["reason"] = (
+                    "FDX returned degraded, unverified, or truncated intelligence; "
+                    "corroborate with normal CPTR Direct Coding tools."
+                )
+                response["fallback_tools"] = [
+                    "cptr_workspace_tree",
+                    "cptr_workspace_search_symbols",
+                    "cptr_code_search_files",
+                    "cptr_code_read_file",
+                    "cptr_code_get_git_status",
+                ]
+            return response
         except FdxUnavailable as exc:
             return {
                 "workspace_id": workspace_id,

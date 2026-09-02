@@ -9,13 +9,15 @@ from unittest.mock import AsyncMock, patch
 from cptr.routers.coding import (
     BatchFileRequest,
     ReadManyRequest,
+    ReadRequest,
     SearchRequest,
     read_many_workspace_files,
+    read_workspace_file,
     search_workspace_files,
 )
 from cptr.services.execution_manager import CommandSessionRegistry
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
-from cptr.utils.runtime import _list_tree_entries
+from cptr.utils.runtime import _list_tree_entries, _read_text_file, _read_text_files
 from cptr.utils.tools import _STOP_SESSION_WRITER, _command_event_writer, command_sessions
 
 
@@ -52,35 +54,93 @@ class FilesystemPerformanceContractTests(unittest.TestCase):
         self.assertNotEqual(first["entries"][0]["path"], second["entries"][0]["path"])
 
 
+    def test_bounded_runtime_read_rejects_oversized_file_before_content_load(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            path = Path(root_value) / "large.txt"
+            path.write_text("x" * 128, encoding="utf-8")
+            with self.assertRaises(Exception) as caught:
+                _read_text_file(str(path), 64)
+        self.assertIn("File too large", str(caught.exception))
+
+    def test_bounded_runtime_batch_preserves_order_in_one_operation(self):
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            paths = []
+            for index in range(4):
+                path = root / f"file-{index}.txt"
+                path.write_text(f"value-{index}\n", encoding="utf-8")
+                paths.append(str(path))
+            result = _read_text_files(paths, 1_024)
+        self.assertEqual(
+            [item["name"] for item in result["files"]],
+            [f"file-{index}.txt" for index in range(4)],
+        )
+
+
 class DirectCodingIoPerformanceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_read_many_uses_bounded_concurrent_io_and_preserves_order(self):
-        active = 0
-        peak = 0
+    async def test_exact_read_uses_one_bounded_runtime_operation(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-perf", user_id="user-1")
+        body = ReadRequest(path="file.py")
+        bounded_read = AsyncMock(
+            return_value={
+                "path": "/tmp/cptr-perf/file.py",
+                "name": "file.py",
+                "size": 12,
+                "binary": False,
+                "content": "value = 1\n",
+                "language": "python",
+            }
+        )
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch("cptr.routers.coding.Runtime.read_text_file", bounded_read),
+            patch(
+                "cptr.routers.coding.Runtime.stat",
+                new=AsyncMock(side_effect=AssertionError("redundant stat used")),
+            ),
+        ):
+            result = await read_workspace_file(request, "ws-1", body)
 
-        async def read_file(_request, path):
-            nonlocal active, peak
-            active += 1
-            peak = max(peak, active)
-            await asyncio.sleep(0.02)
-            active -= 1
-            name = Path(path).name
-            return {"binary": False, "content": f"{name}\n"}
+        bounded_read.assert_awaited_once_with(request, "/tmp/cptr-perf/file.py", 500_000)
+        self.assertEqual(result["content"], "value = 1\n")
+        self.assertEqual(result["size"], 12)
 
+    async def test_read_many_uses_one_bounded_batch_runtime_operation_and_preserves_order(self):
         request = SimpleNamespace()
         workspace = SimpleNamespace(path="/tmp/cptr-perf", user_id="user-1")
         body = ReadManyRequest(
             files=[BatchFileRequest(path=f"file-{index}.txt") for index in range(4)],
             max_chars=10_000,
         )
+        batch_read = AsyncMock(
+            return_value={
+                "files": [
+                    {
+                        "path": f"/tmp/cptr-perf/file-{index}.txt",
+                        "name": f"file-{index}.txt",
+                        "size": 16,
+                        "binary": False,
+                        "content": f"file-{index}.txt\n",
+                        "language": "text",
+                    }
+                    for index in range(4)
+                ]
+            }
+        )
         with (
             patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
             patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
-            patch("cptr.routers.coding.Runtime.read_file", side_effect=read_file),
+            patch("cptr.routers.coding.Runtime.read_text_files", batch_read),
         ):
             result = await read_many_workspace_files(request, "ws-1", body)
 
-        self.assertGreater(peak, 1)
-        self.assertLessEqual(peak, 4)
+        batch_read.assert_awaited_once_with(
+            request,
+            [f"/tmp/cptr-perf/file-{index}.txt" for index in range(4)],
+            500_000,
+        )
         self.assertEqual(
             [item["path"] for item in result["files"]],
             [f"file-{index}.txt" for index in range(4)],

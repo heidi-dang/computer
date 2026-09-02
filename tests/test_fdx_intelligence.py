@@ -60,8 +60,20 @@ def _fake_fdx(root: Path) -> Path:
                             "selected_capabilities": request["args"].get("capabilities", []),
                             "server_capabilities": request["args"].get("capabilities", []),
                         }
+                    elif op == "version":
+                        value = {"version": "9.9.9-test"}
                     elif op == "health":
                         value = {"healthy": True, "service": "fake-fdx"}
+                    elif op == "read":
+                        value = {
+                            "path": str(root_arg / request["args"]["path"]),
+                            "language": "python",
+                            "mode": request["args"].get("mode", "auto"),
+                            "total_lines": 10,
+                            "symbols": [],
+                            "dependencies": [],
+                            "options": request["args"],
+                        }
                     elif op == "search":
                         value = [{"path": str(root_arg / "src" / "main.py"), "symbol": "main"}]
                     elif op == "impact-v2":
@@ -121,6 +133,94 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await service.close_all()
             self.assertEqual(service._daemons, {})
+
+    async def test_status_and_read_use_resident_daemon_without_per_call_cli_spawns(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("def main():\n    return 1\n", encoding="utf-8")
+            binary = _fake_fdx(root)
+            service = FdxIntelligenceService()
+            try:
+                with (
+                    patch("cptr.services.fdx_intelligence.FDX_BINARY", str(binary)),
+                    patch.object(
+                        service,
+                        "_run_cli",
+                        new=AsyncMock(side_effect=AssertionError("per-call FDX CLI spawn used")),
+                    ),
+                ):
+                    status = await service.execute(
+                        user_id="user_1",
+                        workspace_id="ws_1",
+                        root=root,
+                        identity=_identity(temp),
+                        action="status",
+                        options={},
+                    )
+                    read = await service.execute(
+                        user_id="user_1",
+                        workspace_id="ws_1",
+                        root=root,
+                        identity=_identity(temp),
+                        action="read",
+                        options={
+                            "path": "src/main.py",
+                            "mode": "deep",
+                            "symbol": "main",
+                            "limit": 20,
+                            "offset": 2,
+                            "with_deps": True,
+                            "no_cache": False,
+                        },
+                    )
+
+                self.assertEqual(status["status"], "ok")
+                self.assertEqual(status["data"]["version"], {"text": "fdx 9.9.9-test"})
+                self.assertEqual(read["status"], "ok")
+                self.assertEqual(read["data"]["path"], "src/main.py")
+                self.assertEqual(read["data"]["options"]["mode"], "deep")
+                self.assertEqual(read["data"]["options"]["symbol"], "main")
+                self.assertTrue(read["data"]["options"]["with_deps"])
+                self.assertEqual(len(service._daemons), 1)
+            finally:
+                await service.close_all()
+
+    async def test_legacy_text_only_daemon_read_falls_back_to_cli_during_rolling_upgrade(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            daemon = SimpleNamespace(
+                request=AsyncMock(return_value={"path": str(root / "src.py"), "text": "legacy"})
+            )
+            fallback = AsyncMock(
+                return_value={
+                    "path": str(root / "src.py"),
+                    "language": "python",
+                    "mode": "prototype",
+                    "total_lines": 1,
+                    "symbols": [],
+                    "dependencies": [],
+                }
+            )
+            service = FdxIntelligenceService()
+            with (
+                patch.object(service, "_daemon", new=AsyncMock(return_value=daemon)),
+                patch.object(service, "_run_cli", new=fallback),
+            ):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="read",
+                    options={"path": "src.py", "mode": "prototype"},
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["data"]["mode"], "prototype")
+        fallback.assert_awaited_once()
 
     async def test_daemon_accepts_jsonl_responses_larger_than_asyncio_default_reader_limit(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -254,6 +354,75 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('Path(DATA_DIR) / "bin" / executable_name', sanitized)
         self.assertIn("<redacted-path>", sanitized)
         self.assertNotIn("/etc/passwd", sanitized)
+
+    def test_sanitizer_preserves_javascript_regex_literals(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = r'assert.match(description, /DEGRADED\/UNVERIFIED/);'
+            sanitized = FdxIntelligenceService._sanitize_string(source, root)
+        self.assertEqual(sanitized, source)
+
+    def test_legacy_impact_defaults_to_native_supported_depth_one(self):
+        request = FdxIntelligenceRequest(action="impact", paths=["src"])
+        self.assertIsNone(request.depth)
+        args = FdxIntelligenceService._daemon_args("impact", {"paths": ["src"]})
+        self.assertEqual(args["depth"], 1)
+
+    def test_grep_cli_forces_no_tee_for_read_only_gateway_contract(self):
+        argv = FdxIntelligenceService._cli_argv(
+            "grep", {"query": "needle", "path": "src", "max_matches": 1}
+        )
+        self.assertIn("--no-tee", argv)
+
+    async def test_degraded_assurance_preserves_data_and_recommends_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            service = FdxIntelligenceService()
+            with patch.object(
+                service,
+                "_run_cli",
+                new=AsyncMock(return_value={"assurance": "DEGRADED", "selected_checks": []}),
+            ):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="plan",
+                    options={"base": "HEAD"},
+                )
+        self.assertEqual(result["status"], "degraded")
+        self.assertTrue(result["fallback_recommended"])
+        self.assertEqual(result["assurance"], "DEGRADED")
+        self.assertEqual(result["data"]["selected_checks"], [])
+        self.assertIn("cptr_code_read_file", result["fallback_tools"])
+
+    async def test_semantic_degraded_marker_recommends_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            service = FdxIntelligenceService()
+            with patch.object(
+                service,
+                "_run_cli",
+                new=AsyncMock(
+                    return_value={
+                        "text": "source=TreeSitter completeness=Conservative strength=Structural degraded=true"
+                    }
+                ),
+            ):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="semantic_references",
+                    options={"symbol": "PaymentService", "lang": "typescript"},
+                )
+        self.assertEqual(result["status"], "degraded")
+        self.assertTrue(result["fallback_recommended"])
+        self.assertIn("degraded=true", result["data"]["text"])
 
 
 class FdxIntelligenceRouteTests(unittest.IsolatedAsyncioTestCase):

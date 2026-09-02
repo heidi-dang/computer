@@ -1693,6 +1693,7 @@ async def run_command(
     *,
     __context__: dict,
     __argv: list[str] | None = None,
+    __use_pty: bool = True,
 ) -> str:
     """Run a shell command. Returns a task_id for status checks and input.
     :param command: The shell command to execute.
@@ -1727,7 +1728,7 @@ async def run_command(
     master_fd = None
 
     try:
-        if _PTY_AVAILABLE:
+        if _PTY_AVAILABLE and __use_pty:
             if __argv is None:
                 proc, master_fd = _spawn_pty(command, str(work_dir), env, preexec)
             else:

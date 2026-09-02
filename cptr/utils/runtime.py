@@ -163,6 +163,18 @@ class Runtime:
         return await _file(await _request_identity(request), _read_file, path)
 
     @staticmethod
+    async def read_text_file(request: Request, path: str, max_bytes: int) -> dict[str, Any]:
+        """Read one text file with a caller-owned byte ceiling in one runtime operation."""
+        return await _file(await _request_identity(request), _read_text_file, path, max_bytes)
+
+    @staticmethod
+    async def read_text_files(
+        request: Request, paths: list[str], max_bytes: int
+    ) -> dict[str, Any]:
+        """Read a bounded batch through one identity/runtime crossing, preserving input order."""
+        return await _file(await _request_identity(request), _read_text_files, paths, max_bytes)
+
+    @staticmethod
     async def extract_text(request: Request, path: str) -> dict[str, Any]:
         return await _file(await _request_identity(request), _extract_text, path)
 
@@ -624,6 +636,38 @@ def _read_file(path: str) -> dict[str, Any]:
     }
 
 
+def _read_text_file(path: str, max_bytes: int) -> dict[str, Any]:
+    """Read one text file without a separate stat/runtime round-trip."""
+    if max_bytes < 1 or max_bytes > MAX_FILE_SIZE:
+        raise FileError(f"Invalid bounded read size: {max_bytes}")
+    target = _path(path)
+    if not target.exists():
+        raise _missing(path, "File")
+    if not target.is_file():
+        raise FileError(f"Not a file: {path}")
+    size = target.stat().st_size
+    if size > max_bytes:
+        raise FileError(f"File too large ({size} bytes). Max is {max_bytes} bytes.", 413)
+    is_text = _is_text_file(target)
+    return {
+        "path": str(target),
+        "name": target.name,
+        "size": size,
+        "binary": not is_text,
+        "content": target.read_text(encoding="utf-8", errors="replace") if is_text else None,
+        "language": _detect_language(target.name) if is_text else None,
+    }
+
+
+def _read_text_files(paths: list[str], max_bytes: int) -> dict[str, Any]:
+    """Read multiple bounded files inside one runtime/helper process."""
+    if not isinstance(paths, list) or not paths:
+        raise FileError("No paths provided")
+    if len(paths) > 100:
+        raise FileError("Too many paths for one bounded read batch")
+    return {"files": [_read_text_file(path, max_bytes) for path in paths]}
+
+
 def _extract_text(path: str) -> dict[str, Any]:
     target = _path(path)
     if not target.exists():
@@ -1032,6 +1076,8 @@ CALLS = {
         _move_item,
         _read_bytes,
         _read_file,
+        _read_text_file,
+        _read_text_files,
         _search_files,
         _stat,
         _upload_file,

@@ -191,7 +191,7 @@ class FdxIntelligenceRequest(WorkerTargetRequest):
     mode: Literal["auto", "raw", "prototype", "deep"] = "auto"
     kind: str | None = Field(default=None, max_length=120)
     direction: Literal["in", "out", "both"] = "both"
-    depth: int = Field(default=3, ge=1, le=20)
+    depth: int | None = Field(default=None, ge=1, le=20)
     base: str | None = Field(default=None, max_length=300)
     head: str | None = Field(default=None, max_length=300)
     limit: int | None = Field(default=None, ge=1, le=20_000)
@@ -1096,17 +1096,17 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
     workspace = await _workspace(user_id, workspace_id)
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     _, relative_cwd = _relative_path(body.path, root)
-    test_arg = ""
+    test_relative = None
     if body.test_path:
         _, test_relative = _relative_path(body.test_path, root)
-        test_arg = f" {shlex.quote(test_relative)}"
-    profiles = {
-        "python_pytest": f"python -m pytest{test_arg}",
-        "node_test": f"npm test --{test_arg}",
-        "node_vitest": f"./node_modules/.bin/vitest run{test_arg}",
-        "node_build": "npm run build",
+    profiles: dict[str, list[str]] = {
+        "python_pytest": ["python", "-m", "pytest", *([test_relative] if test_relative else [])],
+        "node_test": ["npm", "test", "--", *([test_relative] if test_relative else [])],
+        "node_vitest": ["./node_modules/.bin/vitest", "run", *([test_relative] if test_relative else [])],
+        "node_build": ["npm", "run", "build"],
     }
-    command = profiles[body.target]
+    argv = profiles[body.target]
+    command = shlex.join(argv)
     _validate_command(command, False)
     response = await run_command(
         command,
@@ -1119,6 +1119,8 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
             workspace_path=str(root),
             worker_id=body.worker_id,
         ),
+        __argv=argv,
+        __use_pty=False,
     )
     match = re.match(r"^Task ([0-9a-f]{8}):", response)
     if match is None:
@@ -1189,17 +1191,10 @@ async def read_workspace_file(request: Request, workspace_id: str, body: ReadReq
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     full, relative = _relative_path(body.path, root)
     try:
-        stat = await Runtime.stat(request, str(full))
-        if stat.get("type") != "file":
-            raise HTTPException(status_code=404, detail="file not found")
-        size = int(stat.get("size") or 0)
-        if size > MAX_READ_BYTES:
-            raise HTTPException(
-                status_code=413, detail=f"file is too large (max {MAX_READ_BYTES} bytes)"
-            )
-        data = await Runtime.read_file(request, str(full))
+        data = await Runtime.read_text_file(request, str(full), MAX_READ_BYTES)
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    size = int(data.get("size") or 0)
     if data.get("binary"):
         raise HTTPException(
             status_code=415, detail="binary files are not available through direct coding"
@@ -1407,15 +1402,21 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
-    semaphore = asyncio.Semaphore(DIRECT_CODING_IO_CONCURRENCY)
+    resolved = [_relative_path(item.path, root) for item in body.files]
+    try:
+        batch = await Runtime.read_text_files(
+            request,
+            [str(full) for full, _ in resolved],
+            MAX_READ_BYTES,
+        )
+    except FileError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    data_files = list(batch.get("files") or [])
+    if len(data_files) != len(body.files):
+        raise HTTPException(status_code=500, detail="bounded runtime read returned an incomplete batch")
 
-    async def read_one(item: BatchFileRequest) -> dict[str, Any]:
-        full, relative = _relative_path(item.path, root)
-        try:
-            async with semaphore:
-                data = await Runtime.read_file(request, str(full))
-        except FileError as exc:
-            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    loaded = []
+    for item, (_, relative), data in zip(body.files, resolved, data_files, strict=True):
         if data.get("binary"):
             raise HTTPException(
                 status_code=415,
@@ -1423,16 +1424,16 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
             )
         raw = str(data.get("content") or "")
         sliced, start, end, lines = _line_slice(raw, item.start_line, item.end_line)
-        return {
-            "path": relative,
-            "raw": raw,
-            "sliced": sliced,
-            "start_line": start,
-            "end_line": end,
-            "total_lines": lines,
-        }
-
-    loaded = await asyncio.gather(*(read_one(item) for item in body.files))
+        loaded.append(
+            {
+                "path": relative,
+                "raw": raw,
+                "sliced": sliced,
+                "start_line": start,
+                "end_line": end,
+                "total_lines": lines,
+            }
+        )
     total = 0
     files = []
     any_truncated = False
@@ -1675,6 +1676,7 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
             workspace_path=str(root),
             worker_id=body.worker_id,
         ),
+        __use_pty=False,
     )
     match = re.match(r"^Task ([0-9a-f]{8}):", response)
     if match is None:

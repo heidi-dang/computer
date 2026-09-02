@@ -243,6 +243,7 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
                 "request": request,
                 "user_id": "user_1",
             },
+            __use_pty=False,
         )
 
     async def test_direct_command_marks_initial_wait_timeout_when_process_is_still_running(self):
@@ -343,6 +344,8 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
                 "request": request,
                 "user_id": "user_1",
             },
+            __argv=["npm", "run", "build"],
+            __use_pty=False,
         )
 
     async def test_run_command_publishes_real_incremental_live_terminal_events(self):
@@ -367,6 +370,7 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
                         "request": request,
                         "user_id": "user_1",
                     },
+                    __use_pty=False,
                 )
 
         command_id = result.split(":", 1)[0].removeprefix("Task ")
@@ -495,6 +499,7 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
                         "request": request,
                         "user_id": "user_1",
                     },
+                    __use_pty=False,
                 )
                 command_id = result.split(":", 1)[0].removeprefix("Task ")
                 self.assertIsNone(stop_command_session(request, command_id))
