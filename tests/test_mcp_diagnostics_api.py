@@ -136,10 +136,12 @@ class McpDiagnosticsApiTests(unittest.IsolatedAsyncioTestCase):
         await store.ingest([latency()])
         admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
         sampler = SimpleNamespace(ensure_started=AsyncMock())
+        durable = SimpleNamespace(summary=AsyncMock(return_value={"week": {}, "month": {}}))
         request = route_request()
         with (
             patch.object(mcp_router, "mcp_diagnostics_store", store),
             patch.object(mcp_router, "mcp_metrics_sampler", sampler),
+            patch.object(mcp_router, "mcp_usage_store", durable),
             patch.object(mcp_router, "require_admin", admin),
         ):
             snapshot = await mcp_router.get_mcp_diagnostics_snapshot(request)
@@ -165,10 +167,12 @@ class McpDiagnosticsApiTests(unittest.IsolatedAsyncioTestCase):
         )
         admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
         sampler = SimpleNamespace(ensure_started=AsyncMock())
+        durable = SimpleNamespace(summary=AsyncMock(return_value={"week": {}, "month": {}}))
         request = route_request()
         with (
             patch.object(mcp_router, "mcp_diagnostics_store", store),
             patch.object(mcp_router, "mcp_metrics_sampler", sampler),
+            patch.object(mcp_router, "mcp_usage_store", durable),
             patch.object(mcp_router, "require_admin", admin),
         ):
             response = await mcp_router.stream_mcp_diagnostics(request)

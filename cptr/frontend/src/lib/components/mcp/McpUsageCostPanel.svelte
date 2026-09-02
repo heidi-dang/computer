@@ -3,8 +3,8 @@
 	import type { EChartsCoreOption } from 'echarts/core';
 	import {
 		currentUsageModel,
+		usagePeriodTotals,
 		usageTimeline,
-		usageTotals,
 		type McpDiagnosticsState,
 		type McpUsageTimelineBucket
 	} from '$lib/stores/mcp-diagnostics';
@@ -25,18 +25,21 @@
 	let nowMs = $state(Date.now());
 	let clock: ReturnType<typeof setInterval> | null = null;
 
-	const totals = $derived(
-		diagnosticsState
-			? usageTotals(diagnosticsState)
-			: {
-					inputTokensEstimated: 0,
-					outputTokensEstimated: 0,
-					totalTokensEstimated: 0,
-					simulatedCostUsd: 0,
-					pricedEvents: 0,
-					staleEvents: 0,
-					unpricedEvents: 0
-				}
+	const emptyPeriod = {
+		requests: 0,
+		inputTokensEstimated: 0,
+		outputTokensEstimated: 0,
+		totalTokensEstimated: 0,
+		simulatedCostUsd: 0,
+		pricedEvents: 0,
+		staleEvents: 0,
+		unpricedEvents: 0
+	};
+	const weekTotals = $derived(
+		diagnosticsState ? usagePeriodTotals(diagnosticsState, 'week') : emptyPeriod
+	);
+	const monthTotals = $derived(
+		diagnosticsState ? usagePeriodTotals(diagnosticsState, 'month') : emptyPeriod
 	);
 	const currentModel = $derived(currentUsageModel(diagnosticsState));
 	const buckets = $derived(
@@ -45,9 +48,9 @@
 	const recentInput = $derived(buckets.reduce((sum, bucket) => sum + bucket.inputTokens, 0));
 	const recentOutput = $derived(buckets.reduce((sum, bucket) => sum + bucket.outputTokens, 0));
 	const recentCost = $derived(buckets.reduce((sum, bucket) => sum + bucket.simulatedCostUsd, 0));
-	const pricedRequestCount = $derived(totals.pricedEvents + totals.staleEvents);
+	const pricedRequestCount = $derived(monthTotals.pricedEvents + monthTotals.staleEvents);
 	const avgCost = $derived(
-		pricedRequestCount > 0 ? totals.simulatedCostUsd / pricedRequestCount : null
+		pricedRequestCount > 0 ? monthTotals.simulatedCostUsd / pricedRequestCount : null
 	);
 	const tokenChartOption = $derived.by((): EChartsCoreOption => {
 		const start = buckets[0]?.startMs ?? nowMs - 60_000;
@@ -338,32 +341,24 @@
 			{/if}
 		</div>
 		<div class="border-b px-3 py-2.5 sm:border-r sm:px-4 lg:border-b-0">
-			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Estimated input</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums">
-				{formatTokens(totals.inputTokensEstimated)}
-			</p>
-			<p class="text-[0.58rem] app-muted">tool results → model · cumulative</p>
+			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This week · Weekly tokens</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums">{formatTokens(weekTotals.totalTokensEstimated)}</p>
+			<p class="text-[0.58rem] app-muted">{formatTokens(weekTotals.inputTokensEstimated)} in · {formatTokens(weekTotals.outputTokensEstimated)} out · {weekTotals.requests} requests</p>
 		</div>
 		<div class="border-b border-r px-3 py-2.5 sm:px-4 lg:border-b-0">
-			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Estimated output</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums">
-				{formatTokens(totals.outputTokensEstimated)}
-			</p>
-			<p class="text-[0.58rem] app-muted">model → tool calls · cumulative</p>
+			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This week · Simulated cost (USD)</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">{formatUsd(weekTotals.simulatedCostUsd)}</p>
+			<p class="text-[0.58rem] app-muted">database-backed · UTC week</p>
 		</div>
 		<div class="border-b px-3 py-2.5 sm:border-r sm:px-4 lg:border-b-0">
-			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Estimated total</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums">
-				{formatTokens(totals.totalTokensEstimated)}
-			</p>
-			<p class="text-[0.58rem] app-muted">since backend start</p>
+			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This month · Monthly tokens</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums">{formatTokens(monthTotals.totalTokensEstimated)}</p>
+			<p class="text-[0.58rem] app-muted">{formatTokens(monthTotals.inputTokensEstimated)} in · {formatTokens(monthTotals.outputTokensEstimated)} out · {monthTotals.requests} requests</p>
 		</div>
 		<div class="border-r px-3 py-2.5 sm:px-4">
-			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Simulated cost (USD)</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">
-				{formatUsd(totals.simulatedCostUsd)}
-			</p>
-			<p class="text-[0.58rem] app-muted">since backend start</p>
+			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This month · Simulated cost (USD)</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">{formatUsd(monthTotals.simulatedCostUsd)}</p>
+			<p class="text-[0.58rem] app-muted">database-backed · calendar month</p>
 		</div>
 		<div class="px-3 py-2.5 sm:px-4">
 			<p class="text-[0.62rem] uppercase tracking-wide app-muted">Avg simulated cost/request</p>

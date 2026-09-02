@@ -31,10 +31,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
 from cptr.routers.admin import require_admin
+from cptr.services.coding_benchmark import SUITE_ID, coding_benchmark_store
 from cptr.services.control_auth import authenticate_control_request
 from cptr.services.mcp_activity import McpActivityBatch, mcp_activity_store
-from cptr.services.mcp_diagnostics import McpDiagnosticsBatch, mcp_diagnostics_store
+from cptr.services.mcp_diagnostics import (
+    McpDiagnosticsBatch,
+    McpUsageDiagnostic,
+    mcp_diagnostics_store,
+)
 from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
+from cptr.services.mcp_usage_store import mcp_usage_store
 from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
 from cptr.services.system_metrics import mcp_metrics_sampler
 from cptr.utils.crypto import decrypt_key
@@ -180,29 +186,72 @@ class McpTopologyConfigUpdate(BaseModel):
 
 @router.post("/diagnostics/events")
 async def ingest_mcp_diagnostics(request: Request, body: McpDiagnosticsBatch):
-    """Accept one bounded allowlisted diagnostics batch from the MCP adapter."""
-    await _require_diagnostics_writer(request)
-    return await mcp_diagnostics_store.ingest(body.events)
+    """Persist usage durably before publishing one bounded diagnostics batch."""
+    owner_id = await _require_diagnostics_writer(request)
+    accepted_usage_ids = await mcp_usage_store.ingest(owner_id, body.events)
+    filtered_events = []
+    emitted_usage_ids: set[str] = set()
+    durable_duplicates = 0
+    for event in body.events:
+        if not isinstance(event, McpUsageDiagnostic):
+            filtered_events.append(event)
+            continue
+        if event.event_id not in accepted_usage_ids or event.event_id in emitted_usage_ids:
+            durable_duplicates += 1
+            continue
+        emitted_usage_ids.add(event.event_id)
+        filtered_events.append(event)
+    result = await mcp_diagnostics_store.ingest(filtered_events)
+    result["duplicates"] += durable_duplicates
+    return result
+
+
+async def _diagnostics_snapshot(owner_id: str) -> dict[str, object]:
+    snapshot = await mcp_diagnostics_store.snapshot()
+    snapshot["usage_periods"] = await mcp_usage_store.summary(owner_id)
+    return snapshot
 
 
 @router.get("/diagnostics/snapshot")
 async def get_mcp_diagnostics_snapshot(request: Request):
-    """Return the admin-only bounded MCP diagnostics snapshot."""
-    require_admin(request)
+    """Return bounded live diagnostics plus database-backed durable usage periods."""
+    admin = require_admin(request)
     await mcp_metrics_sampler.ensure_started()
-    return await mcp_diagnostics_store.snapshot()
+    return await _diagnostics_snapshot(admin.user_id)
+
+
+@router.get("/engineering/sessions")
+async def get_mcp_engineering_sessions(
+    request: Request, limit: int = Query(default=50, ge=1, le=200)
+):
+    """Return payload-free observed engineering metrics; these are not comparable benchmarks."""
+    admin = require_admin(request)
+    return await mcp_usage_store.engineering_sessions(admin.user_id, limit=limit)
+
+
+@router.get("/benchmarks/leaderboard")
+async def get_mcp_benchmark_leaderboard(
+    request: Request,
+    suite_id: str = Query(default=SUITE_ID, min_length=1, max_length=80),
+):
+    """Return only comparable standardized benchmark results to the admin dashboard."""
+    admin = require_admin(request)
+    try:
+        return await coding_benchmark_store.leaderboard(admin.user_id, suite_id=suite_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)[:200]) from exc
 
 
 @router.get("/diagnostics/stream")
 async def stream_mcp_diagnostics(request: Request):
     """Stream bounded MCP diagnostics to an authenticated admin browser."""
-    require_admin(request)
+    admin = require_admin(request)
     await mcp_metrics_sampler.ensure_started()
 
     async def _event_stream():
         queue = mcp_diagnostics_store.subscribe()
         try:
-            yield _diagnostics_sse("snapshot", await mcp_diagnostics_store.snapshot())
+            yield _diagnostics_sse("snapshot", await _diagnostics_snapshot(admin.user_id))
             while True:
                 if await request.is_disconnected():
                     break

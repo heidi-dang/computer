@@ -1,12 +1,16 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import {
+		getMcpBenchmarkLeaderboard,
 		getMcpDiagnosticsSnapshot,
+		getMcpEngineeringSessions,
 		getMcpTopologyConfig,
 		getMcpTrafficSnapshot,
 		openMcpDiagnosticsStream,
 		openMcpTrafficStream,
+		type McpBenchmarkLeaderboard,
 		type McpDiagnosticsEvent,
+		type McpEngineeringSessionsResponse,
 		type McpTopologyConfig,
 		type McpTrafficEvent,
 		type McpTrafficSnapshot
@@ -34,6 +38,7 @@
 	import McpTopologyGraph from './McpTopologyGraph.svelte';
 	import McpTopologyDetail from './McpTopologyDetail.svelte';
 	import McpRecentRequests from './McpRecentRequests.svelte';
+	import McpBenchmarkPanel from './McpBenchmarkPanel.svelte';
 	import McpRequestChart from './McpRequestChart.svelte';
 	import McpUsageCostPanel from './McpUsageCostPanel.svelte';
 
@@ -60,6 +65,8 @@
 
 	let traffic = $state<McpTrafficState | null>(null);
 	let diagnostics = $state<McpDiagnosticsState | null>(null);
+	let benchmark = $state<McpBenchmarkLeaderboard | null>(null);
+	let engineering = $state<McpEngineeringSessionsResponse | null>(null);
 	let topologyConfig = $state<McpTopologyConfigState | null>(null);
 	let trafficStatus = $state<StreamStatus>('loading');
 	let diagnosticsStatus = $state<StreamStatus>('loading');
@@ -174,6 +181,16 @@
 		} catch {
 			// Aliases are an optional projection; canonical topology remains usable.
 		}
+	}
+
+	async function loadBenchmarkEvidence() {
+		const [benchmarkResult, engineeringResult] = await Promise.allSettled([
+			getMcpBenchmarkLeaderboard(),
+			getMcpEngineeringSessions(50)
+		]);
+		if (destroyed) return;
+		if (benchmarkResult.status === 'fulfilled') benchmark = benchmarkResult.value;
+		if (engineeringResult.status === 'fulfilled') engineering = engineeringResult.value;
 	}
 
 	async function refreshTrafficAndOpen() {
@@ -310,6 +327,7 @@
 
 	onMount(() => {
 		void loadTopologyConfig();
+		void loadBenchmarkEvidence();
 		void refreshTrafficAndOpen();
 		void refreshDiagnosticsAndOpen();
 	});
@@ -381,6 +399,7 @@
 
 		<McpRequestChart state={traffic} />
 		<McpUsageCostPanel state={diagnostics} />
+		<McpBenchmarkPanel {benchmark} {engineering} />
 
 		<div
 			class="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-[minmax(0,1.45fr)_minmax(22rem,0.85fr)] lg:gap-4"

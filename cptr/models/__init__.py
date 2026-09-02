@@ -27,6 +27,7 @@ from cptr.models.control import (
     WorkbenchSessionEvent,
 )
 from cptr.models.files import File
+from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
 from cptr.models.workspaces import Workspace
 
@@ -49,7 +50,10 @@ __all__ = [
     "ControlLiveEvent",
     "ControlMessage",
     "ControlTask",
+    "CodingBenchmarkRun",
     "File",
+    "McpEngineeringSession",
+    "McpUsageEvent",
     "User",
     "UserStates",
     "Workspace",

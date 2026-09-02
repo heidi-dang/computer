@@ -347,6 +347,79 @@ export interface McpUsageTotals {
 	by_model: Record<string, McpUsageModelTotals>;
 }
 
+export interface McpUsagePeriodTotals {
+	requests: number;
+	input_tokens_estimated: number;
+	output_tokens_estimated: number;
+	total_tokens_estimated: number;
+	simulated_cost_usd: string;
+	priced_events: number;
+	stale_events: number;
+	unpriced_events: number;
+}
+
+export interface McpUsagePeriods {
+	week: McpUsagePeriodTotals;
+	month: McpUsagePeriodTotals;
+	rolling_7d: McpUsagePeriodTotals;
+	rolling_30d: McpUsagePeriodTotals;
+	all_time: McpUsagePeriodTotals;
+	generated_at_ms: number;
+	timezone: 'UTC';
+	week_starts_on: 'monday';
+}
+
+export interface McpEngineeringSession {
+	session_id: string | null;
+	client_id: string;
+	model_reported: string | null;
+	model_canonical: string | null;
+	first_seen_ms: number;
+	last_seen_ms: number;
+	tool_calls: number;
+	successful_tool_calls: number;
+	failed_tool_calls: number;
+	coding_mutations: number;
+	verification_calls: number;
+	read_calls: number;
+	input_tokens_estimated: number;
+	output_tokens_estimated: number;
+	total_tokens_estimated: number;
+	simulated_cost_usd: string;
+	reliability: number;
+	verification_ratio: number;
+	operational_score: number;
+	comparable: false;
+}
+
+export interface McpEngineeringSessionsResponse {
+	comparable: false;
+	comparability: 'observed_real_work_only';
+	score_formula: string;
+	disclaimer: string;
+	sessions: McpEngineeringSession[];
+}
+
+export interface McpBenchmarkLeaderboardModel {
+	model_canonical: string;
+	model_reported: string | null;
+	attempts: number;
+	best_score: number;
+	average_score: number;
+	perfect_runs: number;
+	pass_rate: number;
+	median_duration_ms: number;
+}
+
+export interface McpBenchmarkLeaderboard {
+	comparable: true;
+	comparability: 'standardized_suite_only';
+	suite_id: string;
+	suite_version: string;
+	max_score: number;
+	models: McpBenchmarkLeaderboardModel[];
+}
+
 export type McpDiagnosticsEvent = (
 	| McpLatencySample
 	| McpFailureDiagnostic
@@ -363,6 +436,7 @@ export interface McpDiagnosticsSnapshot {
 	usage: McpUsageDiagnostic[];
 	current_model: McpUsageDiagnostic | null;
 	usage_totals: McpUsageTotals;
+	usage_periods?: McpUsagePeriods;
 	stream_health: {
 		subscriber_count: number;
 		slow_subscriber_drops: number;
@@ -396,6 +470,14 @@ export const updateMcpTopologyConfig = (aliases: Record<string, string | null>) 
 
 export const getMcpDiagnosticsSnapshot = () =>
 	fetchJSON<McpDiagnosticsSnapshot>('/api/mcp/diagnostics/snapshot');
+
+export const getMcpEngineeringSessions = (limit = 50) =>
+	fetchJSON<McpEngineeringSessionsResponse>(`/api/mcp/engineering/sessions?limit=${limit}`);
+
+export const getMcpBenchmarkLeaderboard = (suiteId = 'cptr-python-core') =>
+	fetchJSON<McpBenchmarkLeaderboard>(
+		`/api/mcp/benchmarks/leaderboard?suite_id=${encodeURIComponent(suiteId)}`
+	);
 
 export function openMcpDiagnosticsStream(callbacks: McpDiagnosticsStreamCallbacks): () => void {
 	const source = new EventSource('/api/mcp/diagnostics/stream');

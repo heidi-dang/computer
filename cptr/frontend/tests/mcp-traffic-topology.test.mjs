@@ -292,6 +292,16 @@ test('usage diagnostics hydrate bounded model state and project 60-second token/
 			unpriced_events: 0,
 			by_model: {}
 		},
+		usage_periods: {
+			week: { requests: 5, input_tokens_estimated: 500, output_tokens_estimated: 100, total_tokens_estimated: 600, simulated_cost_usd: '0.004', priced_events: 5, stale_events: 0, unpriced_events: 0 },
+			month: { requests: 8, input_tokens_estimated: 800, output_tokens_estimated: 160, total_tokens_estimated: 960, simulated_cost_usd: '0.0064', priced_events: 8, stale_events: 0, unpriced_events: 0 },
+			rolling_7d: { requests: 5, input_tokens_estimated: 500, output_tokens_estimated: 100, total_tokens_estimated: 600, simulated_cost_usd: '0.004', priced_events: 5, stale_events: 0, unpriced_events: 0 },
+			rolling_30d: { requests: 8, input_tokens_estimated: 800, output_tokens_estimated: 160, total_tokens_estimated: 960, simulated_cost_usd: '0.0064', priced_events: 8, stale_events: 0, unpriced_events: 0 },
+			all_time: { requests: 9, input_tokens_estimated: 900, output_tokens_estimated: 180, total_tokens_estimated: 1080, simulated_cost_usd: '0.0072', priced_events: 9, stale_events: 0, unpriced_events: 0 },
+			generated_at_ms: base + 2_000,
+			timezone: 'UTC',
+			week_starts_on: 'monday'
+		},
 		stream_health: {
 			subscriber_count: 0,
 			slow_subscriber_drops: 0,
@@ -314,6 +324,16 @@ test('usage diagnostics hydrate bounded model state and project 60-second token/
 		staleEvents: 0,
 		unpricedEvents: 0
 	});
+	assert.deepEqual(diagnostics.usagePeriodTotals(state, 'week'), {
+		requests: 5,
+		inputTokensEstimated: 500,
+		outputTokensEstimated: 100,
+		totalTokensEstimated: 600,
+		simulatedCostUsd: 0.004,
+		pricedEvents: 5,
+		staleEvents: 0,
+		unpricedEvents: 0
+	});
 
 	state = diagnostics.applyMcpDiagnosticsEvent(state, usage(6, base + 6_000, 200, 40, '0.0016'));
 	assert.deepEqual(diagnostics.usageTotals(state), {
@@ -325,6 +345,14 @@ test('usage diagnostics hydrate bounded model state and project 60-second token/
 		staleEvents: 0,
 		unpricedEvents: 0
 	});
+	assert.equal(diagnostics.usagePeriodTotals(state, 'week').requests, 6);
+	assert.equal(diagnostics.usagePeriodTotals(state, 'week').totalTokensEstimated, 840);
+	assert.equal(diagnostics.usagePeriodTotals(state, 'month').requests, 9);
+	assert.equal(diagnostics.usagePeriodTotals(state, 'month').totalTokensEstimated, 1200);
+	assert.equal(diagnostics.usagePeriodTotals(state, 'rolling_7d').requests, 6);
+	assert.equal(diagnostics.usagePeriodTotals(state, 'rolling_7d').totalTokensEstimated, 840);
+	assert.equal(diagnostics.usagePeriodTotals(state, 'rolling_30d').requests, 9);
+	assert.equal(diagnostics.usagePeriodTotals(state, 'rolling_30d').totalTokensEstimated, 1200);
 	const timeline = diagnostics.usageTimeline(state, base + 10_000, {
 		windowMs: 10_000,
 		bucketMs: 5_000
@@ -681,9 +709,10 @@ test('MCP topology renders estimated model token usage and API-equivalent simula
 		'Model usage & simulated cost',
 		'Estimated · MCP-visible tokens',
 		'Current model',
-		'Estimated input',
-		'Estimated output',
-		'Estimated total',
+		'This week',
+		'This month',
+		'Weekly tokens',
+		'Monthly tokens',
 		'Simulated cost (USD)',
 		'Avg simulated cost/request',
 		'Pricing status',
@@ -702,7 +731,8 @@ test('MCP topology renders estimated model token usage and API-equivalent simula
 		assert.ok(panel.includes(label), `usage panel must show ${label}`);
 	}
 	assert.match(panel, /usageTimeline/);
-	assert.match(panel, /usageTotals/);
+	assert.match(panel, /usagePeriodTotals/);
+	assert.doesNotMatch(panel, /since backend start/);
 	assert.match(panel, /currentUsageModel/);
 	assert.match(panel, /pricingVersion/);
 	assert.match(panel, /Not your ChatGPT bill/);
@@ -721,6 +751,24 @@ test('MCP topology renders estimated model token usage and API-equivalent simula
 	assert.match(panel, /media:/);
 	assert.match(panel, /hideOverlap/);
 	assert.doesNotMatch(panel, /<polyline|polylinePoints/);
+});
+
+test('MCP topology separates comparable standardized benchmark results from observed real-work metrics', async () => {
+	const [api, topology, panel] = await Promise.all([
+		read('lib/apis/mcp.ts'),
+		read('lib/components/mcp/McpTopology.svelte'),
+		read('lib/components/mcp/McpBenchmarkPanel.svelte').catch(() => '')
+	]);
+	assert.match(api, /getMcpEngineeringSessions/);
+	assert.match(api, /getMcpBenchmarkLeaderboard/);
+	assert.match(topology, /McpBenchmarkPanel/);
+	assert.match(panel, /Coding benchmark/);
+	assert.match(panel, /Comparable standardized/);
+	assert.match(panel, /Observed real-work/);
+	assert.match(panel, /not comparable/i);
+	assert.match(panel, /Best score/);
+	assert.match(panel, /Reliability/);
+	assert.match(panel, /Verification/);
 });
 
 test('topology UI exposes live graph, safe request table, responsive layout and console switch', async () => {

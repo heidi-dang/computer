@@ -13,6 +13,7 @@ from cptr.routers import (
     auth_router,
     automations_router,
     automations_extended_router,
+    benchmarks_router,
     bridge_router,
     browser_router,
     browser_extended_router,
@@ -398,6 +399,7 @@ app.include_router(audio_router)
 app.include_router(auth_router)
 app.include_router(automations_router)
 app.include_router(automations_extended_router)
+app.include_router(benchmarks_router)
 app.include_router(bridge_router)
 app.include_router(browser_router)
 app.include_router(browser_extended_router)

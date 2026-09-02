@@ -5,6 +5,7 @@ from cptr.routers.audio import router as audio_router
 from cptr.routers.auth import router as auth_router
 from cptr.routers.automations import router as automations_router
 from cptr.routers.automations_extended import router as automations_extended_router
+from cptr.routers.benchmarks import router as benchmarks_router
 from cptr.routers.bridge import router as bridge_router
 from cptr.routers.bridge import webhook_router
 from cptr.routers.browser import router as browser_router
@@ -42,6 +43,7 @@ __all__ = [
     "auth_router",
     "automations_router",
     "automations_extended_router",
+    "benchmarks_router",
     "bridge_router",
     "browser_router",
     "browser_extended_router",

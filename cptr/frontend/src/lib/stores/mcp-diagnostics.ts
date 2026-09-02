@@ -11,6 +11,8 @@ import type {
 	McpProcessMetrics,
 	McpPricingStatus,
 	McpUsageDiagnostic,
+	McpUsagePeriodTotals,
+	McpUsagePeriods,
 	McpUsageTotals
 } from '$lib/apis/mcp';
 
@@ -129,6 +131,10 @@ export type McpUsageTotalsState = {
 	unpricedEvents: number;
 };
 
+export type McpUsagePeriodKey = 'week' | 'month' | 'rolling_7d' | 'rolling_30d' | 'all_time';
+export type McpUsagePeriodTotalsState = McpUsageTotalsState & { requests: number };
+export type McpUsagePeriodsState = Record<McpUsagePeriodKey, McpUsagePeriodTotalsState>;
+
 export type McpUsageTimelineBucket = {
 	startMs: number;
 	endMs: number;
@@ -146,6 +152,8 @@ export type McpDiagnosticsState = {
 	system: McpBackendMetricsState[];
 	usage: McpUsageState[];
 	usageTotalsState: McpUsageTotalsState;
+	usagePeriodsState: McpUsagePeriodsState;
+	usagePeriodsGeneratedAtMs: number;
 	latencyCapacityPerEdge: number;
 	failureCapacity: number;
 	systemCapacity: number;
@@ -293,6 +301,99 @@ function usageTotalsState(
 	};
 }
 
+function usagePeriodState(period: McpUsagePeriodTotals): McpUsagePeriodTotalsState {
+	return {
+		requests: period.requests,
+		inputTokensEstimated: period.input_tokens_estimated,
+		outputTokensEstimated: period.output_tokens_estimated,
+		totalTokensEstimated: period.total_tokens_estimated,
+		simulatedCostUsd: decimalNumber(period.simulated_cost_usd) ?? 0,
+		pricedEvents: period.priced_events,
+		staleEvents: period.stale_events,
+		unpricedEvents: period.unpriced_events
+	};
+}
+
+function usagePeriodsState(periods: McpUsagePeriods | undefined): McpUsagePeriodsState {
+	if (!periods) {
+		return {
+			week: emptyUsagePeriod(),
+			month: emptyUsagePeriod(),
+			rolling_7d: emptyUsagePeriod(),
+			rolling_30d: emptyUsagePeriod(),
+			all_time: emptyUsagePeriod()
+		};
+	}
+	return {
+		week: usagePeriodState(periods.week),
+		month: usagePeriodState(periods.month),
+		rolling_7d: usagePeriodState(periods.rolling_7d),
+		rolling_30d: usagePeriodState(periods.rolling_30d),
+		all_time: usagePeriodState(periods.all_time)
+	};
+}
+
+function emptyUsagePeriod(): McpUsagePeriodTotalsState {
+	return {
+		requests: 0,
+		inputTokensEstimated: 0,
+		outputTokensEstimated: 0,
+		totalTokensEstimated: 0,
+		simulatedCostUsd: 0,
+		pricedEvents: 0,
+		staleEvents: 0,
+		unpricedEvents: 0
+	};
+}
+
+function utcWeekKey(timestampMs: number): string {
+	const date = new Date(timestampMs);
+	const day = (date.getUTCDay() + 6) % 7;
+	const monday = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - day);
+	return String(monday);
+}
+
+function utcMonthKey(timestampMs: number): string {
+	const date = new Date(timestampMs);
+	return `${date.getUTCFullYear()}-${date.getUTCMonth()}`;
+}
+
+function incrementPeriod(
+	period: McpUsagePeriodTotalsState,
+	event: McpUsageDiagnostic
+): McpUsagePeriodTotalsState {
+	const inputTokensEstimated = period.inputTokensEstimated + event.input_tokens_estimated;
+	const outputTokensEstimated = period.outputTokensEstimated + event.output_tokens_estimated;
+	return {
+		requests: period.requests + 1,
+		inputTokensEstimated,
+		outputTokensEstimated,
+		totalTokensEstimated: inputTokensEstimated + outputTokensEstimated,
+		simulatedCostUsd: period.simulatedCostUsd + (decimalNumber(event.simulated_cost_usd) ?? 0),
+		pricedEvents: period.pricedEvents + (event.pricing_status === 'current' ? 1 : 0),
+		staleEvents: period.staleEvents + (event.pricing_status === 'stale' ? 1 : 0),
+		unpricedEvents:
+			period.unpricedEvents +
+			(event.pricing_status === 'current' || event.pricing_status === 'stale' ? 0 : 1)
+	};
+}
+
+function applyUsagePeriodEvent(
+	state: McpDiagnosticsState,
+	event: McpUsageDiagnostic
+): McpUsagePeriodsState {
+	const crossedWeek = utcWeekKey(event.timestamp_ms) !== utcWeekKey(state.usagePeriodsGeneratedAtMs);
+	const crossedMonth = utcMonthKey(event.timestamp_ms) !== utcMonthKey(state.usagePeriodsGeneratedAtMs);
+	return {
+		...state.usagePeriodsState,
+		week: incrementPeriod(crossedWeek ? emptyUsagePeriod() : state.usagePeriodsState.week, event),
+		month: incrementPeriod(crossedMonth ? emptyUsagePeriod() : state.usagePeriodsState.month, event),
+		rolling_7d: incrementPeriod(state.usagePeriodsState.rolling_7d, event),
+		rolling_30d: incrementPeriod(state.usagePeriodsState.rolling_30d, event),
+		all_time: incrementPeriod(state.usagePeriodsState.all_time, event)
+	};
+}
+
 function usageState(event: McpUsageDiagnostic): McpUsageState {
 	return {
 		eventId: event.event_id,
@@ -344,6 +445,8 @@ export function hydrateMcpDiagnostics(snapshot: McpDiagnosticsSnapshot): McpDiag
 		system: boundedTail(snapshot.system.map(systemState), systemCapacity),
 		usage: retainedUsage,
 		usageTotalsState: usageTotalsState(snapshot.usage_totals, retainedUsage),
+		usagePeriodsState: usagePeriodsState(snapshot.usage_periods),
+		usagePeriodsGeneratedAtMs: snapshot.usage_periods?.generated_at_ms ?? Date.now(),
 		latencyCapacityPerEdge: Math.max(
 			1,
 			snapshot.stream_health.latency_sample_capacity_per_edge || 1
@@ -390,6 +493,8 @@ export function applyMcpDiagnosticsEvent(
 			...state,
 			sequence: event.ingestion_sequence,
 			usage: boundedTail([...state.usage, usageState(event)], state.usageCapacity),
+			usagePeriodsState: applyUsagePeriodEvent(state, event),
+			usagePeriodsGeneratedAtMs: event.timestamp_ms,
 			usageTotalsState: {
 				inputTokensEstimated,
 				outputTokensEstimated,
@@ -444,6 +549,13 @@ export function currentUsageModel(state: McpDiagnosticsState | null): McpUsageSt
 
 export function usageTotals(state: McpDiagnosticsState): McpUsageTotalsState {
 	return state.usageTotalsState;
+}
+
+export function usagePeriodTotals(
+	state: McpDiagnosticsState,
+	period: McpUsagePeriodKey
+): McpUsagePeriodTotalsState {
+	return state.usagePeriodsState[period];
 }
 
 export function usageTimeline(
