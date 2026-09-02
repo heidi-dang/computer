@@ -37,8 +37,8 @@
 - Test: `tests/test_factory_domain.py`
 
 **Interfaces:**
-- `FactoryState(StrEnum)` contains every state in the architecture spec.
-- `FactoryActor(StrEnum)` distinguishes `SYSTEM`, `USER`, `REASONING_ROLE`, `WORKER`, `VERIFIER`, and `CI`.
+- `FactoryState(str, Enum)` contains every state in the architecture spec and remains compatible with CPTR's Python 3.10 minimum.
+- `FactoryActor(str, Enum)` distinguishes `SYSTEM`, `USER`, `REASONING_ROLE`, `WORKER`, `VERIFIER`, and `CI`.
 - `FactoryTransition` is an immutable transition record with `from_state`, `to_state`, `actor`, `reason`, and optional evidence IDs.
 - `validate_factory_transition(from_state, to_state, actor, *, resumable_state=None, machine_victory=False) -> None` raises `InvalidFactoryTransition` when the graph or authority rule is violated.
 - `is_terminal_factory_state(state) -> bool` is the shared terminal-state predicate.

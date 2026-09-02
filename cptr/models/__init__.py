@@ -26,6 +26,13 @@ from cptr.models.control import (
     WorkbenchSession,
     WorkbenchSessionEvent,
 )
+from cptr.models.factory import (
+    FactoryCycle,
+    FactoryEvent,
+    FactoryEvidence,
+    FactoryGateResult,
+    FactoryRun,
+)
 from cptr.models.files import File
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
@@ -51,6 +58,11 @@ __all__ = [
     "ControlMessage",
     "ControlTask",
     "CodingBenchmarkRun",
+    "FactoryCycle",
+    "FactoryEvent",
+    "FactoryEvidence",
+    "FactoryGateResult",
+    "FactoryRun",
     "File",
     "McpEngineeringSession",
     "McpUsageEvent",
