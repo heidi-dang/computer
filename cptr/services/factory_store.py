@@ -226,6 +226,104 @@ class SqlFactoryStore:
                 )
             return cycle
 
+    async def advance_cycle(
+        self,
+        run_id: str,
+        cycle_id: str,
+        *,
+        reason: str,
+        evidence_ids: Sequence[str],
+        idempotency_key: str,
+    ) -> FactoryCycle:
+        """Atomically close one completed cycle and enter AUDITING on the next cycle."""
+        if not idempotency_key.strip():
+            raise ValueError("cycle advance idempotency key must not be blank")
+        intent_payload = {
+            "previous_cycle_id": cycle_id,
+            "to_state": FactoryState.AUDITING.value,
+            "reason": reason,
+            "evidence_ids": list(evidence_ids),
+        }
+        _, intent_digest = _canonical_payload(intent_payload)
+        async with self._session_factory() as db:
+            async with db.begin():
+                run = await db.get(FactoryRun, run_id)
+                previous_cycle = await db.get(FactoryCycle, cycle_id)
+                if run is None or previous_cycle is None or previous_cycle.run_id != run_id:
+                    raise KeyError("factory run/cycle not found")
+                existing = (
+                    await db.execute(
+                        select(FactoryEvent).where(
+                            FactoryEvent.run_id == run_id,
+                            FactoryEvent.idempotency_key == idempotency_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    if existing.payload_digest != intent_digest:
+                        raise FactoryIdempotencyConflict(
+                            "cycle advance idempotency key was replayed with different intent"
+                        )
+                    next_cycle_id = str((existing.payload or {}).get("next_cycle_id") or "")
+                    next_cycle = await db.get(FactoryCycle, next_cycle_id) if next_cycle_id else None
+                    if next_cycle is None:
+                        raise RuntimeError("durable cycle advance event references a missing next cycle")
+                    return next_cycle
+                if run.current_cycle_id != cycle_id:
+                    raise ValueError("cycle advance requires the active completed factory cycle")
+                current = FactoryState(run.state)
+                if current is not FactoryState.CYCLE_COMPLETE:
+                    raise ValueError("cycle advance requires CYCLE_COMPLETE state")
+                validate_factory_transition(
+                    current,
+                    FactoryState.AUDITING,
+                    FactoryActor.SYSTEM,
+                    machine_victory=False,
+                )
+                last_ordinal = (
+                    await db.execute(
+                        select(func.max(FactoryCycle.ordinal)).where(FactoryCycle.run_id == run_id)
+                    )
+                ).scalar_one()
+                now = _now_ms()
+                next_cycle = FactoryCycle(
+                    id=_new_id("cycle"),
+                    run_id=run_id,
+                    ordinal=int(last_ordinal or 0) + 1,
+                    state=FactoryState.AUDITING.value,
+                    idempotency_key=f"advance:{idempotency_key}",
+                    base_revision=previous_cycle.target_revision,
+                    base_fingerprint=previous_cycle.target_fingerprint,
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(next_cycle)
+                await db.flush()
+                previous_cycle.completed_at = previous_cycle.completed_at or now
+                previous_cycle.updated_at = now
+                run.current_cycle_id = next_cycle.id
+                run.state = FactoryState.AUDITING.value
+                run.resumable_state = None
+                run.updated_at = now
+                event_payload = dict(intent_payload)
+                event_payload["next_cycle_id"] = next_cycle.id
+                event_payload["ordinal"] = next_cycle.ordinal
+                event_payload["base_revision"] = next_cycle.base_revision
+                event_payload["base_fingerprint"] = next_cycle.base_fingerprint
+                await self._append_event_in_transaction(
+                    db,
+                    run=run,
+                    cycle_id=next_cycle.id,
+                    actor=FactoryActor.SYSTEM,
+                    event_type="state.transition",
+                    from_state=FactoryState.CYCLE_COMPLETE,
+                    to_state=FactoryState.AUDITING,
+                    idempotency_key=idempotency_key,
+                    payload=event_payload,
+                    payload_digest=intent_digest,
+                )
+            return next_cycle
+
     async def list_cycles(self, run_id: str) -> list[FactoryCycle]:
         async with self._session_factory() as db:
             rows = await db.execute(
@@ -234,6 +332,157 @@ class SqlFactoryStore:
                 .order_by(FactoryCycle.ordinal)
             )
             return list(rows.scalars().all())
+
+    async def get_cycle(self, cycle_id: str) -> FactoryCycle | None:
+        async with self._session_factory() as db:
+            return await db.get(FactoryCycle, cycle_id)
+
+    async def update_cycle_projection(
+        self,
+        run_id: str,
+        cycle_id: str,
+        *,
+        updates: dict[str, Any],
+        run_next_action: str | None,
+        idempotency_key: str,
+    ) -> FactoryCycle:
+        allowed = {
+            "selected_finding",
+            "capability_requirements",
+            "selected_capabilities",
+            "gate_plan",
+            "base_revision",
+            "base_fingerprint",
+            "mutation_worker_id",
+            "next_action",
+        }
+        unknown = sorted(set(updates) - allowed)
+        if unknown:
+            raise ValueError(f"unsupported factory cycle projection field {unknown[0]}")
+        payload = {
+            "cycle_id": cycle_id,
+            "updates": updates,
+            "run_next_action": run_next_action,
+        }
+        safe_payload, digest = _canonical_payload(payload)
+        async with self._session_factory() as db:
+            async with db.begin():
+                run = await db.get(FactoryRun, run_id)
+                cycle = await db.get(FactoryCycle, cycle_id)
+                if run is None or cycle is None or cycle.run_id != run_id:
+                    raise KeyError("factory run/cycle not found")
+                existing = (
+                    await db.execute(
+                        select(FactoryEvent).where(
+                            FactoryEvent.run_id == run_id,
+                            FactoryEvent.idempotency_key == idempotency_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    if existing.payload_digest != digest:
+                        raise FactoryIdempotencyConflict(
+                            "phase projection idempotency key was replayed with different intent"
+                        )
+                    return cycle
+                now = _now_ms()
+                safe_updates = safe_payload["updates"]
+                for key, value in safe_updates.items():
+                    setattr(cycle, key, value)
+                if run_next_action is not None:
+                    run.next_action = str(run_next_action)[:4_000]
+                cycle.updated_at = now
+                run.updated_at = now
+                await self._append_event_in_transaction(
+                    db,
+                    run=run,
+                    cycle_id=cycle_id,
+                    actor=FactoryActor.SYSTEM,
+                    event_type="phase.projection_updated",
+                    from_state=FactoryState(run.state),
+                    to_state=FactoryState(run.state),
+                    idempotency_key=idempotency_key,
+                    payload=safe_payload,
+                    payload_digest=digest,
+                )
+            return cycle
+
+    async def record_failure(
+        self,
+        run_id: str,
+        cycle_id: str,
+        *,
+        signature: str,
+        category: str,
+        code: str,
+        gate_id: str | None,
+        summary: str,
+        idempotency_key: str,
+    ) -> FactoryCycle:
+        if not signature.strip() or not category.strip() or not code.strip():
+            raise ValueError("factory failure identity fields must not be blank")
+        payload = {
+            "cycle_id": cycle_id,
+            "signature": signature,
+            "category": category,
+            "code": code,
+            "gate_id": gate_id,
+            "summary": summary[:4_000],
+        }
+        safe_payload, digest = _canonical_payload(payload)
+        async with self._session_factory() as db:
+            async with db.begin():
+                run = await db.get(FactoryRun, run_id)
+                cycle = await db.get(FactoryCycle, cycle_id)
+                if run is None or cycle is None or cycle.run_id != run_id:
+                    raise KeyError("factory run/cycle not found")
+                existing_event = (
+                    await db.execute(
+                        select(FactoryEvent).where(
+                            FactoryEvent.run_id == run_id,
+                            FactoryEvent.idempotency_key == idempotency_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing_event is not None:
+                    if existing_event.payload_digest != digest:
+                        raise FactoryIdempotencyConflict(
+                            "factory failure idempotency key was replayed with different evidence"
+                        )
+                    return cycle
+                now = _now_ms()
+                signatures = dict(cycle.failure_signatures or {})
+                previous = dict(signatures.get(signature) or {})
+                count = int(previous.get("count") or 0) + 1
+                signatures[signature] = {
+                    "signature": signature,
+                    "category": category,
+                    "code": code,
+                    "gate_id": gate_id,
+                    "count": count,
+                    "first_seen_at": int(previous.get("first_seen_at") or now),
+                    "last_seen_at": now,
+                    "last_summary": safe_payload["summary"],
+                }
+                cycle.failure_signatures = signatures
+                cycle.attempt_count = int(cycle.attempt_count or 0) + 1
+                cycle.next_action = "diagnose persisted failure before retry"
+                cycle.updated_at = now
+                run.next_action = cycle.next_action
+                run.updated_at = now
+                await self._append_event_in_transaction(
+                    db,
+                    run=run,
+                    cycle_id=cycle_id,
+                    actor=FactoryActor.SYSTEM,
+                    event_type="failure.recorded",
+                    from_state=FactoryState(run.state),
+                    to_state=FactoryState(run.state),
+                    idempotency_key=idempotency_key,
+                    payload=safe_payload,
+                    payload_digest=digest,
+                )
+            return cycle
 
     async def set_cycle_target(
         self,
@@ -480,26 +729,65 @@ class SqlFactoryStore:
         revision: str | None,
         fingerprint: str | None,
         payload: dict[str, Any],
+        idempotency_key: str | None = None,
     ) -> FactoryEvidence:
+        if idempotency_key is not None and not idempotency_key.strip():
+            raise ValueError("evidence idempotency key must not be blank")
         safe_payload, digest = _canonical_payload(payload)
-        row = FactoryEvidence(
-            id=_new_id("fevidence"),
-            run_id=run_id,
-            cycle_id=cycle_id,
-            gate_id=gate_id,
-            kind=kind,
-            source=source,
-            authority=authority.value,
-            revision=revision,
-            fingerprint=fingerprint,
-            digest=digest,
-            payload=safe_payload,
-            created_at=_now_ms(),
-        )
         async with self._session_factory() as db:
+            if idempotency_key is not None:
+                existing = (
+                    await db.execute(
+                        select(FactoryEvidence).where(
+                            FactoryEvidence.run_id == run_id,
+                            FactoryEvidence.idempotency_key == idempotency_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    identity = (
+                        existing.cycle_id,
+                        existing.gate_id,
+                        existing.kind,
+                        existing.source,
+                        existing.authority,
+                        existing.revision,
+                        existing.fingerprint,
+                        existing.digest,
+                    )
+                    requested = (
+                        cycle_id,
+                        gate_id,
+                        kind,
+                        source,
+                        authority.value,
+                        revision,
+                        fingerprint,
+                        digest,
+                    )
+                    if identity != requested:
+                        raise FactoryIdempotencyConflict(
+                            "evidence idempotency key was replayed with different evidence"
+                        )
+                    return existing
+            row = FactoryEvidence(
+                id=_new_id("fevidence"),
+                run_id=run_id,
+                cycle_id=cycle_id,
+                gate_id=gate_id,
+                kind=kind,
+                source=source,
+                authority=authority.value,
+                revision=revision,
+                fingerprint=fingerprint,
+                digest=digest,
+                payload=safe_payload,
+                idempotency_key=idempotency_key,
+                created_at=_now_ms(),
+            )
             db.add(row)
             await db.commit()
-        return row
+            return row
 
     async def list_evidence(self, run_id: str, *, limit: int = 100) -> list[FactoryEvidence]:
         limit = max(1, min(int(limit), 500))
@@ -527,29 +815,74 @@ class SqlFactoryStore:
         evaluated_fingerprint: str | None,
         reason: str | None,
         attempt: int,
+        idempotency_key: str | None = None,
     ) -> FactoryGateResult:
+        if idempotency_key is not None and not idempotency_key.strip():
+            raise ValueError("gate idempotency key must not be blank")
         now = _now_ms()
-        row = FactoryGateResult(
-            id=_new_id("fgate"),
-            run_id=run_id,
-            cycle_id=cycle_id,
-            gate_id=gate_id,
-            category=category,
-            required=required,
-            applicable=applicable,
-            status=status,
-            evidence_ids=list(evidence_ids),
-            evaluated_revision=evaluated_revision,
-            evaluated_fingerprint=evaluated_fingerprint,
-            reason=reason,
-            attempt=attempt,
-            created_at=now,
-            updated_at=now,
-        )
         async with self._session_factory() as db:
+            if idempotency_key is not None:
+                existing = (
+                    await db.execute(
+                        select(FactoryGateResult).where(
+                            FactoryGateResult.run_id == run_id,
+                            FactoryGateResult.idempotency_key == idempotency_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if existing is not None:
+                    identity = (
+                        existing.cycle_id,
+                        existing.gate_id,
+                        existing.category,
+                        bool(existing.required),
+                        bool(existing.applicable),
+                        existing.status,
+                        list(existing.evidence_ids or []),
+                        existing.evaluated_revision,
+                        existing.evaluated_fingerprint,
+                        existing.reason,
+                        int(existing.attempt),
+                    )
+                    requested = (
+                        cycle_id,
+                        gate_id,
+                        category,
+                        bool(required),
+                        bool(applicable),
+                        status,
+                        list(evidence_ids),
+                        evaluated_revision,
+                        evaluated_fingerprint,
+                        reason,
+                        int(attempt),
+                    )
+                    if identity != requested:
+                        raise FactoryIdempotencyConflict(
+                            "gate idempotency key was replayed with different gate evidence"
+                        )
+                    return existing
+            row = FactoryGateResult(
+                id=_new_id("fgate"),
+                run_id=run_id,
+                cycle_id=cycle_id,
+                gate_id=gate_id,
+                category=category,
+                required=required,
+                applicable=applicable,
+                status=status,
+                evidence_ids=list(evidence_ids),
+                evaluated_revision=evaluated_revision,
+                evaluated_fingerprint=evaluated_fingerprint,
+                reason=reason,
+                attempt=attempt,
+                idempotency_key=idempotency_key,
+                created_at=now,
+                updated_at=now,
+            )
             db.add(row)
             await db.commit()
-        return row
+            return row
 
     async def list_gates(
         self,
@@ -589,6 +922,30 @@ class SqlFactoryStore:
                 .limit(limit)
             )
             return list(rows.scalars().all())
+
+    async def latest_state_entry(
+        self,
+        run_id: str,
+        *,
+        cycle_id: str,
+        state: FactoryState,
+    ) -> FactoryEvent | None:
+        async with self._session_factory() as db:
+            return (
+                await db.execute(
+                    select(FactoryEvent)
+                    .where(
+                        FactoryEvent.run_id == run_id,
+                        FactoryEvent.cycle_id == cycle_id,
+                        FactoryEvent.to_state == state.value,
+                        FactoryEvent.event_type.in_(
+                            ("state.transition", "victory.authorized", "cycle.created")
+                        ),
+                    )
+                    .order_by(FactoryEvent.sequence.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
 
     async def claim_run(
         self,

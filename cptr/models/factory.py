@@ -55,6 +55,7 @@ class FactoryCycle(Base):
     selected_finding = Column(JSON, nullable=True)
     capability_requirements = Column(JSON, nullable=False, default=list)
     selected_capabilities = Column(JSON, nullable=False, default=list)
+    gate_plan = Column(JSON, nullable=False, default=dict)
     base_revision = Column(Text, nullable=True)
     base_fingerprint = Column(Text, nullable=True)
     target_revision = Column(Text, nullable=True)
@@ -111,9 +112,15 @@ class FactoryEvidence(Base):
     fingerprint = Column(Text, nullable=True)
     digest = Column(Text, nullable=False)
     payload = Column(JSON, nullable=False, default=dict)
+    idempotency_key = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=False)
 
     __table_args__ = (
+        UniqueConstraint(
+            "run_id",
+            "idempotency_key",
+            name="uq_factory_evidence_run_idempotency",
+        ),
         Index("ix_factory_evidence_run_created", "run_id", "created_at"),
         Index("ix_factory_evidence_cycle_gate", "cycle_id", "gate_id"),
     )
@@ -174,6 +181,7 @@ class FactoryGateResult(Base):
     evaluated_fingerprint = Column(Text, nullable=True)
     reason = Column(Text, nullable=True)
     attempt = Column(BigInteger, nullable=False, default=1)
+    idempotency_key = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=False)
 
@@ -183,6 +191,11 @@ class FactoryGateResult(Base):
             "gate_id",
             "attempt",
             name="uq_factory_gate_cycle_gate_attempt",
+        ),
+        UniqueConstraint(
+            "run_id",
+            "idempotency_key",
+            name="uq_factory_gate_run_idempotency",
         ),
         Index("ix_factory_gate_run_cycle", "run_id", "cycle_id"),
         Index("ix_factory_gate_cycle_gate", "cycle_id", "gate_id"),

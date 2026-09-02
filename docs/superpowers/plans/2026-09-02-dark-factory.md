@@ -308,10 +308,10 @@
 - `FactoryOrchestrator.run_once(run_id) -> FactoryRunRecord` executes at most one resumable state action under a run lease.
 - Each state handler consumes persisted inputs/evidence and produces a bounded `PhaseOutcome` with requested transition and durable artifacts.
 
-- [ ] RED-test the complete state progression with fake deterministic providers.
-- [ ] RED-test gate failure -> persisted evidence -> normalized failure -> Debugger/repair -> targeted verify -> full verify.
-- [ ] RED-test repeated failure triggering capability rediscovery rather than blind reruns.
-- [ ] Implement phase handlers incrementally with no monolithic prompt containing the whole factory loop.
+- [x] RED-test the complete state progression with fake deterministic providers.
+- [x] RED-test gate failure -> persisted evidence -> normalized failure -> Debugger/repair -> targeted verify -> full verify.
+- [x] RED-test repeated failure triggering capability rediscovery rather than blind reruns.
+- [x] Implement phase handlers incrementally with no monolithic prompt containing the whole factory loop.
 
 ### Task 16: Git/commit/push/CI lifecycle
 
@@ -325,8 +325,10 @@
 - Push uses existing Git/network policy + approval.
 - CI state persists provider/check/run identity and exits early on failure.
 
-- [ ] RED-test duplicate commit recovery, stale verified revision, push approval, CI failure diagnosis-before-rerun policy, and changed revision invalidating previous CI PASS.
-- [ ] Implement bounded provider polling/event handling without sleep-based correctness assumptions.
+- [x] RED-test duplicate commit recovery, stale verified revision, push approval, CI failure diagnosis-before-rerun policy, and changed revision invalidating previous CI PASS.
+- [x] Implement bounded provider polling/event handling without sleep-based correctness assumptions.
+
+**Phase 7 verification (2026-09-03):** 22/22 focused Phase 7 tests, 153/153 Dark Factory/recovery regression tests, and 431/431 full repository tests passed. Migration `0022 -> 0023 -> 0022 -> 0023`, Ruff, `git diff --check`, and changed-line credential scanning also passed. Repair budgets fail closed to `BLOCKED`, crash replay is idempotent, multi-cycle advancement is atomic, and CI uses one durable provider observation per orchestrator action with no sleep-loop correctness dependency.
 
 ---
 
