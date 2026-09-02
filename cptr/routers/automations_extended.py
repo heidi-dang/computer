@@ -8,7 +8,7 @@ GET  /api/automations/upcoming                        – list next scheduled tr
 from __future__ import annotations
 
 import logging
-from typing import Literal, Optional
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -64,7 +64,8 @@ async def get_run_detail(request: Request, automation_id: str, run_id: str):
     chat_output = None
     if run.chat_id:
         try:
-            from cptr.models import Chat, ChatMessage
+            from cptr.models import ChatMessage
+
             messages = await ChatMessage.get_all_by_chat(run.chat_id)
             chat_output = [
                 {
@@ -145,13 +146,15 @@ async def list_upcoming_runs(
             next_runs = next_n_runs_ns(a.rrule, n=limit)
         except Exception:
             next_runs = []
-        result.append({
-            "id": a.id,
-            "name": a.name,
-            "workspace": a.workspace,
-            "rrule": a.rrule,
-            "next_runs": next_runs,
-        })
+        result.append(
+            {
+                "id": a.id,
+                "name": a.name,
+                "workspace": a.workspace,
+                "rrule": a.rrule,
+                "next_runs": next_runs,
+            }
+        )
     # Sort by nearest upcoming run
     result.sort(key=lambda x: x["next_runs"][0] if x["next_runs"] else float("inf"))
     return {"automations": result, "count": len(result)}

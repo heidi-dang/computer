@@ -10,7 +10,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import secrets
-import time
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -20,7 +19,6 @@ from cptr.routers.admin import require_admin
 from cptr.services.api_keys import (
     list_api_keys,
     save_api_keys,
-    clear_api_key_cache,
 )
 
 log = logging.getLogger(__name__)

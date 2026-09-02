@@ -18,7 +18,6 @@ from pydantic import BaseModel
 
 from cptr.utils.config import AuthResult, check_access
 from cptr.utils.memory import (
-    list_memory_files_state,
     read_memory_file_state,
     remember,
 )
@@ -68,7 +67,6 @@ async def clear_all_memory(
     user_id = _get_user(request)
     from cptr.utils.memory import _user_memory_root, _workspace_memory_root
     import shutil
-    from pathlib import Path
 
     cleared = []
     errors = []
@@ -79,7 +77,9 @@ async def clear_all_memory(
                 memory_path = _user_memory_root(user_id)
             else:
                 if not workspace:
-                    errors.append({"scope": s, "error": "workspace path required for workspace scope"})
+                    errors.append(
+                        {"scope": s, "error": "workspace path required for workspace scope"}
+                    )
                     return
                 memory_path = _workspace_memory_root(user_id, workspace)
             if memory_path.exists():
@@ -135,7 +135,6 @@ async def delete_memory_entry(
     """Delete a specific memory file/entry."""
     user_id = _get_user(request)
     from cptr.utils.memory import _user_memory_root, _workspace_memory_root
-    from pathlib import Path
 
     try:
         if scope == "user":
@@ -151,6 +150,7 @@ async def delete_memory_entry(
         if target.exists():
             if target.is_dir():
                 import shutil
+
                 await asyncio.to_thread(shutil.rmtree, str(target))
             else:
                 await asyncio.to_thread(target.unlink)

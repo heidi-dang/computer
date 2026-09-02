@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import subprocess
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -57,6 +56,7 @@ async def exec_command(request: Request, body: ExecRequest):
     timeout = min(max(body.timeout or 30.0, 1.0), 300.0)  # cap at 5 min
 
     import os
+
     env = {**os.environ, **(body.env or {})}
 
     try:
@@ -68,9 +68,7 @@ async def exec_command(request: Request, body: ExecRequest):
             env=env,
         )
         try:
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout
-            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             timed_out = False
         except asyncio.TimeoutError:
             proc.kill()

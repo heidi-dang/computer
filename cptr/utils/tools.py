@@ -12,6 +12,7 @@ never exposed to the LLM — they carry injected execution context:
 from __future__ import annotations
 
 import asyncio
+import codecs
 import inspect
 import json
 import mimetypes
@@ -112,11 +113,19 @@ def _compose_preexec(preexec_fn=None):
     return combined
 
 
-def _spawn_pty(command: str, cwd: str, env: dict, preexec_fn=None) -> tuple:
+def _spawn_pty(
+    command: str,
+    cwd: str,
+    env: dict,
+    preexec_fn=None,
+    *,
+    rows: int = 24,
+    cols: int = 80,
+) -> tuple:
     """Spawn a shell command under a PTY (Unix only). Returns (proc, master_fd)."""
     master_fd, slave_fd = pty.openpty()
     try:
-        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         proc = subprocess.Popen(
             command,
             shell=True,
@@ -136,11 +145,19 @@ def _spawn_pty(command: str, cwd: str, env: dict, preexec_fn=None) -> tuple:
     return proc, master_fd
 
 
-def _spawn_pty_argv(argv: list[str], cwd: str, env: dict, preexec_fn=None) -> tuple:
+def _spawn_pty_argv(
+    argv: list[str],
+    cwd: str,
+    env: dict,
+    preexec_fn=None,
+    *,
+    rows: int = 24,
+    cols: int = 80,
+) -> tuple:
     """Spawn an argv command under a PTY without invoking a local shell."""
     master_fd, slave_fd = pty.openpty()
     try:
-        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         proc = subprocess.Popen(
             argv,
             shell=False,
@@ -161,11 +178,16 @@ def _spawn_pty_argv(argv: list[str], cwd: str, env: dict, preexec_fn=None) -> tu
 
 
 def _kill_process_group(pid: int, force: bool = False) -> None:
-    """Send signal to the child's entire process group.
-
-    SIGTERM for graceful shutdown (default), SIGKILL for force.
-    Falls back to signalling just the leader if the group is gone.
-    """
+    """Terminate the entire child process tree on Unix and Windows."""
+    if os.name == "nt":
+        argv = ["taskkill", "/PID", str(pid), "/T"]
+        if force:
+            argv.append("/F")
+        try:
+            subprocess.run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        except OSError:
+            pass
+        return
     sig = signal.SIGKILL if force else signal.SIGTERM
     try:
         os.killpg(pid, sig)
@@ -287,7 +309,13 @@ async def _publish_command_session_event(
 
 
 async def _command_event_writer(command_session_id: str) -> None:
-    """Coalesce terminal bytes and persist live events independently of PTY reads."""
+    """Coalesce stream-tagged terminal bytes without blocking the PTY read loop.
+
+    A bounded secondary overflow buffer absorbs short producer bursts when the
+    persistence queue is full. It is drained only after older queued items so
+    output ordering remains stable. Truly excessive output is still bounded and
+    reported through ``terminal_event_dropped_bytes`` instead of growing memory.
+    """
     session = command_sessions.get(command_session_id)
     if not session:
         return
@@ -295,25 +323,72 @@ async def _command_event_writer(command_session_id: str) -> None:
     if not isinstance(queue, asyncio.Queue):
         return
     terminal = bytearray()
+    terminal_stream = "stdout"
     flush_seconds = TERMINAL_EVENT_FLUSH_INTERVAL_MS / 1000.0
+    from cptr.services.live_events import TerminalStreamSanitizer
+
+    decoders: dict[str, Any] = {}
+    sanitizers: dict[str, TerminalStreamSanitizer] = {}
+    finalized_streams: set[str] = set()
+
+    def stream_state(stream: str) -> tuple[Any, TerminalStreamSanitizer]:
+        if stream not in decoders:
+            decoders[stream] = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            sanitizers[stream] = TerminalStreamSanitizer()
+        return decoders[stream], sanitizers[stream]
+
+    async def publish_terminal_text(stream: str, text: str) -> None:
+        if not text:
+            return
+        await _publish_command_session_event(
+            session,
+            "terminal.chunk",
+            {
+                "command_id": command_session_id,
+                "stream": stream,
+                "text": text,
+            },
+        )
+        session["terminal_events_published"] = (
+            int(session.get("terminal_events_published") or 0) + 1
+        )
 
     async def flush_terminal(*, force: bool = False) -> None:
         while terminal and (force or len(terminal) >= TERMINAL_EVENT_COALESCE_BYTES):
             chunk_size = min(len(terminal), TERMINAL_EVENT_COALESCE_BYTES)
             payload = bytes(terminal[:chunk_size])
             del terminal[:chunk_size]
-            await _publish_command_session_event(
-                session,
-                "terminal.chunk",
-                {
-                    "command_id": command_session_id,
-                    "stream": "stdout",
-                    "text": payload.decode(errors="replace"),
-                },
-            )
-            session["terminal_events_published"] = (
-                int(session.get("terminal_events_published") or 0) + 1
-            )
+            decoder, sanitizer = stream_state(terminal_stream)
+            decoded = decoder.decode(payload, final=False)
+            await publish_terminal_text(terminal_stream, sanitizer.feed(decoded))
+
+    async def finalize_terminal_streams() -> None:
+        for stream in list(decoders):
+            if stream in finalized_streams:
+                continue
+            decoder, sanitizer = stream_state(stream)
+            decoded = decoder.decode(b"", final=True)
+            await publish_terminal_text(stream, sanitizer.feed(decoded, final=True))
+            finalized_streams.add(stream)
+
+    async def absorb(stream: str, payload: bytes) -> None:
+        nonlocal terminal_stream
+        if terminal and stream != terminal_stream:
+            await flush_terminal(force=True)
+        terminal_stream = stream
+        terminal.extend(payload)
+        if len(terminal) >= TERMINAL_EVENT_COALESCE_BYTES:
+            await flush_terminal()
+
+    async def drain_overflow() -> None:
+        overflow = session.get("terminal_event_overflow")
+        if not isinstance(overflow, list) or not overflow:
+            return
+        items = list(overflow)
+        overflow.clear()
+        session["terminal_event_overflow_bytes"] = 0
+        for stream, payload in items:
+            await absorb(str(stream), bytes(payload))
 
     while True:
         item = None
@@ -323,22 +398,34 @@ async def _command_event_writer(command_session_id: str) -> None:
             else:
                 item = await queue.get()
         except asyncio.TimeoutError:
+            if queue.empty():
+                await drain_overflow()
             await flush_terminal(force=True)
             continue
 
         if item is _STOP_SESSION_WRITER:
             queue.task_done()
+            await drain_overflow()
             await flush_terminal(force=True)
+            await finalize_terminal_streams()
             return
-        event_type, payload = item
+        event_type, payload = item[0], item[1:]
         queue.task_done()
         if event_type == "terminal.bytes":
-            terminal.extend(payload)
-            if len(terminal) >= TERMINAL_EVENT_COALESCE_BYTES:
-                await flush_terminal()
+            if len(payload) == 1:
+                stream, chunk = "stdout", payload[0]
+            else:
+                stream, chunk = payload[0], payload[1]
+            await absorb(str(stream), bytes(chunk))
+            if queue.empty():
+                await drain_overflow()
             continue
+        if queue.empty():
+            await drain_overflow()
         await flush_terminal(force=True)
-        await _publish_command_session_event(session, event_type, payload)
+        if event_type == "command.completed":
+            await finalize_terminal_streams()
+        await _publish_command_session_event(session, event_type, payload[0])
 
 
 async def _queue_command_session_event(
@@ -349,16 +436,36 @@ async def _queue_command_session_event(
         await queue.put((event_type, payload))
 
 
-def _queue_command_terminal_bytes(session: dict[str, Any] | None, chunk: bytes) -> None:
+def _queue_command_terminal_bytes(
+    session: dict[str, Any] | None,
+    chunk: bytes,
+    *,
+    stream: str = "stdout",
+) -> None:
     queue = session.get("event_queue") if session else None
-    if not isinstance(queue, asyncio.Queue):
+    if not isinstance(queue, asyncio.Queue) or not session:
         return
+    session["terminal_event_queue_high_water"] = max(
+        int(session.get("terminal_event_queue_high_water") or 0), queue.qsize()
+    )
+    payload = bytes(chunk)
     try:
-        queue.put_nowait(("terminal.bytes", bytes(chunk)))
+        queue.put_nowait(("terminal.bytes", stream, payload))
+        session["terminal_event_queue_high_water"] = max(
+            int(session.get("terminal_event_queue_high_water") or 0), queue.qsize()
+        )
     except asyncio.QueueFull:
-        session["terminal_event_dropped_bytes"] = int(
-            session.get("terminal_event_dropped_bytes") or 0
-        ) + len(chunk)
+        overflow = session.setdefault("terminal_event_overflow", [])
+        overflow.append((stream, payload))
+        overflow_bytes = int(session.get("terminal_event_overflow_bytes") or 0) + len(payload)
+        overflow_cap = max(COMMAND_OUTPUT_BUFFER_BYTES, TERMINAL_EVENT_COALESCE_BYTES * 4)
+        while overflow and overflow_bytes > overflow_cap:
+            _, removed = overflow.pop(0)
+            overflow_bytes -= len(removed)
+            session["terminal_event_dropped_bytes"] = int(
+                session.get("terminal_event_dropped_bytes") or 0
+            ) + len(removed)
+        session["terminal_event_overflow_bytes"] = overflow_bytes
 
 
 async def stream_command_session_output(command_session_id: str):
@@ -380,14 +487,40 @@ async def stream_command_session_output(command_session_id: str):
                     "command": session["command"],
                     "pid": proc.pid,
                     "ts": time.time(),
+                    "pty": bool(session.get("pty")),
+                    "rows": int(session.get("rows") or 24),
+                    "cols": int(session.get("cols") or 80),
                 }
             )
             + "\n"
         )
 
+    async def record_chunk(stream: str, chunk: bytes) -> None:
+        current = command_sessions.get(command_session_id)
+        if current:
+            current["output"].extend(chunk)
+            current["total_bytes"] += len(chunk)
+            if len(current["output"]) > COMMAND_OUTPUT_BUFFER_BYTES:
+                current["output"] = current["output"][-COMMAND_OUTPUT_BUFFER_BYTES:]
+            async with current["condition"]:
+                current["condition"].notify_all()
+            _queue_command_terminal_bytes(current, chunk, stream=stream)
+        if isinstance(log_queue, asyncio.Queue):
+            await log_queue.put(
+                json.dumps(
+                    {
+                        "type": "output",
+                        "stream": stream,
+                        "data": chunk.decode(errors="replace"),
+                        "ts": time.time(),
+                    }
+                )
+                + "\n"
+            )
+
     try:
-        while True:
-            if master_fd is not None:
+        if master_fd is not None:
+            while True:
                 try:
                     chunk = await loop.run_in_executor(
                         None, os.read, master_fd, COMMAND_READ_CHUNK_BYTES
@@ -396,32 +529,33 @@ async def stream_command_session_output(command_session_id: str):
                         break
                 except OSError:
                     break
-            else:
-                chunk = await proc.stdout.read(COMMAND_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
+                await record_chunk("stdout", chunk)
+        else:
+            capture_queue: asyncio.Queue[tuple[str, bytes | None]] = asyncio.Queue(maxsize=32)
 
-            session = command_sessions.get(command_session_id)
-            if session:
-                session["output"].extend(chunk)
-                session["total_bytes"] += len(chunk)
-                if len(session["output"]) > COMMAND_OUTPUT_BUFFER_BYTES:
-                    session["output"] = session["output"][-COMMAND_OUTPUT_BUFFER_BYTES:]
-                async with session["condition"]:
-                    session["condition"].notify_all()
-                _queue_command_terminal_bytes(session, chunk)
+            async def pump(reader, stream: str) -> None:
+                if reader is None:
+                    await capture_queue.put((stream, None))
+                    return
+                while True:
+                    chunk = await reader.read(COMMAND_READ_CHUNK_BYTES)
+                    if not chunk:
+                        await capture_queue.put((stream, None))
+                        return
+                    await capture_queue.put((stream, chunk))
 
-            if isinstance(log_queue, asyncio.Queue):
-                await log_queue.put(
-                    json.dumps(
-                        {
-                            "type": "output",
-                            "data": chunk.decode(errors="replace"),
-                            "ts": time.time(),
-                        }
-                    )
-                    + "\n"
-                )
+            pumps = [
+                asyncio.create_task(pump(proc.stdout, "stdout")),
+                asyncio.create_task(pump(proc.stderr, "stderr")),
+            ]
+            completed_streams = 0
+            while completed_streams < len(pumps):
+                stream, chunk = await capture_queue.get()
+                if chunk is None:
+                    completed_streams += 1
+                else:
+                    await record_chunk(stream, chunk)
+            await asyncio.gather(*pumps, return_exceptions=True)
     except Exception:
         # Process completion below remains authoritative even if capture fails.
         pass
@@ -452,6 +586,9 @@ async def stream_command_session_output(command_session_id: str):
                     "status": "COMPLETE" if exit_code == 0 else "FAILED",
                     "exit_code": exit_code,
                     "dropped_live_bytes": int(session.get("terminal_event_dropped_bytes") or 0),
+                    "event_queue_high_water": int(
+                        session.get("terminal_event_queue_high_water") or 0
+                    ),
                 },
             )
 
@@ -681,20 +818,59 @@ def resize_command_session(request, command_session_id: str, rows: int, cols: in
     try:
         winsize = struct.pack("HHHH", rows, cols, 0, 0)
         fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+        session["rows"] = rows
+        session["cols"] = cols
     except OSError:
         pass
 
 
-def stop_command_session(
-    request, command_session_id: str, force: bool = False, **scope
+def signal_command_session(
+    request,
+    command_session_id: str,
+    signal_name: str,
+    **scope,
 ) -> str | None:
     session = get_command_session(request, command_session_id, **scope)
     if not session:
         return "command session not found"
     if session.get("done"):
+        return "command session already exited"
+    normalized = signal_name.lower()
+    if normalized == "interrupt":
+        master_fd = session.get("master_fd")
+        if master_fd is not None:
+            try:
+                os.write(master_fd, b"\x03")
+                return None
+            except OSError:
+                return "PTY closed"
+        proc = session["proc"]
+        try:
+            if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
+                proc.send_signal(signal.CTRL_BREAK_EVENT)
+            else:
+                os.killpg(proc.pid, signal.SIGINT)
+            return None
+        except (ProcessLookupError, PermissionError, OSError):
+            return "process is not available"
+    if normalized == "terminate":
+        _kill_process_group(session["proc"].pid, force=False)
         return None
-    _kill_process_group(session["proc"].pid, force=force)
-    return None
+    if normalized == "kill":
+        _kill_process_group(session["proc"].pid, force=True)
+        return None
+    return "unsupported signal"
+
+
+def stop_command_session(
+    request, command_session_id: str, force: bool = False, **scope
+) -> str | None:
+    return signal_command_session(
+        request,
+        command_session_id,
+        "kill" if force else "terminate",
+        **scope,
+    )
 
 
 def start_command_session_manager() -> None:
@@ -1694,6 +1870,9 @@ async def run_command(
     __context__: dict,
     __argv: list[str] | None = None,
     __use_pty: bool = True,
+    __rows: int = 24,
+    __cols: int = 80,
+    __stdin: str | None = None,
 ) -> str:
     """Run a shell command. Returns a task_id for status checks and input.
     :param command: The shell command to execute.
@@ -1730,20 +1909,27 @@ async def run_command(
     try:
         if _PTY_AVAILABLE and __use_pty:
             if __argv is None:
-                proc, master_fd = _spawn_pty(command, str(work_dir), env, preexec)
+                proc, master_fd = _spawn_pty(
+                    command, str(work_dir), env, preexec, rows=__rows, cols=__cols
+                )
             else:
-                proc, master_fd = _spawn_pty_argv(__argv, str(work_dir), env, preexec)
+                proc, master_fd = _spawn_pty_argv(
+                    __argv, str(work_dir), env, preexec, rows=__rows, cols=__cols
+                )
         else:
             # Keep the fallback subprocess in its own process group so task
             # cancellation cannot signal the CPTR parent or another task.
-            kwargs = {"start_new_session": True}
-            if preexec is not None:
-                kwargs["preexec_fn"] = preexec
+            if os.name == "nt":
+                kwargs = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+            else:
+                kwargs = {"start_new_session": True}
+                if preexec is not None:
+                    kwargs["preexec_fn"] = preexec
             if __argv is None:
                 proc = await asyncio.create_subprocess_shell(
                     command,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
+                    stderr=asyncio.subprocess.PIPE,
                     stdin=asyncio.subprocess.PIPE,
                     cwd=str(work_dir),
                     env=env,
@@ -1753,7 +1939,7 @@ async def run_command(
                 proc = await asyncio.create_subprocess_exec(
                     *__argv,
                     stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
+                    stderr=asyncio.subprocess.PIPE,
                     stdin=asyncio.subprocess.PIPE,
                     cwd=str(work_dir),
                     env=env,
@@ -1820,8 +2006,26 @@ async def run_command(
         "event_writer_task": None,
         "terminal_events_published": 0,
         "terminal_event_dropped_bytes": 0,
+        "terminal_event_overflow": [],
+        "terminal_event_overflow_bytes": 0,
+        "terminal_event_queue_high_water": 0,
+        "pty": bool(master_fd is not None),
+        "rows": __rows,
+        "cols": __cols,
     }
     command_session_registry.register(command_session_id, session)
+    if __stdin:
+        input_error = send_command_session_input(
+            request,
+            command_session_id,
+            __stdin.encode("utf-8"),
+            context=__context__,
+        )
+        if input_error:
+            stop_command_session(request, command_session_id, force=True, context=__context__)
+            command_session_registry.remove(command_session_id)
+            return f"Error: {input_error}"
+        await drain_command_session_input(request, command_session_id, context=__context__)
     session["log_writer_task"] = asyncio.create_task(
         _command_log_writer(command_session_id), name=f"cptr-command-log-{command_session_id}"
     )

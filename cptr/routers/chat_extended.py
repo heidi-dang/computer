@@ -14,9 +14,8 @@ GET    /api/chats/{chat_id}/attachments                 – list all file attach
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Literal, Optional
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -292,9 +291,11 @@ async def list_attachments(request: Request, chat_id: str):
                 fid = f.get("id") or f.get("name") or ""
                 if fid and fid not in seen:
                     seen.add(fid)
-                    attachments.append({
-                        "message_id": m.id,
-                        "role": m.role,
-                        **f,
-                    })
+                    attachments.append(
+                        {
+                            "message_id": m.id,
+                            "role": m.role,
+                            **f,
+                        }
+                    )
     return {"chat_id": chat_id, "attachments": attachments, "count": len(attachments)}

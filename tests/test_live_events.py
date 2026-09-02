@@ -1,6 +1,11 @@
 import unittest
 
-from cptr.services.live_events import LiveEventHub, LiveEventStore
+from cptr.services.live_events import (
+    LiveEventHub,
+    LiveEventStore,
+    TerminalStreamSanitizer,
+    sanitize_terminal_text,
+)
 
 
 class LiveEventTests(unittest.IsolatedAsyncioTestCase):
@@ -52,7 +57,6 @@ class LiveEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.sequence for item in replay], [2])
         self.assertEqual(replay[0].event_type, "task.completed")
 
-
     async def test_terminal_output_is_redacted_and_control_sequences_are_removed(self):
         store = LiveEventStore(max_payload_chars=8_000)
         event = await store.append(
@@ -73,6 +77,20 @@ class LiveEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("\\x1b", text)
         self.assertNotIn("/home/user/private.txt", text)
         self.assertIn("<workspace-path>", text)
+
+    def test_terminal_stream_sanitizer_preserves_safe_sgr_across_chunk_boundaries(self):
+        sanitizer = TerminalStreamSanitizer()
+        first = sanitizer.feed("prefix \x1b[31")
+        second = sanitizer.feed(";1mRED\x1b[0m suffix")
+        self.assertEqual(first, "prefix ")
+        self.assertEqual(second, "\x1b[31;1mRED\x1b[0m suffix")
+        self.assertEqual(sanitizer.feed("", final=True), "")
+
+    def test_terminal_stream_sanitizer_normalizes_progress_backspace_and_dangerous_controls(self):
+        sanitizer = TerminalStreamSanitizer()
+        text = sanitizer.feed("next\b!\rprogress\x1b]52;c;clipboard\x07\x1b[2Jdone", final=True)
+        self.assertEqual(text, "nex!\nprogressdone")
+        self.assertEqual(sanitize_terminal_text("\x1b[32mgreen\x1b[0m"), "\x1b[32mgreen\x1b[0m")
 
     async def test_snapshot_replays_only_events_after_cursor(self):
         store = LiveEventStore()

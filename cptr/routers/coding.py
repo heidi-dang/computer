@@ -13,6 +13,7 @@ import hashlib
 import difflib
 import ipaddress
 import json
+import os
 import re
 import shlex
 import shutil
@@ -34,15 +35,26 @@ from cptr.services.direct_coding_workers import (
     service as direct_worker_service,
 )
 from cptr.services.fdx_intelligence import service as fdx_intelligence_service
+from cptr.services.lsp_manager import LspError, lsp_manager
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.utils.db import get_db
-from cptr.utils.identity import IdentityUnavailable, env_for, expand_user_path, identity_for_context
+from cptr.utils.identity import (
+    IdentityUnavailable,
+    env_for,
+    expand_user_path,
+    identity_for_context,
+    preexec_for,
+)
 from cptr.utils.runtime import FileError, Runtime
 from cptr.utils.tools import (
     command_session_bytes_since,
+    drain_command_session_input,
     get_command_session,
+    resize_command_session,
     run_command,
     search_files,
+    send_command_session_input,
+    signal_command_session,
     stop_command_session,
 )
 
@@ -137,7 +149,40 @@ class CommandRequest(WorkerTargetRequest):
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=30, ge=0, le=60)
     allow_network: bool = False
+    pty: bool = False
+    rows: int = Field(default=24, ge=5, le=300)
+    cols: int = Field(default=80, ge=20, le=500)
+    stdin: str | None = Field(default=None, max_length=65_536)
     idempotency_key: str | None = Field(default=None, max_length=200)
+
+
+class CommandInputRequest(WorkerTargetRequest):
+    data: str = Field(max_length=65_536)
+
+
+class CommandResizeRequest(WorkerTargetRequest):
+    rows: int = Field(ge=5, le=300)
+    cols: int = Field(ge=20, le=500)
+
+
+class CommandSignalRequest(WorkerTargetRequest):
+    signal: Literal["interrupt", "terminate", "kill"]
+
+
+class LspStartRequest(WorkerTargetRequest):
+    server_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-z0-9][a-z0-9._-]{0,63}$")
+    root: str = Field(default=".", min_length=1, max_length=1_000)
+
+
+class LspRequest(WorkerTargetRequest):
+    lsp_id: str = Field(min_length=1, max_length=80)
+    method: str = Field(min_length=1, max_length=256)
+    params: Any = None
+    timeout_seconds: float = Field(default=15.0, ge=0.1, le=60.0)
+
+
+class LspStopRequest(WorkerTargetRequest):
+    lsp_id: str = Field(min_length=1, max_length=80)
 
 
 class WorkspaceInspectRequest(WorkerTargetRequest):
@@ -618,6 +663,77 @@ def _line_slice(content: str, start_line: int, end_line: int) -> tuple[str, int,
     return "".join(lines[start - 1 : end]), start, end, total
 
 
+async def _recovered_command_snapshot(
+    *,
+    workspace_path: str,
+    command_id: str,
+    offset: int = 0,
+    tail_bytes: int | None = None,
+) -> dict[str, Any] | None:
+    if re.fullmatch(r"[0-9a-f]{8}", command_id) is None:
+        return None
+    log_path = Path(workspace_path).resolve() / ".cptr" / "task_logs" / f"{command_id}.jsonl"
+    try:
+        raw_log = await asyncio.to_thread(log_path.read_text, encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    command = ""
+    created_at = 0.0
+    completed_at: float | None = None
+    exit_code: int | None = None
+    pty_mode = False
+    rows = 24
+    cols = 80
+    output = bytearray()
+    for line in raw_log.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        entry_type = str(entry.get("type") or "")
+        if entry_type == "start":
+            command = str(entry.get("command") or command)
+            created_at = float(entry.get("ts") or created_at or 0.0)
+            pty_mode = bool(entry.get("pty", pty_mode))
+            rows = int(entry.get("rows") or rows)
+            cols = int(entry.get("cols") or cols)
+        elif entry_type == "output":
+            output.extend(str(entry.get("data") or "").encode("utf-8", errors="replace"))
+        elif entry_type == "end":
+            value = entry.get("exit_code")
+            exit_code = int(value) if isinstance(value, int) else None
+            completed_at = float(entry.get("ts") or time.time())
+    total = len(output)
+    if tail_bytes is not None:
+        selected = bytes(output[-tail_bytes:] if tail_bytes else b"")
+    else:
+        selected = bytes(output[max(0, min(offset, total)) :])
+    decoded = selected.decode(errors="replace")
+    finished = completed_at is not None
+    return {
+        "command_id": command_id,
+        "status": "COMPLETE" if finished else "INTERRUPTED",
+        "exit_code": exit_code,
+        "output": _truncate(decoded),
+        "next_offset": total,
+        "duration_ms": max(
+            0,
+            int(
+                ((completed_at or time.time()) - (created_at or completed_at or time.time())) * 1000
+            ),
+        ),
+        "output_truncated": len(decoded) > MAX_COMMAND_OUTPUT_CHARS,
+        "timed_out": False,
+        "pty": pty_mode,
+        "rows": rows,
+        "cols": cols,
+        "recovered": True,
+        "command": command,
+    }
+
+
 async def _command_snapshot(
     request: Request,
     *,
@@ -629,6 +745,14 @@ async def _command_snapshot(
 ) -> dict[str, Any]:
     session = get_command_session(request, command_id)
     if session is None or session.get("workspace") != workspace_path:
+        recovered = await _recovered_command_snapshot(
+            workspace_path=workspace_path,
+            command_id=command_id,
+            offset=offset,
+            tail_bytes=tail_bytes,
+        )
+        if recovered is not None:
+            return recovered
         raise HTTPException(status_code=404, detail="command not found")
     waited_out = False
     if wait_seconds > 0 and not session.get("done"):
@@ -657,6 +781,10 @@ async def _command_snapshot(
         "duration_ms": max(0, int((time.time() - created_at) * 1000)),
         "output_truncated": output_truncated,
         "timed_out": waited_out,
+        "pty": bool(session.get("pty")),
+        "rows": int(session.get("rows") or 24),
+        "cols": int(session.get("cols") or 80),
+        "recovered": False,
     }
 
 
@@ -1102,7 +1230,11 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
     profiles: dict[str, list[str]] = {
         "python_pytest": ["python", "-m", "pytest", *([test_relative] if test_relative else [])],
         "node_test": ["npm", "test", "--", *([test_relative] if test_relative else [])],
-        "node_vitest": ["./node_modules/.bin/vitest", "run", *([test_relative] if test_relative else [])],
+        "node_vitest": [
+            "./node_modules/.bin/vitest",
+            "run",
+            *([test_relative] if test_relative else []),
+        ],
         "node_build": ["npm", "run", "build"],
     }
     argv = profiles[body.target]
@@ -1413,7 +1545,9 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     data_files = list(batch.get("files") or [])
     if len(data_files) != len(body.files):
-        raise HTTPException(status_code=500, detail="bounded runtime read returned an incomplete batch")
+        raise HTTPException(
+            status_code=500, detail="bounded runtime read returned an incomplete batch"
+        )
 
     loaded = []
     for item, (_, relative), data in zip(body.files, resolved, data_files, strict=True):
@@ -1665,6 +1799,11 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
             status_code=403,
             detail="external commands require the command:external scope",
         )
+    run_options: dict[str, Any] = {}
+    if body.pty:
+        run_options.update({"__rows": body.rows, "__cols": body.cols})
+    if body.stdin is not None:
+        run_options["__stdin"] = body.stdin
     response = await run_command(
         body.command,
         relative_cwd,
@@ -1676,7 +1815,8 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
             workspace_path=str(root),
             worker_id=body.worker_id,
         ),
-        __use_pty=False,
+        __use_pty=body.pty,
+        **run_options,
     )
     match = re.match(r"^Task ([0-9a-f]{8}):", response)
     if match is None:
@@ -1748,6 +1888,159 @@ async def cancel_workspace_command(
         command_id=command_id,
         wait_seconds=2,
     )
+
+
+@router.post("/workspaces/{workspace_id}/coding/commands/{command_id}/input")
+async def send_workspace_command_input(
+    request: Request,
+    workspace_id: str,
+    command_id: str,
+    body: CommandInputRequest,
+):
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    session = get_command_session(request, command_id)
+    if session is None or session.get("workspace") != str(root):
+        raise HTTPException(status_code=404, detail="command not found")
+    error = send_command_session_input(request, command_id, body.data.encode("utf-8"))
+    if error:
+        raise HTTPException(status_code=409, detail=error)
+    await drain_command_session_input(request, command_id)
+    return await _command_snapshot(request, workspace_path=str(root), command_id=command_id)
+
+
+@router.post("/workspaces/{workspace_id}/coding/commands/{command_id}/resize")
+async def resize_workspace_command(
+    request: Request,
+    workspace_id: str,
+    command_id: str,
+    body: CommandResizeRequest,
+):
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    session = get_command_session(request, command_id)
+    if session is None or session.get("workspace") != str(root):
+        raise HTTPException(status_code=404, detail="command not found")
+    if session.get("master_fd") is None:
+        raise HTTPException(status_code=409, detail="command is not running in PTY mode")
+    resize_command_session(request, command_id, body.rows, body.cols)
+    return await _command_snapshot(request, workspace_path=str(root), command_id=command_id)
+
+
+@router.post("/workspaces/{workspace_id}/coding/commands/{command_id}/signal")
+async def signal_workspace_command(
+    request: Request,
+    workspace_id: str,
+    command_id: str,
+    body: CommandSignalRequest,
+):
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    session = get_command_session(request, command_id)
+    if session is None or session.get("workspace") != str(root):
+        raise HTTPException(status_code=404, detail="command not found")
+    error = signal_command_session(request, command_id, body.signal)
+    if error:
+        raise HTTPException(status_code=409, detail=error)
+    return await _command_snapshot(
+        request,
+        workspace_path=str(root),
+        command_id=command_id,
+        wait_seconds=2 if body.signal in {"terminate", "kill"} else 0,
+    )
+
+
+@router.post("/workspaces/{workspace_id}/coding/lsp/discover")
+async def discover_workspace_lsp(
+    request: Request,
+    workspace_id: str,
+    body: WorkerTargetRequest,
+):
+    user_id = await _user(request, "coding:read")
+    workspace = await _workspace(user_id, workspace_id)
+    await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    return {"workspace_id": workspace_id, **lsp_manager.discover()}
+
+
+@router.post("/workspaces/{workspace_id}/coding/lsp/start")
+async def start_workspace_lsp(
+    request: Request,
+    workspace_id: str,
+    body: LspStartRequest,
+):
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    lsp_root, relative_root = _relative_path(body.root, root)
+    context = _command_context(
+        request=request,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        workspace_path=str(root),
+        worker_id=body.worker_id,
+    )
+    try:
+        identity = await identity_for_context(context)
+        if identity.is_pam:
+            process_env = env_for(identity, lsp_root, {"PAGER": "cat", "GIT_PAGER": "cat"})
+            process_preexec = preexec_for(identity)
+        else:
+            process_env = {**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"}
+            process_preexec = None
+        result = await lsp_manager.start(
+            server_id=body.server_id,
+            root=lsp_root,
+            user_id=user_id,
+            env=process_env,
+            preexec_fn=process_preexec,
+        )
+    except (IdentityUnavailable, LspError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    result.update({"workspace_id": workspace_id, "root": relative_root})
+    return result
+
+
+@router.post("/workspaces/{workspace_id}/coding/lsp/request")
+async def request_workspace_lsp(
+    request: Request,
+    workspace_id: str,
+    body: LspRequest,
+):
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    try:
+        lsp_manager.validate_scope(lsp_id=body.lsp_id, user_id=user_id, workspace_root=root)
+        response = await lsp_manager.request(
+            lsp_id=body.lsp_id,
+            user_id=user_id,
+            method=body.method,
+            params=body.params,
+            timeout_seconds=body.timeout_seconds,
+        )
+    except LspError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"workspace_id": workspace_id, "lsp_id": body.lsp_id, "response": response}
+
+
+@router.post("/workspaces/{workspace_id}/coding/lsp/stop")
+async def stop_workspace_lsp(
+    request: Request,
+    workspace_id: str,
+    body: LspStopRequest,
+):
+    user_id = await _user(request, "command:execute")
+    workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    try:
+        lsp_manager.validate_scope(lsp_id=body.lsp_id, user_id=user_id, workspace_root=root)
+        result = await lsp_manager.stop(lsp_id=body.lsp_id, user_id=user_id)
+    except LspError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"workspace_id": workspace_id, **result}
 
 
 @router.post("/workspaces/{workspace_id}/browser")

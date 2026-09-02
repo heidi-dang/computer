@@ -28,17 +28,114 @@ MAX_TERMINAL_CHUNK_CHARS = 8_192
 MAX_REPLAY_EVENTS = 500
 logger = logging.getLogger(__name__)
 
-_OSC_ESCAPE_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
-_CSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-_UNSAFE_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_SAFE_SGR_RE = re.compile(r"^\x1b\[[0-9;]*m$")
 _STOP_WRITER = object()
+
+
+class TerminalStreamSanitizer:
+    """Incrementally normalize terminal text without leaking control traffic.
+
+    The ChatGPT Terminal UI intentionally presents a stable transcript rather
+    than emulating cursor motion. Safe SGR color/style sequences are retained
+    for syntax rendering, while OSC payloads and cursor/control CSI sequences
+    are discarded. Incomplete escape sequences are buffered across transport
+    chunk boundaries so fragments such as ``[31`` / ``m`` never leak into the
+    visible transcript.
+    """
+
+    def __init__(self) -> None:
+        self._pending_escape = ""
+
+    def feed(self, value: str, *, final: bool = False) -> str:
+        text = f"{self._pending_escape}{value}"
+        self._pending_escape = ""
+        output: list[tuple[str, str]] = []
+        index = 0
+
+        def append_char(char: str) -> None:
+            output.append(("char", char))
+
+        while index < len(text):
+            code = ord(text[index])
+            if code == 0x1B:
+                if index + 1 >= len(text):
+                    if not final:
+                        self._pending_escape = text[index:]
+                    break
+                kind = text[index + 1]
+                if kind == "[":
+                    end = index + 2
+                    while end < len(text):
+                        control = ord(text[end])
+                        if 0x40 <= control <= 0x7E:
+                            sequence = text[index : end + 1]
+                            if _SAFE_SGR_RE.fullmatch(sequence):
+                                output.append(("control", sequence))
+                            index = end + 1
+                            break
+                        end += 1
+                    else:
+                        if not final:
+                            self._pending_escape = text[index:]
+                        break
+                    continue
+                if kind == "]":
+                    end = index + 2
+                    terminated = False
+                    while end < len(text):
+                        if text[end] == "\x07":
+                            end += 1
+                            terminated = True
+                            break
+                        if text[end] == "\x1b" and end + 1 < len(text) and text[end + 1] == "\\":
+                            end += 2
+                            terminated = True
+                            break
+                        end += 1
+                    if not terminated:
+                        if not final:
+                            self._pending_escape = text[index:]
+                        break
+                    index = end
+                    continue
+                index += min(2, len(text) - index)
+                continue
+
+            if code == 0x08:
+                for reverse_index in range(len(output) - 1, -1, -1):
+                    token_type, token_value = output[reverse_index]
+                    if token_type == "control":
+                        continue
+                    if token_value == "\n":
+                        break
+                    del output[reverse_index]
+                    break
+                index += 1
+                continue
+
+            if code == 0x0D:
+                if index + 1 < len(text) and text[index + 1] == "\n":
+                    index += 1
+                append_char("\n")
+                index += 1
+                continue
+
+            if code < 0x20 and code not in {0x09, 0x0A}:
+                index += 1
+                continue
+            if code == 0x7F:
+                index += 1
+                continue
+
+            append_char(text[index])
+            index += 1
+
+        return "".join(value for _, value in output)
 
 
 def sanitize_terminal_text(value: str, *, limit: int = MAX_TERMINAL_CHUNK_CHARS) -> str:
     """Return redacted, display-safe terminal text with bounded output."""
-    text = _OSC_ESCAPE_RE.sub("", value)
-    text = _CSI_ESCAPE_RE.sub("", text)
-    text = _UNSAFE_CONTROL_RE.sub("", text)
+    text = TerminalStreamSanitizer().feed(value, final=True)
     text = redact_external(text)
     if len(text) > limit:
         return f"{text[:limit]}… [truncated]"

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import os
 import zipfile
 from pathlib import Path
 from typing import Optional
@@ -86,7 +85,12 @@ async def bulk_read_files(request: Request, body: BulkReadRequest):
     async def _read_one(path: str) -> dict:
         try:
             result = await Runtime.read_file(request, path)
-            return {"path": path, "content": result.get("content"), "binary": result.get("binary", False), "error": None}
+            return {
+                "path": path,
+                "content": result.get("content"),
+                "binary": result.get("binary", False),
+                "error": None,
+            }
         except FileError as exc:
             return {"path": path, "content": None, "error": str(exc)}
         except Exception as exc:
@@ -142,12 +146,14 @@ async def recent_files(
                 continue
             try:
                 stat = item.stat()
-                entries.append({
-                    "path": str(item),
-                    "name": item.name,
-                    "size": stat.st_size,
-                    "modified_at": int(stat.st_mtime * 1000),
-                })
+                entries.append(
+                    {
+                        "path": str(item),
+                        "name": item.name,
+                        "size": stat.st_size,
+                        "modified_at": int(stat.st_mtime * 1000),
+                    }
+                )
             except OSError:
                 continue
         entries.sort(key=lambda e: e["modified_at"], reverse=True)
@@ -194,14 +200,33 @@ async def workspace_stats(
 ):
     """Return workspace stats: disk usage, file count, language breakdown."""
     _LANGUAGE_MAP = {
-        ".py": "Python", ".js": "JavaScript", ".ts": "TypeScript",
-        ".tsx": "TypeScript", ".jsx": "JavaScript", ".rs": "Rust",
-        ".go": "Go", ".java": "Java", ".cpp": "C++", ".c": "C",
-        ".cs": "C#", ".rb": "Ruby", ".php": "PHP", ".swift": "Swift",
-        ".kt": "Kotlin", ".md": "Markdown", ".html": "HTML",
-        ".css": "CSS", ".scss": "CSS", ".json": "JSON", ".yaml": "YAML",
-        ".yml": "YAML", ".toml": "TOML", ".sh": "Shell", ".sql": "SQL",
-        ".vue": "Vue", ".svelte": "Svelte",
+        ".py": "Python",
+        ".js": "JavaScript",
+        ".ts": "TypeScript",
+        ".tsx": "TypeScript",
+        ".jsx": "JavaScript",
+        ".rs": "Rust",
+        ".go": "Go",
+        ".java": "Java",
+        ".cpp": "C++",
+        ".c": "C",
+        ".cs": "C#",
+        ".rb": "Ruby",
+        ".php": "PHP",
+        ".swift": "Swift",
+        ".kt": "Kotlin",
+        ".md": "Markdown",
+        ".html": "HTML",
+        ".css": "CSS",
+        ".scss": "CSS",
+        ".json": "JSON",
+        ".yaml": "YAML",
+        ".yml": "YAML",
+        ".toml": "TOML",
+        ".sh": "Shell",
+        ".sql": "SQL",
+        ".vue": "Vue",
+        ".svelte": "Svelte",
     }
 
     def _compute() -> dict:

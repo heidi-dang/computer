@@ -173,6 +173,15 @@ async def lifespan(app: FastAPI):
             await shutdown_browser()
         except Exception:
             pass
+        # Language servers are CPTR-owned workspace subprocesses. Dispose all
+        # sessions before lower-level process/event infrastructure is closed.
+        try:
+            from cptr.services.lsp_manager import lsp_manager
+
+            await lsp_manager.shutdown_all()
+        except Exception:
+            pass
+
         # Clean up stdio MCP server processes
         try:
             from cptr.utils.mcp.stdio_manager import stdio_manager

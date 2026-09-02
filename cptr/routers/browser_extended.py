@@ -42,14 +42,14 @@ def _owner(auth: AuthResult) -> str:
 
 async def _get_cdp_client(session_id: str, owner: str):
     """Get a CDPClient for the named browser session."""
-    from cptr.utils.browser.proxy import manager
-    from cptr.utils.browser.viewer import manager as chrome_manager, resolve_cdp_endpoint
+    from cptr.utils.browser.viewer import resolve_cdp_endpoint
 
     # Try the chrome_viewer_manager first (for personal-chrome sessions)
     try:
         cdp_url = await resolve_cdp_endpoint()
         if cdp_url:
             from cptr.utils.browser.cdp import CDPClient
+
             client = await CDPClient.connect(cdp_url)
             return client
     except Exception:
