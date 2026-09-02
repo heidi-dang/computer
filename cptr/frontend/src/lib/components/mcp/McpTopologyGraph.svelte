@@ -81,6 +81,14 @@
 		return sample ? `${sample.latestMs} ms` : '—';
 	}
 
+	function latencyTone(edgeId: keyof LatencyMap): string {
+		const health = latency[edgeId]?.health;
+		if (health === 'error') return 'edge-health edge-health--error';
+		if (health === 'degraded') return 'edge-health edge-health--degraded';
+		if (health === 'healthy') return 'edge-health edge-health--healthy';
+		return 'edge-health edge-health--unknown';
+	}
+
 	function nodeLabel(id: string, canonical: string): string {
 		return displayTopologyLabel(id, canonical, aliases);
 	}
@@ -108,6 +116,15 @@
 				<stop offset="0%" stop-color="currentColor" stop-opacity="0.22" />
 				<stop offset="100%" stop-color="currentColor" stop-opacity="0" />
 			</radialGradient>
+			<linearGradient id="edge-flow-gradient" x1="0%" y1="0%" x2="100%" y2="100%">
+				<stop offset="0%" stop-color="#38bdf8" />
+				<stop offset="52%" stop-color="#22d3ee" />
+				<stop offset="100%" stop-color="#a78bfa" />
+			</linearGradient>
+			<filter id="edge-glow" x="-40%" y="-40%" width="180%" height="180%">
+				<feGaussianBlur stdDeviation="3.5" result="edgeBlur" />
+				<feMerge><feMergeNode in="edgeBlur" /><feMergeNode in="SourceGraphic" /></feMerge>
+			</filter>
 			<filter id="soft-glow" x="-60%" y="-60%" width="220%" height="220%">
 				<feGaussianBlur stdDeviation="9" result="blur" />
 				<feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
@@ -125,15 +142,18 @@
 		>
 			{#each nodes as node (node.id)}
 				<path d={clientPath(node)} class="edge-hit" />
+				<path d={clientPath(node)} class="edge-route-underlay" />
 				<path
 					d={clientPath(node)}
 					class:edge-active={node.active || pulseClientIds.has(node.id)}
+					class:edge-flow={node.active || pulseClientIds.has(node.id)}
 					class:edge-error={errorClientIds.has(node.id)}
 					class="topology-edge"
 				/>
 			{/each}
 			<g class="edge-badge" transform={`translate(${centerX + 92} ${connectorY - 50})`}>
 				<rect x="-70" y="-13" width="140" height="26" rx="13" />
+				<circle cx="-58" cy="0" r="3.5" class={latencyTone('client-mcp-connector')} />
 				<text text-anchor="middle" y="3"
 					>Observed request time · {edgeValue('client-mcp-connector')}</text
 				>
@@ -154,12 +174,21 @@
 				y1={connectorY + 44}
 				x2={centerX}
 				y2={centerY - 47}
+				class="edge-route-underlay"
+			/>
+			<line
+				x1={centerX}
+				y1={connectorY + 44}
+				x2={centerX}
+				y2={centerY - 47}
 				class:edge-active={anyActive}
+				class:edge-flow={anyActive}
 				class:edge-error={anyError}
 				class="topology-edge infrastructure-edge"
 			/>
 			<g class="edge-badge" transform={`translate(${centerX + 82} ${centerY - 60})`}>
 				<rect x="-60" y="-13" width="120" height="26" rx="13" />
+				<circle cx="-48" cy="0" r="3.5" class={latencyTone('mcp-connector-cptr-mcp')} />
 				<text text-anchor="middle" y="3"
 					>Adapter handoff · {edgeValue('mcp-connector-cptr-mcp')}</text
 				>
@@ -180,12 +209,21 @@
 				y1={centerY + 47}
 				x2={centerX}
 				y2={backendY - 40}
+				class="edge-route-underlay"
+			/>
+			<line
+				x1={centerX}
+				y1={centerY + 47}
+				x2={centerX}
+				y2={backendY - 40}
 				class:edge-active={anyActive}
+				class:edge-flow={anyActive}
 				class:edge-error={anyError}
 				class="topology-edge infrastructure-edge"
 			/>
 			<g class="edge-badge" transform={`translate(${centerX + 82} ${centerY + 60})`}>
 				<rect x="-62" y="-13" width="124" height="26" rx="13" />
+				<circle cx="-50" cy="0" r="3.5" class={latencyTone('cptr-mcp-cptr-backend')} />
 				<text text-anchor="middle" y="3"
 					>Backend API RTT · {edgeValue('cptr-mcp-cptr-backend')}</text
 				>
@@ -201,6 +239,7 @@
 			onclick={() => choose({ kind: 'node', id: 'mcp-connector' })}
 			onkeydown={(event) => handleKey(event, { kind: 'node', id: 'mcp-connector' })}
 		>
+			<circle cx={centerX} cy={connectorY} r="57" class="node-selected-ring" />
 			<circle cx={centerX} cy={connectorY} r="51" class="infra-halo" />
 			<circle cx={centerX} cy={connectorY} r="41" class="infra-core" />
 			<text x={centerX} y={connectorY - 2} text-anchor="middle" class="infra-title"
@@ -222,6 +261,7 @@
 			onclick={() => choose({ kind: 'node', id: 'cptr-mcp' })}
 			onkeydown={(event) => handleKey(event, { kind: 'node', id: 'cptr-mcp' })}
 		>
+			<circle cx={centerX} cy={centerY} r="65" class="node-selected-ring" />
 			<circle cx={centerX} cy={centerY} r="57" />
 			<circle cx={centerX} cy={centerY} r="46" class="center-node-inner" />
 			<text x={centerX} y={centerY - 3} text-anchor="middle" class="center-title"
@@ -239,6 +279,14 @@
 			onclick={() => choose({ kind: 'node', id: 'cptr-backend' })}
 			onkeydown={(event) => handleKey(event, { kind: 'node', id: 'cptr-backend' })}
 		>
+			<rect
+				x={centerX - 72}
+				y={backendY - 44}
+				width="144"
+				height="88"
+				rx="29"
+				class="node-selected-ring"
+			/>
 			<rect
 				x={centerX - 65}
 				y={backendY - 37}
@@ -268,6 +316,7 @@
 				onclick={() => choose({ kind: 'client', id: node.id })}
 				onkeydown={(event) => handleKey(event, { kind: 'client', id: node.id })}
 			>
+				<circle cx={x(node)} cy={y(node)} r="49" class="node-selected-ring" />
 				<circle cx={x(node)} cy={y(node)} r="43" class="client-halo" />
 				<circle cx={x(node)} cy={y(node)} r="34" class="client-core" />
 				<circle cx={x(node) + 25} cy={y(node) - 25} r="6" class="client-status" />
@@ -328,6 +377,13 @@
 			28px 28px,
 			28px 28px;
 	}
+	.edge-route-underlay {
+		fill: none;
+		stroke: color-mix(in oklab, var(--app-accent) 8%, transparent);
+		stroke-width: 8;
+		stroke-linecap: round;
+		pointer-events: none;
+	}
 	.topology-edge {
 		fill: none;
 		stroke: color-mix(in oklab, var(--app-fg) 16%, transparent);
@@ -344,7 +400,13 @@
 	.topology-edge.edge-active {
 		stroke: color-mix(in oklab, var(--app-accent) 84%, white 8%);
 		stroke-width: 3;
-		stroke-dasharray: 0;
+	}
+	.topology-edge.edge-flow {
+		stroke: url(#edge-flow-gradient);
+		stroke-width: 3.25;
+		stroke-dasharray: 15 10;
+		filter: url(#edge-glow);
+		animation: edge-flow 1.15s linear infinite;
 	}
 	.topology-edge.edge-error {
 		stroke: #ef4444;
@@ -362,6 +424,22 @@
 	.edge-badge rect {
 		fill: var(--app-surface-raised);
 		stroke: var(--app-border);
+	}
+	.edge-health {
+		stroke: var(--app-surface-raised);
+		stroke-width: 1.5;
+	}
+	.edge-health--healthy {
+		fill: #34d399;
+	}
+	.edge-health--degraded {
+		fill: #f59e0b;
+	}
+	.edge-health--error {
+		fill: #fb7185;
+	}
+	.edge-health--unknown {
+		fill: #64748b;
 	}
 	.edge-badge text {
 		fill: var(--app-fg-muted);
@@ -394,6 +472,22 @@
 	.client-node {
 		cursor: pointer;
 		outline: none;
+	}
+	.node-selected-ring {
+		fill: none;
+		stroke: var(--app-accent);
+		stroke-width: 2;
+		opacity: 0;
+		filter: url(#soft-glow);
+		transition:
+			opacity 180ms ease,
+			stroke-width 180ms ease;
+		pointer-events: none;
+	}
+	.node-selected .node-selected-ring,
+	.client-selected .node-selected-ring {
+		opacity: 0.9;
+		stroke-width: 3;
 	}
 	.center-node circle:first-child,
 	.infra-core,
@@ -499,6 +593,11 @@
 		filter: url(#soft-glow);
 		pointer-events: none;
 	}
+	@keyframes edge-flow {
+		to {
+			stroke-dashoffset: -50;
+		}
+	}
 	@keyframes center-ripple {
 		0% {
 			opacity: 0.9;
@@ -513,7 +612,8 @@
 	}
 	@media (prefers-reduced-motion: reduce) {
 		.traffic-particle,
-		.center-ripple {
+		.center-ripple,
+		.edge-flow {
 			animation: none !important;
 		}
 		.traffic-particle {

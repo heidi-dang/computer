@@ -550,7 +550,7 @@ test('request statistics distinguish success, failure, active work and rolling t
 	);
 });
 
-test('MCP topology renders a responsive live request success and failure chart', async () => {
+test('MCP topology renders a premium interactive live request chart', async () => {
 	const [topology, chart] = await Promise.all([
 		read('lib/components/mcp/McpTopology.svelte'),
 		read('lib/components/mcp/McpRequestChart.svelte').catch(() => '')
@@ -562,9 +562,13 @@ test('MCP topology renders a responsive live request success and failure chart',
 	assert.match(chart, /Failed/);
 	assert.match(chart, /Active/);
 	assert.match(chart, /Last 60 seconds/);
-	assert.match(chart, /<svg/);
+	assert.match(chart, /McpTimeSeriesChart/);
 	assert.match(chart, /requestTimeline/);
-	assert.doesNotMatch(chart, /chart\.js|recharts|echarts|highcharts/i);
+	assert.match(chart, /axisPointer/);
+	assert.match(chart, /dataZoom/);
+	assert.match(chart, /media:/);
+	assert.match(chart, /hideOverlap/);
+	assert.doesNotMatch(chart, /<polyline|polylinePoints/);
 });
 
 test('MCP topology renders estimated model token usage and API-equivalent simulated cost analytics', async () => {
@@ -609,10 +613,16 @@ test('MCP topology renders estimated model token usage and API-equivalent simula
 	assert.match(panel, /final-answer tokens/);
 	assert.match(panel, /Long-context multiplier not inferable from MCP-visible tokens/);
 	assert.ok(
-		(panel.match(/<svg/g) ?? []).length >= 2,
-		'usage panel must render token and cost charts'
+		(panel.match(/<McpTimeSeriesChart/g) ?? []).length >= 2,
+		'usage panel must render interactive token and cost charts'
 	);
-	assert.doesNotMatch(panel, /chart\.js|recharts|echarts|highcharts/i);
+	assert.match(panel, /axisPointer/);
+	assert.match(panel, /dataZoom/);
+	assert.match(panel, /legend:/);
+	assert.match(panel, /selectedMode/);
+	assert.match(panel, /media:/);
+	assert.match(panel, /hideOverlap/);
+	assert.doesNotMatch(panel, /<polyline|polylinePoints/);
 });
 
 test('topology UI exposes live graph, safe request table, responsive layout and console switch', async () => {
@@ -644,6 +654,21 @@ test('topology UI exposes live graph, safe request table, responsive layout and 
 	assert.match(recent, /Status/);
 	assert.match(recent, /When/);
 	assert.doesNotMatch(recent, /record\.arguments|record\.result|authorization|bearer token/i);
+});
+
+test('MCP topology graph renders directional flow lanes and latency health affordances', async () => {
+	const graph = await read('lib/components/mcp/McpTopologyGraph.svelte');
+
+	assert.match(graph, /edge-flow-gradient/);
+	assert.match(graph, /edge-flow/);
+	assert.match(graph, /edge-route-underlay/);
+	assert.match(graph, /latencyTone/);
+	assert.match(graph, /edge-health--healthy/);
+	assert.match(graph, /edge-health--degraded/);
+	assert.match(graph, /edge-health--error/);
+	assert.match(graph, /node-selected-ring/);
+	assert.match(graph, /@keyframes edge-flow/);
+	assert.match(graph, /prefers-reduced-motion:\s*reduce/);
 });
 
 test('MCP Console uses one full-width pane at a time on mobile', async () => {
@@ -908,11 +933,32 @@ test('CPTR Backend detail exposes bounded live system monitoring and sparklines'
 		assert.ok(monitor.includes(label), `backend monitor must show ${label}`);
 	}
 	assert.match(monitor, /Unavailable/);
-	assert.match(monitor, /<svg/);
-	assert.match(monitor, /polyline/);
+	assert.match(monitor, /McpTimeSeriesChart/);
+	assert.match(monitor, /Minimum|Average|Maximum/);
 	assert.match(monitor, /app-surface|app-subtle-surface/);
-	assert.doesNotMatch(monitor, /chart\.js|recharts|echarts|highcharts/i);
+	assert.doesNotMatch(monitor, /<polyline|sparkline/);
 	assert.match(topology, /diagnostics/);
+});
+
+test('shared MCP time-series charts use modular ECharts with responsive lifecycle and accessibility', async () => {
+	const [chart, packageJson] = await Promise.all([
+		read('lib/components/mcp/McpTimeSeriesChart.svelte').catch(() => ''),
+		read('../package.json')
+	]);
+
+	assert.match(packageJson, /["']echarts["']/);
+	assert.match(chart, /echarts\/core/);
+	assert.match(chart, /CanvasRenderer/);
+	assert.match(chart, /LineChart/);
+	assert.match(chart, /TooltipComponent/);
+	assert.match(chart, /DataZoomComponent/);
+	assert.match(chart, /ResizeObserver/);
+	assert.match(chart, /prefers-reduced-motion/);
+	assert.match(chart, /dispose\(/);
+	assert.match(chart, /aria-label/);
+	assert.match(chart, /notMerge:\s*false/);
+	assert.doesNotMatch(chart, /notMerge:\s*true/);
+	assert.doesNotMatch(chart, /import\s+\*\s+as\s+echarts/);
 });
 
 test('failed MCP requests show safe structured diagnostics and can reveal matching Activity', async () => {

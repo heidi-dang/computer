@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import type { EChartsCoreOption } from 'echarts/core';
 	import {
 		currentUsageModel,
 		usageTimeline,
@@ -7,10 +8,18 @@
 		type McpDiagnosticsState,
 		type McpUsageTimelineBucket
 	} from '$lib/stores/mcp-diagnostics';
+	import McpTimeSeriesChart from './McpTimeSeriesChart.svelte';
 
 	type Props = {
 		state: McpDiagnosticsState | null;
 	};
+
+	const telemetryGroup = 'mcp-live-telemetry';
+	const inputColor = '#38bdf8';
+	const outputColor = '#a78bfa';
+	const costColor = '#22d3ee';
+	const axisColor = 'rgba(148, 163, 184, 0.58)';
+	const gridColor = 'rgba(148, 163, 184, 0.13)';
 
 	let { state: diagnosticsState }: Props = $props();
 	let nowMs = $state(Date.now());
@@ -40,28 +49,108 @@
 	const avgCost = $derived(
 		pricedRequestCount > 0 ? totals.simulatedCostUsd / pricedRequestCount : null
 	);
-	const tokenMax = $derived(
-		Math.max(1, ...buckets.map((bucket) => Math.max(bucket.inputTokens, bucket.outputTokens)))
-	);
-	const costMax = $derived(Math.max(0.000001, ...buckets.map((bucket) => bucket.simulatedCostUsd)));
-	const inputPoints = $derived(
-		polylinePoints(
-			buckets.map((bucket) => bucket.inputTokens),
-			tokenMax
-		)
-	);
-	const outputPoints = $derived(
-		polylinePoints(
-			buckets.map((bucket) => bucket.outputTokens),
-			tokenMax
-		)
-	);
-	const costPoints = $derived(
-		polylinePoints(
-			buckets.map((bucket) => bucket.simulatedCostUsd),
-			costMax
-		)
-	);
+	const tokenChartOption = $derived.by((): EChartsCoreOption => {
+		const start = buckets[0]?.startMs ?? nowMs - 60_000;
+		const end = buckets.at(-1)?.endMs ?? nowMs;
+		return {
+			legend: {
+				data: ['Input tokens', 'Output tokens'],
+				selectedMode: true,
+				top: 0,
+				left: 'center',
+				icon: 'roundRect',
+				itemWidth: 14,
+				itemHeight: 3,
+				textStyle: { color: axisColor, fontSize: 10 }
+			},
+			grid: { left: 10, right: 12, top: 34, bottom: 26, containLabel: true },
+			tooltip: {
+				trigger: 'axis',
+				confine: true,
+				axisPointer: {
+					type: 'line',
+					snap: true,
+					lineStyle: { color: 'rgba(125, 211, 252, 0.62)' }
+				},
+				backgroundColor: 'rgba(10, 15, 24, 0.94)',
+				borderColor: 'rgba(148, 163, 184, 0.28)',
+				textStyle: { color: '#e5edf7', fontSize: 11 }
+			},
+			xAxis: timeAxis(start, end),
+			yAxis: valueAxis((value) => compactNumber(value)),
+			dataZoom: insideDataZoom(),
+			series: [
+				lineSeries(
+					'Input tokens',
+					inputColor,
+					buckets.map((bucket) => [bucket.endMs, bucket.inputTokens])
+				),
+				lineSeries(
+					'Output tokens',
+					outputColor,
+					buckets.map((bucket) => [bucket.endMs, bucket.outputTokens])
+				)
+			],
+			aria: {
+				enabled: true,
+				label: {
+					description: `Estimated MCP-visible tokens in the last 60 seconds: ${recentInput} input and ${recentOutput} output.`
+				}
+			},
+			media: [
+				{
+					query: { maxWidth: 520 },
+					option: {
+						grid: { left: 4, right: 8, top: 34, bottom: 22, containLabel: true },
+						xAxis: { axisLabel: { fontSize: 9, hideOverlap: true } },
+						yAxis: { axisLabel: { show: false }, splitNumber: 2 }
+					}
+				}
+			]
+		};
+	});
+	const costChartOption = $derived.by((): EChartsCoreOption => {
+		const start = buckets[0]?.startMs ?? nowMs - 60_000;
+		const end = buckets.at(-1)?.endMs ?? nowMs;
+		return {
+			grid: { left: 10, right: 12, top: 16, bottom: 26, containLabel: true },
+			tooltip: {
+				trigger: 'axis',
+				confine: true,
+				axisPointer: { type: 'line', snap: true, lineStyle: { color: 'rgba(34, 211, 238, 0.68)' } },
+				backgroundColor: 'rgba(10, 15, 24, 0.94)',
+				borderColor: 'rgba(148, 163, 184, 0.28)',
+				textStyle: { color: '#e5edf7', fontSize: 11 }
+			},
+			xAxis: timeAxis(start, end),
+			yAxis: valueAxis((value) => formatUsdAxis(value)),
+			dataZoom: insideDataZoom(),
+			series: [
+				lineSeries(
+					'Simulated cost',
+					costColor,
+					buckets.map((bucket) => [bucket.endMs, bucket.simulatedCostUsd]),
+					true
+				)
+			],
+			aria: {
+				enabled: true,
+				label: {
+					description: `API-equivalent simulated MCP cost in the last 60 seconds: ${formatUsd(recentCost)}.`
+				}
+			},
+			media: [
+				{
+					query: { maxWidth: 520 },
+					option: {
+						grid: { left: 4, right: 8, top: 14, bottom: 22, containLabel: true },
+						xAxis: { axisLabel: { fontSize: 9, hideOverlap: true } },
+						yAxis: { axisLabel: { show: false }, splitNumber: 2 }
+					}
+				}
+			]
+		};
+	});
 
 	function emptyTimeline(now: number): McpUsageTimelineBucket[] {
 		return Array.from({ length: 12 }, (_, index) => ({
@@ -75,17 +164,99 @@
 		}));
 	}
 
-	function polylinePoints(values: number[], maximum: number): string {
-		if (values.length === 0) return '';
-		const width = 100;
-		const height = 40;
-		return values
-			.map((value, index) => {
-				const x = values.length === 1 ? width : (index / (values.length - 1)) * width;
-				const y = height - (Math.max(0, value) / maximum) * (height - 4) - 2;
-				return `${x.toFixed(2)},${y.toFixed(2)}`;
-			})
-			.join(' ');
+	function timeAxis(start: number, end: number) {
+		return {
+			type: 'time' as const,
+			min: start,
+			max: end,
+			boundaryGap: false,
+			axisLine: { lineStyle: { color: gridColor } },
+			axisTick: { show: false },
+			axisLabel: {
+				color: axisColor,
+				fontSize: 10,
+				hideOverlap: true,
+				formatter: (value: number) => formatTime(value)
+			},
+			splitLine: { show: false }
+		};
+	}
+
+	function valueAxis(formatter: (value: number) => string) {
+		return {
+			type: 'value' as const,
+			min: 0,
+			splitNumber: 3,
+			axisLine: { show: false },
+			axisTick: { show: false },
+			axisLabel: { color: axisColor, fontSize: 10, formatter },
+			splitLine: { lineStyle: { color: gridColor, type: 'dashed' as const } }
+		};
+	}
+
+	function insideDataZoom() {
+		return [
+			{
+				type: 'inside' as const,
+				xAxisIndex: 0,
+				filterMode: 'none' as const,
+				zoomOnMouseWheel: 'shift' as const,
+				moveOnMouseWheel: true,
+				moveOnMouseMove: true
+			}
+		];
+	}
+
+	function lineSeries(name: string, color: string, data: number[][], cost = false) {
+		return {
+			name,
+			type: 'line' as const,
+			data,
+			smooth: 0.28,
+			showSymbol: false,
+			symbol: 'circle',
+			symbolSize: 7,
+			lineStyle: { color, width: 2.25, shadowBlur: 8, shadowColor: `${color}55` },
+			itemStyle: { color },
+			areaStyle: {
+				color: {
+					type: 'linear',
+					x: 0,
+					y: 0,
+					x2: 0,
+					y2: 1,
+					colorStops: [
+						{ offset: 0, color: `${color}32` },
+						{ offset: 1, color: `${color}03` }
+					]
+				}
+			},
+			tooltip: {
+				valueFormatter: (value: unknown) =>
+					cost ? formatUsd(Number(value)) : `${formatTokens(Number(value))} tokens`
+			},
+			emphasis: { focus: 'series' as const }
+		};
+	}
+
+	function formatTime(value: number): string {
+		return new Intl.DateTimeFormat(undefined, { minute: '2-digit', second: '2-digit' }).format(
+			new Date(value)
+		);
+	}
+
+	function compactNumber(value: number): string {
+		return new Intl.NumberFormat(undefined, {
+			notation: 'compact',
+			maximumFractionDigits: 1
+		}).format(value);
+	}
+
+	function formatUsdAxis(value: number): string {
+		if (value === 0) return '$0';
+		if (Math.abs(value) < 0.001) return `$${value.toExponential(1)}`;
+		if (Math.abs(value) < 1) return `$${value.toFixed(3)}`;
+		return `$${value.toFixed(2)}`;
 	}
 
 	function formatTokens(value: number): string {
@@ -216,38 +387,13 @@
 				</div>
 				<span>{formatTokens(recentInput)} in · {formatTokens(recentOutput)} out</span>
 			</div>
-			<div class="relative h-32 overflow-hidden rounded-lg border px-2 py-2">
-				<div class="pointer-events-none absolute inset-x-2 top-1/4 border-t opacity-40"></div>
-				<div class="pointer-events-none absolute inset-x-2 top-1/2 border-t opacity-40"></div>
-				<div class="pointer-events-none absolute inset-x-2 top-3/4 border-t opacity-40"></div>
-				<svg
-					class="relative h-full w-full overflow-visible"
-					viewBox="0 0 100 40"
-					preserveAspectRatio="none"
-					role="img"
-					aria-label={`Estimated MCP-visible tokens in the last 60 seconds: ${recentInput} input and ${recentOutput} output`}
-				>
-					<polyline
-						points={inputPoints}
-						fill="none"
-						stroke="currentColor"
-						class="text-sky-500"
-						stroke-width="1.5"
-						vector-effect="non-scaling-stroke"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					/>
-					<polyline
-						points={outputPoints}
-						fill="none"
-						stroke="currentColor"
-						class="text-violet-500"
-						stroke-width="1.5"
-						vector-effect="non-scaling-stroke"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					/>
-				</svg>
+			<div class="overflow-hidden rounded-lg border p-1.5">
+				<McpTimeSeriesChart
+					option={tokenChartOption}
+					group={telemetryGroup}
+					height="standard"
+					ariaLabel={`Estimated MCP-visible tokens in the last 60 seconds: ${recentInput} input and ${recentOutput} output`}
+				/>
 			</div>
 		</div>
 
@@ -256,28 +402,13 @@
 				<span class="font-medium">API-equivalent simulated USD</span>
 				<span>{formatUsd(recentCost)} recent</span>
 			</div>
-			<div class="relative h-32 overflow-hidden rounded-lg border px-2 py-2">
-				<div class="pointer-events-none absolute inset-x-2 top-1/4 border-t opacity-40"></div>
-				<div class="pointer-events-none absolute inset-x-2 top-1/2 border-t opacity-40"></div>
-				<div class="pointer-events-none absolute inset-x-2 top-3/4 border-t opacity-40"></div>
-				<svg
-					class="relative h-full w-full overflow-visible"
-					viewBox="0 0 100 40"
-					preserveAspectRatio="none"
-					role="img"
-					aria-label={`API-equivalent simulated MCP cost in the last 60 seconds: ${formatUsd(recentCost)}`}
-				>
-					<polyline
-						points={costPoints}
-						fill="none"
-						stroke="currentColor"
-						class="app-accent"
-						stroke-width="1.5"
-						vector-effect="non-scaling-stroke"
-						stroke-linecap="round"
-						stroke-linejoin="round"
-					/>
-				</svg>
+			<div class="overflow-hidden rounded-lg border p-1.5">
+				<McpTimeSeriesChart
+					option={costChartOption}
+					group={telemetryGroup}
+					height="standard"
+					ariaLabel={`API-equivalent simulated MCP cost in the last 60 seconds: ${formatUsd(recentCost)}`}
+				/>
 			</div>
 		</div>
 	</div>
