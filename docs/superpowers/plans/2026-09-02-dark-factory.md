@@ -186,10 +186,10 @@
 - `FactoryReasoner.run(request) -> StructuredReasoningResult` validates schema and records provider/response identity, tokens/runtime/cost where available.
 - Provider-specific Responses implementation remains behind an interface and stores separate continuation state per role.
 
-- [ ] RED-test role isolation, invalid JSON/schema failure, bounded retries, budget exhaustion, and no hidden-reasoning persistence.
-- [ ] Implement provider-neutral interface by reusing patterns in `OpenAISupervisorDirector`.
-- [ ] Add adaptive role policy so trivial deterministic phases do not invoke every role.
-- [ ] Verify security/adversarial/final high-risk roles select the strongest configured model policy without hardcoding a workstation model ID.
+- [x] RED-test role isolation, invalid JSON/schema failure, bounded retries, budget exhaustion, and no hidden-reasoning persistence.
+- [x] Implement provider-neutral interface by reusing patterns in `OpenAISupervisorDirector`.
+- [x] Add adaptive role policy so trivial deterministic phases do not invoke every role.
+- [x] Verify security/adversarial/final high-risk roles select the strongest configured model policy without hardcoding a workstation model ID.
 
 ---
 
@@ -208,8 +208,8 @@
 - `CapabilityInventory.discover_local(workspace) -> list[CapabilityManifest]` adapts repository/global Skills, CPTR built-ins, configured MCP servers, FDX/LSP/browser/Git/command providers.
 - `CapabilityRequirement` normalizes task capability needs.
 
-- [ ] RED-test deterministic IDs, version/digest identity, permission/network representation, skill progressive disclosure, and duplicate normalization.
-- [ ] Implement adapters over existing Skills/MCP/tool services; do not duplicate their execution code.
+- [x] RED-test deterministic IDs, version/digest identity, permission/network representation, skill progressive disclosure, and duplicate normalization.
+- [x] Implement adapters over existing Skills/MCP/tool services; do not duplicate their execution code.
 
 ### Task 10: Historical performance and trust-aware ranking
 
@@ -223,9 +223,9 @@
 - `record_capability_outcome(...)` updates attempts, verified success/failure/regression, repair iterations, tokens/runtime/cost and confidence.
 - `rank_capabilities(requirements, candidates, history, policy) -> list[RankedCapability]` first removes trust-ineligible candidates, then returns decomposed scores for fit/quality/history/maintenance/freshness/latency/token/cost.
 
-- [ ] RED-test that a high historical score never overrides `REJECTED`, `QUARANTINED`, revoked, stale-review-required or excessive-permission status.
-- [ ] RED-test deterministic ranking and low-sample confidence behavior.
-- [ ] Implement objective outcome updates only from verified factory outcomes.
+- [x] RED-test that a high historical score never overrides `REJECTED`, `QUARANTINED`, revoked, stale-review-required or excessive-permission status.
+- [x] RED-test deterministic ranking and low-sample confidence behavior.
+- [x] Implement objective outcome updates only from verified factory outcomes.
 
 ---
 

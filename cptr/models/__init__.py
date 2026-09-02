@@ -34,6 +34,10 @@ from cptr.models.factory import (
     FactoryReasoningCall,
     FactoryRun,
 )
+from cptr.models.factory_capabilities import (
+    FactoryCapabilityPerformance,
+    FactoryCapabilityRecord,
+)
 from cptr.models.files import File
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
@@ -59,6 +63,8 @@ __all__ = [
     "ControlMessage",
     "ControlTask",
     "CodingBenchmarkRun",
+    "FactoryCapabilityPerformance",
+    "FactoryCapabilityRecord",
     "FactoryCycle",
     "FactoryEvent",
     "FactoryEvidence",
