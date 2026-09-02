@@ -243,8 +243,8 @@
 - `DiscoveryBudget` enforces max providers/results/bytes/runtime.
 - Fetched content lands in a quarantine cache and is never directly invoked.
 
-- [ ] RED-test research trigger policy, result/byte bounds, timeout behavior, and that fetched executable-looking content is not executed.
-- [ ] Implement providers using existing browser/web/MCP/network infrastructure and explicit configuration.
+- [x] RED-test research trigger policy, result/byte bounds, timeout behavior, and that fetched executable-looking content is not executed.
+- [x] Implement providers using existing browser/web/MCP/network infrastructure and explicit configuration.
 
 ### Task 12: Trust/quarantine evaluator
 
@@ -256,9 +256,9 @@
 - `TrustEvaluation` contains pin, digest, provenance, permissions, static/dependency/injection findings, capability-test result, final trust state.
 - `FactoryTrustEvaluator.evaluate(candidate, policy) -> TrustEvaluation` fails closed.
 
-- [ ] RED-test mutable/unpinned source rejection, digest changes, manifest permission escalation, prompt-injection text, unsafe dependency/install instructions, and cache revalidation.
-- [ ] Implement static analysis and permission comparison without executing candidate code.
-- [ ] Add a constrained capability-test adapter only for candidates that reach quarantine-test eligibility.
+- [x] RED-test mutable/unpinned source rejection, digest changes, manifest permission escalation, prompt-injection text, unsafe dependency/install instructions, and cache revalidation.
+- [x] Implement static analysis and permission comparison without executing candidate code.
+- [x] Add a constrained capability-test adapter only for candidates that reach quarantine-test eligibility.
 
 ---
 
