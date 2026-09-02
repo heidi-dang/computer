@@ -38,6 +38,7 @@ from cptr.models.factory_capabilities import (
     FactoryCapabilityPerformance,
     FactoryCapabilityRecord,
 )
+from cptr.models.factory_workers import FactoryWorkerAssignment
 from cptr.models.files import File
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
@@ -71,6 +72,7 @@ __all__ = [
     "FactoryGateResult",
     "FactoryReasoningCall",
     "FactoryRun",
+    "FactoryWorkerAssignment",
     "File",
     "McpEngineeringSession",
     "McpUsageEvent",

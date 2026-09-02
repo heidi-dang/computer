@@ -276,8 +276,8 @@
 - `assign_mutation(...)` enforces one writer per overlapping scope.
 - `reconcile(...)` maps persisted worker IDs to current worktree/process state after restart.
 
-- [ ] RED-test dirty base protection, cross-workspace references, overlapping mutation ownership, restart reconciliation, quiescent cancellation, and cleanup.
-- [ ] Implement by composing Direct Coding Worker and command services, not shelling out to unmanaged worktrees.
+- [x] RED-test dirty base protection, cross-workspace references, overlapping mutation ownership, restart reconciliation, quiescent cancellation, and cleanup.
+- [x] Implement by composing Direct Coding Worker and command services, not shelling out to unmanaged worktrees.
 
 ### Task 14: Capability execution router
 
@@ -289,8 +289,8 @@
 - Route approved manifests to CPTR file/coding, FDX, LSP, command/PTY, browser/web, MCP, SSH-configured, or optional terminal-plugin providers.
 - Route rejects trust-ineligible or over-permissioned capabilities before provider invocation.
 
-- [ ] RED-test every trust/permission rejection before provider call.
-- [ ] Implement provider adapters with bounded outputs and evidence normalization.
+- [x] RED-test every trust/permission rejection before provider call.
+- [x] Implement provider adapters with bounded outputs and evidence normalization.
 
 ---
 
