@@ -196,6 +196,18 @@ class StructuredReasoningResult:
         }
 
 
+class ReasoningHistoryStore(Protocol):
+    async def latest_response_id(
+        self,
+        *,
+        run_id: str,
+        cycle_id: str,
+        role: ReasoningRole,
+    ) -> str | None: ...
+
+    async def record_result(self, result: StructuredReasoningResult) -> Any: ...
+
+
 _HIGH_RISK_ROLES = {
     ReasoningRole.ADVERSARIAL,
     ReasoningRole.SECURITY,
@@ -421,8 +433,10 @@ class FactoryReasoner:
         *,
         provider: ReasoningProvider,
         schemas: list[ReasoningSchema] | tuple[ReasoningSchema, ...],
+        history_store: ReasoningHistoryStore | None = None,
     ) -> None:
         self._provider = provider
+        self._history_store = history_store
         self._schemas = {schema.schema_id: schema for schema in schemas}
         if not self._schemas:
             raise ValueError("at least one reasoning schema is required")
@@ -434,7 +448,14 @@ class FactoryReasoner:
             raise StructuredReasoningError(f"unknown reasoning schema {request.schema_id}")
 
         continuation_key = (request.run_id, request.cycle_id, request.role)
-        previous_response_id = self._continuations.get(continuation_key)
+        if self._history_store is not None:
+            previous_response_id = await self._history_store.latest_response_id(
+                run_id=request.run_id,
+                cycle_id=request.cycle_id,
+                role=request.role,
+            )
+        else:
+            previous_response_id = self._continuations.get(continuation_key)
         input_tokens = 0
         output_tokens = 0
         cost_usd = 0.0
@@ -487,10 +508,8 @@ class FactoryReasoner:
                 # Invalid responses are not trusted continuation checkpoints.
                 continue
 
-            if response.response_id:
-                self._continuations[continuation_key] = response.response_id
             runtime_ms = max(0, int((time.perf_counter() - started) * 1000))
-            return StructuredReasoningResult(
+            result = StructuredReasoningResult(
                 run_id=request.run_id,
                 cycle_id=request.cycle_id,
                 role=request.role,
@@ -507,6 +526,11 @@ class FactoryReasoner:
                 attempt_count=attempt,
                 provider_metadata=_safe_provider_metadata(response.provider_metadata),
             )
+            if self._history_store is not None:
+                await self._history_store.record_result(result)
+            if response.response_id:
+                self._continuations[continuation_key] = response.response_id
+            return result
 
         if last_error is not None:
             raise last_error

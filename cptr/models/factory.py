@@ -119,6 +119,45 @@ class FactoryEvidence(Base):
     )
 
 
+class FactoryReasoningCall(Base):
+    __tablename__ = "factory_reasoning_calls"
+
+    id = Column(Text, primary_key=True, default=lambda: _id("freason"))
+    run_id = Column(Text, ForeignKey("factory_runs.id", ondelete="CASCADE"), nullable=False)
+    cycle_id = Column(Text, ForeignKey("factory_cycles.id", ondelete="CASCADE"), nullable=False)
+    role = Column(Text, nullable=False)
+    role_ordinal = Column(BigInteger, nullable=False)
+    schema_id = Column(Text, nullable=False)
+    provider = Column(Text, nullable=False)
+    model = Column(Text, nullable=False)
+    response_id = Column(Text, nullable=True)
+    input_tokens = Column(BigInteger, nullable=False, default=0)
+    output_tokens = Column(BigInteger, nullable=False, default=0)
+    total_tokens = Column(BigInteger, nullable=False, default=0)
+    runtime_ms = Column(BigInteger, nullable=False, default=0)
+    cost_microusd = Column(BigInteger, nullable=False, default=0)
+    attempt_count = Column(BigInteger, nullable=False, default=1)
+    data = Column(JSON, nullable=False, default=dict)
+    provider_metadata = Column(JSON, nullable=False, default=dict)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "cycle_id",
+            "role",
+            "role_ordinal",
+            name="uq_factory_reasoning_cycle_role_ordinal",
+        ),
+        Index(
+            "ix_factory_reasoning_run_cycle_role",
+            "run_id",
+            "cycle_id",
+            "role",
+            "role_ordinal",
+        ),
+    )
+
+
 class FactoryGateResult(Base):
     __tablename__ = "factory_gate_results"
 

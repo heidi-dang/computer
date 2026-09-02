@@ -31,6 +31,7 @@ from cptr.models.factory import (
     FactoryEvent,
     FactoryEvidence,
     FactoryGateResult,
+    FactoryReasoningCall,
     FactoryRun,
 )
 from cptr.models.files import File
@@ -62,6 +63,7 @@ __all__ = [
     "FactoryEvent",
     "FactoryEvidence",
     "FactoryGateResult",
+    "FactoryReasoningCall",
     "FactoryRun",
     "File",
     "McpEngineeringSession",
