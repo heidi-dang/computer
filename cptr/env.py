@@ -97,6 +97,9 @@ SUPERVISOR_MAX_ATTEMPTS = _env_int("CPTR_SUPERVISOR_MAX_ATTEMPTS", 5)
 SUPERVISOR_OPENAI_MODEL = os.environ.get("CPTR_SUPERVISOR_OPENAI_MODEL", "")
 SUPERVISOR_OPENAI_API_KEY = os.environ.get("CPTR_SUPERVISOR_OPENAI_API_KEY", "")
 
+# ── Dark Factory runtime ────────────────────────────────────
+FACTORY_RUN_LEASE_MS = max(1_000, _env_int("CPTR_FACTORY_RUN_LEASE_MS", 30_000))
+
 # ── SQLite performance / resilience ─────────────────────────
 DB_BUSY_TIMEOUT_MS = max(100, _env_int("CPTR_DB_BUSY_TIMEOUT_MS", 5_000))
 DB_CACHE_SIZE_KIB = max(1_024, _env_int("CPTR_DB_CACHE_SIZE_KIB", 32_768))

@@ -174,6 +174,19 @@ def validate_factory_transition(
             f"actor {actor.value} lacks authority for {to_state.value}"
         )
 
+    if to_state is FactoryState.RECOVERING:
+        if actor is not FactoryActor.SYSTEM:
+            raise InvalidFactoryTransition(
+                f"actor {actor.value} lacks authority for {to_state.value}"
+            )
+        if from_state in {
+            FactoryState.RECOVERING,
+            FactoryState.PAUSED,
+            FactoryState.APPROVAL_REQUIRED,
+        }:
+            raise InvalidFactoryTransition(f"cannot recover from {from_state.value}")
+        return
+
     if to_state is FactoryState.CANCELLED:
         if actor not in {FactoryActor.SYSTEM, FactoryActor.USER}:
             raise InvalidFactoryTransition(
@@ -210,6 +223,18 @@ def validate_factory_transition(
             expected = resumable_state.value if resumable_state else "<missing>"
             raise InvalidFactoryTransition(
                 f"transition must resume the recorded resumable state {expected}"
+            )
+        return
+
+    if from_state is FactoryState.RECOVERING and resumable_state is not None:
+        if actor is not FactoryActor.SYSTEM:
+            raise InvalidFactoryTransition(
+                f"actor {actor.value} lacks authority to resume {from_state.value}"
+            )
+        if to_state is not resumable_state:
+            raise InvalidFactoryTransition(
+                "transition must resume the recorded resumable state "
+                f"{resumable_state.value}"
             )
         return
 

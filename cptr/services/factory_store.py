@@ -126,6 +126,10 @@ class SqlFactoryStore:
                     updated_at=now,
                 )
                 db.add(run)
+                # The immutable run.created event has a foreign key to this
+                # newly-created run. Flush the parent first so SQLite FK
+                # enforcement cannot observe the event before its run row.
+                await db.flush()
                 payload, digest = _canonical_payload(
                     {
                         "workspace_id": workspace_id,
@@ -200,6 +204,9 @@ class SqlFactoryStore:
                     updated_at=now,
                 )
                 db.add(cycle)
+                # cycle.created references the new cycle via FactoryEvent.cycle_id.
+                # Persist the parent before appending the immutable event.
+                await db.flush()
                 run.current_cycle_id = cycle.id
                 run.updated_at = now
                 await self._append_event_in_transaction(
@@ -328,7 +335,11 @@ class SqlFactoryStore:
 
                 current = FactoryState(run.state)
                 effective_resumable = resumable_state
-                if current in {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}:
+                if current in {
+                    FactoryState.RECOVERING,
+                    FactoryState.PAUSED,
+                    FactoryState.APPROVAL_REQUIRED,
+                }:
                     effective_resumable = (
                         FactoryState(run.resumable_state) if run.resumable_state else resumable_state
                     )
@@ -342,9 +353,22 @@ class SqlFactoryStore:
 
                 now = _now_ms()
                 previous = current
-                if to_state in {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}:
+                if to_state is FactoryState.RECOVERING:
+                    if current is FactoryState.MISSION:
+                        run.resumable_state = None
+                    else:
+                        if resumable_state is not None and resumable_state is not current:
+                            raise ValueError(
+                                "recovery resumable state must match the interrupted state"
+                            )
+                        run.resumable_state = current.value
+                elif to_state in {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}:
                     run.resumable_state = current.value
-                elif current in {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}:
+                elif current in {
+                    FactoryState.RECOVERING,
+                    FactoryState.PAUSED,
+                    FactoryState.APPROVAL_REQUIRED,
+                }:
                     run.resumable_state = None
                 run.state = to_state.value
                 run.updated_at = now

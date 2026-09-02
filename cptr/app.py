@@ -1,5 +1,6 @@
 import asyncio
 import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -66,6 +67,17 @@ async def lifespan(app: FastAPI):
     _logging.getLogger(__name__).info("truststore: using system certificate store")
 
     await init_db()
+
+    from cptr.env import FACTORY_RUN_LEASE_MS
+    from cptr.services.factory_runtime import FactoryRuntime
+    from cptr.services.factory_store import SqlFactoryStore
+
+    app.state.factory_runtime = FactoryRuntime(
+        store=SqlFactoryStore(),
+        owner_token=f"factory-runtime-{uuid.uuid4().hex}",
+        lease_ms=FACTORY_RUN_LEASE_MS,
+    )
+    app.state.factory_recovered_run_ids = await app.state.factory_runtime.recover_active_runs()
 
     from cptr.services.live_events import live_event_hub
     from cptr.services.runtime_metrics import event_loop_lag_worker
