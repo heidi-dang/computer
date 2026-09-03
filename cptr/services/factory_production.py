@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -713,7 +714,7 @@ async def _run_fixed_target(root: str, spec: FactoryVerificationSpec) -> dict[st
         raise ValueError("verification cwd escapes repository") from exc
     test_path = spec.test_path
     profiles: dict[str, list[str]] = {
-        "python_pytest": ["python", "-m", "pytest", *([test_path] if test_path else [])],
+        "python_pytest": [sys.executable, "-m", "pytest", *([test_path] if test_path else [])],
         "node_test": ["npm", "test", "--", *([test_path] if test_path else [])],
         "node_vitest": ["./node_modules/.bin/vitest", "run", *([test_path] if test_path else [])],
         "node_build": ["npm", "run", "build"],

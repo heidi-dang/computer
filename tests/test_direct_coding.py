@@ -397,6 +397,56 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             __use_pty=False,
         )
 
+    async def test_python_test_target_uses_current_interpreter(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CodingTestTargetRequest(
+            target="python_pytest",
+            path=".",
+            test_path="tests/test_smoke.py",
+            wait_seconds=0,
+        )
+        with (
+            patch("cptr.routers.coding.sys.executable", "/opt/cptr/python"),
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: running"),
+            ) as run,
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(
+                    return_value={
+                        "command_id": "deadbeef",
+                        "status": "RUNNING",
+                        "exit_code": None,
+                        "output": "",
+                        "next_offset": 0,
+                        "duration_ms": 0,
+                        "output_truncated": False,
+                        "timed_out": False,
+                    }
+                ),
+            ),
+        ):
+            result = await run_workspace_test_target(request, "ws_1", body)
+
+        self.assertEqual(result["target"], "python_pytest")
+        run.assert_awaited_once_with(
+            "/opt/cptr/python -m pytest tests/test_smoke.py",
+            ".",
+            0,
+            __context__={
+                "workspace": "/tmp/cptr-direct-coding",
+                "workspace_id": "ws_1",
+                "request": request,
+                "user_id": "user_1",
+            },
+            __argv=["/opt/cptr/python", "-m", "pytest", "tests/test_smoke.py"],
+            __use_pty=False,
+        )
+
     async def test_run_command_publishes_real_incremental_live_terminal_events(self):
         hub = LiveEventHub(store=LiveEventStore())
         request = SimpleNamespace()

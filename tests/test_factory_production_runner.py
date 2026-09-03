@@ -16,6 +16,7 @@ from cptr.services.factory_phases import PhaseContext, RecoveryPhaseHandler
 from cptr.services.factory_production import (
     FactoryProductionRunner,
     ProductionCiPhaseHandler,
+    _run_fixed_target,
     build_production_orchestrator,
 )
 from cptr.services.factory_runtime import FactoryRuntime
@@ -32,6 +33,34 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.engine.dispose()
+
+    async def test_python_verification_uses_current_interpreter(self):
+        process = SimpleNamespace(
+            returncode=0,
+            communicate=AsyncMock(return_value=(b"ok", b"")),
+            kill=lambda: None,
+        )
+        spec = SimpleNamespace(
+            path=".",
+            test_path="test_smoke.py",
+            target="python_pytest",
+            timeout_seconds=5.0,
+        )
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch("cptr.services.factory_production.sys.executable", "/opt/cptr/python"),
+                patch(
+                    "cptr.services.factory_production.asyncio.create_subprocess_exec",
+                    new=AsyncMock(return_value=process),
+                ) as spawn,
+            ):
+                result = await _run_fixed_target(root, spec)
+
+        self.assertTrue(result["passed"])
+        self.assertEqual(
+            spawn.await_args.args[:4],
+            ("/opt/cptr/python", "-m", "pytest", "test_smoke.py"),
+        )
 
     @staticmethod
     def _git_repo() -> tempfile.TemporaryDirectory:

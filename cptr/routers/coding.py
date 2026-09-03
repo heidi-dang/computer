@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import shutil
+import sys
 import time
 import uuid
 from pathlib import Path, PureWindowsPath
@@ -1430,7 +1431,7 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
     if body.test_path:
         _, test_relative = _relative_path(body.test_path, root)
     profiles: dict[str, list[str]] = {
-        "python_pytest": ["python", "-m", "pytest", *([test_relative] if test_relative else [])],
+        "python_pytest": [sys.executable, "-m", "pytest", *([test_relative] if test_relative else [])],
         "node_test": ["npm", "test", "--", *([test_relative] if test_relative else [])],
         "node_vitest": [
             "./node_modules/.bin/vitest",
