@@ -204,7 +204,14 @@ class BrowserDeviceStore:
                     and current_session.closed_at is None
                     and current_session.state != "DISCONNECTED"
                 ):
-                    raise BrowserTabInUseError("browser tab already has an active session")
+                    if lease.owner != "none":
+                        raise BrowserTabInUseError("browser tab already has an active session")
+                    # Older releases represented agent -> none as OBSERVING even
+                    # though the extension had already detached its debugger.
+                    # Retire that stale session before repointing the per-tab lease.
+                    current_session.state = "DISCONNECTED"
+                    current_session.closed_at = now
+                    current_session.updated_at = now
 
             session = BrowserSession(
                 user_id=user_id,
@@ -266,11 +273,15 @@ class BrowserDeviceStore:
             lease.owner = new_owner
             lease.epoch = int(lease.epoch) + 1
             lease.updated_at = now
-            session.state = {
-                "none": "OBSERVING",
-                "agent": "AGENT_CONTROL",
-                "human": "HUMAN_CONTROL",
-            }[new_owner]
+            if new_owner == "none":
+                lease.expires_at = None
+                session.state = "DISCONNECTED"
+                session.closed_at = now
+            else:
+                session.state = {
+                    "agent": "AGENT_CONTROL",
+                    "human": "HUMAN_CONTROL",
+                }[new_owner]
             session.updated_at = now
             await db.commit()
             result = {

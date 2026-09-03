@@ -715,6 +715,8 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
                 },
             },
         )
+        if body.new_owner == "none":
+            await browser_visual_frames.clear(device_id=session.device_id, session_id=session_id)
         return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="browser session not found") from exc

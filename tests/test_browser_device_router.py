@@ -373,6 +373,44 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["payload"]["owner"], "human")
         self.assertEqual(message["payload"]["epoch"], 10)
 
+    async def test_release_to_none_notifies_detach_and_clears_cached_frame(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1")
+        result = {
+            "device_id": "bdv_1",
+            "tab_id": 7,
+            "session_id": "brs_1",
+            "owner": "none",
+            "epoch": 11,
+            "snapshot_id": None,
+            "state": "DISCONNECTED",
+        }
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.transfer_lease", new=AsyncMock(return_value=result)),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=23)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+            patch("cptr.routers.browser_device.browser_visual_frames.clear", new=AsyncMock()) as clear,
+        ):
+            response = await transfer_browser_lease(
+                request,
+                "brs_1",
+                TransferLeaseBody(expected_epoch=10, expected_owner="agent", new_owner="none"),
+            )
+        self.assertEqual(response["state"], "DISCONNECTED")
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["type"], "browser.handoff.cancelled")
+        self.assertEqual(message["mode"], "DISCONNECTED")
+        self.assertEqual(message["payload"]["owner"], "none")
+        clear.assert_awaited_once_with(device_id="bdv_1", session_id="brs_1")
+
     async def test_frame_read_is_owner_scoped_and_no_store(self):
         request = SimpleNamespace()
         session = SimpleNamespace(device_id="bdv_1")
