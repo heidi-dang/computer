@@ -347,8 +347,8 @@
 - Owner/scope validation uses existing control authentication.
 - Pagination and response size are bounded.
 
-- [ ] RED-test ownership, idempotent start, transition authority, pagination, approval replay, pause/resume and cancellation quiescence.
-- [ ] Implement routes as thin calls into factory services.
+- [x] RED-test ownership, idempotent start, transition authority, pagination, approval replay, pause/resume and cancellation quiescence.
+- [x] Implement routes as thin calls into factory services.
 
 ### Task 18: ChatGPT plugin adapter
 
@@ -373,9 +373,11 @@
 - `cptr_factory_approve`
 - `cptr_factory_stop`
 
-- [ ] RED-test exact compact tool set, bounded schemas, annotations, forwarding, owner-safe errors, and absence of internal state mutation primitives.
-- [ ] Implement thin client forwarding only; no factory transition/trust/Victory logic in TypeScript.
-- [ ] Run plugin typecheck/test/build and deployed-contract checks.
+- [x] RED-test exact compact tool set, bounded schemas, annotations, forwarding, owner-safe errors, and absence of internal state mutation primitives.
+- [x] Implement thin client forwarding only; no factory transition/trust/Victory logic in TypeScript.
+- [x] Run plugin typecheck/test/build and deployed-contract checker contract tests. Live production invocation of `check:deployed-contract` remains the Phase 10 deployment gate because this Phase 8 environment has no deployed endpoint/token and the new branch is intentionally not deployed yet.
+
+**Phase 8 verification (2026-09-03):** backend API/domain focused gate 20/20 passed; cross-phase Dark Factory/restart gate 163/163 passed; full backend repository 441/441 passed; migration `0023 -> 0024 -> 0023 -> 0024`, full Ruff and `git diff --check` passed. Plugin MCP/full suite 136/136 passed, server + web TypeScript typecheck passed, production build passed with a 169,918-byte Workbench bundle against the 450,000-byte limit, and the deployed-contract checker/static contract tests passed for 83 core tools / 89 registered actions. The actual remote deployed-contract invocation is deferred to Phase 10 with deployment/credential evidence rather than falsely treating an undeployed branch as production-verified.
 
 ---
 

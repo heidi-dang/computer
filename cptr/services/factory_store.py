@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from cptr.models import FactoryCycle, FactoryEvent, FactoryEvidence, FactoryGateResult, FactoryRun
@@ -800,6 +800,34 @@ class SqlFactoryStore:
             )
             return list(rows.scalars().all())
 
+    async def list_evidence_page(
+        self,
+        run_id: str,
+        *,
+        after_id: str | None = None,
+        limit: int = 100,
+    ) -> list[FactoryEvidence]:
+        limit = max(1, min(int(limit), 500))
+        async with self._session_factory() as db:
+            query = select(FactoryEvidence).where(FactoryEvidence.run_id == run_id)
+            if after_id:
+                cursor = await db.get(FactoryEvidence, after_id)
+                if cursor is None or cursor.run_id != run_id:
+                    raise ValueError("invalid factory evidence cursor")
+                query = query.where(
+                    or_(
+                        FactoryEvidence.created_at > cursor.created_at,
+                        and_(
+                            FactoryEvidence.created_at == cursor.created_at,
+                            FactoryEvidence.id > cursor.id,
+                        ),
+                    )
+                )
+            rows = await db.execute(
+                query.order_by(FactoryEvidence.created_at, FactoryEvidence.id).limit(limit)
+            )
+            return list(rows.scalars().all())
+
     async def record_gate(
         self,
         *,
@@ -922,6 +950,55 @@ class SqlFactoryStore:
                 .limit(limit)
             )
             return list(rows.scalars().all())
+
+    async def append_user_event(
+        self,
+        *,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        idempotency_key: str | None,
+        cycle_id: str | None = None,
+    ) -> FactoryEvent:
+        if event_type not in {"user.message", "approval.decision"}:
+            raise ValueError("unsupported user factory event type")
+        safe_payload, digest = _canonical_payload(payload)
+        async with self._session_factory() as db:
+            async with db.begin():
+                run = await db.get(FactoryRun, run_id)
+                if run is None:
+                    raise KeyError("factory run not found")
+                if cycle_id is not None:
+                    cycle = await db.get(FactoryCycle, cycle_id)
+                    if cycle is None or cycle.run_id != run_id:
+                        raise KeyError("factory run/cycle not found")
+                if idempotency_key:
+                    existing = (
+                        await db.execute(
+                            select(FactoryEvent).where(
+                                FactoryEvent.run_id == run_id,
+                                FactoryEvent.idempotency_key == idempotency_key,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing is not None:
+                        if existing.event_type != event_type or existing.payload_digest != digest:
+                            raise FactoryIdempotencyConflict(
+                                "factory user event idempotency key was replayed with different intent"
+                            )
+                        return existing
+                return await self._append_event_in_transaction(
+                    db,
+                    run=run,
+                    cycle_id=cycle_id if cycle_id is not None else run.current_cycle_id,
+                    actor=FactoryActor.USER,
+                    event_type=event_type,
+                    from_state=FactoryState(run.state),
+                    to_state=FactoryState(run.state),
+                    idempotency_key=idempotency_key,
+                    payload=safe_payload,
+                    payload_digest=digest,
+                )
 
     async def latest_state_entry(
         self,

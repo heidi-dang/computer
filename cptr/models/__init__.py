@@ -38,6 +38,7 @@ from cptr.models.factory_capabilities import (
     FactoryCapabilityPerformance,
     FactoryCapabilityRecord,
 )
+from cptr.models.factory_control import FactoryApproval
 from cptr.models.factory_lifecycle import FactoryCiRun, FactoryCommitIntent
 from cptr.models.factory_workers import FactoryWorkerAssignment
 from cptr.models.files import File
@@ -66,6 +67,7 @@ __all__ = [
     "ControlTask",
     "CodingBenchmarkRun",
     "FactoryCapabilityPerformance",
+    "FactoryApproval",
     "FactoryCapabilityRecord",
     "FactoryCiRun",
     "FactoryCommitIntent",

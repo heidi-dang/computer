@@ -214,6 +214,12 @@ def validate_factory_transition(
             )
         return
 
+    if (
+        from_state is FactoryState.APPROVAL_REQUIRED
+        and to_state is FactoryState.BLOCKED
+    ):
+        return
+
     if from_state in {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}:
         if actor not in {FactoryActor.SYSTEM, FactoryActor.USER}:
             raise InvalidFactoryTransition(

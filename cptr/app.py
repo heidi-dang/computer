@@ -24,6 +24,7 @@ from cptr.routers import (
     control_router,
     control_stream_router,
     events_router,
+    factory_router,
     files_router,
     gateway_router,
     gateway_extended_router,
@@ -422,6 +423,7 @@ app.include_router(coding_router)
 app.include_router(control_router)
 app.include_router(control_stream_router)
 app.include_router(events_router)
+app.include_router(factory_router)
 app.include_router(files_router)
 app.include_router(gateway_router)
 app.include_router(gateway_extended_router)
