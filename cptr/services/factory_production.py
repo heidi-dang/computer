@@ -337,6 +337,44 @@ async def _factory_worker_workspace(context: PhaseContext, worker_id: str):
     return root, workspace
 
 
+async def _reset_isolated_reproduction(root: Path) -> None:
+    """Discard command-created reproduction scratch before implementation.
+
+    REPRODUCING may execute bounded shell commands inside the pre-created
+    isolated worker, but its contract is observational: implementation starts
+    from the captured clean base. Reset only that owned isolated worktree and
+    fail closed if Git cannot restore it.
+    """
+
+    for argv in (
+        ("git", "-C", str(root), "reset", "--hard", "HEAD"),
+        ("git", "-C", str(root), "clean", "-fd"),
+    ):
+        process = await asyncio.create_subprocess_exec(
+            *argv,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise RuntimeError("isolated reproduction cleanup timed out") from exc
+        if process.returncode != 0:
+            raise RuntimeError("isolated reproduction cleanup failed")
+    if await git_utils.change_manifest(str(root), None):
+        raise RuntimeError("isolated reproduction cleanup left a dirty worktree")
+
+
+async def _worker_target(root: Path, user_id: str) -> tuple[str, str]:
+    identity = await identity_for_user_id(user_id)
+    adapter = CptrGitAdapter(identity=identity)
+    revision = await adapter.current_revision(str(root))
+    fingerprint = await adapter.workspace_fingerprint(str(root))
+    return revision, fingerprint
+
+
 class BaselinePhaseHandler:
     def __init__(
         self,
@@ -544,6 +582,16 @@ class AdvisoryPhaseHandler:
             reasons.append(f"{max_tool_calls}-tool budget")
         return (" and ".join(reasons) or None, elapsed_ms, tool_calls)
 
+    async def _cleanup_reproduction_changes(self, context: PhaseContext) -> None:
+        if self._state is not FactoryState.REPRODUCING or not context.cycle.mutation_worker_id:
+            return
+        root = await direct_worker_service.resolve_root(
+            user_id=context.run.user_id,
+            workspace_id=context.run.workspace_id,
+            worker_id=str(context.cycle.mutation_worker_id),
+        )
+        await _reset_isolated_reproduction(root)
+
     def _budget_outcome(
         self,
         *,
@@ -699,6 +747,7 @@ class AdvisoryPhaseHandler:
                 run_next_action=f"wait for {self._state.value.lower()} advisory task",
             )
         if status == "CANCELLED" and budget_reason is not None:
+            await self._cleanup_reproduction_changes(context)
             return self._budget_outcome(
                 task_id=task_id,
                 task=task,
@@ -707,6 +756,7 @@ class AdvisoryPhaseHandler:
                 tool_calls=tool_calls,
             )
         if status not in _SUCCESS_TASK_STATUSES:
+            await self._cleanup_reproduction_changes(context)
             return PhaseOutcome(
                 reason=f"{self._state.value} advisory task failed",
                 failure=PhaseFailure(
@@ -716,6 +766,7 @@ class AdvisoryPhaseHandler:
                 ),
             )
         output = await self._agent.get_output(task_id, user_id=context.run.user_id)
+        await self._cleanup_reproduction_changes(context)
         return PhaseOutcome(
             next_state=self._next,
             reason=f"{self._state.value} advisory reasoning completed",
@@ -906,7 +957,9 @@ class ImplementationPhaseHandler:
                 f"{max_tool_calls} tool actions. Work only inside this isolated workspace. Use the existing reproduced/root-cause "
                 "evidence, make the smallest production-quality fix, and stop once the targeted fix is implemented. "
                 "Run only focused checks needed while editing; do not run the full suite or broad build because machine-owned "
-                "verification phases run them next. Do not push, deploy, or claim Victory."
+                "verification phases run them next. Before returning, inspect Git status once, remove transient reproduction/debug "
+                "scripts or logs, and leave only intentional production and regression-test changes. Then stop immediately. "
+                "Do not push, deploy, or claim Victory."
             )
             task = await self._agent.start_task(
                 user_id=context.run.user_id,
@@ -965,14 +1018,35 @@ class ImplementationPhaseHandler:
                     run_next_action="stop over-budget implementation task",
                 )
         if status == "CANCELLED" and budget_reason is not None:
+            revision, fingerprint = await _worker_target(root, context.run.user_id)
+            summary = redact_external_text(str(task.get("output") or "")).strip()[:12_000]
+            if not summary:
+                summary = (
+                    "Implementation budget reached before a final model summary; "
+                    "machine verification now decides whether the bounded diff is acceptable."
+                )
             return PhaseOutcome(
-                reason="isolated implementation fast-execution budget reached",
-                failure=PhaseFailure(
-                    category=PhaseFailureCategory.IMPLEMENTATION,
-                    code="FACTORY_IMPLEMENTATION_BUDGET_EXCEEDED",
-                    summary=(
-                        f"implementation stopped after {elapsed_ms} ms / {tool_calls} tools: "
-                        f"{budget_reason}"
+                next_state=FactoryState.TARGETED_VERIFYING,
+                reason="isolated implementation budget reached; machine verification required",
+                target_revision=revision,
+                target_fingerprint=fingerprint,
+                run_next_action=None,
+                artifacts=(
+                    PhaseArtifact(
+                        key="implementation-result",
+                        kind="implementation_result",
+                        source="cptr-agent-service",
+                        authority=EvidenceAuthority.ADVISORY,
+                        revision=revision,
+                        fingerprint=fingerprint,
+                        payload={
+                            "task_id": task_id,
+                            "summary": summary,
+                            "budget_exhausted": True,
+                            "budget_reason": budget_reason,
+                            "elapsed_ms": elapsed_ms,
+                            "tool_calls": tool_calls,
+                        },
                     ),
                 ),
             )
@@ -990,10 +1064,7 @@ class ImplementationPhaseHandler:
                     summary=f"implementation task ended with {status}",
                 ),
             )
-        identity = await identity_for_user_id(context.run.user_id)
-        adapter = CptrGitAdapter(identity=identity)
-        revision = await adapter.current_revision(str(root))
-        fingerprint = await adapter.workspace_fingerprint(str(root))
+        revision, fingerprint = await _worker_target(root, context.run.user_id)
         output = await self._agent.get_output(task_id, user_id=context.run.user_id)
         return PhaseOutcome(
             next_state=FactoryState.TARGETED_VERIFYING,

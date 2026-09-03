@@ -19,6 +19,7 @@ from cptr.services.factory_production import (
     FactoryProductionRunner,
     ImplementationPhaseHandler,
     ProductionCiPhaseHandler,
+    _reset_isolated_reproduction,
     _run_fixed_target,
     build_production_orchestrator,
 )
@@ -338,7 +339,24 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item.kind == "factory_worker" for item in outcome.artifacts))
         ensure_worker.assert_awaited_once()
 
-    async def test_implementation_budget_cancels_and_routes_to_repair(self):
+    async def test_reproduction_cleanup_restores_tracked_and_removes_untracked_scratch(self):
+        temp = self._git_repo()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        original = (root / "test_smoke.py").read_text(encoding="utf-8")
+        (root / "test_smoke.py").write_text("broken = True\n", encoding="utf-8")
+        (root / "reproduce.py").write_text("print('scratch')\n", encoding="utf-8")
+
+        await _reset_isolated_reproduction(root)
+
+        self.assertEqual((root / "test_smoke.py").read_text(encoding="utf-8"), original)
+        self.assertFalse((root / "reproduce.py").exists())
+        status = subprocess.check_output(
+            ["git", "-C", str(root), "status", "--porcelain"], text=True
+        )
+        self.assertEqual(status, "")
+
+    async def test_implementation_budget_cancels_and_routes_to_machine_verification(self):
         running = {
             "id": "task-implementation",
             "status": "RUNNING",
@@ -395,12 +413,21 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
             patch("cptr.services.factory_production.time.time", return_value=1_000),
+            patch(
+                "cptr.services.factory_production._worker_target",
+                new=AsyncMock(return_value=("rev-budget", "fp-budget")),
+            ) as worker_target,
         ):
             outcome = await handler.execute(context)
 
-        self.assertIsNotNone(outcome.failure)
-        self.assertEqual(outcome.failure.code, "FACTORY_IMPLEMENTATION_BUDGET_EXCEEDED")
+        self.assertIsNone(outcome.failure)
+        self.assertEqual(outcome.next_state, FactoryState.TARGETED_VERIFYING)
+        self.assertEqual(outcome.target_revision, "rev-budget")
+        self.assertEqual(outcome.target_fingerprint, "fp-budget")
+        self.assertTrue(outcome.artifacts[0].payload["budget_exhausted"])
+        self.assertIn("8-tool budget", outcome.artifacts[0].payload["budget_reason"])
         agent.cancel_task.assert_awaited_once_with("task-implementation", user_id="user-1")
+        worker_target.assert_awaited_once_with(Path("/isolated"), "user-1")
 
     async def test_transition_projection_next_action_stays_consistent(self):
         run = await self.store.create_run(

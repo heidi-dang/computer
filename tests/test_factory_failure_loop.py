@@ -217,7 +217,9 @@ class FactoryFailureLoopTests(unittest.IsolatedAsyncioTestCase):
         verified = await orchestrator.run_once(self.run.id)
         self.assertEqual(verified.state, FactoryState.FULL_VERIFYING.value)
         gates = await self.store.list_gates(self.run.id, cycle_id=self.cycle.id)
-        self.assertEqual([item.status for item in gates if item.gate_id == "targeted-tests"], ["FAIL", "PASS"])
+        self.assertEqual(
+            [item.status for item in gates if item.gate_id == "targeted-tests"], ["FAIL", "PASS"]
+        )
 
     async def test_interrupted_failure_phase_replays_without_duplicate_evidence_or_attempts(self):
         failing = _Handler(_failing_verification("assertion failed before crash"))
@@ -286,6 +288,78 @@ class FactoryFailureLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failure_record["count"], 2)
         self.assertEqual(failure_record["category"], "implementation")
         self.assertEqual(failure_record["code"], "TARGETED_TEST_FAILURE")
+
+    async def test_implementation_failure_enters_repair_loop_instead_of_invalid_transition(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-implementation-failure",
+            mission="bound implementation and repair safely",
+            acceptance_criteria=["implementation failures enter repair"],
+            policy={},
+            budget={"max_repair_attempts_per_signature": 3},
+            model_id="configured-model",
+            idempotency_key="implementation-failure-run",
+        )
+        cycle = await self.store.create_cycle(
+            run.id,
+            base_revision="rev-base",
+            base_fingerprint="fp-base",
+            idempotency_key="implementation-failure-cycle",
+        )
+        for index, state in enumerate(
+            (
+                FactoryState.RECOVERING,
+                FactoryState.BASELINING,
+                FactoryState.UNDERSTANDING,
+                FactoryState.AUDITING,
+                FactoryState.SELECTING_FINDING,
+                FactoryState.CAPABILITY_ANALYSIS,
+                FactoryState.SKILL_DISCOVERY,
+                FactoryState.TRUST_EVALUATION,
+                FactoryState.SKILL_SELECTION,
+                FactoryState.REPRODUCING,
+                FactoryState.ROOT_CAUSE_ANALYSIS,
+                FactoryState.PLANNING,
+                FactoryState.IMPLEMENTING,
+            )
+        ):
+            await self.store.transition(
+                run.id,
+                to_state=state,
+                actor=FactoryActor.SYSTEM,
+                reason=f"test setup {state.value}",
+                idempotency_key=f"implementation-failure-setup:{index}:{state.value}",
+            )
+
+        failing = _Handler(
+            PhaseOutcome(
+                reason="implementation tool budget reached",
+                failure=PhaseFailure(
+                    category=PhaseFailureCategory.IMPLEMENTATION,
+                    code="FACTORY_IMPLEMENTATION_BUDGET_EXCEEDED",
+                    summary="implementation stopped after the bounded tool budget",
+                ),
+            )
+        )
+        repair = RepairRequiredPhaseHandler(repeated_failure_threshold=2)
+        orchestrator = FactoryOrchestrator(
+            store=self.store,
+            handlers={
+                FactoryState.IMPLEMENTING: failing,
+                FactoryState.REPAIR_REQUIRED: repair,
+            },
+            owner_token="orchestrator-implementation-failure",
+            lease_ms=10_000,
+        )
+
+        failed = await orchestrator.run_once(run.id)
+        self.assertEqual(failed.state, FactoryState.REPAIR_REQUIRED.value)
+        persisted_cycle = await self.store.get_cycle(cycle.id)
+        self.assertEqual(persisted_cycle.attempt_count, 1)
+        self.assertEqual(len(persisted_cycle.failure_signatures), 1)
+
+        diagnosed = await orchestrator.run_once(run.id)
+        self.assertEqual(diagnosed.state, FactoryState.ROOT_CAUSE_ANALYSIS.value)
 
     async def test_configured_repair_budget_exhaustion_blocks_identical_signature(self):
         failure = _failing_verification("persistent deterministic failure").failure

@@ -117,7 +117,11 @@ class FactoryDomainTests(unittest.TestCase):
 
     def test_worker_and_reasoning_role_cannot_claim_success(self):
         for actor in (FactoryActor.WORKER, FactoryActor.REASONING_ROLE):
-            for target in (FactoryState.COMMITTING, FactoryState.CYCLE_COMPLETE, FactoryState.COMPLETE):
+            for target in (
+                FactoryState.COMMITTING,
+                FactoryState.CYCLE_COMPLETE,
+                FactoryState.COMPLETE,
+            ):
                 with self.subTest(actor=actor, target=target):
                     with self.assertRaisesRegex(InvalidFactoryTransition, "authority"):
                         validate_factory_transition(
@@ -129,6 +133,12 @@ class FactoryDomainTests(unittest.TestCase):
 
     def test_repair_loop_can_return_to_analysis_or_implementation(self):
         repair_sources = {
+            FactoryState.UNDERSTANDING,
+            FactoryState.AUDITING,
+            FactoryState.REPRODUCING,
+            FactoryState.ROOT_CAUSE_ANALYSIS,
+            FactoryState.PLANNING,
+            FactoryState.IMPLEMENTING,
             FactoryState.TARGETED_VERIFYING,
             FactoryState.FULL_VERIFYING,
             FactoryState.ADVERSARIAL_REVIEW,
@@ -139,7 +149,9 @@ class FactoryDomainTests(unittest.TestCase):
         }
         for source in repair_sources:
             with self.subTest(source=source):
-                validate_factory_transition(source, FactoryState.REPAIR_REQUIRED, FactoryActor.SYSTEM)
+                validate_factory_transition(
+                    source, FactoryState.REPAIR_REQUIRED, FactoryActor.SYSTEM
+                )
 
         for target in (
             FactoryState.ROOT_CAUSE_ANALYSIS,
@@ -202,7 +214,12 @@ class FactoryDomainTests(unittest.TestCase):
             )
 
     def test_terminal_states_are_closed(self):
-        for state in (FactoryState.BLOCKED, FactoryState.FAILED, FactoryState.COMPLETE, FactoryState.CANCELLED):
+        for state in (
+            FactoryState.BLOCKED,
+            FactoryState.FAILED,
+            FactoryState.COMPLETE,
+            FactoryState.CANCELLED,
+        ):
             self.assertTrue(is_terminal_factory_state(state))
             with self.assertRaisesRegex(InvalidFactoryTransition, "terminal"):
                 validate_factory_transition(state, FactoryState.AUDITING, FactoryActor.SYSTEM)
@@ -225,7 +242,12 @@ class FactoryDomainTests(unittest.TestCase):
             FactoryState.FAILED,
             FactoryActor.SYSTEM,
         )
-        for actor in (FactoryActor.WORKER, FactoryActor.REASONING_ROLE, FactoryActor.VERIFIER, FactoryActor.CI):
+        for actor in (
+            FactoryActor.WORKER,
+            FactoryActor.REASONING_ROLE,
+            FactoryActor.VERIFIER,
+            FactoryActor.CI,
+        ):
             with self.subTest(actor=actor):
                 with self.assertRaisesRegex(InvalidFactoryTransition, "authority"):
                     validate_factory_transition(

@@ -125,7 +125,17 @@ _ALLOWED.update(
     }
 )
 
+# Every phase handler that can persist a PhaseFailure must be able to enter the
+# shared repair loop. Keep this aligned with failure-producing production
+# handlers; otherwise a correctly classified failure can itself crash as an
+# InvalidFactoryTransition before repair begins.
 for _repair_source in (
+    FactoryState.UNDERSTANDING,
+    FactoryState.AUDITING,
+    FactoryState.REPRODUCING,
+    FactoryState.ROOT_CAUSE_ANALYSIS,
+    FactoryState.PLANNING,
+    FactoryState.IMPLEMENTING,
     FactoryState.TARGETED_VERIFYING,
     FactoryState.FULL_VERIFYING,
     FactoryState.ADVERSARIAL_REVIEW,
@@ -165,14 +175,10 @@ def validate_factory_transition(
         raise InvalidFactoryTransition(f"terminal state {from_state.value} cannot transition")
 
     if to_state in _SUCCESS_AUTHORITY_STATES and actor is not FactoryActor.SYSTEM:
-        raise InvalidFactoryTransition(
-            f"actor {actor.value} lacks authority for {to_state.value}"
-        )
+        raise InvalidFactoryTransition(f"actor {actor.value} lacks authority for {to_state.value}")
 
     if to_state in {FactoryState.BLOCKED, FactoryState.FAILED} and actor is not FactoryActor.SYSTEM:
-        raise InvalidFactoryTransition(
-            f"actor {actor.value} lacks authority for {to_state.value}"
-        )
+        raise InvalidFactoryTransition(f"actor {actor.value} lacks authority for {to_state.value}")
 
     if to_state is FactoryState.RECOVERING:
         if actor is not FactoryActor.SYSTEM:
@@ -209,15 +215,10 @@ def validate_factory_transition(
                 f"actor {actor.value} lacks authority for {to_state.value}"
             )
         if from_state in {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}:
-            raise InvalidFactoryTransition(
-                f"cannot request approval from {from_state.value}"
-            )
+            raise InvalidFactoryTransition(f"cannot request approval from {from_state.value}")
         return
 
-    if (
-        from_state is FactoryState.APPROVAL_REQUIRED
-        and to_state is FactoryState.BLOCKED
-    ):
+    if from_state is FactoryState.APPROVAL_REQUIRED and to_state is FactoryState.BLOCKED:
         return
 
     if from_state in {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}:
@@ -239,8 +240,7 @@ def validate_factory_transition(
             )
         if to_state is not resumable_state:
             raise InvalidFactoryTransition(
-                "transition must resume the recorded resumable state "
-                f"{resumable_state.value}"
+                f"transition must resume the recorded resumable state {resumable_state.value}"
             )
         return
 
