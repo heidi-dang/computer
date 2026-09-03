@@ -133,6 +133,44 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(raised.exception.status_code, 404)
 
+    async def test_lease_transfer_notifies_extension_with_authoritative_epoch(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1")
+        result = {
+            "device_id": "bdv_1",
+            "tab_id": 7,
+            "session_id": "brs_1",
+            "owner": "human",
+            "epoch": 10,
+            "snapshot_id": "snap_9",
+            "state": "HUMAN_CONTROL",
+        }
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.transfer_lease", new=AsyncMock(return_value=result)),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=22)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+        ):
+            response = await transfer_browser_lease(
+                request,
+                "brs_1",
+                TransferLeaseBody(expected_epoch=9, expected_owner="agent", new_owner="human"),
+            )
+        self.assertEqual(response["epoch"], 10)
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["type"], "browser.handoff.accepted")
+        self.assertEqual(message["sequence"], 22)
+        self.assertEqual(message["mode"], "HUMAN_CONTROL")
+        self.assertEqual(message["payload"]["owner"], "human")
+        self.assertEqual(message["payload"]["epoch"], 10)
+
     async def test_frame_read_is_owner_scoped_and_no_store(self):
         request = SimpleNamespace()
         session = SimpleNamespace(device_id="bdv_1")

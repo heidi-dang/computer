@@ -260,7 +260,7 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
             if body.expected_owner == "human" and body.new_owner == "agent"
             else "browser.lease.transferred"
         )
-        await browser_device_store.append_device_event(
+        handoff_event = await browser_device_store.append_device_event(
             device_id=session.device_id,
             event_type=event_type,
             payload={
@@ -270,6 +270,32 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
                 "epoch": result["epoch"],
                 "snapshot_id": result["snapshot_id"],
                 "state": result["state"],
+            },
+        )
+        control_type = (
+            "browser.handoff.returned"
+            if body.expected_owner == "human" and body.new_owner == "agent"
+            else "browser.handoff.accepted"
+            if body.new_owner == "human"
+            else "browser.handoff.cancelled"
+        )
+        await browser_device_connections.send_control(
+            device_id=session.device_id,
+            message={
+                "protocol_version": 1,
+                "type": control_type,
+                "device_id": session.device_id,
+                "session_id": session_id,
+                "surface_id": session.surface_id or session_id,
+                "sequence": int(handoff_event.sequence),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "source": "cptr",
+                "mode": result["state"],
+                "payload": {
+                    "owner": result["owner"],
+                    "epoch": result["epoch"],
+                    "snapshot_id": result["snapshot_id"],
+                },
             },
         )
         return result
