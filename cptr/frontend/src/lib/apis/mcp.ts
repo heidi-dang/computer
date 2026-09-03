@@ -191,9 +191,7 @@ export interface McpTopologyConfig {
 }
 
 export type McpLatencyEdge =
-	| 'client-mcp-connector'
-	| 'mcp-connector-cptr-mcp'
-	| 'cptr-mcp-cptr-backend';
+	'client-mcp-connector' | 'mcp-connector-cptr-mcp' | 'cptr-mcp-cptr-backend';
 export type McpLatencyMetric = 'observed_request_time' | 'adapter_handoff' | 'backend_api_rtt';
 export type McpFailureStage =
 	| 'client_transport'
@@ -420,11 +418,270 @@ export interface McpBenchmarkLeaderboard {
 	models: McpBenchmarkLeaderboardModel[];
 }
 
+export interface McpFactoryRunSummary {
+	run_id: string;
+	workspace_id: string;
+	workspace_name: string | null;
+	mission: string;
+	state: string;
+	terminal: boolean;
+	current_cycle_id: string | null;
+	next_action: string | null;
+	created_at: number;
+	updated_at: number;
+	completed_at: number | null;
+}
+
+export interface McpFactoryCycle {
+	cycle_id: string;
+	ordinal: number;
+	state: string;
+	selected_finding: unknown;
+	capability_requirements: unknown;
+	selected_capabilities: unknown;
+	gate_plan: unknown;
+	base_revision: string | null;
+	base_fingerprint: string | null;
+	target_revision: string | null;
+	target_fingerprint: string | null;
+	mutation_worker_id: string | null;
+	attempt_count: number;
+	failure_signatures: unknown;
+	next_action: string | null;
+	created_at: number;
+	updated_at: number;
+	completed_at: number | null;
+}
+
+export interface McpFactoryGate {
+	gate_result_id: string;
+	cycle_id: string;
+	gate_id: string;
+	category: string;
+	required: boolean;
+	applicable: boolean;
+	status: string;
+	evidence_ids: string[];
+	evaluated_revision: string | null;
+	evaluated_fingerprint: string | null;
+	reason: string | null;
+	attempt: number;
+	created_at: number;
+	updated_at: number;
+}
+
+export interface McpFactoryEvent {
+	event_id: string;
+	cycle_id: string | null;
+	sequence: number;
+	actor: string;
+	event_type: string;
+	from_state: string | null;
+	to_state: string | null;
+	payload: unknown;
+	created_at: number;
+}
+
+export interface McpFactoryEvidence {
+	evidence_id: string;
+	cycle_id: string | null;
+	gate_id: string | null;
+	kind: string;
+	source: string;
+	authority: string;
+	revision: string | null;
+	fingerprint: string | null;
+	digest: string;
+	payload: unknown;
+	created_at: number;
+}
+
+export interface McpFactoryWorker {
+	assignment_id: string;
+	cycle_id: string;
+	worker_id: string | null;
+	mode: string;
+	repo_path: string;
+	scope: string[];
+	branch: string | null;
+	base_revision: string | null;
+	status: string;
+	created_at: number;
+	updated_at: number;
+	closed_at: number | null;
+}
+
+export interface McpFactoryReasoning {
+	reasoning_id: string;
+	cycle_id: string;
+	role: string;
+	role_ordinal: number;
+	schema_id: string;
+	provider: string;
+	model: string;
+	response_id: string | null;
+	input_tokens: number;
+	output_tokens: number;
+	total_tokens: number;
+	runtime_ms: number;
+	cost_microusd: number;
+	attempt_count: number;
+	data: unknown;
+	provider_metadata: unknown;
+	created_at: number;
+}
+
+export interface McpFactoryApproval {
+	approval_id: string;
+	cycle_id: string;
+	kind: string;
+	revision: string;
+	remote: string;
+	branch: string;
+	status: string;
+	note: string | null;
+	created_at: number;
+	updated_at: number;
+	decided_at: number | null;
+}
+
+export interface McpFactoryMetric {
+	metric_id: string;
+	cycle_id: string | null;
+	scope: string;
+	dimension_key: string;
+	attempts: number;
+	repair_iterations: number;
+	regressions: number;
+	input_tokens: number;
+	output_tokens: number;
+	runtime_ms: number;
+	cost_microusd: number;
+	gate_latency_ms: number;
+	verified_outcome: string | null;
+	updated_at: number;
+}
+
+export interface McpFactoryCapabilityOutcome {
+	outcome_id: string;
+	cycle_id: string;
+	capability_id: string;
+	stable_id: string;
+	version: string;
+	origin_type: string;
+	risk_classification: string;
+	trust_status: string;
+	verification_status: string;
+	repository_family: string;
+	task_family: string;
+	verified_success: boolean;
+	regression: boolean;
+	repair_iterations: number;
+	input_tokens: number;
+	output_tokens: number;
+	runtime_ms: number;
+	cost_microusd: number;
+	created_at: number;
+}
+
+export interface McpFactoryCommitIntent {
+	commit_intent_id: string;
+	cycle_id: string;
+	repository_key: string;
+	verified_revision: string;
+	verified_fingerprint: string;
+	diff_digest: string;
+	changed_paths: string[];
+	commit_message: string;
+	status: string;
+	commit_sha: string | null;
+	push_status: string | null;
+	push_remote: string | null;
+	push_branch: string | null;
+	push_approval_id: string | null;
+	created_at: number;
+	updated_at: number;
+	committed_at: number | null;
+	pushed_at: number | null;
+}
+
+export interface McpFactoryCiRun {
+	ci_run_id: string;
+	cycle_id: string;
+	provider: string;
+	repository: string;
+	revision: string;
+	external_run_id: string;
+	check_id: string;
+	status: string;
+	conclusion: string | null;
+	url: string | null;
+	failure_summary: string | null;
+	diagnosis_required: boolean;
+	diagnosis_summary: string | null;
+	created_at: number;
+	updated_at: number;
+	last_observed_at: number | null;
+	diagnosed_at: number | null;
+}
+
+export interface McpFactorySummary {
+	cycle_count: number;
+	current_cycle_ordinal: number;
+	event_count: number;
+	evidence_count: number;
+	required_gates: number;
+	passed_required_gates: number;
+	failed_required_gates: number;
+	active_workers: number;
+	pending_approvals: number;
+	reasoning_calls: number;
+	input_tokens: number;
+	output_tokens: number;
+	reasoning_runtime_ms: number;
+	reasoning_cost_microusd: number;
+	last_event_sequence: number;
+}
+
+export interface McpFactoryRunDetail extends McpFactoryRunSummary {
+	mission: string;
+	acceptance_criteria: string[];
+	model_id: string | null;
+	resumable_state: string | null;
+	policy: unknown;
+	budget: unknown;
+	cycle: McpFactoryCycle | null;
+	cycles: McpFactoryCycle[];
+	gates: McpFactoryGate[];
+	gate_history: McpFactoryGate[];
+	events: McpFactoryEvent[];
+	evidence: McpFactoryEvidence[];
+	workers: McpFactoryWorker[];
+	reasoning: McpFactoryReasoning[];
+	approvals: McpFactoryApproval[];
+	metrics: McpFactoryMetric[];
+	capability_outcomes: McpFactoryCapabilityOutcome[];
+	commit_intents: McpFactoryCommitIntent[];
+	ci_runs: McpFactoryCiRun[];
+	summary: McpFactorySummary;
+}
+
+export interface McpFactorySnapshot {
+	version: 1;
+	runs: McpFactoryRunSummary[];
+	selected: McpFactoryRunDetail | null;
+	fingerprint: string;
+	generated_at_ms: number;
+}
+
+export interface McpFactoryStreamCallbacks {
+	onSnapshot: (snapshot: McpFactorySnapshot) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown) => void;
+}
+
 export type McpDiagnosticsEvent = (
-	| McpLatencySample
-	| McpFailureDiagnostic
-	| McpBackendMetricsSample
-	| McpUsageDiagnostic
+	McpLatencySample | McpFailureDiagnostic | McpBackendMetricsSample | McpUsageDiagnostic
 ) & { ingestion_sequence: number };
 
 export interface McpDiagnosticsSnapshot {
@@ -459,6 +716,37 @@ export interface McpDiagnosticsStreamCallbacks {
 }
 
 // ── Topology config + diagnostics ────────────────────────────────────────────
+
+export const getMcpFactorySnapshot = (runId?: string | null, runLimit = 20) => {
+	const params = new URLSearchParams({ run_limit: String(runLimit) });
+	if (runId) params.set('run_id', runId);
+	return fetchJSON<McpFactorySnapshot>(`/api/mcp/factory/snapshot?${params.toString()}`);
+};
+
+export function openMcpFactoryStream(
+	runId: string | null | undefined,
+	callbacks: McpFactoryStreamCallbacks,
+	runLimit = 20
+): () => void {
+	const params = new URLSearchParams({ run_limit: String(runLimit) });
+	if (runId) params.set('run_id', runId);
+	const source = new EventSource(`/api/mcp/factory/stream?${params.toString()}`);
+	const parse = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onSnapshot(JSON.parse(message.data) as McpFactorySnapshot);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+
+	source.addEventListener('snapshot', (event) => parse(event as MessageEvent<string>));
+	source.addEventListener('factory_error', (event) => {
+		callbacks.onError?.(new Error((event as MessageEvent<string>).data || 'Factory stream failed'));
+	});
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+	return () => source.close();
+}
 
 export const getMcpTopologyConfig = () => fetchJSON<McpTopologyConfig>('/api/mcp/topology/config');
 

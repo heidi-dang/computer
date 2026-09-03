@@ -1,8 +1,9 @@
 <script lang="ts">
 	import McpConsole from '$lib/components/mcp/McpConsole.svelte';
+	import McpDarkFactory from '$lib/components/mcp/McpDarkFactory.svelte';
 	import McpTopology from '$lib/components/mcp/McpTopology.svelte';
 
-	type McpView = 'topology' | 'console';
+	type McpView = 'topology' | 'console' | 'factory';
 	let view = $state<McpView>('topology');
 	let focusRequestId = $state<string | null>(null);
 	let focusCorrelationId = $state<string | null>(null);
@@ -61,13 +62,13 @@
 				<div class="min-w-0">
 					<h1 class="truncate text-sm font-semibold">MCP</h1>
 					<p class="hidden truncate text-[0.68rem] app-muted sm:block">
-						Live client topology and server console
+						Live topology, console, and Dark Factory operations
 					</p>
 				</div>
 			</div>
 
 			<div
-				class="app-subtle-surface flex shrink-0 rounded-xl border p-1"
+				class="app-subtle-surface scrollbar-none flex max-w-[66vw] shrink-0 overflow-x-auto rounded-xl border p-1 sm:max-w-none"
 				role="tablist"
 				aria-label="MCP view"
 			>
@@ -83,7 +84,7 @@
 					Topology
 				</button>
 				<button
-					class="app-interactive min-h-11 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
+					class="app-interactive min-h-11 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
 					'console'
 						? 'app-interactive-active'
 						: 'app-muted'}"
@@ -93,6 +94,17 @@
 				>
 					Console
 				</button>
+				<button
+					class="app-interactive min-h-11 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
+					'factory'
+						? 'app-interactive-active'
+						: 'app-muted'}"
+					role="tab"
+					aria-selected={view === 'factory'}
+					onclick={() => (view = 'factory')}
+				>
+					Dark Factory
+				</button>
 			</div>
 		</div>
 	</header>
@@ -100,8 +112,10 @@
 	<div class="min-h-0 flex-1 overflow-hidden">
 		{#if view === 'topology'}
 			<McpTopology onrevealactivity={revealActivity} />
-		{:else}
+		{:else if view === 'console'}
 			<McpConsole {focusRequestId} {focusCorrelationId} />
+		{:else}
+			<McpDarkFactory />
 		{/if}
 	</div>
 </div>
