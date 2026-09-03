@@ -292,6 +292,12 @@ async def auth_middleware(request: Request, call_next):
         path.startswith("/_app/")
         or path.startswith("/v1/")
         or path.startswith("/api/control/v1")
+        # Browser-device routes own their authentication boundary: pairing
+        # request/claim are intentionally public, owner operations require a
+        # scoped Control API bearer token in the router, and device sockets use
+        # device credentials. Do not require legacy cookie auth in front of
+        # those explicit checks or bearer-only MCP calls are rejected first.
+        or path.startswith("/api/browser-device/v1")
         or not path.startswith("/api/")
     ):
         return await call_next(request)
