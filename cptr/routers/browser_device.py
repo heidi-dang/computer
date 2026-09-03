@@ -55,6 +55,31 @@ class SendCommandBody(BaseModel):
     wait_seconds: float = Field(default=15.0, ge=0.1, le=60.0)
 
 
+class HumanInputBody(BaseModel):
+    command_id: str = Field(min_length=1, max_length=160)
+    expected_epoch: int = Field(ge=0)
+    input_type: Literal[
+        "pointer_move", "pointer_down", "pointer_up", "click", "double_click",
+        "wheel", "key_down", "key_up", "text_input", "touch_start",
+        "touch_move", "touch_end", "focus", "blur", "viewport_resize",
+        "drag_start", "drag_move", "drag_end",
+    ]
+    x: float | None = Field(default=None, ge=0.0, le=1.0)
+    y: float | None = Field(default=None, ge=0.0, le=1.0)
+    delta_x: float | None = None
+    delta_y: float | None = None
+    button: Literal["none", "left", "middle", "right", "back", "forward"] | None = None
+    key: str | None = Field(default=None, max_length=128)
+    code: str | None = Field(default=None, max_length=128)
+    text: str | None = Field(default=None, max_length=20_000)
+    modifiers: list[Literal["Alt", "Control", "Meta", "Shift"]] = Field(default_factory=list, max_length=4)
+    pointer_id: int | None = Field(default=None, ge=0)
+    width: float | None = Field(default=None, gt=0, le=16_384)
+    height: float | None = Field(default=None, gt=0, le=16_384)
+    sensitive: bool = False
+    wait_seconds: float = Field(default=10.0, ge=0.1, le=30.0)
+
+
 async def _control_user(request: Request, scope: str) -> str:
     try:
         return await authenticate_control_request(request, scope)
@@ -176,6 +201,58 @@ async def get_browser_frame(request: Request, session_id: str, after_frame_id: s
             "X-CPTR-Frame-Time": str(frame.created_at_ms),
         },
     )
+
+
+@router.post("/sessions/{session_id}/human-input")
+async def send_browser_human_input(request: Request, session_id: str, body: HumanInputBody):
+    user_id = await _control_user(request, "task:write")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="browser session not found")
+    try:
+        await browser_device_store.assert_mutation(
+            session_id=session_id,
+            actor="human",
+            expected_epoch=body.expected_epoch,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await browser_command_results.reserve(body.command_id)
+    event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.human.input.dispatched",
+        payload={
+            "session_id": session_id,
+            "command_id": body.command_id,
+            "input_type": body.input_type,
+            "sensitive": body.sensitive,
+        },
+    )
+    payload = body.model_dump(exclude={"command_id", "wait_seconds"}, exclude_none=True)
+    delivered = await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.human.input",
+            "device_id": session.device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "HUMAN_CONTROL",
+            "command_id": body.command_id,
+            "payload": payload,
+        },
+    )
+    if not delivered:
+        await browser_command_results.abandon(body.command_id)
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    try:
+        result = await browser_command_results.wait(body.command_id, timeout_seconds=body.wait_seconds)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="human browser input timed out") from exc
+    return {"accepted": True, "command_id": body.command_id, "result": result}
 
 
 @router.post("/sessions/{session_id}/command")

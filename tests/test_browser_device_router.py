@@ -9,6 +9,7 @@ from cptr.routers.browser_device import (
     PairingApproveBody,
     PairingClaimBody,
     PairingRequestBody,
+    HumanInputBody,
     SendCommandBody,
     TransferLeaseBody,
     approve_pairing,
@@ -18,6 +19,7 @@ from cptr.routers.browser_device import (
     request_pairing,
     router,
     send_browser_command,
+    send_browser_human_input,
     get_browser_frame,
     transfer_browser_lease,
 )
@@ -66,6 +68,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/browser-device/v1/connect/control", paths)
         self.assertIn("/api/browser-device/v1/connect/visual", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/command", paths)
+        self.assertIn("/api/browser-device/v1/sessions/{session_id}/human-input", paths)
 
     async def test_pairing_request_returns_claim_secret_only_to_extension(self):
         with patch(
@@ -201,6 +204,41 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         ):
             await get_browser_frame(request, "brs_1", None)
         self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_human_input_requires_human_epoch_and_does_not_persist_text(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1")
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()) as assert_mutation,
+            patch("cptr.routers.browser_device.browser_device_store.append_device_event", new=AsyncMock(return_value=SimpleNamespace(sequence=31))) as append_event,
+            patch("cptr.routers.browser_device.browser_device_connections.send_control", new=AsyncMock(return_value=True)) as send,
+            patch("cptr.routers.browser_device.browser_command_results.reserve", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_command_results.wait", new=AsyncMock(return_value={"type": "browser.command.completed", "payload": {"ok": True}})),
+        ):
+            result = await send_browser_human_input(
+                request,
+                "brs_1",
+                HumanInputBody(
+                    command_id="human_1",
+                    expected_epoch=10,
+                    input_type="text_input",
+                    text="super-secret-password",
+                    sensitive=True,
+                ),
+            )
+        self.assertTrue(result["accepted"])
+        assert_mutation.assert_awaited_once_with(session_id="brs_1", actor="human", expected_epoch=10)
+        persisted = append_event.await_args.kwargs["payload"]
+        self.assertNotIn("text", persisted)
+        self.assertNotIn("super-secret-password", json.dumps(persisted))
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["type"], "browser.human.input")
+        self.assertEqual(message["mode"], "HUMAN_CONTROL")
+        self.assertEqual(message["payload"]["expected_epoch"], 10)
+        self.assertEqual(message["payload"]["text"], "super-secret-password")
+        self.assertTrue(message["payload"]["sensitive"])
 
     async def test_agent_command_requires_current_lease_epoch_before_delivery(self):
         request = SimpleNamespace()
