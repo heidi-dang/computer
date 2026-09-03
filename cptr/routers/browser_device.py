@@ -55,6 +55,11 @@ class SendCommandBody(BaseModel):
     wait_seconds: float = Field(default=15.0, ge=0.1, le=60.0)
 
 
+class ReturnToAgentBody(BaseModel):
+    expected_epoch: int = Field(ge=0)
+    wait_seconds: float = Field(default=15.0, ge=0.1, le=30.0)
+
+
 class HumanInputBody(BaseModel):
     command_id: str = Field(min_length=1, max_length=160)
     expected_epoch: int = Field(ge=0)
@@ -201,6 +206,102 @@ async def get_browser_frame(request: Request, session_id: str, after_frame_id: s
             "X-CPTR-Frame-Time": str(frame.created_at_ms),
         },
     )
+
+
+@router.post("/sessions/{session_id}/return-to-agent")
+async def return_browser_to_agent(request: Request, session_id: str, body: ReturnToAgentBody):
+    user_id = await _control_user(request, "task:write")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="browser session not found")
+    try:
+        await browser_device_store.assert_mutation(
+            session_id=session_id,
+            actor="human",
+            expected_epoch=body.expected_epoch,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    command_id = f"handoff_prepare_{session_id}_{body.expected_epoch}"
+    await browser_command_results.reserve(command_id)
+    event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.handoff.prepare_return",
+        payload={"session_id": session_id, "command_id": command_id, "epoch": body.expected_epoch},
+    )
+    delivered = await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.handoff.prepare_return",
+            "device_id": session.device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "HUMAN_CONTROL",
+            "command_id": command_id,
+            "payload": {"expected_epoch": body.expected_epoch},
+        },
+    )
+    if not delivered:
+        await browser_command_results.abandon(command_id)
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    try:
+        prepared = await browser_command_results.wait(command_id, timeout_seconds=body.wait_seconds)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="browser handoff snapshot timed out") from exc
+    if prepared.get("type") != "browser.command.completed":
+        raise HTTPException(status_code=409, detail="browser handoff snapshot failed")
+    payload = prepared.get("payload")
+    snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
+    if not isinstance(snapshot_id, str) or not snapshot_id:
+        raise HTTPException(status_code=409, detail="browser handoff did not return a fresh snapshot")
+
+    try:
+        result = await browser_device_store.transfer_lease(
+            session_id=session_id,
+            expected_epoch=body.expected_epoch,
+            expected_owner="human",
+            new_owner="agent",
+            fresh_snapshot_id=snapshot_id,
+        )
+    except (KeyError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    returned_event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.handoff.returned",
+        payload={
+            "session_id": session_id,
+            "tab_id": result["tab_id"],
+            "owner": result["owner"],
+            "epoch": result["epoch"],
+            "snapshot_id": result["snapshot_id"],
+            "state": result["state"],
+        },
+    )
+    await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.handoff.returned",
+            "device_id": session.device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(returned_event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "AGENT_CONTROL",
+            "payload": {
+                "owner": result["owner"],
+                "epoch": result["epoch"],
+                "snapshot_id": result["snapshot_id"],
+            },
+        },
+    )
+    return result
 
 
 @router.post("/sessions/{session_id}/human-input")

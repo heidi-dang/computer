@@ -10,6 +10,7 @@ from cptr.routers.browser_device import (
     PairingClaimBody,
     PairingRequestBody,
     HumanInputBody,
+    ReturnToAgentBody,
     SendCommandBody,
     TransferLeaseBody,
     approve_pairing,
@@ -20,6 +21,7 @@ from cptr.routers.browser_device import (
     router,
     send_browser_command,
     send_browser_human_input,
+    return_browser_to_agent,
     get_browser_frame,
     transfer_browser_lease,
 )
@@ -69,6 +71,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/browser-device/v1/connect/visual", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/command", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/human-input", paths)
+        self.assertIn("/api/browser-device/v1/sessions/{session_id}/return-to-agent", paths)
 
     async def test_pairing_request_returns_claim_secret_only_to_extension(self):
         with patch(
@@ -204,6 +207,51 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         ):
             await get_browser_frame(request, "brs_1", None)
         self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_return_to_agent_requires_fresh_snapshot_before_transfer(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1")
+        result = {
+            "device_id": "bdv_1", "tab_id": 7, "session_id": "brs_1",
+            "owner": "agent", "epoch": 11, "snapshot_id": "snap_fresh", "state": "AGENT_CONTROL",
+        }
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_device_store.append_device_event", new=AsyncMock(side_effect=[SimpleNamespace(sequence=40), SimpleNamespace(sequence=41)])),
+            patch("cptr.routers.browser_device.browser_device_connections.send_control", new=AsyncMock(return_value=True)) as send,
+            patch("cptr.routers.browser_device.browser_command_results.reserve", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_command_results.wait", new=AsyncMock(return_value={"type": "browser.command.completed", "payload": {"snapshot_id": "snap_fresh"}})),
+            patch("cptr.routers.browser_device.browser_device_store.transfer_lease", new=AsyncMock(return_value=result)) as transfer,
+        ):
+            response = await return_browser_to_agent(request, "brs_1", ReturnToAgentBody(expected_epoch=10))
+        self.assertEqual(response["owner"], "agent")
+        transfer.assert_awaited_once_with(session_id="brs_1", expected_epoch=10, expected_owner="human", new_owner="agent", fresh_snapshot_id="snap_fresh")
+        messages = [call.kwargs["message"] for call in send.await_args_list]
+        self.assertEqual(messages[0]["type"], "browser.handoff.prepare_return")
+        self.assertEqual(messages[0]["payload"]["expected_epoch"], 10)
+        self.assertEqual(messages[1]["type"], "browser.handoff.returned")
+        self.assertEqual(messages[1]["payload"]["snapshot_id"], "snap_fresh")
+        self.assertEqual(messages[1]["payload"]["epoch"], 11)
+
+    async def test_return_to_agent_does_not_transfer_when_snapshot_fails(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1")
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_device_store.append_device_event", new=AsyncMock(return_value=SimpleNamespace(sequence=40))),
+            patch("cptr.routers.browser_device.browser_device_connections.send_control", new=AsyncMock(return_value=True)),
+            patch("cptr.routers.browser_device.browser_command_results.reserve", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_command_results.wait", new=AsyncMock(return_value={"type": "browser.command.failed", "payload": {"error": "snapshot failed"}})),
+            patch("cptr.routers.browser_device.browser_device_store.transfer_lease", new=AsyncMock()) as transfer,
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await return_browser_to_agent(request, "brs_1", ReturnToAgentBody(expected_epoch=10))
+        self.assertEqual(raised.exception.status_code, 409)
+        transfer.assert_not_awaited()
 
     async def test_human_input_requires_human_epoch_and_does_not_persist_text(self):
         request = SimpleNamespace()
