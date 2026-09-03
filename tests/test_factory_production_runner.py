@@ -170,6 +170,59 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(agent.start_task.await_args.kwargs["execution_policy"]["allow_commands"])
         self.assertNotIn("state", payload)
 
+    async def test_advisory_handoff_reuses_meaningful_prior_evidence_and_tightens_budget(self):
+        agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-handoff"}))
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.ROOT_CAUSE_ANALYSIS,
+            next_state=FactoryState.PLANNING,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-handoff",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="diagnose quickly",
+                acceptance_criteria=("identify root cause",),
+                model_id="agent:model",
+                policy={"advisory_timeout_seconds": 75, "advisory_max_tool_calls": 8},
+            ),
+            cycle=SimpleNamespace(id="cycle-handoff", attempt_count=0),
+            evidence=(
+                SimpleNamespace(
+                    kind="reasoning_advice",
+                    payload={
+                        "phase_state": "AUDITING",
+                        "summary": (
+                            "Fast advisory budget reached before a final model summary; "
+                            "continue with bounded observations."
+                        ),
+                    },
+                ),
+                SimpleNamespace(
+                    kind="reasoning_advice",
+                    payload={
+                        "phase_state": "REPRODUCING",
+                        "summary": "health leak reproduced in cptr/app.py; remove pid and uptime fields",
+                    },
+                ),
+            ),
+            gates=(),
+        )
+
+        outcome = await handler.execute(context)
+
+        prompt = agent.start_task.await_args.kwargs["prompt"]
+        self.assertIn("PRIOR PHASE EVIDENCE", prompt)
+        self.assertIn("[REPRODUCING] health leak reproduced in cptr/app.py", prompt)
+        self.assertNotIn("continue with bounded observations", prompt)
+        self.assertIn("finish within 45 seconds", prompt)
+        self.assertIn("at most 4 tool actions", prompt)
+        payload = outcome.artifacts[0].payload
+        self.assertEqual(payload["timeout_seconds"], 45)
+        self.assertEqual(payload["max_tool_calls"], 4)
+        self.assertGreater(payload["handoff_evidence_chars"], 0)
+
     async def test_reproduction_runs_commands_only_in_prepared_isolated_worker(self):
         agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-repro"}))
         handler = AdvisoryPhaseHandler(
@@ -355,6 +408,68 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
             ["git", "-C", str(root), "status", "--porcelain"], text=True
         )
         self.assertEqual(status, "")
+
+    async def test_implementation_handoff_reuses_prior_evidence_and_tightens_budget(self):
+        agent = SimpleNamespace(
+            start_task=AsyncMock(return_value={"id": "task-implementation-handoff"})
+        )
+        handler = ImplementationPhaseHandler(
+            workers=SimpleNamespace(),
+            worker_store=SimpleNamespace(),
+            agent=agent,
+        )
+        assignment = SimpleNamespace(worker_id="worker-1", base_revision="rev", branch="branch")
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-implementation-handoff",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="fix one defect",
+                acceptance_criteria=("fix is verified",),
+                model_id="agent:model",
+                policy={
+                    "implementation_required": True,
+                    "implementation_timeout_seconds": 240,
+                    "implementation_max_tool_calls": 36,
+                },
+            ),
+            cycle=SimpleNamespace(
+                id="cycle-implementation-handoff",
+                attempt_count=0,
+                mutation_worker_id="worker-1",
+            ),
+            evidence=(
+                SimpleNamespace(
+                    kind="reasoning_advice",
+                    payload={
+                        "phase_state": "REPRODUCING",
+                        "summary": "change cptr/app.py health response and add a focused regression test",
+                    },
+                ),
+            ),
+            gates=(),
+        )
+
+        with (
+            patch.object(handler, "_ensure_assignment", new=AsyncMock(return_value=assignment)),
+            patch(
+                "cptr.services.factory_production._factory_worker_workspace",
+                new=AsyncMock(
+                    return_value=(Path("/isolated"), SimpleNamespace(id="workspace-worker"))
+                ),
+            ),
+        ):
+            outcome = await handler.execute(context)
+
+        prompt = agent.start_task.await_args.kwargs["prompt"]
+        self.assertIn("PRIOR PHASE EVIDENCE", prompt)
+        self.assertIn("[REPRODUCING] change cptr/app.py health response", prompt)
+        self.assertIn("finish within 150 seconds", prompt)
+        self.assertIn("at most 20 tool actions", prompt)
+        payload = outcome.artifacts[0].payload
+        self.assertEqual(payload["timeout_seconds"], 150)
+        self.assertEqual(payload["max_tool_calls"], 20)
+        self.assertGreater(payload["handoff_evidence_chars"], 0)
 
     async def test_implementation_budget_cancels_and_routes_to_machine_verification(self):
         running = {
