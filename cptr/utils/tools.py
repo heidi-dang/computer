@@ -32,6 +32,7 @@ from cptr.env import (
     CHAT_TOOL_COMMAND_MAX_CHARS,
     CHAT_TOOL_MAX_CHARS,
     COMMAND_EVENT_QUEUE_SIZE,
+    COMMAND_INLINE_WAIT_MAX_SECONDS,
     COMMAND_LOG_BATCH_BYTES,
     COMMAND_LOG_FLUSH_INTERVAL_MS,
     COMMAND_LOG_MAX_BYTES,
@@ -497,9 +498,11 @@ async def stream_command_session_output(command_session_id: str):
 
     async def record_chunk(stream: str, chunk: bytes) -> None:
         current = command_sessions.get(command_session_id)
+        offset_end: int | None = None
         if current:
             current["output"].extend(chunk)
             current["total_bytes"] += len(chunk)
+            offset_end = int(current["total_bytes"])
             if len(current["output"]) > COMMAND_OUTPUT_BUFFER_BYTES:
                 current["output"] = current["output"][-COMMAND_OUTPUT_BUFFER_BYTES:]
             async with current["condition"]:
@@ -512,6 +515,7 @@ async def stream_command_session_output(command_session_id: str):
                         "type": "output",
                         "stream": stream,
                         "data": chunk.decode(errors="replace"),
+                        "offset_end": offset_end,
                         "ts": time.time(),
                     }
                 )
@@ -598,7 +602,20 @@ async def stream_command_session_output(command_session_id: str):
 
         if isinstance(log_queue, asyncio.Queue):
             await log_queue.put(
-                json.dumps({"type": "end", "exit_code": exit_code, "ts": time.time()}) + "\n"
+                json.dumps(
+                    {
+                        "type": "end",
+                        "exit_code": exit_code,
+                        "total_bytes": int(session.get("total_bytes") or 0) if session else 0,
+                        "started_at": float(session.get("created_at") or 0.0) if session else 0.0,
+                        "command": str(session.get("command") or "") if session else "",
+                        "pty": bool(session.get("pty")) if session else False,
+                        "rows": int(session.get("rows") or 24) if session else 24,
+                        "cols": int(session.get("cols") or 80) if session else 80,
+                        "ts": time.time(),
+                    }
+                )
+                + "\n"
             )
             await log_queue.put(_STOP_SESSION_WRITER)
 
@@ -1877,7 +1894,7 @@ async def run_command(
     """Run a shell command. Returns a task_id for status checks and input.
     :param command: The shell command to execute.
     :param cwd: Working directory relative to workspace root.
-    :param wait: Seconds to wait for the command to finish before returning (max 300). Returns early if done sooner. Null returns immediately. Use 30-60 for installs and builds, 5-10 for quick commands, null or 0 for long-lived servers.
+    :param wait: Seconds to wait for the command to finish before returning. The server caps inline waiting at CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS; the command itself keeps running after the call returns. Null returns immediately.
     """
     workspace = __context__["workspace"]
     if not _accept_new_command_sessions:
@@ -2054,7 +2071,9 @@ async def run_command(
         wait = EXECUTE_TIMEOUT
     if wait is not None and wait > 0:
         try:
-            await asyncio.wait_for(asyncio.shield(log_task), timeout=min(wait, 300))
+            await asyncio.wait_for(
+                asyncio.shield(log_task), timeout=min(wait, COMMAND_INLINE_WAIT_MAX_SECONDS)
+            )
         except asyncio.TimeoutError:
             pass
 
@@ -2079,7 +2098,7 @@ async def check_task(
     """Check status and recent output of a background task.
     :param task_id: The task ID returned by run_command.
     :param offset: Byte offset from previous check. Pass next_offset from the last response to get only new output.
-    :param wait: Seconds to wait for the task to finish before returning (max 300). Returns early if done sooner. Null returns immediately.
+    :param wait: Seconds to wait for the task to finish before returning, bounded by CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS. Null returns immediately.
     """
     request = __context__.get("request")
     task = get_command_session(request, task_id, context=__context__)
@@ -2099,7 +2118,9 @@ async def check_task(
         collect = task.get("log_task")
         if collect and not collect.done():
             try:
-                await asyncio.wait_for(asyncio.shield(collect), timeout=min(wait, 300))
+                await asyncio.wait_for(
+                    asyncio.shield(collect), timeout=min(wait, COMMAND_INLINE_WAIT_MAX_SECONDS)
+                )
             except asyncio.TimeoutError:
                 pass
 

@@ -72,19 +72,22 @@ WORKSPACE_AUTO_GITIGNORE_DOT_CPTR_ENV = os.environ.get("CPTR_AUTO_GITIGNORE_DOT_
 WORKSPACE_AUTO_GITIGNORE_DOT_CPTR = _env_bool("CPTR_AUTO_GITIGNORE_DOT_CPTR", "true")
 
 # ── Execute timeout ─────────────────────────────────────────
-# Default wait (seconds) for run_command / check_task when the caller
-# doesn't pass an explicit wait value.  None = return immediately.
+# ``CPTR_EXECUTE_TIMEOUT`` controls only how long an API call waits inline;
+# it does not cap the lifetime of the owned command process.  Keep the default
+# non-blocking so long work returns a durable command ID immediately, while
+# allowing trusted clients to request a much longer bounded inline wait.
+COMMAND_INLINE_WAIT_MAX_SECONDS = max(60, _env_int("CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS", 60 * 60))
 EXECUTE_TIMEOUT: float | None = None
 _execute_timeout = os.environ.get("CPTR_EXECUTE_TIMEOUT")
 if _execute_timeout is not None:
-    EXECUTE_TIMEOUT = float(_execute_timeout)
+    EXECUTE_TIMEOUT = max(0.0, min(float(_execute_timeout), COMMAND_INLINE_WAIT_MAX_SECONDS))
 
 # ── AI stream settings ──────────────────────────────────────
 STREAM_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_CONNECT_TIMEOUT", "30"))
 STREAM_READ_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_READ_TIMEOUT", "300"))
 STREAM_WRITE_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_WRITE_TIMEOUT", "600"))
 TASK_CANCELLATION_TIMEOUT_SECONDS = max(
-    0.1, float(os.environ.get("CPTR_TASK_CANCELLATION_TIMEOUT", "10"))
+    0.1, float(os.environ.get("CPTR_TASK_CANCELLATION_TIMEOUT", "30"))
 )
 
 # ── Automation scheduler ────────────────────────────────────
@@ -110,17 +113,29 @@ if DB_SYNCHRONOUS not in {"OFF", "NORMAL", "FULL", "EXTRA"}:
     DB_SYNCHRONOUS = "NORMAL"
 
 # ── Command execution performance / retention ───────────────
+# Completed command metadata is retained in memory for up to 30 days, while
+# the durable JSONL transcript remains recoverable from ``.cptr/task_logs``
+# across CPTR/ChatGPT disconnects and process restarts.  Memory remains bounded
+# independently from transcript size so persistence cannot exhaust RAM.
 COMMAND_OUTPUT_BUFFER_BYTES = max(
-    32 * 1024, _env_int("CPTR_COMMAND_OUTPUT_BUFFER_BYTES", 256 * 1024)
+    32 * 1024, _env_int("CPTR_COMMAND_OUTPUT_BUFFER_BYTES", 512 * 1024)
 )
 COMMAND_READ_CHUNK_BYTES = max(4_096, _env_int("CPTR_COMMAND_READ_CHUNK_BYTES", 16 * 1024))
-COMMAND_SESSION_TTL_SECONDS = max(30, _env_int("CPTR_COMMAND_SESSION_TTL_SECONDS", 15 * 60))
-COMMAND_SESSION_MAX_RETAINED = max(8, _env_int("CPTR_COMMAND_SESSION_MAX_RETAINED", 128))
+COMMAND_SESSION_TTL_SECONDS = max(
+    30, _env_int("CPTR_COMMAND_SESSION_TTL_SECONDS", 30 * 24 * 60 * 60)
+)
+COMMAND_SESSION_MAX_RETAINED = max(8, _env_int("CPTR_COMMAND_SESSION_MAX_RETAINED", 512))
 COMMAND_SESSION_REAPER_INTERVAL_SECONDS = max(
-    5, _env_int("CPTR_COMMAND_SESSION_REAPER_INTERVAL_SECONDS", 30)
+    5, _env_int("CPTR_COMMAND_SESSION_REAPER_INTERVAL_SECONDS", 5 * 60)
 )
 COMMAND_LOG_MAX_BYTES = max(
-    1 * 1024 * 1024, _env_int("CPTR_COMMAND_LOG_MAX_BYTES", 50 * 1024 * 1024)
+    1 * 1024 * 1024, _env_int("CPTR_COMMAND_LOG_MAX_BYTES", 128 * 1024 * 1024)
+)
+COMMAND_IDEMPOTENCY_CACHE_TTL_SECONDS = max(
+    60, _env_int("CPTR_COMMAND_IDEMPOTENCY_CACHE_TTL_SECONDS", 24 * 60 * 60)
+)
+COMMAND_IDEMPOTENCY_CACHE_MAX_ENTRIES = max(
+    128, _env_int("CPTR_COMMAND_IDEMPOTENCY_CACHE_MAX_ENTRIES", 4_096)
 )
 COMMAND_LOG_BATCH_BYTES = max(16 * 1024, _env_int("CPTR_COMMAND_LOG_BATCH_BYTES", 128 * 1024))
 COMMAND_LOG_FLUSH_INTERVAL_MS = max(10, _env_int("CPTR_COMMAND_LOG_FLUSH_INTERVAL_MS", 200))
@@ -131,9 +146,12 @@ TERMINAL_EVENT_FLUSH_INTERVAL_MS = max(10, _env_int("CPTR_TERMINAL_EVENT_FLUSH_I
 
 # ── Live-event durability ───────────────────────────────────
 LIVE_EVENT_WRITE_BATCH_SIZE = max(1, _env_int("CPTR_LIVE_EVENT_WRITE_BATCH_SIZE", 64))
-LIVE_EVENT_QUEUE_SIZE = max(64, _env_int("CPTR_LIVE_EVENT_QUEUE_SIZE", 2_048))
+LIVE_EVENT_QUEUE_SIZE = max(64, _env_int("CPTR_LIVE_EVENT_QUEUE_SIZE", 8_192))
+LIVE_EVENT_MAX_REPLAY_EVENTS = max(
+    500, min(_env_int("CPTR_LIVE_EVENT_MAX_REPLAY_EVENTS", 5_000), 50_000)
+)
 LIVE_EVENT_RETENTION_CLEANUP_INTERVAL = max(
-    10, _env_int("CPTR_LIVE_EVENT_RETENTION_CLEANUP_INTERVAL", 100)
+    10, _env_int("CPTR_LIVE_EVENT_RETENTION_CLEANUP_INTERVAL", 500)
 )
 
 # ── Control-plane caches ────────────────────────────────────

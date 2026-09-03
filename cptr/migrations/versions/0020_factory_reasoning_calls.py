@@ -2,7 +2,15 @@
 
 Revision ID: 0020
 Revises: 0019
+
+Compatibility note: ``main`` briefly used revision ``0019`` for the browser
+broker while the Dark Factory branch used the same ID for its core schema.  A
+legacy-main database can therefore report ``0019`` while lacking the factory
+core tables.  Repair that historical ambiguity before creating reasoning rows.
 """
+
+import importlib.util
+from pathlib import Path
 
 import sqlalchemy as sa
 from alembic import op
@@ -13,7 +21,21 @@ branch_labels = None
 depends_on = None
 
 
+def _ensure_factory_core_compat() -> None:
+    if "factory_runs" in set(sa.inspect(op.get_bind()).get_table_names()):
+        return
+
+    migration_path = Path(__file__).with_name("0019_dark_factory_core.py")
+    spec = importlib.util.spec_from_file_location("_cptr_dark_factory_core_compat", migration_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load Dark Factory core compatibility migration")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.upgrade()
+
+
 def upgrade() -> None:
+    _ensure_factory_core_compat()
     op.create_table(
         "factory_reasoning_calls",
         sa.Column("id", sa.Text(), primary_key=True, nullable=False),

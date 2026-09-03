@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 
 from cptr.env import (
+    LIVE_EVENT_MAX_REPLAY_EVENTS,
     LIVE_EVENT_QUEUE_SIZE,
     LIVE_EVENT_RETENTION_CLEANUP_INTERVAL,
     LIVE_EVENT_WRITE_BATCH_SIZE,
@@ -25,7 +26,7 @@ from cptr.utils.redaction import redact_external, redact_sensitive
 
 MAX_EVENT_PAYLOAD_CHARS = 12_000
 MAX_TERMINAL_CHUNK_CHARS = 8_192
-MAX_REPLAY_EVENTS = 500
+MAX_REPLAY_EVENTS = LIVE_EVENT_MAX_REPLAY_EVENTS
 logger = logging.getLogger(__name__)
 
 _SAFE_SGR_RE = re.compile(r"^\x1b\[[0-9;]*m$")
@@ -612,7 +613,9 @@ class LiveEventHub:
         loop = asyncio.get_running_loop()
         if self._subscriber_loop_owner is not loop:
             if self._subscribers:
-                raise RuntimeError("cannot rebind live event subscribers while subscriptions are active")
+                raise RuntimeError(
+                    "cannot rebind live event subscribers while subscriptions are active"
+                )
             self._subscriber_lock = asyncio.Lock()
             self._subscriber_loop_owner = loop
         await self.store.start()
