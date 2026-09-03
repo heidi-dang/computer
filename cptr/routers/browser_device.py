@@ -14,11 +14,12 @@ from pydantic import BaseModel, Field
 from cptr.services.browser_command_results import browser_command_results
 from cptr.services.browser_evaluate_approvals import browser_evaluate_approvals
 from cptr.services.browser_device_connections import browser_device_connections
-from cptr.services.browser_devices import browser_device_store
+from cptr.services.browser_devices import BrowserTabInUseError, browser_device_store
 from cptr.services.browser_visual_frames import BrowserVisualFrame, browser_visual_frames
 from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
 
 router = APIRouter(prefix="/api/browser-device/v1", tags=["browser-device"])
+CONTROL_HEARTBEAT_SECONDS = 20.0
 
 
 class PairingRequestBody(BaseModel):
@@ -106,12 +107,12 @@ async def _control_user(request: Request, scope: str) -> str:
     try:
         return await authenticate_control_request(request, scope)
     except PermissionError as exc:
-        message = str(exc)
         if isinstance(exc, ControlMemoryUnavailable):
             raise HTTPException(
                 status_code=503,
                 detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
             ) from exc
+        message = str(exc)
         raise HTTPException(
             status_code=403 if message.startswith("missing required scope") else 401,
             detail="control-plane access denied",
@@ -197,6 +198,19 @@ def _safe_discovered_tabs(result: dict[str, Any]) -> list[dict[str, Any]]:
     return tabs
 
 
+async def _wait_browser_command(
+    command_id: str,
+    *,
+    timeout_seconds: float,
+    timeout_detail: str,
+) -> dict[str, Any]:
+    try:
+        return await browser_command_results.wait(command_id, timeout_seconds=timeout_seconds)
+    except TimeoutError as exc:
+        await browser_command_results.abandon(command_id)
+        raise HTTPException(status_code=504, detail=timeout_detail) from exc
+
+
 async def _discover_device_tabs(*, user_id: str, device_id: str, wait_seconds: float = 15.0) -> list[dict[str, Any]]:
     if not await browser_device_store.owns_active_device(user_id=user_id, device_id=device_id):
         raise HTTPException(status_code=404, detail="browser device not found")
@@ -228,10 +242,11 @@ async def _discover_device_tabs(*, user_id: str, device_id: str, wait_seconds: f
     if not delivered:
         await browser_command_results.abandon(command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        result = await browser_command_results.wait(command_id, timeout_seconds=wait_seconds)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser tab discovery timed out") from exc
+    result = await _wait_browser_command(
+        command_id,
+        timeout_seconds=wait_seconds,
+        timeout_detail="browser tab discovery timed out",
+    )
     if result.get("type") != "browser.command.completed":
         raise HTTPException(status_code=409, detail="browser tab discovery failed")
     return _safe_discovered_tabs(result)
@@ -279,6 +294,8 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
             workbench_session_id=body.workbench_session_id,
             surface_id=body.surface_id,
         )
+    except BrowserTabInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="browser device not found") from exc
 
@@ -330,13 +347,17 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
         )
         raise HTTPException(status_code=409, detail="browser device is offline")
     try:
-        attach_result = await browser_command_results.wait(command_id, timeout_seconds=15.0)
-    except TimeoutError as exc:
+        attach_result = await _wait_browser_command(
+            command_id,
+            timeout_seconds=15.0,
+            timeout_detail="browser attach timed out",
+        )
+    except HTTPException:
         await browser_device_store.abort_session_bootstrap(
             session_id=session.id,
             expected_epoch=int(acquired["epoch"]),
         )
-        raise HTTPException(status_code=504, detail="browser attach timed out") from exc
+        raise
     if attach_result.get("type") != "browser.command.completed":
         await browser_device_store.abort_session_bootstrap(
             session_id=session.id,
@@ -362,6 +383,7 @@ async def get_browser_frame(request: Request, session_id: str, after_frame_id: s
         raise HTTPException(status_code=404, detail="browser session not found")
     frame = await browser_visual_frames.wait_next(
         device_id=session.device_id,
+        session_id=session_id,
         after_frame_id=after_frame_id,
         timeout_seconds=15.0,
     )
@@ -458,10 +480,11 @@ async def return_browser_to_agent(request: Request, session_id: str, body: Retur
     if not delivered:
         await browser_command_results.abandon(command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        prepared = await browser_command_results.wait(command_id, timeout_seconds=body.wait_seconds)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser handoff snapshot timed out") from exc
+    prepared = await _wait_browser_command(
+        command_id,
+        timeout_seconds=body.wait_seconds,
+        timeout_detail="browser handoff snapshot timed out",
+    )
     if prepared.get("type") != "browser.command.completed":
         raise HTTPException(status_code=409, detail="browser handoff snapshot failed")
     payload = prepared.get("payload")
@@ -558,10 +581,11 @@ async def send_browser_human_input(request: Request, session_id: str, body: Huma
     if not delivered:
         await browser_command_results.abandon(body.command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        result = await browser_command_results.wait(body.command_id, timeout_seconds=body.wait_seconds)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="human browser input timed out") from exc
+    result = await _wait_browser_command(
+        body.command_id,
+        timeout_seconds=body.wait_seconds,
+        timeout_detail="human browser input timed out",
+    )
     return {"accepted": True, "command_id": body.command_id, "result": result}
 
 
@@ -636,7 +660,7 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             "command_id": body.command_id,
             "payload": {
                 "action": body.action,
-                "expected_epoch": body.expected_epoch,
+                **({"expected_epoch": body.expected_epoch} if body.expected_epoch is not None else {}),
                 "args": body.payload,
             },
         },
@@ -644,13 +668,11 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
     if not delivered:
         await browser_command_results.abandon(body.command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        result = await browser_command_results.wait(
-            body.command_id,
-            timeout_seconds=body.wait_seconds,
-        )
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser command timed out") from exc
+    result = await _wait_browser_command(
+        body.command_id,
+        timeout_seconds=body.wait_seconds,
+        timeout_detail="browser command timed out",
+    )
     return {
         "accepted": True,
         "command_id": body.command_id,
@@ -659,12 +681,64 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
     }
 
 
+async def _detach_agent_session(session_id: str, session: Any, expected_epoch: int) -> None:
+    """Detach Chrome and wait for acknowledgement before releasing an agent lease."""
+    try:
+        await browser_device_store.assert_mutation(
+            session_id=session_id,
+            actor="agent",
+            expected_epoch=expected_epoch,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    command_id = f"detach_{session_id}_{expected_epoch}_{uuid4().hex[:8]}"
+    await browser_command_results.reserve(command_id)
+    event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.session.detach",
+        payload={"session_id": session_id, "command_id": command_id, "epoch": expected_epoch},
+    )
+    delivered = await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.command",
+            "device_id": session.device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "AGENT_CONTROL",
+            "command_id": command_id,
+            "payload": {
+                "action": "detach",
+                "expected_epoch": expected_epoch,
+                "args": {},
+            },
+        },
+    )
+    if not delivered:
+        await browser_command_results.abandon(command_id)
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    detached = await _wait_browser_command(
+        command_id,
+        timeout_seconds=15.0,
+        timeout_detail="browser detach timed out",
+    )
+    if detached.get("type") != "browser.command.completed":
+        raise HTTPException(status_code=409, detail="browser detach failed")
+
+
 @router.post("/sessions/{session_id}/lease")
 async def transfer_browser_lease(request: Request, session_id: str, body: TransferLeaseBody):
     user_id = await _control_user(request, "task:write")
     session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="browser session not found")
+    if body.expected_owner == "agent" and body.new_owner == "none":
+        await _detach_agent_session(session_id, session, body.expected_epoch)
     try:
         result = await browser_device_store.transfer_lease(
             session_id=session_id,
@@ -716,6 +790,8 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
                 },
             },
         )
+        if body.new_owner == "none":
+            await browser_visual_frames.clear(device_id=session.device_id, session_id=session_id)
         return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="browser session not found") from exc
@@ -741,6 +817,24 @@ async def _receive_auth(websocket: WebSocket) -> tuple[str, str, int] | None:
     if not isinstance(resume_from, int) or resume_from < 0:
         return None
     return device_id, credential, resume_from
+
+
+async def _browser_device_control_heartbeat(device_id: str) -> None:
+    try:
+        while True:
+            await asyncio.sleep(CONTROL_HEARTBEAT_SECONDS)
+            delivered = await browser_device_connections.send_control(
+                device_id=device_id,
+                message={
+                    "protocol_version": 1,
+                    "type": "device.ping",
+                    "device_id": device_id,
+                },
+            )
+            if not delivered:
+                return
+    except asyncio.CancelledError:
+        raise
 
 
 @router.websocket("/connect/visual")
@@ -843,6 +937,7 @@ async def browser_device_control_socket(websocket: WebSocket):
     # In-flight commands interrupted by a disconnect time out and are retried
     # by their caller instead of replaying potentially sensitive payloads.
     _ = resume_from
+    heartbeat_task = asyncio.create_task(_browser_device_control_heartbeat(device_id))
 
     try:
         while True:
@@ -881,4 +976,9 @@ async def browser_device_control_socket(websocket: WebSocket):
     except WebSocketDisconnect:
         return
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         await browser_device_connections.detach(device_id=device_id, websocket=websocket)

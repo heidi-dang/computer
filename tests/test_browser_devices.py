@@ -1,8 +1,8 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from cptr.services.browser_devices import BrowserDeviceStore
+from cptr.services.browser_devices import BrowserDeviceStore, BrowserTabInUseError
 
 
 class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -130,6 +130,108 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
             db.get.return_value = SimpleNamespace(user_id="user_1", status="REVOKED")
             self.assertFalse(await store.owns_active_device(user_id="user_1", device_id="bdv_1"))
 
+    async def test_open_session_rejects_live_session_on_same_tab_before_repointing_lease(self):
+        store = BrowserDeviceStore()
+        device = SimpleNamespace(user_id="user_1", status="ACTIVE")
+        active_session = SimpleNamespace(id="brs_existing", closed_at=None, state="AGENT_CONTROL")
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_existing",
+            owner="agent",
+            epoch=4,
+        )
+        db = AsyncMock()
+        db.get.side_effect = [device, active_session]
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            self.assertRaises(BrowserTabInUseError),
+        ):
+            await store.open_session(user_id="user_1", device_id="bdv_1", tab_id=7)
+
+        self.assertEqual(lease.session_id, "brs_existing")
+        self.assertEqual(lease.owner, "agent")
+        self.assertEqual(lease.epoch, 4)
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
+
+    async def test_open_session_rejects_inflight_bootstrap_with_owner_none(self):
+        store = BrowserDeviceStore()
+        device = SimpleNamespace(user_id="user_1", status="ACTIVE")
+        bootstrap_session = SimpleNamespace(
+            id="brs_connecting",
+            closed_at=None,
+            state="CONNECTING",
+        )
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_connecting",
+            owner="none",
+            epoch=4,
+        )
+        db = AsyncMock()
+        db.add = MagicMock()
+        db.get.side_effect = [device, bootstrap_session]
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            self.assertRaises(BrowserTabInUseError),
+        ):
+            await store.open_session(user_id="user_1", device_id="bdv_1", tab_id=7)
+
+        self.assertIsNone(bootstrap_session.closed_at)
+        self.assertEqual(bootstrap_session.state, "CONNECTING")
+        self.assertEqual(lease.session_id, "brs_connecting")
+        self.assertEqual(lease.owner, "none")
+        self.assertEqual(lease.epoch, 4)
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
+
+    async def test_open_session_retires_released_observing_session_before_reusing_tab(self):
+        store = BrowserDeviceStore()
+        device = SimpleNamespace(user_id="user_1", status="ACTIVE")
+        released_session = SimpleNamespace(id="brs_old", closed_at=None, state="OBSERVING", updated_at=1)
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_old",
+            owner="none",
+            epoch=4,
+            expires_at=123,
+            updated_at=1,
+        )
+        new_session = SimpleNamespace(id="brs_new")
+        db = AsyncMock()
+        db.add = MagicMock()
+        db.get.side_effect = [device, released_session]
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            patch("cptr.services.browser_devices.BrowserSession", return_value=new_session),
+            patch("cptr.services.browser_devices._now_ms", return_value=999),
+        ):
+            result = await store.open_session(user_id="user_1", device_id="bdv_1", tab_id=7)
+
+        self.assertIs(result, new_session)
+        self.assertEqual(released_session.state, "DISCONNECTED")
+        self.assertEqual(released_session.closed_at, 999)
+        self.assertEqual(lease.session_id, "brs_new")
+        self.assertEqual(lease.owner, "none")
+        self.assertEqual(lease.epoch, 5)
+        self.assertIsNone(lease.expires_at)
+        db.commit.assert_awaited_once()
+
     async def test_transfer_rejects_stale_epoch(self):
         store = BrowserDeviceStore()
         session = SimpleNamespace(id="brs_1", closed_at=None, snapshot_id="snap_old", state="AGENT_CONTROL", updated_at=1)
@@ -159,6 +261,42 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(lease.owner, "agent")
         self.assertEqual(lease.epoch, 4)
+
+    async def test_transfer_to_none_closes_session_and_marks_it_disconnected(self):
+        store = BrowserDeviceStore()
+        session = SimpleNamespace(id="brs_1", closed_at=None, snapshot_id="snap_old", state="AGENT_CONTROL", updated_at=1)
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_1",
+            owner="agent",
+            epoch=4,
+            expires_at=456,
+            updated_at=1,
+        )
+        db = AsyncMock()
+        db.get.return_value = session
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            patch("cptr.services.browser_devices._now_ms", return_value=999),
+        ):
+            result = await store.transfer_lease(
+                session_id="brs_1",
+                expected_epoch=4,
+                expected_owner="agent",
+                new_owner="none",
+            )
+
+        self.assertEqual(result["owner"], "none")
+        self.assertEqual(result["epoch"], 5)
+        self.assertEqual(result["state"], "DISCONNECTED")
+        self.assertEqual(session.state, "DISCONNECTED")
+        self.assertEqual(session.closed_at, 999)
+        self.assertIsNone(lease.expires_at)
 
     async def test_return_to_agent_requires_fresh_snapshot_and_increments_epoch(self):
         store = BrowserDeviceStore()
