@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 from cptr.services.live_events import (
@@ -6,6 +7,59 @@ from cptr.services.live_events import (
     TerminalStreamSanitizer,
     sanitize_terminal_text,
 )
+
+
+class _LoopRecordingPersistentStore(LiveEventStore):
+    def __init__(self):
+        super().__init__(persistent=True)
+        self.sequences = {}
+
+    async def _persist_batch(self, batch):
+        for pending in batch:
+            sequence = self.sequences.get(pending.target_key, 0) + 1
+            self.sequences[pending.target_key] = sequence
+            envelope = self._envelope(
+                event_id=f"event-{sequence}",
+                sequence=sequence,
+                created_at=pending.created_at,
+                user_id=pending.user_id,
+                target_key=pending.target_key,
+                task_id=pending.task_id,
+                monitor_id=pending.monitor_id,
+                worker_task_id=pending.worker_task_id,
+                event_type=pending.event_type,
+                payload=pending.payload,
+            )
+            if not pending.future.done():
+                pending.future.set_result(envelope)
+
+
+class LiveEventCrossLoopTests(unittest.TestCase):
+    def test_persistent_store_rebinds_cleanly_across_event_loop_lifespans(self):
+        store = _LoopRecordingPersistentStore()
+        hub = LiveEventHub(store=store)
+        subscriber_lock_ids = []
+
+        async def cycle():
+            await hub.start()
+            subscriber_lock_ids.append(id(hub._subscriber_lock))
+            try:
+                return await hub.publish(
+                    user_id="user-1",
+                    target_key="task:task-1",
+                    task_id="task-1",
+                    event_type="task.started",
+                    payload={"status": "RUNNING"},
+                )
+            finally:
+                await hub.close()
+
+        first = asyncio.run(cycle())
+        second = asyncio.run(cycle())
+
+        self.assertEqual(first.sequence, 1)
+        self.assertEqual(second.sequence, 2)
+        self.assertNotEqual(subscriber_lock_ids[0], subscriber_lock_ids[1])
 
 
 class LiveEventTests(unittest.IsolatedAsyncioTestCase):

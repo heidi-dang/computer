@@ -1,5 +1,6 @@
 import asyncio
 import time
+import uuid
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -24,6 +25,7 @@ from cptr.routers import (
     control_router,
     control_stream_router,
     events_router,
+    factory_router,
     files_router,
     gateway_router,
     gateway_extended_router,
@@ -67,6 +69,28 @@ async def lifespan(app: FastAPI):
     _logging.getLogger(__name__).info("truststore: using system certificate store")
 
     await init_db()
+
+    from cptr.env import FACTORY_RUN_LEASE_MS
+    from cptr.services.factory_control import FactoryControlService
+    from cptr.services.factory_production import FactoryProductionRunner
+    from cptr.services.factory_runtime import FactoryRuntime
+    from cptr.services.factory_store import SqlFactoryStore
+
+    factory_store = SqlFactoryStore()
+    app.state.factory_runtime = FactoryRuntime(
+        store=factory_store,
+        owner_token=f"factory-runtime-{uuid.uuid4().hex}",
+        lease_ms=FACTORY_RUN_LEASE_MS,
+    )
+    app.state.factory_recovered_run_ids = await app.state.factory_runtime.recover_active_runs()
+    app.state.factory_control_service = FactoryControlService(store=factory_store)
+    app.state.factory_production_runner = FactoryProductionRunner(
+        store=factory_store,
+        lease_ms=FACTORY_RUN_LEASE_MS,
+    )
+    app.state.factory_scheduled_run_ids = (
+        await app.state.factory_production_runner.schedule_active()
+    )
 
     from cptr.services.live_events import live_event_hub
     from cptr.services.runtime_metrics import event_loop_lag_worker
@@ -119,6 +143,10 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        factory_runner = getattr(app.state, "factory_production_runner", None)
+        if factory_runner is not None:
+            await factory_runner.close()
+
         for monitor_task in getattr(app.state, "control_monitor_tasks", {}).values():
             monitor_task.cancel()
         for monitor_task in getattr(app.state, "control_monitor_tasks", {}).values():
@@ -412,6 +440,7 @@ app.include_router(coding_router)
 app.include_router(control_router)
 app.include_router(control_stream_router)
 app.include_router(events_router)
+app.include_router(factory_router)
 app.include_router(files_router)
 app.include_router(gateway_router)
 app.include_router(gateway_extended_router)

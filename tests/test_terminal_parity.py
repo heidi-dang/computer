@@ -105,6 +105,63 @@ class TerminalParityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["__cols"], 132)
         self.assertEqual(kwargs["__stdin"], "hello\n")
 
+    async def test_recovered_command_snapshot_streams_rotated_log_with_global_offsets(self):
+        with tempfile.TemporaryDirectory() as workspace_root:
+            log_dir = Path(workspace_root, ".cptr", "task_logs")
+            log_dir.mkdir(parents=True)
+            log_path = log_dir / "feedface.jsonl"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps({"type": "log_rotated", "ts": 20.0}),
+                        json.dumps(
+                            {
+                                "type": "output",
+                                "stream": "stdout",
+                                "data": "alpha-",
+                                "offset_end": 100006,
+                                "ts": 20.1,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "output",
+                                "stream": "stdout",
+                                "data": "omega",
+                                "offset_end": 100011,
+                                "ts": 20.2,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "end",
+                                "exit_code": 0,
+                                "total_bytes": 100011,
+                                "started_at": 10.0,
+                                "ts": 20.3,
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(
+                Path, "read_text", side_effect=AssertionError("whole-file read used")
+            ):
+                snapshot = await _command_snapshot(
+                    SimpleNamespace(),
+                    workspace_path=workspace_root,
+                    command_id="feedface",
+                    offset=100006,
+                )
+
+        self.assertEqual(snapshot["status"], "COMPLETE")
+        self.assertEqual(snapshot["next_offset"], 100011)
+        self.assertEqual(snapshot["output"], "omega")
+        self.assertGreaterEqual(snapshot["duration_ms"], 10_000)
+        self.assertTrue(snapshot["recovered"])
+
     async def test_completed_command_snapshot_recovers_from_durable_jsonl_after_registry_loss(self):
         with tempfile.TemporaryDirectory() as workspace_root:
             log_dir = Path(workspace_root, ".cptr", "task_logs")

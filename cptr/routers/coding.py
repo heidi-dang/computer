@@ -25,9 +25,16 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
-from cptr.env import DIRECT_CODING_IO_CONCURRENCY
-from cptr.models import Workspace
+from cptr.env import (
+    COMMAND_IDEMPOTENCY_CACHE_MAX_ENTRIES,
+    COMMAND_IDEMPOTENCY_CACHE_TTL_SECONDS,
+    COMMAND_INLINE_WAIT_MAX_SECONDS,
+    DIRECT_CODING_IO_CONCURRENCY,
+)
+from cptr.models import ControlIdempotency, Workspace
 from cptr.services.control_auth import authenticate_control_request
 from cptr.services.direct_coding_workers import (
     DirectCodingWorkerError,
@@ -71,8 +78,8 @@ MAX_BROWSER_TEXT_CHARS = 20_000
 MAX_BROWSER_SNAPSHOT_CHARS = 24_000
 _BROWSER_OPERATION_TIMEOUT_SECONDS = 45
 _BROWSER_CONTROL_LOCKS: dict[str, asyncio.Lock] = {}
-_COMMAND_IDEMPOTENCY_TTL_SECONDS = 300.0
-_COMMAND_IDEMPOTENCY_MAX = 512
+_COMMAND_IDEMPOTENCY_TTL_SECONDS = float(COMMAND_IDEMPOTENCY_CACHE_TTL_SECONDS)
+_COMMAND_IDEMPOTENCY_MAX = COMMAND_IDEMPOTENCY_CACHE_MAX_ENTRIES
 _COMMAND_IDEMPOTENCY: dict[tuple[str, str, str], tuple[str, float]] = {}
 
 # Direct coding supports local development and validation. Deliberately refuse
@@ -147,7 +154,7 @@ class EditRequest(WorkerTargetRequest):
 class CommandRequest(WorkerTargetRequest):
     command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
-    wait_seconds: int = Field(default=30, ge=0, le=60)
+    wait_seconds: int = Field(default=30, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
     allow_network: bool = False
     pty: bool = False
     rows: int = Field(default=24, ge=5, le=300)
@@ -264,13 +271,13 @@ class TestTargetRequest(WorkerTargetRequest):
     target: Literal["python_pytest", "node_test", "node_vitest", "node_build"]
     path: str = Field(default=".", min_length=1, max_length=1_000)
     test_path: str | None = Field(default=None, min_length=1, max_length=1_000)
-    wait_seconds: int = Field(default=30, ge=0, le=60)
+    wait_seconds: int = Field(default=30, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
 
 
 class SshCommandRequest(BaseModel):
     alias: str = Field(min_length=1, max_length=MAX_SSH_ALIAS_CHARS)
     command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
-    wait_seconds: int = Field(default=0, ge=0, le=60)
+    wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
 
 
 class BrowserControlRequest(BaseModel):
@@ -474,7 +481,7 @@ def _cursor(value: str | None) -> int:
     return int(value)
 
 
-def _command_idempotency_get(user_id: str, workspace_id: str, key: str) -> str | None:
+def _command_idempotency_memory_get(user_id: str, workspace_id: str, key: str) -> str | None:
     now = time.monotonic()
     expired = [item for item, (_, expires_at) in _COMMAND_IDEMPOTENCY.items() if expires_at <= now]
     for item in expired:
@@ -483,7 +490,9 @@ def _command_idempotency_get(user_id: str, workspace_id: str, key: str) -> str |
     return value[0] if value and value[1] > now else None
 
 
-def _command_idempotency_put(user_id: str, workspace_id: str, key: str, command_id: str) -> None:
+def _command_idempotency_memory_put(
+    user_id: str, workspace_id: str, key: str, command_id: str
+) -> None:
     if len(_COMMAND_IDEMPOTENCY) >= _COMMAND_IDEMPOTENCY_MAX:
         oldest = min(_COMMAND_IDEMPOTENCY.items(), key=lambda item: item[1][1])[0]
         _COMMAND_IDEMPOTENCY.pop(oldest, None)
@@ -491,6 +500,85 @@ def _command_idempotency_put(user_id: str, workspace_id: str, key: str, command_
         command_id,
         time.monotonic() + _COMMAND_IDEMPOTENCY_TTL_SECONDS,
     )
+
+
+def _command_idempotency_db_key(workspace_id: str, key: str) -> str:
+    return f"direct-command:{workspace_id}:{key}"
+
+
+async def _command_idempotency_get(user_id: str, workspace_id: str, key: str) -> str | None:
+    cached = _command_idempotency_memory_get(user_id, workspace_id, key)
+    if cached is not None:
+        return cached
+
+    durable_key = _command_idempotency_db_key(workspace_id, key)
+    async with await get_db() as db:
+        record = (
+            await db.execute(
+                select(ControlIdempotency).where(
+                    ControlIdempotency.user_id == user_id,
+                    ControlIdempotency.key == durable_key,
+                )
+            )
+        ).scalar_one_or_none()
+    if record is None:
+        return None
+    if record.resource_type != "direct_command":
+        raise HTTPException(status_code=409, detail="command idempotency key collision")
+    command_id = str(record.resource_id)
+    _command_idempotency_memory_put(user_id, workspace_id, key, command_id)
+    return command_id
+
+
+async def _command_idempotency_put(
+    user_id: str, workspace_id: str, key: str, command_id: str
+) -> str:
+    durable_key = _command_idempotency_db_key(workspace_id, key)
+    now_ms = int(time.time() * 1000)
+    async with await get_db() as db:
+        existing = (
+            await db.execute(
+                select(ControlIdempotency).where(
+                    ControlIdempotency.user_id == user_id,
+                    ControlIdempotency.key == durable_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if existing.resource_type != "direct_command":
+                raise HTTPException(status_code=409, detail="command idempotency key collision")
+            authoritative = str(existing.resource_id)
+            _command_idempotency_memory_put(user_id, workspace_id, key, authoritative)
+            return authoritative
+
+        db.add(
+            ControlIdempotency(
+                user_id=user_id,
+                key=durable_key,
+                resource_type="direct_command",
+                resource_id=command_id,
+                response={"workspace_id": workspace_id, "command_id": command_id},
+                created_at=now_ms,
+            )
+        )
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            existing = (
+                await db.execute(
+                    select(ControlIdempotency).where(
+                        ControlIdempotency.user_id == user_id,
+                        ControlIdempotency.key == durable_key,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None or existing.resource_type != "direct_command":
+                raise
+            command_id = str(existing.resource_id)
+
+    _command_idempotency_memory_put(user_id, workspace_id, key, command_id)
+    return command_id
 
 
 def _bounded_diff(old: str, new: str, path: str) -> tuple[str, bool]:
@@ -663,6 +751,134 @@ def _line_slice(content: str, start_line: int, end_line: int) -> tuple[str, int,
     return "".join(lines[start - 1 : end]), start, end, total
 
 
+def _parse_recovered_command_log(
+    log_path: Path,
+    *,
+    offset: int,
+    tail_bytes: int | None,
+) -> dict[str, Any] | None:
+    """Stream one durable command JSONL into a bounded recovery projection."""
+
+    command = ""
+    created_at = 0.0
+    completed_at: float | None = None
+    exit_code: int | None = None
+    pty_mode = False
+    rows = 24
+    cols = 80
+    total_bytes = 0
+    legacy_offset = 0
+    preview_bytes = MAX_COMMAND_OUTPUT_CHARS * 4
+    head = bytearray()
+    tail = bytearray()
+    requested_tail = max(0, int(tail_bytes or 0)) if tail_bytes is not None else None
+    selected_char_count = 0
+
+    def append_preview(payload: bytes) -> None:
+        nonlocal selected_char_count
+        if not payload:
+            return
+        selected_char_count += len(payload.decode("utf-8", errors="replace"))
+        if len(head) < preview_bytes:
+            head.extend(payload[: preview_bytes - len(head)])
+        tail.extend(payload)
+        if len(tail) > preview_bytes:
+            del tail[:-preview_bytes]
+
+    try:
+        source = log_path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+    with source:
+        for line in source:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            entry_type = str(entry.get("type") or "")
+            if entry_type == "start":
+                command = str(entry.get("command") or command)
+                created_at = float(entry.get("ts") or created_at or 0.0)
+                pty_mode = bool(entry.get("pty", pty_mode))
+                rows = int(entry.get("rows") or rows)
+                cols = int(entry.get("cols") or cols)
+                continue
+            if entry_type == "end":
+                value = entry.get("exit_code")
+                exit_code = int(value) if isinstance(value, int) else None
+                completed_at = float(entry.get("ts") or time.time())
+                total_value = entry.get("total_bytes")
+                if isinstance(total_value, int) and total_value >= 0:
+                    total_bytes = max(total_bytes, total_value)
+                    legacy_offset = max(legacy_offset, total_value)
+                started_value = entry.get("started_at")
+                if not created_at and isinstance(started_value, (int, float)):
+                    created_at = float(started_value)
+                command = str(entry.get("command") or command)
+                pty_mode = bool(entry.get("pty", pty_mode))
+                rows = int(entry.get("rows") or rows)
+                cols = int(entry.get("cols") or cols)
+                continue
+            if entry_type != "output":
+                continue
+
+            payload = str(entry.get("data") or "").encode("utf-8", errors="replace")
+            explicit_end = entry.get("offset_end")
+            if isinstance(explicit_end, int) and explicit_end >= 0:
+                chunk_end = explicit_end
+                chunk_start = max(0, chunk_end - len(payload))
+            else:
+                chunk_start = legacy_offset
+                chunk_end = chunk_start + len(payload)
+            legacy_offset = max(legacy_offset, chunk_end)
+            total_bytes = max(total_bytes, chunk_end)
+
+            if requested_tail is not None:
+                if requested_tail == 0:
+                    continue
+                tail.extend(payload)
+                if len(tail) > requested_tail:
+                    del tail[:-requested_tail]
+                continue
+
+            if chunk_end <= offset:
+                continue
+            local_start = max(0, offset - chunk_start)
+            append_preview(payload[local_start:])
+
+    if requested_tail is not None:
+        selected = bytes(tail)
+        decoded = selected.decode("utf-8", errors="replace")
+        output_truncated = len(decoded) > MAX_COMMAND_OUTPUT_CHARS
+        output = _truncate(decoded)
+    else:
+        output_truncated = selected_char_count > MAX_COMMAND_OUTPUT_CHARS
+        if not output_truncated:
+            output = bytes(head).decode("utf-8", errors="replace")
+        else:
+            head_text = bytes(head).decode("utf-8", errors="replace")
+            tail_text = bytes(tail).decode("utf-8", errors="replace")
+            half = MAX_COMMAND_OUTPUT_CHARS // 2
+            output = f"{head_text[:half]}\n\n... [output truncated] ...\n\n{tail_text[-half:]}"
+
+    return {
+        "command": command,
+        "created_at": created_at,
+        "completed_at": completed_at,
+        "exit_code": exit_code,
+        "pty": pty_mode,
+        "rows": rows,
+        "cols": cols,
+        "next_offset": total_bytes,
+        "output": output,
+        "output_truncated": output_truncated,
+        "finished": completed_at is not None,
+    }
+
+
 async def _recovered_command_snapshot(
     *,
     workspace_path: str,
@@ -673,64 +889,30 @@ async def _recovered_command_snapshot(
     if re.fullmatch(r"[0-9a-f]{8}", command_id) is None:
         return None
     log_path = Path(workspace_path).resolve() / ".cptr" / "task_logs" / f"{command_id}.jsonl"
-    try:
-        raw_log = await asyncio.to_thread(log_path.read_text, encoding="utf-8", errors="replace")
-    except OSError:
+    parsed = await asyncio.to_thread(
+        _parse_recovered_command_log,
+        log_path,
+        offset=max(0, int(offset)),
+        tail_bytes=tail_bytes,
+    )
+    if parsed is None:
         return None
-    command = ""
-    created_at = 0.0
-    completed_at: float | None = None
-    exit_code: int | None = None
-    pty_mode = False
-    rows = 24
-    cols = 80
-    output = bytearray()
-    for line in raw_log.splitlines():
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(entry, dict):
-            continue
-        entry_type = str(entry.get("type") or "")
-        if entry_type == "start":
-            command = str(entry.get("command") or command)
-            created_at = float(entry.get("ts") or created_at or 0.0)
-            pty_mode = bool(entry.get("pty", pty_mode))
-            rows = int(entry.get("rows") or rows)
-            cols = int(entry.get("cols") or cols)
-        elif entry_type == "output":
-            output.extend(str(entry.get("data") or "").encode("utf-8", errors="replace"))
-        elif entry_type == "end":
-            value = entry.get("exit_code")
-            exit_code = int(value) if isinstance(value, int) else None
-            completed_at = float(entry.get("ts") or time.time())
-    total = len(output)
-    if tail_bytes is not None:
-        selected = bytes(output[-tail_bytes:] if tail_bytes else b"")
-    else:
-        selected = bytes(output[max(0, min(offset, total)) :])
-    decoded = selected.decode(errors="replace")
-    finished = completed_at is not None
+    completed_at = parsed["completed_at"]
+    created_at = float(parsed["created_at"] or completed_at or time.time())
     return {
         "command_id": command_id,
-        "status": "COMPLETE" if finished else "INTERRUPTED",
-        "exit_code": exit_code,
-        "output": _truncate(decoded),
-        "next_offset": total,
-        "duration_ms": max(
-            0,
-            int(
-                ((completed_at or time.time()) - (created_at or completed_at or time.time())) * 1000
-            ),
-        ),
-        "output_truncated": len(decoded) > MAX_COMMAND_OUTPUT_CHARS,
+        "status": "COMPLETE" if parsed["finished"] else "INTERRUPTED",
+        "exit_code": parsed["exit_code"],
+        "output": parsed["output"],
+        "next_offset": parsed["next_offset"],
+        "duration_ms": max(0, int(((completed_at or time.time()) - created_at) * 1000)),
+        "output_truncated": parsed["output_truncated"],
         "timed_out": False,
-        "pty": pty_mode,
-        "rows": rows,
-        "cols": cols,
+        "pty": parsed["pty"],
+        "rows": parsed["rows"],
+        "cols": parsed["cols"],
         "recovered": True,
-        "command": command,
+        "command": parsed["command"],
     }
 
 
@@ -1784,15 +1966,23 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     _validate_command(body.command, body.allow_network)
     idempotency_workspace = f"{workspace_id}:{body.worker_id or '-'}"
     if body.idempotency_key:
-        existing_id = _command_idempotency_get(user_id, idempotency_workspace, body.idempotency_key)
+        existing_id = await _command_idempotency_get(
+            user_id, idempotency_workspace, body.idempotency_key
+        )
         if existing_id:
-            existing = get_command_session(request, existing_id)
-            if existing is not None and existing.get("workspace") == str(root):
+            try:
                 return await _command_snapshot(
                     request,
                     workspace_path=str(root),
                     command_id=existing_id,
                 )
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                raise HTTPException(
+                    status_code=409,
+                    detail="durable command checkpoint exists but its transcript is unavailable",
+                ) from exc
     scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
     if body.allow_network and "command:external" not in scopes:
         raise HTTPException(
@@ -1824,7 +2014,12 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     command_id = match.group(1)
     await _touch_worker(user_id, workspace_id, body.worker_id)
     if body.idempotency_key:
-        _command_idempotency_put(user_id, idempotency_workspace, body.idempotency_key, command_id)
+        authoritative_id = await _command_idempotency_put(
+            user_id, idempotency_workspace, body.idempotency_key, command_id
+        )
+        if authoritative_id != command_id:
+            stop_command_session(request, command_id, force=True)
+            command_id = authoritative_id
     snapshot = await _command_snapshot(
         request,
         workspace_path=str(root),

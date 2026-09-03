@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import delete, func, select
 
 from cptr.env import (
+    LIVE_EVENT_MAX_REPLAY_EVENTS,
     LIVE_EVENT_QUEUE_SIZE,
     LIVE_EVENT_RETENTION_CLEANUP_INTERVAL,
     LIVE_EVENT_WRITE_BATCH_SIZE,
@@ -25,7 +26,7 @@ from cptr.utils.redaction import redact_external, redact_sensitive
 
 MAX_EVENT_PAYLOAD_CHARS = 12_000
 MAX_TERMINAL_CHUNK_CHARS = 8_192
-MAX_REPLAY_EVENTS = 500
+MAX_REPLAY_EVENTS = LIVE_EVENT_MAX_REPLAY_EVENTS
 logger = logging.getLogger(__name__)
 
 _SAFE_SGR_RE = re.compile(r"^\x1b\[[0-9;]*m$")
@@ -215,11 +216,10 @@ class LiveEventStore:
         self.persistent = persistent
         self._events: dict[str, list[LiveEventEnvelope]] = {}
         self._lock = asyncio.Lock()
-        self._writer_start_lock = asyncio.Lock()
-        self._write_queue: asyncio.Queue[Any] | None = (
-            asyncio.Queue(maxsize=LIVE_EVENT_QUEUE_SIZE) if persistent else None
-        )
+        self._writer_start_lock: asyncio.Lock | None = None
+        self._write_queue: asyncio.Queue[Any] | None = None
         self._writer_task: asyncio.Task | None = None
+        self._writer_loop_owner: asyncio.AbstractEventLoop | None = None
         self._sequence_cache: dict[str, int] = {}
         self._closed = False
         self._write_batches = 0
@@ -282,10 +282,28 @@ class LiveEventStore:
         )
         return await future
 
+    def _bind_writer_state_to_current_loop(self) -> None:
+        if not self.persistent:
+            return
+        loop = asyncio.get_running_loop()
+        if self._writer_loop_owner is None:
+            self._writer_loop_owner = loop
+            self._writer_start_lock = asyncio.Lock()
+            self._write_queue = asyncio.Queue(maxsize=LIVE_EVENT_QUEUE_SIZE)
+            return
+        if self._writer_loop_owner is not loop:
+            raise RuntimeError(
+                "live event store is bound to a different event loop; close and restart it first"
+            )
+
     async def _ensure_writer(self) -> None:
+        self._bind_writer_state_to_current_loop()
         if self._writer_task is not None and not self._writer_task.done():
             return
-        async with self._writer_start_lock:
+        start_lock = self._writer_start_lock
+        if start_lock is None:
+            raise RuntimeError("persistent live event writer lock is unavailable")
+        async with start_lock:
             if self._writer_task is None or self._writer_task.done():
                 self._writer_task = asyncio.create_task(
                     self._writer_loop(), name="cptr-live-event-writer"
@@ -472,20 +490,42 @@ class LiveEventStore:
         }
 
     async def start(self) -> None:
-        """Re-open the store for a fresh application lifespan."""
+        """Open the store for the current application event-loop lifespan."""
+        if not self.persistent:
+            self._closed = False
+            return
+
+        loop = asyncio.get_running_loop()
+        if self._writer_loop_owner is loop:
+            if self._writer_task is not None and not self._writer_task.done():
+                self._closed = False
+                return
+        elif self._writer_task is not None and not self._writer_task.done():
+            raise RuntimeError("cannot rebind a live event store with an active writer")
+
+        self._writer_loop_owner = loop
+        self._writer_start_lock = asyncio.Lock()
+        self._write_queue = asyncio.Queue(maxsize=LIVE_EVENT_QUEUE_SIZE)
+        self._writer_task = None
+        self._sequence_cache.clear()
         self._closed = False
 
     async def close(self) -> None:
         if not self.persistent or self._closed:
             return
         self._closed = True
+        self._bind_writer_state_to_current_loop()
         queue = self._write_queue
         task = self._writer_task
-        if queue is None or task is None:
-            return
-        await queue.join()
-        await queue.put(_STOP_WRITER)
-        await task
+        if queue is not None and task is not None:
+            await queue.join()
+            await queue.put(_STOP_WRITER)
+            await task
+        self._writer_task = None
+        self._write_queue = None
+        self._writer_start_lock = None
+        self._writer_loop_owner = None
+        self._sequence_cache.clear()
 
     def stats(self) -> dict[str, int]:
         queue = self._write_queue
@@ -519,6 +559,7 @@ class LiveEventHub:
         self.store = store or LiveEventStore(persistent=True)
         self._subscribers: dict[str, set[asyncio.Queue[LiveEventEnvelope | None]]] = {}
         self._subscriber_lock = asyncio.Lock()
+        self._subscriber_loop_owner: asyncio.AbstractEventLoop | None = None
         self._slow_subscriber_disconnects = 0
 
     async def publish(self, **kwargs: Any) -> LiveEventEnvelope:
@@ -569,6 +610,14 @@ class LiveEventHub:
                         self._subscribers.pop(target_key, None)
 
     async def start(self) -> None:
+        loop = asyncio.get_running_loop()
+        if self._subscriber_loop_owner is not loop:
+            if self._subscribers:
+                raise RuntimeError(
+                    "cannot rebind live event subscribers while subscriptions are active"
+                )
+            self._subscriber_lock = asyncio.Lock()
+            self._subscriber_loop_owner = loop
         await self.store.start()
 
     async def close(self) -> None:
@@ -583,6 +632,7 @@ class LiveEventHub:
                 while not queue.empty():
                     queue.get_nowait()
                 queue.put_nowait(None)
+        self._subscriber_loop_owner = None
 
     def stats(self) -> dict[str, int]:
         subscriber_count = sum(len(items) for items in self._subscribers.values())

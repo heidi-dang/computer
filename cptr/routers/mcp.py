@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict
 from cptr.routers.admin import require_admin
 from cptr.services.coding_benchmark import SUITE_ID, coding_benchmark_store
 from cptr.services.control_auth import authenticate_control_request
+from cptr.services.factory_observability import FactoryObservabilityService
 from cptr.services.mcp_activity import McpActivityBatch, mcp_activity_store
 from cptr.services.mcp_diagnostics import (
     McpDiagnosticsBatch,
@@ -48,6 +49,7 @@ from cptr.utils.crypto import decrypt_key
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
+factory_observability = FactoryObservabilityService()
 
 # ── Per-server log buffer (stdio only, ring buffer of 500 lines) ──────────────
 _server_logs: dict[str, deque[str]] = {}
@@ -104,6 +106,10 @@ async def _require_diagnostics_writer(request: Request) -> str:
 
 def _diagnostics_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n"
+
+
+def _factory_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -182,6 +188,71 @@ class McpTopologyConfigUpdate(BaseModel):
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+@router.get("/factory/snapshot")
+async def get_factory_observability_snapshot(
+    request: Request,
+    run_id: str | None = Query(default=None, max_length=200),
+    run_limit: int = Query(default=20, ge=1, le=30),
+):
+    """Return a bounded, owner-scoped Dark Factory operations snapshot."""
+    admin = require_admin(request)
+    try:
+        return await factory_observability.snapshot(
+            user_id=admin.user_id,
+            run_id=run_id,
+            run_limit=run_limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="factory run not found") from exc
+
+
+@router.get("/factory/stream")
+async def stream_factory_observability(
+    request: Request,
+    run_id: str | None = Query(default=None, max_length=200),
+    run_limit: int = Query(default=20, ge=1, le=30),
+):
+    """Stream changed durable Dark Factory snapshots to the authenticated admin UI."""
+    admin = require_admin(request)
+
+    async def _event_stream():
+        previous_fingerprint: str | None = None
+        quiet_ticks = 0
+        yield "retry: 1500\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                snapshot = await factory_observability.snapshot(
+                    user_id=admin.user_id,
+                    run_id=run_id,
+                    run_limit=run_limit,
+                )
+            except KeyError:
+                yield _factory_sse("factory_error", {"code": "FACTORY_RUN_NOT_FOUND"})
+                break
+            fingerprint = str(snapshot.get("fingerprint") or "")
+            if fingerprint != previous_fingerprint:
+                previous_fingerprint = fingerprint
+                quiet_ticks = 0
+                yield _factory_sse("snapshot", snapshot)
+            else:
+                quiet_ticks += 1
+                if quiet_ticks >= 10:
+                    quiet_ticks = 0
+                    yield ": keepalive\n\n"
+            await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/diagnostics/events")

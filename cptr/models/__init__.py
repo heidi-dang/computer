@@ -33,6 +33,22 @@ from cptr.models.control import (
     WorkbenchSession,
     WorkbenchSessionEvent,
 )
+from cptr.models.factory import (
+    FactoryCycle,
+    FactoryEvent,
+    FactoryEvidence,
+    FactoryGateResult,
+    FactoryReasoningCall,
+    FactoryRun,
+)
+from cptr.models.factory_capabilities import (
+    FactoryCapabilityPerformance,
+    FactoryCapabilityRecord,
+)
+from cptr.models.factory_control import FactoryApproval
+from cptr.models.factory_lifecycle import FactoryCiRun, FactoryCommitIntent
+from cptr.models.factory_metrics import FactoryCapabilityOutcome, FactoryMetricProjection
+from cptr.models.factory_workers import FactoryWorkerAssignment
 from cptr.models.files import File
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
@@ -63,6 +79,20 @@ __all__ = [
     "ControlMessage",
     "ControlTask",
     "CodingBenchmarkRun",
+    "FactoryCapabilityPerformance",
+    "FactoryApproval",
+    "FactoryCapabilityRecord",
+    "FactoryCapabilityOutcome",
+    "FactoryCiRun",
+    "FactoryCommitIntent",
+    "FactoryCycle",
+    "FactoryEvent",
+    "FactoryEvidence",
+    "FactoryGateResult",
+    "FactoryMetricProjection",
+    "FactoryReasoningCall",
+    "FactoryRun",
+    "FactoryWorkerAssignment",
     "File",
     "McpEngineeringSession",
     "McpUsageEvent",
