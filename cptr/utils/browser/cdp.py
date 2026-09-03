@@ -22,6 +22,18 @@ logger = logging.getLogger(__name__)
 _REF_PREFIX = "@e"
 
 
+def _normalize_ref(value: str) -> str:
+    """Accept refs exactly as rendered, plus compact e42/42 forms."""
+    ref = value.strip()
+    if ref.startswith(_REF_PREFIX):
+        return ref
+    if ref.startswith("e") and ref[1:].isdigit():
+        return f"@{ref}"
+    if ref.isdigit():
+        return f"{_REF_PREFIX}{ref}"
+    return ref
+
+
 class CDPClient:
     """Low-level Chrome DevTools Protocol client."""
 
@@ -224,9 +236,7 @@ class CDPClient:
 
     async def click(self, ref: str) -> None:
         """Click an element identified by its ref ID from the latest snapshot."""
-        ref = ref.strip()
-        if not ref.startswith(_REF_PREFIX):
-            ref = f"{_REF_PREFIX}{ref}"
+        ref = _normalize_ref(ref)
 
         backend_node_id = self._ref_map.get(ref)
         if not backend_node_id:
@@ -286,9 +296,7 @@ class CDPClient:
     async def type_text(self, ref: str, text: str) -> None:
         """Type text into an element identified by its ref ID."""
         # Focus the element first
-        ref = ref.strip()
-        if not ref.startswith(_REF_PREFIX):
-            ref = f"{_REF_PREFIX}{ref}"
+        ref = _normalize_ref(ref)
 
         backend_node_id = self._ref_map.get(ref)
         if not backend_node_id:

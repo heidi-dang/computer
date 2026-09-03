@@ -162,6 +162,15 @@ class BrowserDeviceStore:
             await db.commit()
             return credential
 
+    async def owns_active_device(self, *, user_id: str, device_id: str) -> bool:
+        async with await get_db() as db:
+            device = await db.get(BrowserDevice, device_id)
+            return bool(
+                device is not None
+                and device.user_id == user_id
+                and device.status == "ACTIVE"
+            )
+
     async def open_session(
         self,
         *,

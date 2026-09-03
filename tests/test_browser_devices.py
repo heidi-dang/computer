@@ -118,6 +118,18 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         matches.assert_not_called()
 
+    async def test_owns_active_device_is_owner_scoped_and_status_scoped(self):
+        store = BrowserDeviceStore()
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        with patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)):
+            db.get.return_value = SimpleNamespace(user_id="user_1", status="ACTIVE")
+            self.assertTrue(await store.owns_active_device(user_id="user_1", device_id="bdv_1"))
+            self.assertFalse(await store.owns_active_device(user_id="user_2", device_id="bdv_1"))
+            db.get.return_value = SimpleNamespace(user_id="user_1", status="REVOKED")
+            self.assertFalse(await store.owns_active_device(user_id="user_1", device_id="bdv_1"))
+
     async def test_transfer_rejects_stale_epoch(self):
         store = BrowserDeviceStore()
         session = SimpleNamespace(id="brs_1", closed_at=None, snapshot_id="snap_old", state="AGENT_CONTROL", updated_at=1)

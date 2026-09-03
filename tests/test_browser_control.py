@@ -9,10 +9,11 @@ from cptr.routers.coding import (
     MAX_BROWSER_SNAPSHOT_CHARS,
     BrowserControlRequest,
     _bounded_browser_snapshot,
+    _settled_browser_snapshot,
     _validate_browser_url,
     router as coding_router,
 )
-from cptr.utils.browser.cdp import CDPClient
+from cptr.utils.browser.cdp import CDPClient, _normalize_ref
 from cptr.utils.browser.session import BrowserSessionManager
 
 
@@ -89,6 +90,19 @@ class BrowserControlValidationTests(unittest.TestCase):
             BrowserControlRequest(action="type", text="x" * 20_001)
         with self.assertRaises(ValidationError):
             BrowserControlRequest(action="screenshot", width=100, height=100)
+
+    def test_accessibility_refs_accept_rendered_and_compact_forms(self):
+        self.assertEqual(_normalize_ref("@e33"), "@e33")
+        self.assertEqual(_normalize_ref("e33"), "@e33")
+        self.assertEqual(_normalize_ref("33"), "@e33")
+
+
+class BrowserSnapshotSettlingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settled_snapshot_retries_transient_empty_page(self):
+        client = SimpleNamespace(snapshot=AsyncMock(side_effect=["[empty page]", "[button @e1] Ready"]))
+        result = await _settled_browser_snapshot(client, settle_seconds=0.5)
+        self.assertEqual(result, "[button @e1] Ready")
+        self.assertEqual(client.snapshot.await_count, 2)
 
 
 class BrowserSessionManagerTests(unittest.IsolatedAsyncioTestCase):

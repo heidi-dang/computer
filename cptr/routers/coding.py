@@ -668,6 +668,21 @@ def _bounded_browser_snapshot(value: str) -> tuple[str, bool]:
     )
 
 
+async def _settled_browser_snapshot(client: Any, *, settle_seconds: float = 1.5) -> str:
+    """Avoid returning a transient empty AX tree immediately after navigation."""
+    deadline = asyncio.get_running_loop().time() + max(0.1, min(settle_seconds, 2.0))
+    latest = "[empty page]"
+    while True:
+        latest = await asyncio.wait_for(
+            client.snapshot(), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
+        )
+        if latest.strip() and latest.strip() != "[empty page]":
+            return latest
+        if asyncio.get_running_loop().time() >= deadline:
+            return latest
+        await asyncio.sleep(0.1)
+
+
 async def _managed_browser_client(session_key: str):
     from cptr.utils.browser.launcher import ensure_managed_browser
     from cptr.utils.browser.session import session_manager
@@ -2313,9 +2328,7 @@ async def control_managed_browser(request: Request, workspace_id: str, body: Bro
                     client.click(body.ref), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
                 )
                 snapshot, truncated = _bounded_browser_snapshot(
-                    await asyncio.wait_for(
-                        client.snapshot(), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
-                    )
+                    await _settled_browser_snapshot(client)
                 )
                 return {
                     "workspace_id": workspace_id,

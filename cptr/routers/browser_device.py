@@ -6,6 +6,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any, Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
@@ -40,7 +41,7 @@ class PairingApproveBody(BaseModel):
 
 class OpenSessionBody(BaseModel):
     device_id: str = Field(min_length=1, max_length=120)
-    tab_id: int = Field(ge=0, le=2_147_483_647)
+    tab_id: int | None = Field(default=None, ge=0, le=2_147_483_647)
     workbench_session_id: str | None = Field(default=None, max_length=120)
     surface_id: str | None = Field(default=None, max_length=200)
 
@@ -155,7 +156,87 @@ async def claim_pairing(body: PairingClaimBody):
 @router.get("/devices")
 async def list_devices(request: Request):
     user_id = await _control_user(request, "task:read")
-    return {"devices": await browser_device_store.list_devices(user_id=user_id)}
+    devices = await browser_device_store.list_devices(user_id=user_id)
+    for device in devices:
+        device_id = device.get("device_id")
+        device["connected"] = bool(
+            isinstance(device_id, str)
+            and await browser_device_connections.is_connected(device_id=device_id)
+        )
+    return {"devices": devices}
+
+
+def _safe_discovered_tabs(result: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = result.get("payload")
+    raw_tabs = payload.get("tabs") if isinstance(payload, dict) else None
+    if not isinstance(raw_tabs, list):
+        return []
+    tabs: list[dict[str, Any]] = []
+    for value in raw_tabs[:200]:
+        if not isinstance(value, dict):
+            continue
+        tab_id = value.get("id")
+        window_id = value.get("windowId")
+        if not isinstance(tab_id, int) or tab_id < 0 or not isinstance(window_id, int) or window_id < 0:
+            continue
+        tabs.append({
+            "id": tab_id,
+            "windowId": window_id,
+            "active": bool(value.get("active")),
+            "title": str(value.get("title") or "")[:512],
+            "url": str(value.get("url") or "")[:4096],
+            "status": str(value.get("status") or "unknown")[:32],
+            "pinned": bool(value.get("pinned")),
+            "incognito": bool(value.get("incognito")),
+        })
+    return tabs
+
+
+async def _discover_device_tabs(*, user_id: str, device_id: str, wait_seconds: float = 15.0) -> list[dict[str, Any]]:
+    if not await browser_device_store.owns_active_device(user_id=user_id, device_id=device_id):
+        raise HTTPException(status_code=404, detail="browser device not found")
+    if not await browser_device_connections.is_connected(device_id=device_id):
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    command_id = f"tabs_{uuid4().hex}"
+    await browser_command_results.reserve(command_id)
+    event = await browser_device_store.append_device_event(
+        device_id=device_id,
+        event_type="browser.tabs.dispatched",
+        payload={"command_id": command_id},
+    )
+    delivered = await browser_device_connections.send_control(
+        device_id=device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.command",
+            "device_id": device_id,
+            "session_id": f"device_{device_id}",
+            "surface_id": f"device_{device_id}",
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "OBSERVING",
+            "command_id": command_id,
+            "payload": {"action": "list_tabs", "args": {}},
+        },
+    )
+    if not delivered:
+        await browser_command_results.abandon(command_id)
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    try:
+        result = await browser_command_results.wait(command_id, timeout_seconds=wait_seconds)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="browser tab discovery timed out") from exc
+    if result.get("type") != "browser.command.completed":
+        raise HTTPException(status_code=409, detail="browser tab discovery failed")
+    return _safe_discovered_tabs(result)
+
+
+@router.get("/devices/{device_id}/tabs")
+async def list_device_tabs(request: Request, device_id: str):
+    user_id = await _control_user(request, "task:read")
+    tabs = await _discover_device_tabs(user_id=user_id, device_id=device_id)
+    return {"device_id": device_id, "tabs": tabs}
 
 
 @router.post("/devices/{device_id}/revoke")
@@ -178,11 +259,18 @@ async def rotate_device_credential(request: Request, device_id: str):
 @router.post("/sessions")
 async def open_browser_session(request: Request, body: OpenSessionBody):
     user_id = await _control_user(request, "task:write")
+    tab_id = body.tab_id
+    if tab_id is None:
+        tabs = await _discover_device_tabs(user_id=user_id, device_id=body.device_id)
+        selected = next((tab for tab in tabs if tab.get("active") is True), tabs[0] if tabs else None)
+        if selected is None:
+            raise HTTPException(status_code=409, detail="browser device has no discoverable tabs")
+        tab_id = int(selected["id"])
     try:
         session = await browser_device_store.open_session(
             user_id=user_id,
             device_id=body.device_id,
-            tab_id=body.tab_id,
+            tab_id=tab_id,
             workbench_session_id=body.workbench_session_id,
             surface_id=body.surface_id,
         )
@@ -742,12 +830,14 @@ async def browser_device_control_socket(websocket: WebSocket):
             "resume_from": resume_from,
         }
     )
-    replay = await browser_device_store.replay_device_events(
-        device_id=device_id,
-        after_sequence=resume_from,
-    )
-    for event in replay:
-        await websocket.send_json({"protocol_version": 1, **event})
+    # BrowserDeviceEvent is an internal audit log, not a wire-protocol replay
+    # log. Replaying those rows produces envelopes missing session_id,
+    # surface_id, timestamp/source/mode and can force the extension into a
+    # reconnect loop. The extension restores its durable session/lease mirror;
+    # new outbound commands may safely continue at any higher sequence.
+    # In-flight commands interrupted by a disconnect time out and are retried
+    # by their caller instead of replaying potentially sensitive payloads.
+    _ = resume_from
 
     try:
         while True:
