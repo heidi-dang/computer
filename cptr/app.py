@@ -484,9 +484,7 @@ app.include_router(workbench_router)
 @app.get("/api/health")
 @app.get("/api/health/live")
 async def health():
-    import os
-
-    return {"status": "ok", "uptime_seconds": int(time.time() - START_TIME), "pid": os.getpid()}
+    return {"status": "ok"}
 
 
 @app.get("/api/health/ready")
