@@ -2,6 +2,13 @@
 
 from cptr.models.automations import Automation, AutomationRun
 from cptr.models.base import Base
+from cptr.models.browser_device import (
+    BrowserDevice,
+    BrowserDeviceEvent,
+    BrowserLease,
+    BrowserPairingChallenge,
+    BrowserSession,
+)
 from cptr.models.chats import (
     Chat,
     ChatMessage,
@@ -57,6 +64,11 @@ __all__ = [
     "AutonomousScope",
     "AutonomousWorkspaceLease",
     "Base",
+    "BrowserDevice",
+    "BrowserDeviceEvent",
+    "BrowserLease",
+    "BrowserPairingChallenge",
+    "BrowserSession",
     "Chat",
     "ChatMessage",
     "Config",
