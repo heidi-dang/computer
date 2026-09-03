@@ -158,8 +158,14 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             result = await claim_pairing(
                 PairingClaimBody(pairing_id="pair_1", claim_secret="x" * 32)
             )
-        self.assertEqual(result["device_credential"], "device-secret")
-        self.assertNotIn("credential_hash", result)
+        self.assertEqual(
+            result,
+            {
+                "status": "claimed",
+                "device_id": "bdv_1",
+                "device_credential": "device-secret",
+            },
+        )
 
     async def test_open_session_acquires_agent_epoch_and_confirms_attach(self):
         request = SimpleNamespace()
