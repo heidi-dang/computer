@@ -282,6 +282,8 @@ async def auth_middleware(request: Request, call_next):
                 "/api/mcp/traffic/events",
                 "/api/mcp/activity/events",
                 "/api/mcp/diagnostics/events",
+                "/api/browser-device/v1/pairing/request",
+                "/api/browser-device/v1/pairing/claim",
             }
         )
     ):
