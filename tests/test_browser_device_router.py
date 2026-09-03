@@ -13,6 +13,7 @@ from cptr.routers.browser_device import (
     TransferLeaseBody,
     approve_pairing,
     browser_device_control_socket,
+    browser_device_visual_socket,
     claim_pairing,
     request_pairing,
     router,
@@ -62,6 +63,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/browser-device/v1/pairing/claim", paths)
         self.assertIn("/api/browser-device/v1/devices", paths)
         self.assertIn("/api/browser-device/v1/connect/control", paths)
+        self.assertIn("/api/browser-device/v1/connect/visual", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/command", paths)
 
     async def test_pairing_request_returns_claim_secret_only_to_extension(self):
@@ -147,6 +149,14 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                 "cptr.routers.browser_device.browser_device_connections.send_control",
                 new=AsyncMock(return_value=True),
             ) as send,
+            patch(
+                "cptr.routers.browser_device.browser_command_results.reserve",
+                new=AsyncMock(),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_command_results.wait",
+                new=AsyncMock(return_value={"type": "browser.command.completed", "command_id": "cmd_1", "payload": {}}),
+            ),
         ):
             result = await send_browser_command(
                 request,
@@ -163,6 +173,115 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             session_id="brs_1", actor="agent", expected_epoch=9
         )
         self.assertEqual(send.await_args.kwargs["message"]["expected_epoch"], 9)
+        self.assertEqual(result["result"]["type"], "browser.command.completed")
+
+    async def test_websocket_completes_matching_command_id(self):
+        socket = FakeWebSocket(
+            [
+                {
+                    "protocol_version": 1,
+                    "type": "device.authenticate",
+                    "device_id": "bdv_1",
+                    "device_credential": "secret",
+                    "resume_from": 0,
+                },
+                {
+                    "protocol_version": 1,
+                    "type": "browser.command.completed",
+                    "device_id": "bdv_1",
+                    "command_id": "cmd_1",
+                    "payload": {"ok": True},
+                },
+            ]
+        )
+        with (
+            patch(
+                "cptr.routers.browser_device.browser_device_store.authenticate_device",
+                new=AsyncMock(return_value=SimpleNamespace(id="bdv_1")),
+            ),
+            patch("cptr.routers.browser_device.browser_device_connections.attach", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_device_connections.detach", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_device_store.replay_device_events", new=AsyncMock(return_value=[])),
+            patch("cptr.routers.browser_device.browser_device_store.append_device_event", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_command_results.complete", new=AsyncMock(return_value=True)) as complete,
+        ):
+            await browser_device_control_socket(socket)
+        complete.assert_awaited_once()
+        self.assertEqual(complete.await_args.args[0], "cmd_1")
+
+    async def test_visual_websocket_authenticates_and_stores_latest_frame(self):
+        socket = FakeWebSocket(
+            [
+                {
+                    "protocol_version": 1,
+                    "type": "device.authenticate",
+                    "device_id": "bdv_1",
+                    "device_credential": "secret",
+                    "resume_from": 0,
+                },
+                {
+                    "protocol_version": 1,
+                    "type": "browser.frame",
+                    "device_id": "bdv_1",
+                    "session_id": "brs_1",
+                    "frame_id": "frm_1",
+                    "mime_type": "image/jpeg",
+                    "width": 640,
+                    "height": 480,
+                    "created_at_ms": 123,
+                    "data_base64": "aGVsbG8=",
+                },
+            ]
+        )
+        with (
+            patch(
+                "cptr.routers.browser_device.browser_device_store.authenticate_device",
+                new=AsyncMock(return_value=SimpleNamespace(id="bdv_1")),
+            ),
+            patch("cptr.routers.browser_device.browser_visual_frames.put", new=AsyncMock()) as put,
+        ):
+            await browser_device_visual_socket(socket)
+        self.assertTrue(socket.accepted)
+        self.assertEqual(socket.sent[0]["type"], "device.visual_authenticated")
+        put.assert_awaited_once()
+        frame = put.await_args.args[0]
+        self.assertEqual(frame.frame_id, "frm_1")
+        self.assertEqual(frame.data, b"hello")
+
+    async def test_visual_websocket_rejects_malformed_frame_before_storage(self):
+        socket = FakeWebSocket(
+            [
+                {
+                    "protocol_version": 1,
+                    "type": "device.authenticate",
+                    "device_id": "bdv_1",
+                    "device_credential": "secret",
+                    "resume_from": 0,
+                },
+                {
+                    "protocol_version": 1,
+                    "type": "browser.frame",
+                    "device_id": "bdv_1",
+                    "session_id": "brs_1",
+                    "frame_id": "frm_bad",
+                    "mime_type": "image/jpeg",
+                    "width": 640,
+                    "height": 480,
+                    "created_at_ms": 123,
+                    "data_base64": "not base64!!",
+                },
+            ]
+        )
+        with (
+            patch(
+                "cptr.routers.browser_device.browser_device_store.authenticate_device",
+                new=AsyncMock(return_value=SimpleNamespace(id="bdv_1")),
+            ),
+            patch("cptr.routers.browser_device.browser_visual_frames.put", new=AsyncMock()) as put,
+        ):
+            await browser_device_visual_socket(socket)
+        self.assertEqual(socket.closed, [(1008, "invalid browser frame")])
+        put.assert_not_awaited()
 
     async def test_websocket_authenticates_then_replays_from_cursor(self):
         socket = FakeWebSocket(

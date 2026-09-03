@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from cptr.services.browser_command_results import browser_command_results
 from cptr.services.browser_device_connections import browser_device_connections
 from cptr.services.browser_devices import browser_device_store
+from cptr.services.browser_visual_frames import BrowserVisualFrame, browser_visual_frames
 from cptr.services.control_auth import authenticate_control_request
 
 router = APIRouter(prefix="/api/browser-device/v1", tags=["browser-device"])
@@ -253,6 +254,73 @@ async def _receive_auth(websocket: WebSocket) -> tuple[str, str, int] | None:
     if not isinstance(resume_from, int) or resume_from < 0:
         return None
     return device_id, credential, resume_from
+
+
+@router.websocket("/connect/visual")
+async def browser_device_visual_socket(websocket: WebSocket):
+    await websocket.accept()
+    auth = await _receive_auth(websocket)
+    if auth is None:
+        await websocket.close(code=1008, reason="device authentication required")
+        return
+    device_id, credential, _resume_from = auth
+    device = await browser_device_store.authenticate_device(device_id=device_id, credential=credential)
+    if device is None:
+        await websocket.close(code=1008, reason="device authentication failed")
+        return
+    await websocket.send_json({
+        "protocol_version": 1,
+        "type": "device.visual_authenticated",
+        "device_id": device_id,
+    })
+    try:
+        while True:
+            message = await websocket.receive_json()
+            if not isinstance(message, dict):
+                await websocket.close(code=1008, reason="invalid visual message")
+                return
+            if message.get("protocol_version") != 1 or message.get("device_id") != device_id:
+                await websocket.close(code=1008, reason="visual protocol violation")
+                return
+            if message.get("type") != "browser.frame":
+                await websocket.close(code=1008, reason="unsupported visual event")
+                return
+            session_id = message.get("session_id")
+            frame_id = message.get("frame_id")
+            mime_type = message.get("mime_type")
+            width = message.get("width")
+            height = message.get("height")
+            created_at_ms = message.get("created_at_ms")
+            data_b64 = message.get("data_base64")
+            if not all([
+                isinstance(session_id, str),
+                isinstance(frame_id, str),
+                isinstance(mime_type, str),
+                isinstance(width, int),
+                isinstance(height, int),
+                isinstance(created_at_ms, int),
+                isinstance(data_b64, str),
+            ]):
+                await websocket.close(code=1008, reason="invalid browser frame metadata")
+                return
+            import base64
+            try:
+                data = base64.b64decode(data_b64, validate=True)
+                await browser_visual_frames.put(BrowserVisualFrame(
+                    device_id=device_id,
+                    session_id=session_id,
+                    frame_id=frame_id,
+                    mime_type=mime_type,
+                    width=width,
+                    height=height,
+                    created_at_ms=created_at_ms,
+                    data=data,
+                ))
+            except (ValueError, TypeError):
+                await websocket.close(code=1008, reason="invalid browser frame")
+                return
+    except WebSocketDisconnect:
+        return
 
 
 @router.websocket("/connect/control")
