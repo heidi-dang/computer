@@ -142,6 +142,10 @@ class CodingBenchmarkStore:
                         updated_at=now // 1000,
                     )
                 )
+                # CodingBenchmarkRun.workspace_id references this row.  These mappers
+                # do not have an ORM relationship, so force the parent INSERT before
+                # adding the child; production SQLite enforces foreign keys.
+                await db.flush()
                 run = CodingBenchmarkRun(
                     id=run_id,
                     user_id=owner_id,

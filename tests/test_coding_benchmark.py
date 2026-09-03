@@ -3,9 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models.base import Base
+from cptr.models.users import User
 
 
 INTERVAL_SOLUTION = """def merge_intervals(intervals):
@@ -101,9 +103,21 @@ class CodingBenchmarkTests(unittest.IsolatedAsyncioTestCase):
         self.temp = tempfile.TemporaryDirectory()
         root = Path(self.temp.name)
         self.engine = create_async_engine(f"sqlite+aiosqlite:///{root / 'benchmark.db'}")
+
+        @event.listens_for(self.engine.sync_engine, "connect")
+        def _enable_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+            finally:
+                cursor.close()
+
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         self.factory = async_sessionmaker(self.engine, expire_on_commit=False)
+        async with self.factory() as db:
+            db.add(User(id="user-1", role="user", settings={}, created_at=1))
+            await db.commit()
         self.store = self.CodingBenchmarkStore(session_factory=self.factory, data_dir=root)
 
     async def asyncTearDown(self):
