@@ -744,7 +744,7 @@ def list_command_sessions(
     if user_id is None and context:
         user_id = context.get("user_id")
     for command_session_id, session in command_sessions.items():
-        if session.get("done"):
+        if not command_session_registry.is_active(session):
             continue
         if workspace and session.get("workspace") != workspace:
             continue
@@ -764,7 +764,7 @@ def get_command_session(
     context: dict | None = None,
 ) -> dict | None:
     command_session_registry.reap()
-    session = command_sessions.get(command_session_id)
+    session = command_session_registry.get(command_session_id)
     if context and context.get("request") is not None:
         request = context["request"]
     if request is not None:

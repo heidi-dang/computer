@@ -26,7 +26,10 @@ class CommandSessionRegistry:
         self.total_created += 1
 
     def get(self, session_id: str) -> dict[str, Any] | None:
-        return self.sessions.get(session_id)
+        session = self.sessions.get(session_id)
+        if session is not None:
+            self._reconcile_session(session)
+        return session
 
     def remove(self, session_id: str) -> dict[str, Any] | None:
         session = self.sessions.pop(session_id, None)
@@ -35,18 +38,86 @@ class CommandSessionRegistry:
         return session
 
     def values(self) -> Iterable[dict[str, Any]]:
+        self.reconcile()
         return self.sessions.values()
 
+    @staticmethod
+    def _process_exit_state(session: dict[str, Any]) -> tuple[bool, int | None]:
+        """Return whether the owned child has exited without trusting cached `done`."""
+        proc = session.get("proc")
+        if proc is None:
+            return False, None
+
+        returncode = getattr(proc, "returncode", None)
+        if returncode is None:
+            poll = getattr(proc, "poll", None)
+            if callable(poll):
+                try:
+                    returncode = poll()
+                except (ChildProcessError, OSError, ProcessLookupError):
+                    return False, None
+                except Exception:
+                    return False, None
+        if returncode is None:
+            return False, None
+        try:
+            return True, int(returncode)
+        except (TypeError, ValueError):
+            return True, None
+
+    @staticmethod
+    def _capture_finished(session: dict[str, Any]) -> bool:
+        task = session.get("log_task")
+        if task is None:
+            return True
+        done = getattr(task, "done", None)
+        if not callable(done):
+            return False
+        try:
+            return bool(done())
+        except Exception:
+            return False
+
+    def _reconcile_session(self, session: dict[str, Any], *, now: float | None = None) -> bool:
+        """Repair stale completion metadata once the child and capture task are quiescent."""
+        if session.get("done"):
+            return False
+        exited, exit_code = self._process_exit_state(session)
+        if not exited or not self._capture_finished(session):
+            return False
+        session["done"] = True
+        session.setdefault("completed_at", time.time() if now is None else now)
+        if session.get("exit_code") is None and exit_code is not None:
+            session["exit_code"] = exit_code
+        return True
+
+    def reconcile(self, *, now: float | None = None) -> int:
+        """Self-heal stale registry flags after child-process completion."""
+        repaired = 0
+        for session in self.sessions.values():
+            if self._reconcile_session(session, now=now):
+                repaired += 1
+        return repaired
+
+    def is_active(self, session: dict[str, Any]) -> bool:
+        """A command consumes a concurrency slot only while its child is alive."""
+        if session.get("done"):
+            return False
+        exited, _ = self._process_exit_state(session)
+        return not exited
+
     def active_count(self, user_id: str | None = None) -> int:
+        self.reconcile()
         return sum(
             1
             for session in self.sessions.values()
-            if not session.get("done") and (user_id is None or session.get("user_id") == user_id)
+            if self.is_active(session) and (user_id is None or session.get("user_id") == user_id)
         )
 
     def reap(self, *, now: float | None = None) -> list[str]:
-        """Evict expired completed sessions and enforce a hard retained cap."""
+        """Reconcile completion, evict expired sessions, and enforce the retained cap."""
         current = time.time() if now is None else now
+        self.reconcile(now=current)
         removable = [
             (session_id, session)
             for session_id, session in self.sessions.items()
@@ -75,7 +146,8 @@ class CommandSessionRegistry:
         return removed
 
     def stats(self) -> dict[str, int]:
-        active = sum(1 for session in self.sessions.values() if not session.get("done"))
+        self.reconcile()
+        active = sum(1 for session in self.sessions.values() if self.is_active(session))
         completed = len(self.sessions) - active
         retained_output_bytes = sum(
             len(session.get("output") or b"") for session in self.sessions.values()

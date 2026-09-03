@@ -53,7 +53,6 @@ class FilesystemPerformanceContractTests(unittest.TestCase):
         self.assertEqual(len(second["entries"]), 7)
         self.assertNotEqual(first["entries"][0]["path"], second["entries"][0]["path"])
 
-
     def test_bounded_runtime_read_rejects_oversized_file_before_content_load(self):
         with tempfile.TemporaryDirectory() as root_value:
             path = Path(root_value) / "large.txt"
@@ -227,6 +226,51 @@ class CommandSessionRetentionTests(unittest.TestCase):
         self.assertEqual(removed, ["expired"])
         self.assertIn("active", registry.sessions)
         self.assertEqual(registry.stats()["total_reaped"], 1)
+
+    def test_registry_reconciles_exited_process_before_counting_active_slots(self):
+        registry = CommandSessionRegistry()
+        registry.register(
+            "stale",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "created_at": 1.0,
+                "proc": SimpleNamespace(returncode=0),
+                "output": bytearray(),
+            },
+        )
+        registry.register(
+            "running",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "created_at": 2.0,
+                "proc": SimpleNamespace(returncode=None, poll=lambda: None),
+                "output": bytearray(),
+            },
+        )
+
+        self.assertEqual(registry.active_count("user-1"), 1)
+        self.assertTrue(registry.sessions["stale"]["done"])
+        self.assertEqual(registry.sessions["stale"]["exit_code"], 0)
+        self.assertIn("completed_at", registry.sessions["stale"])
+
+    def test_registry_frees_slot_when_process_exited_but_capture_is_still_draining(self):
+        registry = CommandSessionRegistry()
+        registry.register(
+            "draining",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "created_at": 1.0,
+                "proc": SimpleNamespace(returncode=0),
+                "log_task": SimpleNamespace(done=lambda: False),
+                "output": bytearray(),
+            },
+        )
+
+        self.assertEqual(registry.active_count("user-1"), 0)
+        self.assertFalse(registry.sessions["draining"]["done"])
 
     def test_registry_enforces_hard_completed_retention_cap(self):
         registry = CommandSessionRegistry()
