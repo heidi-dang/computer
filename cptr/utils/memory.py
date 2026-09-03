@@ -1223,6 +1223,63 @@ async def write_memory(
         }
 
 
+def _operation_telemetry(operations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return mutation metadata without persisting memory content or old text."""
+    allowed = {
+        "action",
+        "path",
+        "new_path",
+        "source_path",
+        "target_path",
+        "heading",
+        "memory_id",
+        "link",
+    }
+    rows: list[dict[str, Any]] = []
+    for operation in operations[:50]:
+        if not isinstance(operation, dict):
+            continue
+        row = {
+            key: str(operation[key])[:500]
+            for key in allowed
+            if operation.get(key) is not None and str(operation.get(key)).strip()
+        }
+        if row:
+            rows.append(row)
+    return rows
+
+
+async def _record_memory_fabric_event(
+    *,
+    user_id: str,
+    workspace: str,
+    event_type: str,
+    scope: str | None = None,
+    path: str | None = None,
+    heading: str | None = None,
+    memory_id: str | None = None,
+    reason: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Best-effort durable observability; memory correctness never depends on telemetry."""
+    try:
+        from cptr.services.memory_fabric import memory_fabric_store
+
+        await memory_fabric_store.record_event(
+            user_id=user_id,
+            workspace=workspace,
+            event_type=event_type,
+            scope=scope,
+            path=path,
+            heading=heading,
+            memory_id=memory_id,
+            reason=reason,
+            payload=payload or {},
+        )
+    except Exception:
+        return
+
+
 async def remember(
     request: Request,
     user_id: str,
@@ -1232,8 +1289,24 @@ async def remember(
 ) -> dict[str, Any]:
     settings = await get_memory_settings()
     if not settings["enabled"]:
-        return {"success": False, "error": "memory writes are disabled"}
-    return await write_memory(request, user_id, workspace, scope, operations)
+        result = {"success": False, "error": "memory writes are disabled"}
+    else:
+        result = await write_memory(request, user_id, workspace, scope, operations)
+    success = bool(result.get("success"))
+    await _record_memory_fabric_event(
+        user_id=user_id,
+        workspace=workspace,
+        event_type="write" if success else "write_rejected",
+        scope=scope,
+        path=str(result.get("path") or "") or None,
+        reason=str(result.get("message") or result.get("error") or "memory mutation"),
+        payload={
+            "success": success,
+            "operation_count": len(operations),
+            "operations": _operation_telemetry(operations),
+        },
+    )
+    return result
 
 
 async def read_memory_state(request: Request, user_id: str, workspace: str) -> dict[str, Any]:
@@ -1346,6 +1419,7 @@ async def build_memory_prompt(
     if not settings["enabled"]:
         return ""
     blocks: list[str] = []
+    recall_items: list[dict[str, Any]] = []
 
     context = await recall_memory_context(
         request,
@@ -1399,7 +1473,54 @@ async def build_memory_prompt(
         content = "\n".join(part for part in (baseline, contextual) if part.strip()).strip()
         if content:
             blocks.append(f"[{title}] [{min(len(content), budget)}/{budget}]\n{content}")
-    return "\n\n".join(blocks)
+            if baseline:
+                recall_items.append(
+                    {
+                        "node_id": "",
+                        "scope": root.scope,
+                        "path": root.baseline_path.name,
+                        "heading": "Baseline",
+                        "memory_id": "",
+                        "reason": "baseline memory",
+                    }
+                )
+            if snippets:
+                try:
+                    from cptr.services.memory_observability import memory_node_id
+
+                    for snippet in snippets[:20]:
+                        recall_items.append(
+                            {
+                                "node_id": memory_node_id(
+                                    scope=root.scope,
+                                    workspace_path=workspace if root.scope == "workspace" else "",
+                                    path=snippet.path,
+                                    heading=snippet.heading,
+                                    memory_id=snippet.memory_id,
+                                ),
+                                "scope": root.scope,
+                                "path": snippet.path,
+                                "heading": snippet.heading,
+                                "memory_id": snippet.memory_id,
+                                "reason": snippet.reason,
+                            }
+                        )
+                except Exception:
+                    pass
+    rendered = "\n\n".join(blocks)
+    if recall_items:
+        await _record_memory_fabric_event(
+            user_id=user_id,
+            workspace=workspace,
+            event_type="recall",
+            reason="compiled for prompt",
+            payload={
+                "items": recall_items[:50],
+                "context_chars": len(rendered),
+                "item_count": len(recall_items),
+            },
+        )
+    return rendered
 
 
 async def search_memory_state(

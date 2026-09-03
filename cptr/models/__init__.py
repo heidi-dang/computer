@@ -50,6 +50,7 @@ from cptr.models.factory_lifecycle import FactoryCiRun, FactoryCommitIntent
 from cptr.models.factory_metrics import FactoryCapabilityOutcome, FactoryMetricProjection
 from cptr.models.factory_workers import FactoryWorkerAssignment
 from cptr.models.files import File
+from cptr.models.memory_fabric import MemoryFabricEvent
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
 from cptr.models.workspaces import Workspace
@@ -96,6 +97,7 @@ __all__ = [
     "File",
     "McpEngineeringSession",
     "McpUsageEvent",
+    "MemoryFabricEvent",
     "User",
     "UserStates",
     "Workspace",

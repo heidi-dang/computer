@@ -43,6 +43,7 @@ from cptr.services.mcp_diagnostics import (
 from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
 from cptr.services.mcp_usage_store import mcp_usage_store
 from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
+from cptr.services.memory_observability import MemoryObservabilityService
 from cptr.services.system_metrics import mcp_metrics_sampler
 from cptr.utils.crypto import decrypt_key
 
@@ -50,6 +51,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 factory_observability = FactoryObservabilityService()
+memory_observability = MemoryObservabilityService()
 
 # ── Per-server log buffer (stdio only, ring buffer of 500 lines) ──────────────
 _server_logs: dict[str, deque[str]] = {}
@@ -109,6 +111,10 @@ def _diagnostics_sse(event: str, data: dict[str, Any]) -> str:
 
 
 def _factory_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
+
+
+def _memory_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
 
 
@@ -188,6 +194,75 @@ class McpTopologyConfigUpdate(BaseModel):
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+@router.get("/memory/snapshot")
+async def get_memory_observability_snapshot(
+    request: Request,
+    workspace_id: str | None = Query(default=None, max_length=200),
+    node_limit: int = Query(default=400, ge=25, le=2000),
+    event_limit: int = Query(default=120, ge=1, le=500),
+):
+    """Return a bounded owner-scoped projection of canonical memory plus provenance."""
+    admin = require_admin(request)
+    try:
+        return await memory_observability.snapshot(
+            user_id=admin.user_id,
+            workspace_id=workspace_id,
+            node_limit=node_limit,
+            event_limit=event_limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory workspace not found") from exc
+
+
+@router.get("/memory/stream")
+async def stream_memory_observability(
+    request: Request,
+    workspace_id: str | None = Query(default=None, max_length=200),
+    node_limit: int = Query(default=400, ge=25, le=2000),
+    event_limit: int = Query(default=120, ge=1, le=500),
+):
+    """Stream changed memory graph/provenance snapshots to the authenticated admin UI."""
+    admin = require_admin(request)
+
+    async def _event_stream():
+        previous_fingerprint: str | None = None
+        quiet_ticks = 0
+        yield "retry: 1500\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                snapshot = await memory_observability.snapshot(
+                    user_id=admin.user_id,
+                    workspace_id=workspace_id,
+                    node_limit=node_limit,
+                    event_limit=event_limit,
+                )
+            except KeyError:
+                yield _memory_sse("memory_error", {"code": "MEMORY_WORKSPACE_NOT_FOUND"})
+                break
+            fingerprint = str(snapshot.get("fingerprint") or "")
+            if fingerprint != previous_fingerprint:
+                previous_fingerprint = fingerprint
+                quiet_ticks = 0
+                yield _memory_sse("snapshot", snapshot)
+            else:
+                quiet_ticks += 1
+                if quiet_ticks >= 10:
+                    quiet_ticks = 0
+                    yield ": keepalive\n\n"
+            await asyncio.sleep(1.5)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/factory/snapshot")

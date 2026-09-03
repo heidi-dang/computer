@@ -1,9 +1,10 @@
 <script lang="ts">
 	import McpConsole from '$lib/components/mcp/McpConsole.svelte';
 	import McpDarkFactory from '$lib/components/mcp/McpDarkFactory.svelte';
+	import McpMemory from '$lib/components/mcp/McpMemory.svelte';
 	import McpTopology from '$lib/components/mcp/McpTopology.svelte';
 
-	type McpView = 'topology' | 'console' | 'factory';
+	type McpView = 'topology' | 'console' | 'factory' | 'memory';
 	let view = $state<McpView>('topology');
 	let focusRequestId = $state<string | null>(null);
 	let focusCorrelationId = $state<string | null>(null);
@@ -62,7 +63,7 @@
 				<div class="min-w-0">
 					<h1 class="truncate text-sm font-semibold">MCP</h1>
 					<p class="hidden truncate text-[0.68rem] app-muted sm:block">
-						Live topology, console, and Dark Factory operations
+						Live topology, console, Dark Factory, and persistent memory operations
 					</p>
 				</div>
 			</div>
@@ -105,6 +106,17 @@
 				>
 					Dark Factory
 				</button>
+				<button
+					class="app-interactive min-h-11 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
+					'memory'
+						? 'app-interactive-active'
+						: 'app-muted'}"
+					role="tab"
+					aria-selected={view === 'memory'}
+					onclick={() => (view = 'memory')}
+				>
+					Memory
+				</button>
 			</div>
 		</div>
 	</header>
@@ -114,8 +126,10 @@
 			<McpTopology onrevealactivity={revealActivity} />
 		{:else if view === 'console'}
 			<McpConsole {focusRequestId} {focusCorrelationId} />
-		{:else}
+		{:else if view === 'factory'}
 			<McpDarkFactory />
+		{:else}
+			<McpMemory />
 		{/if}
 	</div>
 </div>
