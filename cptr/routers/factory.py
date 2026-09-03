@@ -86,6 +86,12 @@ def _service(request: Request) -> FactoryControlService:
     return service
 
 
+def _schedule(request: Request, run_id: str) -> None:
+    runner = getattr(request.app.state, "factory_production_runner", None)
+    if runner is not None:
+        runner.schedule(run_id)
+
+
 def _public_error(exc: Exception) -> HTTPException:
     if isinstance(exc, FactoryControlNotFound):
         return HTTPException(status_code=404, detail="factory run not found")
@@ -120,6 +126,7 @@ async def start_factory_run(request: Request, body: FactoryRunStartRequest):
         )
     except Exception as exc:
         raise _public_error(exc) from exc
+    _schedule(request, run.id)
     return {"run_id": run.id, "state": run.state}
 
 
@@ -209,6 +216,7 @@ async def resume_factory_run(request: Request, run_id: str, body: FactoryControl
         )
     except Exception as exc:
         raise _public_error(exc) from exc
+    _schedule(request, run.id)
     return {"run_id": run.id, "state": run.state}
 
 
@@ -216,7 +224,7 @@ async def resume_factory_run(request: Request, run_id: str, body: FactoryControl
 async def approve_factory_run(request: Request, run_id: str, body: FactoryApprovalRequest):
     user_id = await _user(request, "autonomous:run")
     try:
-        return await _service(request).approve(
+        result = await _service(request).approve(
             user_id=user_id,
             run_id=run_id,
             approval_id=body.approval_id,
@@ -226,6 +234,9 @@ async def approve_factory_run(request: Request, run_id: str, body: FactoryApprov
         )
     except Exception as exc:
         raise _public_error(exc) from exc
+    if body.approved:
+        _schedule(request, run_id)
+    return result
 
 
 @factory_router.post("/runs/{run_id}/stop")

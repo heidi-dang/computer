@@ -236,9 +236,14 @@ class FactoryOrchestrator:
             if cycle is None or cycle.run_id != run.id:
                 raise FactoryOrchestratorError("active factory cycle projection is missing")
             return cycle
-        if FactoryState(run.state) is not FactoryState.MISSION:
+        state = FactoryState(run.state)
+        if state not in {FactoryState.MISSION, FactoryState.RECOVERING}:
             raise FactoryOrchestratorError(
                 f"active state {run.state} requires a persisted current cycle"
+            )
+        if state is FactoryState.RECOVERING and run.resumable_state is not None:
+            raise FactoryOrchestratorError(
+                "recovery of an interrupted post-mission phase requires its persisted current cycle"
             )
         return await self._store.create_cycle(
             run.id,

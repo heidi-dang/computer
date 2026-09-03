@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -5,8 +6,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from cptr.models import Base
 from cptr.services.factory_ci import (
     CiObservation,
+    CiPollRequest,
     FactoryCiError,
     FactoryCiService,
+    GitHubActionsCliProvider,
 )
 from cptr.services.factory_git import (
     FactoryGitError,
@@ -83,6 +86,16 @@ class _CiProvider:
     async def observe(self, request):
         self.calls.append(request)
         return self.observations.pop(0)
+
+
+class _GhRunner:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    async def __call__(self, argv, timeout_seconds):
+        self.calls.append((argv, timeout_seconds))
+        return self.responses.pop(0)
 
 
 class FactoryGitCiTests(unittest.IsolatedAsyncioTestCase):
@@ -370,6 +383,133 @@ class FactoryGitCiTests(unittest.IsolatedAsyncioTestCase):
         await service.poll_once(second.id)
         self.assertTrue(await service.has_current_pass(self.cycle.id, "commit-sha-2"))
         self.assertEqual(len(provider.calls), 2)
+
+
+class GitHubActionsCliProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_discovery_is_bounded_to_exact_revision_and_keeps_latest_runs_first(self):
+        revision = "a" * 40
+        runner = _GhRunner(
+            [
+                (
+                    0,
+                    json.dumps(
+                        [
+                            {
+                                "databaseId": 101,
+                                "headSha": revision,
+                                "workflowName": "Tests",
+                                "status": "completed",
+                                "conclusion": "success",
+                                "url": "https://github.com/example/repo/actions/runs/101",
+                            },
+                            {
+                                "databaseId": 102,
+                                "headSha": revision,
+                                "workflowName": "Tests",
+                                "status": "in_progress",
+                                "conclusion": "",
+                                "url": "https://github.com/example/repo/actions/runs/102",
+                            },
+                            {
+                                "databaseId": 999,
+                                "headSha": "b" * 40,
+                                "workflowName": "Other revision",
+                            },
+                        ]
+                    ),
+                    "",
+                )
+            ]
+        )
+        provider = GitHubActionsCliProvider(command_runner=runner)
+
+        identities = await provider.discover(repository="example/repo", revision=revision)
+
+        self.assertEqual([item.external_run_id for item in identities], ["102", "101"])
+        self.assertTrue(all(item.workflow == "Tests" for item in identities))
+        argv = runner.calls[0][0]
+        self.assertEqual(argv[:3], ("gh", "run", "list"))
+        self.assertIn(revision, argv)
+
+    async def test_observation_rejects_stale_revision_and_never_returns_provider_stderr(self):
+        revision = "c" * 40
+        stale = _GhRunner(
+            [
+                (
+                    0,
+                    json.dumps(
+                        {
+                            "databaseId": 55,
+                            "headSha": "d" * 40,
+                            "workflowName": "Tests",
+                            "status": "completed",
+                            "conclusion": "success",
+                        }
+                    ),
+                    "secret stderr",
+                )
+            ]
+        )
+        provider = GitHubActionsCliProvider(command_runner=stale)
+        with self.assertRaises(FactoryCiError) as caught:
+            await provider.observe(
+                CiPollRequest(
+                    provider="github",
+                    repository="example/repo",
+                    revision=revision,
+                    external_run_id="55",
+                    check_id="Tests",
+                )
+            )
+        self.assertEqual(caught.exception.code, "FACTORY_CI_STALE_REVISION")
+        self.assertNotIn("secret", str(caught.exception))
+
+    async def test_observation_maps_github_terminal_failure_without_fetching_logs(self):
+        revision = "e" * 40
+        runner = _GhRunner(
+            [
+                (
+                    0,
+                    json.dumps(
+                        {
+                            "databaseId": 77,
+                            "headSha": revision,
+                            "workflowName": "Tests",
+                            "status": "completed",
+                            "conclusion": "failure",
+                            "url": "https://github.com/example/repo/actions/runs/77",
+                        }
+                    ),
+                    "",
+                )
+            ]
+        )
+        provider = GitHubActionsCliProvider(command_runner=runner)
+
+        observation = await provider.observe(
+            CiPollRequest(
+                provider="github",
+                repository="example/repo",
+                revision=revision,
+                external_run_id="77",
+                check_id="Tests",
+            )
+        )
+
+        self.assertEqual(observation.status, "completed")
+        self.assertEqual(observation.conclusion, "failure")
+        self.assertIn("Tests", observation.failure_summary or "")
+        self.assertEqual(runner.calls[0][0][:3], ("gh", "run", "view"))
+
+    async def test_cli_failure_is_generic_and_does_not_leak_response_body(self):
+        runner = _GhRunner([(1, "", "gh token=super-secret")])
+        provider = GitHubActionsCliProvider(command_runner=runner)
+
+        with self.assertRaises(FactoryCiError) as caught:
+            await provider.discover(repository="example/repo", revision="f" * 40)
+
+        self.assertEqual(caught.exception.code, "FACTORY_CI_PROVIDER_FAILURE")
+        self.assertNotIn("super-secret", str(caught.exception))
 
 
 if __name__ == "__main__":

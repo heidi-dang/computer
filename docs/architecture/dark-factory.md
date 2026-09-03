@@ -672,9 +672,10 @@ Startup recovery follows the existing monitor pattern:
 4. inspect the persisted current state and owned execution references;
 5. reconcile worker/worktree/command/CI state;
 6. replay no side effect without an idempotency key;
-7. resume from the persisted next action or move to `RECOVERING`/`REPAIR_REQUIRED` when evidence is incomplete.
+7. schedule every non-waiting recovered run through `FactoryProductionRunner`;
+8. execute at most one leased orchestrator phase action per runner tick until the run reaches a waiting or terminal state.
 
-Recovery must never infer success from the prior process disappearing. Missing transient execution becomes evidence to diagnose.
+`POST /factory/runs`, resume, and an approved waiting action schedule the same durable runner path; HTTP request lifetime is never the execution owner. Recovery must never infer success from the prior process disappearing. Missing transient execution becomes evidence to diagnose.
 
 ## Idempotency and concurrency
 
@@ -708,7 +709,9 @@ The factory never merges by itself unless an explicit repository/user policy gra
 
 ## CI lifecycle
 
-CI tracking stores provider, repository, commit SHA, run/check IDs, status/conclusion, URLs/opaque IDs where safe, timestamps, and bounded failure summaries. Polling is bounded and exits early on failure. No arbitrary fixed sleep is used as a correctness mechanism. Provider-specific waiting can use event/webhook integration or bounded status polling.
+CI tracking stores provider, repository, commit SHA, run/check IDs, status/conclusion, URLs/opaque IDs where safe, timestamps, and bounded failure summaries. The production GitHub Actions provider uses shell-free bounded `gh run list`/`gh run view` argv calls, filters discovered runs to the exact committed SHA, and requires the configured workflow set to become terminal before the factory advances. Provider stderr is never surfaced as factory evidence.
+
+Transient `QUEUED`/`IN_PROGRESS` observations remain durable in `FactoryCiRun`; phase-keyed factory evidence is emitted only for terminal observations so repeated polling cannot replay an idempotency key with changing payload. Polling is bounded and exits early on failure. No arbitrary fixed sleep is used as a correctness mechanism. Provider-specific waiting can use event/webhook integration or bounded status polling.
 
 A new local mutation invalidates prior CI success because the revision changed.
 

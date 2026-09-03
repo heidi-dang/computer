@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import re
 import time
 from dataclasses import dataclass
-from typing import Mapping, Protocol
+from typing import Awaitable, Callable, Mapping, Protocol
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -49,6 +53,195 @@ class CiProvider(Protocol):
     async def observe(self, request: CiPollRequest) -> CiObservation: ...
 
 
+@dataclass(frozen=True)
+class CiRunIdentity:
+    external_run_id: str
+    workflow: str
+    url: str | None = None
+
+
+_GITHUB_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_GIT_REVISION_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+_GH_OUTPUT_LIMIT = 512 * 1024
+GhCommandRunner = Callable[[tuple[str, ...], float], Awaitable[tuple[int, str, str]]]
+
+
+async def _run_gh_command(argv: tuple[str, ...], timeout_seconds: float) -> tuple[int, str, str]:
+    process = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except asyncio.TimeoutError as exc:
+        process.kill()
+        await process.communicate()
+        raise FactoryCiError(
+            "FACTORY_CI_PROVIDER_TIMEOUT", "GitHub Actions observation timed out"
+        ) from exc
+    if len(stdout) > _GH_OUTPUT_LIMIT or len(stderr) > _GH_OUTPUT_LIMIT:
+        raise FactoryCiError(
+            "FACTORY_CI_PROVIDER_OUTPUT_TOO_LARGE",
+            "GitHub Actions response exceeded the bounded limit",
+        )
+    return (
+        int(process.returncode or 0),
+        stdout.decode(errors="replace"),
+        stderr.decode(errors="replace"),
+    )
+
+
+class GitHubActionsCliProvider:
+    """Read exact-revision GitHub Actions state through bounded ``gh`` argv calls."""
+
+    provider_name = "github"
+
+    def __init__(
+        self,
+        *,
+        executable: str | None = None,
+        timeout_seconds: float = 20.0,
+        command_runner: GhCommandRunner | None = None,
+    ) -> None:
+        self._executable = (executable or os.environ.get("CPTR_GH_EXECUTABLE") or "gh").strip()
+        self._timeout_seconds = float(timeout_seconds)
+        self._run = command_runner or _run_gh_command
+        if not self._executable:
+            raise ValueError("GitHub CLI executable must not be blank")
+        if self._timeout_seconds <= 0 or self._timeout_seconds > 60:
+            raise ValueError("GitHub CI provider timeout must be between 0 and 60 seconds")
+
+    @staticmethod
+    def _repository(value: str) -> str:
+        repository = value.strip()
+        if not _GITHUB_REPOSITORY_RE.fullmatch(repository):
+            raise FactoryCiError(
+                "FACTORY_CI_INVALID_REPOSITORY", "GitHub repository must use owner/name syntax"
+            )
+        return repository
+
+    @staticmethod
+    def _revision(value: str) -> str:
+        revision = value.strip()
+        if not _GIT_REVISION_RE.fullmatch(revision):
+            raise FactoryCiError(
+                "FACTORY_CI_INVALID_REVISION", "GitHub CI requires an immutable Git revision"
+            )
+        return revision.lower()
+
+    async def _json(self, argv: tuple[str, ...]) -> object:
+        try:
+            code, stdout, _stderr = await self._run(argv, self._timeout_seconds)
+        except OSError as exc:
+            raise FactoryCiError(
+                "FACTORY_CI_PROVIDER_UNAVAILABLE", "GitHub CLI is unavailable"
+            ) from exc
+        if code != 0:
+            raise FactoryCiError("FACTORY_CI_PROVIDER_FAILURE", "GitHub Actions observation failed")
+        try:
+            return json.loads(stdout)
+        except json.JSONDecodeError as exc:
+            raise FactoryCiError(
+                "FACTORY_CI_PROVIDER_INVALID_RESPONSE", "GitHub Actions returned invalid JSON"
+            ) from exc
+
+    async def discover(self, *, repository: str, revision: str) -> tuple[CiRunIdentity, ...]:
+        repository = self._repository(repository)
+        revision = self._revision(revision)
+        payload = await self._json(
+            (
+                self._executable,
+                "run",
+                "list",
+                "--repo",
+                repository,
+                "--commit",
+                revision,
+                "--limit",
+                "50",
+                "--json",
+                "databaseId,headSha,status,conclusion,url,name,workflowName",
+            )
+        )
+        if not isinstance(payload, list):
+            raise FactoryCiError(
+                "FACTORY_CI_PROVIDER_INVALID_RESPONSE", "GitHub Actions run list must be an array"
+            )
+        rows: list[CiRunIdentity] = []
+        for item in payload[:50]:
+            if not isinstance(item, dict):
+                continue
+            head_sha = str(item.get("headSha") or "").strip().lower()
+            if head_sha != revision:
+                continue
+            run_id = str(item.get("databaseId") or "").strip()
+            workflow = str(item.get("workflowName") or item.get("name") or "").strip()
+            if not run_id or not workflow:
+                continue
+            rows.append(
+                CiRunIdentity(
+                    external_run_id=run_id[:120],
+                    workflow=workflow[:500],
+                    url=(str(item.get("url") or "").strip() or None),
+                )
+            )
+        rows.sort(
+            key=lambda row: int(row.external_run_id) if row.external_run_id.isdigit() else -1,
+            reverse=True,
+        )
+        return tuple(rows)
+
+    async def observe(self, request: CiPollRequest) -> CiObservation:
+        repository = self._repository(request.repository)
+        revision = self._revision(request.revision)
+        run_id = _token(request.external_run_id, "GitHub Actions run ID", 120)
+        if not run_id.isdigit():
+            raise FactoryCiError(
+                "FACTORY_CI_INVALID_RUN_ID", "GitHub Actions run ID must be numeric"
+            )
+        payload = await self._json(
+            (
+                self._executable,
+                "run",
+                "view",
+                run_id,
+                "--repo",
+                repository,
+                "--json",
+                "databaseId,headSha,status,conclusion,url,name,workflowName",
+            )
+        )
+        if not isinstance(payload, dict):
+            raise FactoryCiError(
+                "FACTORY_CI_PROVIDER_INVALID_RESPONSE", "GitHub Actions run must be an object"
+            )
+        if str(payload.get("headSha") or "").strip().lower() != revision:
+            raise FactoryCiError(
+                "FACTORY_CI_STALE_REVISION",
+                "GitHub Actions run does not match the tracked revision",
+            )
+        workflow = str(payload.get("workflowName") or payload.get("name") or "").strip()
+        if request.check_id and workflow != request.check_id:
+            raise FactoryCiError(
+                "FACTORY_CI_WORKFLOW_MISMATCH",
+                "GitHub Actions run does not match the tracked workflow",
+            )
+        status = str(payload.get("status") or "").strip()
+        conclusion = str(payload.get("conclusion") or "").strip() or None
+        failure_summary = None
+        if conclusion and _conclusion(conclusion) in _FAILURE_CONCLUSIONS:
+            failure_summary = (
+                f"GitHub Actions workflow {workflow or request.check_id} concluded {conclusion}"
+            )
+        return CiObservation(
+            status=status,
+            conclusion=conclusion,
+            url=(str(payload.get("url") or "").strip() or None),
+            failure_summary=failure_summary,
+        )
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -69,6 +262,8 @@ def _status(value: str) -> str:
         "RUNNING": "IN_PROGRESS",
         "QUEUED": "QUEUED",
         "PENDING": "QUEUED",
+        "REQUESTED": "QUEUED",
+        "WAITING": "QUEUED",
         "COMPLETED": "COMPLETED",
         "COMPLETE": "COMPLETED",
     }
@@ -93,6 +288,8 @@ def _conclusion(value: str | None) -> str | None:
         "SKIPPED": "SKIPPED",
         "NEUTRAL": "NEUTRAL",
         "ACTION_REQUIRED": "ACTION_REQUIRED",
+        "STALE": "FAILURE",
+        "STARTUP_FAILURE": "FAILURE",
     }
     if normalized not in aliases:
         raise FactoryCiError(
@@ -164,22 +361,30 @@ class FactoryCiService:
                     )
                 ).scalar_one_or_none()
                 if exact is not None:
-                    if exact.run_id != run_id or exact.cycle_id != cycle_id or exact.revision != revision:
+                    if (
+                        exact.run_id != run_id
+                        or exact.cycle_id != cycle_id
+                        or exact.revision != revision
+                    ):
                         raise FactoryCiError(
                             "FACTORY_CI_TRACKING_CONFLICT",
                             "existing CI identity is bound to a different factory target",
                         )
                     return exact
                 pending_diagnosis = (
-                    await db.execute(
-                        select(FactoryCiRun).where(
-                            FactoryCiRun.cycle_id == cycle_id,
-                            FactoryCiRun.provider == provider,
-                            FactoryCiRun.revision == revision,
-                            FactoryCiRun.diagnosis_required.is_(True),
+                    (
+                        await db.execute(
+                            select(FactoryCiRun).where(
+                                FactoryCiRun.cycle_id == cycle_id,
+                                FactoryCiRun.provider == provider,
+                                FactoryCiRun.revision == revision,
+                                FactoryCiRun.diagnosis_required.is_(True),
+                            )
                         )
                     )
-                ).scalars().first()
+                    .scalars()
+                    .first()
+                )
                 if pending_diagnosis is not None:
                     raise FactoryCiError(
                         "FACTORY_CI_DIAGNOSIS_REQUIRED",

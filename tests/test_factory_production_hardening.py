@@ -519,23 +519,27 @@ class FactoryCriticalBoundaryProcessRestartCampaignTests(unittest.TestCase):
                     text=True,
                 )
                 run_id = seeded.stdout.strip().splitlines()[-1]
-                marker_before = self._marker_count(data_dir, boundary)
+                marker_before = self._marker_count(data_dir, boundary, run_id)
                 port = self._free_port()
                 process = self._start_server(data_dir, port)
                 try:
                     self._wait_for_health(port)
                     self._wait_until(
-                        lambda: self._query(
-                            data_dir, "select state from factory_runs where id=?", (run_id,)
+                        lambda: int(
+                            self._query(
+                                data_dir,
+                                "select count(*) from factory_events where run_id=? and event_type='state.transition' and to_state='RECOVERING'",
+                                (run_id,),
+                            )
                         )
-                        == FactoryState.RECOVERING.value
+                        == 1
                     )
-                    self.assertEqual(self._marker_count(data_dir, boundary), marker_before)
+                    self.assertEqual(self._marker_count(data_dir, boundary, run_id), marker_before)
                     self.assertEqual(
                         int(
                             self._query(
                                 data_dir,
-                                "select count(*) from factory_events where run_id=? and to_state='RECOVERING'",
+                                "select count(*) from factory_events where run_id=? and event_type='state.transition' and to_state='RECOVERING'",
                                 (run_id,),
                             )
                         ),
@@ -547,28 +551,44 @@ class FactoryCriticalBoundaryProcessRestartCampaignTests(unittest.TestCase):
                         process.wait(timeout=10)
 
     @staticmethod
-    def _marker_count(data_dir: str, boundary: str) -> int:
-        if boundary == "victory_pass":
-            return int(
-                FactoryCriticalBoundaryProcessRestartCampaignTests._query(
-                    data_dir,
-                    "select count(*) from factory_events where event_type='victory.authorized'",
-                )
-            )
-        table = {
-            "run_create": "factory_runs",
-            "worker_create": "factory_worker_assignments",
-            "mutation": "factory_evidence",
-            "verification_pass": "factory_gate_results",
-            "commit_intent": "factory_commit_intents",
-            "commit": "factory_commit_intents",
-            "push": "factory_commit_intents",
-            "ci_observation": "factory_ci_runs",
+    def _marker_count(data_dir: str, boundary: str, run_id: str) -> int:
+        query, params = {
+            "run_create": ("select count(*) from factory_runs where id=?", (run_id,)),
+            "worker_create": (
+                "select count(*) from factory_worker_assignments where run_id=? and worker_id='dcw-phase10'",
+                (run_id,),
+            ),
+            "mutation": (
+                "select count(*) from factory_evidence where run_id=? and id='fevidence-phase10-mutation'",
+                (run_id,),
+            ),
+            "verification_pass": (
+                "select count(*) from factory_gate_results where run_id=? and idempotency_key='gate-boundary'",
+                (run_id,),
+            ),
+            "victory_pass": (
+                "select count(*) from factory_events where run_id=? and event_type='victory.authorized' and idempotency_key='victory-boundary'",
+                (run_id,),
+            ),
+            "commit_intent": (
+                "select count(*) from factory_commit_intents where run_id=? and commit_message='phase10 verified commit' and status='PREPARED'",
+                (run_id,),
+            ),
+            "commit": (
+                "select count(*) from factory_commit_intents where run_id=? and commit_sha='commit-sha' and status='COMMITTED'",
+                (run_id,),
+            ),
+            "push": (
+                "select count(*) from factory_commit_intents where run_id=? and commit_sha='commit-sha' and push_status='PUSHED'",
+                (run_id,),
+            ),
+            "ci_observation": (
+                "select count(*) from factory_ci_runs where run_id=? and external_run_id='ci-phase10'",
+                (run_id,),
+            ),
         }[boundary]
         return int(
-            FactoryCriticalBoundaryProcessRestartCampaignTests._query(
-                data_dir, f"select count(*) from {table}"
-            )
+            FactoryCriticalBoundaryProcessRestartCampaignTests._query(data_dir, query, params)
         )
 
     @staticmethod
