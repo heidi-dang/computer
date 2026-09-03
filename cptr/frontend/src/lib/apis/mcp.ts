@@ -680,6 +680,192 @@ export interface McpFactoryStreamCallbacks {
 	onError?: (error: unknown) => void;
 }
 
+export interface McpMemoryWorkspace {
+	workspace_id: string;
+	workspace_name: string;
+	workspace_path: string;
+}
+
+export interface McpMemoryNode {
+	id: string;
+	label: string;
+	kind: 'scope' | 'memory' | 'entity';
+	scope: 'user' | 'workspace';
+	workspace_id: string | null;
+	workspace_name: string | null;
+	path: string;
+	heading: string;
+	memory_id: string;
+	preview: string;
+	links?: string[];
+	modified_at_ms: number;
+	size: number;
+	trust_level: string;
+	confidence: number;
+	status: string;
+	source_layer?: 'scope' | 'canonical' | 'entity' | string;
+	importance?: number;
+	valid_from_ms?: number | null;
+	valid_until_ms?: number | null;
+	verified_at_ms?: number | null;
+	verification_expires_at_ms?: number | null;
+	verification_stale?: boolean;
+	branch_id?: string | null;
+	parent_memory_id?: string | null;
+	superseded_by_id?: string | null;
+	entity_type?: string;
+	recall_count?: number;
+	last_recalled_at_ms?: number;
+}
+
+export interface McpMemoryEdge {
+	id: string;
+	source: string;
+	target: string;
+	kind: 'belongs_to' | 'related';
+	label?: string;
+}
+
+export interface McpMemoryEvent {
+	event_id: string;
+	workspace: string | null;
+	event_type: 'recall' | 'write' | 'write_rejected' | string;
+	scope: 'user' | 'workspace' | null;
+	memory_id: string | null;
+	path: string | null;
+	heading: string | null;
+	reason: string | null;
+	trust_level: string;
+	confidence: number;
+	payload: Record<string, unknown>;
+	created_at_ms: number;
+}
+
+export interface McpMemoryRecallItem {
+	node_id: string;
+	scope: 'user' | 'workspace';
+	path: string;
+	heading: string;
+	memory_id: string;
+	reason: string;
+}
+
+export interface McpMemoryRecallTrace {
+	event_id: string;
+	created_at_ms: number;
+	workspace: string | null;
+	context_chars: number;
+	items: McpMemoryRecallItem[];
+}
+
+export interface McpMemoryNamespaceState {
+	workspace: string;
+	version: number;
+	active_branch_id: string | null;
+	active_snapshot_id: string | null;
+	updated_at_ms: number;
+}
+
+export interface McpMemoryCheckpointState {
+	checkpoint_id: string;
+	workspace: string;
+	task_key_hash: string;
+	version: number;
+	stage: string;
+	memory_version: number;
+	created_at_ms: number;
+}
+
+export interface McpMemorySnapshotState {
+	snapshot_id: string;
+	workspace: string;
+	label: string;
+	memory_version: number;
+	record_count: number;
+	created_at_ms: number;
+}
+
+export interface McpMemoryBranchState {
+	branch_id: string;
+	workspace: string;
+	name: string;
+	from_snapshot_id: string | null;
+	status: string;
+	created_at_ms: number;
+	updated_at_ms: number;
+}
+
+export interface McpMemorySnapshot {
+	version: 1 | 2;
+	workspaces: McpMemoryWorkspace[];
+	selected_workspace_id: string | null;
+	nodes: McpMemoryNode[];
+	edges: McpMemoryEdge[];
+	events: McpMemoryEvent[];
+	recall_traces: McpMemoryRecallTrace[];
+	metrics: {
+		memory_nodes?: number;
+		managed_memory_nodes?: number;
+		canonical_memory_nodes?: number;
+		entity_nodes?: number;
+		user_memory_nodes?: number;
+		workspace_memory_nodes?: number;
+		scope_nodes?: number;
+		edge_count?: number;
+		file_count?: number;
+		total_bytes?: number;
+		truncated?: boolean;
+		recalls_24h?: number;
+		writes_24h?: number;
+		rejected_writes_24h?: number;
+		event_count_visible?: number;
+		superseded_memory_nodes?: number;
+		stale_verification_nodes?: number;
+		snapshot_count?: number;
+		branch_count?: number;
+		checkpoint_count?: number;
+		memory_version?: number;
+		pending_memory_jobs?: number;
+		running_memory_jobs?: number;
+		failed_memory_jobs?: number;
+	};
+	health: {
+		enabled?: boolean;
+		tool_enabled?: boolean;
+		background_review_enabled?: boolean;
+		review_interval_turns?: number;
+		canonical_store?: string;
+		event_store?: string;
+		retrieval?: string;
+		realtime?: string;
+		trust_policy?: string;
+		required_for_execution?: boolean;
+		context_char_limit?: number;
+		verification_ttl_seconds?: number;
+		maintenance_enabled?: boolean;
+		maintenance_queue?: {
+			pending?: number;
+			running?: number;
+			complete?: number;
+			failed?: number;
+		};
+	};
+	lifecycle?: {
+		namespaces: McpMemoryNamespaceState[];
+		checkpoints: McpMemoryCheckpointState[];
+		snapshots: McpMemorySnapshotState[];
+		branches: McpMemoryBranchState[];
+	};
+	fingerprint: string;
+	generated_at_ms: number;
+}
+
+export interface McpMemoryStreamCallbacks {
+	onSnapshot: (snapshot: McpMemorySnapshot) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown) => void;
+}
+
 export type McpDiagnosticsEvent = (
 	McpLatencySample | McpFailureDiagnostic | McpBackendMetricsSample | McpUsageDiagnostic
 ) & { ingestion_sequence: number };
@@ -716,6 +902,48 @@ export interface McpDiagnosticsStreamCallbacks {
 }
 
 // ── Topology config + diagnostics ────────────────────────────────────────────
+
+export const getMcpMemorySnapshot = (
+	workspaceId?: string | null,
+	nodeLimit = 400,
+	eventLimit = 120
+) => {
+	const params = new URLSearchParams({
+		node_limit: String(nodeLimit),
+		event_limit: String(eventLimit)
+	});
+	if (workspaceId) params.set('workspace_id', workspaceId);
+	return fetchJSON<McpMemorySnapshot>(`/api/mcp/memory/snapshot?${params.toString()}`);
+};
+
+export function openMcpMemoryStream(
+	workspaceId: string | null | undefined,
+	callbacks: McpMemoryStreamCallbacks,
+	nodeLimit = 400,
+	eventLimit = 120
+): () => void {
+	const params = new URLSearchParams({
+		node_limit: String(nodeLimit),
+		event_limit: String(eventLimit)
+	});
+	if (workspaceId) params.set('workspace_id', workspaceId);
+	const source = new EventSource(`/api/mcp/memory/stream?${params.toString()}`);
+	const parse = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onSnapshot(JSON.parse(message.data) as McpMemorySnapshot);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+
+	source.addEventListener('snapshot', (event) => parse(event as MessageEvent<string>));
+	source.addEventListener('memory_error', (event) => {
+		callbacks.onError?.(new Error((event as MessageEvent<string>).data || 'Memory stream failed'));
+	});
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+	return () => source.close();
+}
 
 export const getMcpFactorySnapshot = (runId?: string | null, runLimit = 20) => {
 	const params = new URLSearchParams({ run_limit: String(runLimit) });

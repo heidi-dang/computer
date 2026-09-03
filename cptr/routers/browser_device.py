@@ -16,7 +16,7 @@ from cptr.services.browser_evaluate_approvals import browser_evaluate_approvals
 from cptr.services.browser_device_connections import browser_device_connections
 from cptr.services.browser_devices import BrowserTabInUseError, browser_device_store
 from cptr.services.browser_visual_frames import BrowserVisualFrame, browser_visual_frames
-from cptr.services.control_auth import authenticate_control_request
+from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
 
 router = APIRouter(prefix="/api/browser-device/v1", tags=["browser-device"])
 CONTROL_HEARTBEAT_SECONDS = 20.0
@@ -108,6 +108,11 @@ async def _control_user(request: Request, scope: str) -> str:
         return await authenticate_control_request(request, scope)
     except PermissionError as exc:
         message = str(exc)
+        if isinstance(exc, ControlMemoryUnavailable):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
+            ) from exc
         raise HTTPException(
             status_code=403 if message.startswith("missing required scope") else 401,
             detail="control-plane access denied",

@@ -35,7 +35,7 @@ from cptr.env import (
     DIRECT_CODING_IO_CONCURRENCY,
 )
 from cptr.models import ControlIdempotency, Workspace
-from cptr.services.control_auth import authenticate_control_request
+from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
 from cptr.services.direct_coding_workers import (
     DirectCodingWorkerError,
     resolve_direct_worker_root,
@@ -357,6 +357,11 @@ class DirectWorkerCloseRequest(BaseModel):
 
 
 def _raise_auth(exc: PermissionError) -> None:
+    if isinstance(exc, ControlMemoryUnavailable):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
+        ) from exc
     if str(exc).startswith("missing required scope"):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc

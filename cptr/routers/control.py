@@ -16,7 +16,7 @@ from sqlalchemy import select
 from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.agent_service import AgentService
-from cptr.services.control_auth import authenticate_control_request
+from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
 from cptr.services.control_store import SqlSupervisorStore
 from cptr.services.direct_coding_workers import DirectCodingWorkerError, resolve_direct_worker_root
 from cptr.services.supervisor import AutonomousSupervisor, MonitorState, MonitorStatus
@@ -232,6 +232,11 @@ def _monitor_summary(monitor: MonitorState) -> dict[str, Any]:
 
 
 def _raise_auth(exc: PermissionError) -> None:
+    if isinstance(exc, ControlMemoryUnavailable):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
+        ) from exc
     if str(exc).startswith("missing required scope"):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc

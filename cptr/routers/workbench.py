@@ -8,7 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from cptr.models import AutonomousMonitor, ControlTask, Workspace
-from cptr.services.control_auth import authenticate_control_request
+from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
 from cptr.services.workbench_sessions import MAX_EVENT_LIST_LIMIT, workbench_session_store
 from cptr.utils.db import get_db
 from cptr.utils.tools import get_command_session
@@ -52,6 +52,11 @@ async def _user(request: Request, scope: str) -> str:
     try:
         return await authenticate_control_request(request, scope)
     except PermissionError as exc:
+        if isinstance(exc, ControlMemoryUnavailable):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
+            ) from exc
         message = str(exc)
         raise HTTPException(
             status_code=403 if message.startswith("missing required scope") else 401,

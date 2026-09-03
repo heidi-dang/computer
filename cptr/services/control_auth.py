@@ -5,8 +5,14 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from cptr.memory.gate import require_control_action_memory
+from cptr.memory.service import MemoryUnavailableError
 from cptr.services.api_keys import list_api_keys, resolve_api_key_principal
 from cptr.utils.config import AuthResult
+
+
+class ControlMemoryUnavailable(PermissionError):
+    """Authenticated control action was blocked because required memory was unavailable."""
 
 
 def _hash_key(raw: str) -> str:
@@ -38,4 +44,12 @@ async def authenticate_control_request(request: Any, required_scope: str | None 
         role="user",
     )
     request.state.control_scopes = set(principal.scopes)
+    try:
+        await require_control_action_memory(
+            request,
+            user_id=principal.user_id,
+            required_scope=required_scope,
+        )
+    except MemoryUnavailableError as exc:
+        raise ControlMemoryUnavailable("required CPTR memory context is unavailable") from exc
     return principal.user_id

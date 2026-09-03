@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from cptr.services.coding_benchmark import SUITE_ID, coding_benchmark_store
-from cptr.services.control_auth import authenticate_control_request
+from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
 
 router = APIRouter(prefix="/api/control/v1/benchmarks", tags=["coding-benchmarks"])
 
@@ -22,6 +22,11 @@ async def _user(request: Request, scope: str) -> str:
     try:
         return await authenticate_control_request(request, scope)
     except PermissionError as exc:
+        if isinstance(exc, ControlMemoryUnavailable):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
+            ) from exc
         message = str(exc)
         raise HTTPException(
             status_code=403 if message.startswith("missing required scope") else 401,

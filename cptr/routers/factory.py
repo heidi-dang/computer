@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.models import Workspace
-from cptr.services.control_auth import authenticate_control_request
+from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
 from cptr.services.factory_control import (
     FactoryControlConflict,
     FactoryControlNotFound,
@@ -55,6 +55,11 @@ class FactoryStopRequest(BaseModel):
 
 
 def _raise_auth(exc: PermissionError) -> None:
+    if isinstance(exc, ControlMemoryUnavailable):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
+        ) from exc
     if str(exc).startswith("missing required scope"):
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc
