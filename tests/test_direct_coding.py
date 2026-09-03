@@ -31,7 +31,56 @@ from cptr.routers.coding import router as coding_router
 from cptr.routers.gateway import CreateApiKeyRequest, create_api_key
 from cptr.services.api_keys import ApiKeyPrincipal
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
-from cptr.utils.tools import command_sessions, run_command, stop_command_session
+from cptr.utils.tools import command_sessions, run_command, search_files, stop_command_session
+
+
+class SearchFilesFallbackTests(unittest.IsolatedAsyncioTestCase):
+    async def test_python_fallback_matches_ripgrep_line_contract_without_separator_whitespace(self):
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.Runtime.stat",
+                    new=AsyncMock(return_value={"type": "directory"}),
+                ),
+                patch(
+                    "cptr.utils.tools._search_rg",
+                    new=AsyncMock(side_effect=FileNotFoundError()),
+                ),
+                patch(
+                    "cptr.utils.tools.Runtime.file_matches",
+                    new=AsyncMock(
+                        return_value={
+                            "results": [
+                                {
+                                    "relative_path": "example.py",
+                                    "content_matches": [
+                                        {"line": 1, "text": "value = 1"},
+                                        {"line": 2, "text": "    indented"},
+                                    ],
+                                }
+                            ]
+                        }
+                    ),
+                ),
+                patch(
+                    "cptr.utils.tools.identity_for_context",
+                    new=AsyncMock(return_value=SimpleNamespace(is_pam=False)),
+                ),
+            ):
+                result = await search_files(
+                    "value",
+                    ".",
+                    __context__={
+                        "workspace": workspace_root,
+                        "request": object(),
+                        "user_id": "user-1",
+                    },
+                )
+
+        self.assertEqual(
+            result.splitlines(),
+            ["example.py:1:value = 1", "example.py:2:    indented"],
+        )
 
 
 class DirectCodingContractHelperTests(unittest.TestCase):

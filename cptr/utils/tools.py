@@ -1313,7 +1313,7 @@ async def search_files(
                 rows.append(str(rel))
             else:
                 for match in item.get("content_matches") or []:
-                    rows.append(f"{rel}:{match.get('line')}: {match.get('text')}")
+                    rows.append(f"{rel}:{match.get('line')}:{match.get('text')}")
         res = "\n".join(rows) if rows else "No matches found."
 
     return _truncate_output(res, max_chars=CHAT_TOOL_MAX_CHARS)
