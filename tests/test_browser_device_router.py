@@ -81,33 +81,24 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/stream-config", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/evaluate-approval", paths)
 
-    async def test_global_auth_middleware_allows_only_public_pairing_request_and_claim(self):
+    async def test_global_auth_middleware_defers_browser_device_auth_to_router(self):
         from cptr import app as cptr_app
 
         sentinel = object()
-        for path in (
-            "/api/browser-device/v1/pairing/request",
-            "/api/browser-device/v1/pairing/claim",
+        for method, path in (
+            ("POST", "/api/browser-device/v1/pairing/request"),
+            ("POST", "/api/browser-device/v1/pairing/claim"),
+            ("POST", "/api/browser-device/v1/pairing/approve"),
+            ("GET", "/api/browser-device/v1/devices"),
+            ("POST", "/api/browser-device/v1/sessions"),
         ):
             call_next = AsyncMock(return_value=sentinel)
-            request = SimpleNamespace(url=SimpleNamespace(path=path), method="POST")
-            result = await cptr_app.auth_middleware(request, call_next)
+            request = SimpleNamespace(url=SimpleNamespace(path=path), method=method)
+            with patch.object(cptr_app, "check_access") as legacy_check:
+                result = await cptr_app.auth_middleware(request, call_next)
             self.assertIs(result, sentinel)
             call_next.assert_awaited_once_with(request)
-
-        protected = SimpleNamespace(
-            url=SimpleNamespace(path="/api/browser-device/v1/pairing/approve"),
-            method="POST",
-            client=None,
-            cookies={},
-            headers={},
-        )
-        with (
-            patch.object(cptr_app, "check_access", return_value=None),
-            patch.object(cptr_app, "load_config", return_value={"auth": {}}),
-        ):
-            response = await cptr_app.auth_middleware(protected, AsyncMock())
-        self.assertEqual(response.status_code, 401)
+            legacy_check.assert_not_called()
 
     async def test_pairing_request_returns_claim_secret_only_to_extension(self):
         with patch(
