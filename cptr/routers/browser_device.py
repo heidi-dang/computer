@@ -173,12 +173,76 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
         )
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="browser device not found") from exc
+
+    lease = await browser_device_store.session_lease(session_id=session.id)
+    if lease is None:
+        raise HTTPException(status_code=409, detail="browser lease is unavailable")
+    try:
+        acquired = await browser_device_store.transfer_lease(
+            session_id=session.id,
+            expected_epoch=int(lease["epoch"]),
+            expected_owner="none",
+            new_owner="agent",
+        )
+    except (KeyError, PermissionError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    command_id = f"attach_{session.id}_{acquired['epoch']}"
+    await browser_command_results.reserve(command_id)
+    event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.session.attach",
+        payload={"session_id": session.id, "command_id": command_id, "tab_id": int(session.tab_id), "epoch": acquired["epoch"]},
+    )
+    delivered = await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.command",
+            "device_id": session.device_id,
+            "session_id": session.id,
+            "surface_id": session.surface_id or session.id,
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "AGENT_CONTROL",
+            "command_id": command_id,
+            "payload": {
+                "action": "attach",
+                "expected_epoch": acquired["epoch"],
+                "args": {"tab_id": int(session.tab_id)},
+            },
+        },
+    )
+    if not delivered:
+        await browser_command_results.abandon(command_id)
+        await browser_device_store.abort_session_bootstrap(
+            session_id=session.id,
+            expected_epoch=int(acquired["epoch"]),
+        )
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    try:
+        attach_result = await browser_command_results.wait(command_id, timeout_seconds=15.0)
+    except TimeoutError as exc:
+        await browser_device_store.abort_session_bootstrap(
+            session_id=session.id,
+            expected_epoch=int(acquired["epoch"]),
+        )
+        raise HTTPException(status_code=504, detail="browser attach timed out") from exc
+    if attach_result.get("type") != "browser.command.completed":
+        await browser_device_store.abort_session_bootstrap(
+            session_id=session.id,
+            expected_epoch=int(acquired["epoch"]),
+        )
+        raise HTTPException(status_code=409, detail="browser attach failed")
     return {
         "session_id": session.id,
         "device_id": session.device_id,
         "tab_id": int(session.tab_id),
-        "state": session.state,
+        "state": "AGENT_CONTROL",
         "surface_id": session.surface_id,
+        "lease": acquired,
+        "attach": attach_result.get("payload", {}),
     }
 
 

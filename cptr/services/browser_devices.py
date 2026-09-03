@@ -258,6 +258,31 @@ class BrowserDeviceStore:
             }
             return result
 
+    async def abort_session_bootstrap(self, *, session_id: str, expected_epoch: int) -> None:
+        now = _now_ms()
+        async with await get_db() as db:
+            session = await db.get(BrowserSession, session_id)
+            if session is None:
+                return
+            lease = (
+                await db.scalars(select(BrowserLease).where(BrowserLease.session_id == session_id))
+            ).first()
+            if lease is None:
+                session.state = "DISCONNECTED"
+                session.closed_at = now
+                session.updated_at = now
+                await db.commit()
+                return
+            if lease.owner == "agent" and int(lease.epoch) == expected_epoch:
+                lease.owner = "none"
+                lease.epoch = int(lease.epoch) + 1
+                lease.expires_at = None
+                lease.updated_at = now
+            session.state = "DISCONNECTED"
+            session.closed_at = now
+            session.updated_at = now
+            await db.commit()
+
     async def assert_mutation(
         self,
         *,
