@@ -7,7 +7,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
 from cptr.services.browser_command_results import browser_command_results
@@ -150,6 +150,32 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
         "state": session.state,
         "surface_id": session.surface_id,
     }
+
+
+@router.get("/sessions/{session_id}/frame")
+async def get_browser_frame(request: Request, session_id: str, after_frame_id: str | None = None):
+    user_id = await _control_user(request, "task:read")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="browser session not found")
+    frame = await browser_visual_frames.wait_next(
+        device_id=session.device_id,
+        after_frame_id=after_frame_id,
+        timeout_seconds=15.0,
+    )
+    if frame is None or frame.session_id != session_id:
+        return Response(status_code=204)
+    return Response(
+        content=frame.data,
+        media_type=frame.mime_type,
+        headers={
+            "Cache-Control": "no-store",
+            "X-CPTR-Frame-Id": frame.frame_id,
+            "X-CPTR-Frame-Width": str(frame.width),
+            "X-CPTR-Frame-Height": str(frame.height),
+            "X-CPTR-Frame-Time": str(frame.created_at_ms),
+        },
+    )
 
 
 @router.post("/sessions/{session_id}/command")

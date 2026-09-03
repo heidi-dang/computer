@@ -18,6 +18,7 @@ from cptr.routers.browser_device import (
     request_pairing,
     router,
     send_browser_command,
+    get_browser_frame,
     transfer_browser_lease,
 )
 from cptr.services.browser_devices import PairingRequest
@@ -130,6 +131,37 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                     new_owner="human",
                 ),
             )
+        self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_frame_read_is_owner_scoped_and_no_store(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1")
+        frame = SimpleNamespace(
+            session_id="brs_1",
+            data=b"jpeg-bytes",
+            mime_type="image/jpeg",
+            frame_id="frm_1",
+            width=640,
+            height=480,
+            created_at_ms=123,
+        )
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_visual_frames.wait_next", new=AsyncMock(return_value=frame)),
+        ):
+            response = await get_browser_frame(request, "brs_1", "frm_0")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.body, b"jpeg-bytes")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.headers["x-cptr-frame-id"], "frm_1")
+
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_2")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=None)),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await get_browser_frame(request, "brs_1", None)
         self.assertEqual(raised.exception.status_code, 404)
 
     async def test_agent_command_requires_current_lease_epoch_before_delivery(self):
