@@ -146,10 +146,9 @@ async def claim_pairing(body: PairingClaimBody):
         raise HTTPException(status_code=401, detail="pairing claim is invalid or expired")
     device, credential = claimed
     return {
+        "status": "claimed",
         "device_id": device.id,
-        "device_name": device.name,
         "device_credential": credential,
-        "credential_version": int(device.credential_version),
     }
 
 
