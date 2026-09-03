@@ -1,0 +1,280 @@
+"""Secure CPTR browser-device pairing, owner controls, and device WebSocket transport."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, Literal
+
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field
+
+from cptr.services.browser_device_connections import browser_device_connections
+from cptr.services.browser_devices import browser_device_store
+from cptr.services.control_auth import authenticate_control_request
+
+router = APIRouter(prefix="/api/browser-device/v1", tags=["browser-device"])
+
+
+class PairingRequestBody(BaseModel):
+    device_name: str = Field(min_length=1, max_length=120)
+
+
+class PairingClaimBody(BaseModel):
+    pairing_id: str = Field(min_length=1, max_length=120)
+    claim_secret: str = Field(min_length=32, max_length=1024)
+
+
+class PairingApproveBody(BaseModel):
+    pairing_id: str = Field(min_length=1, max_length=120)
+    code: str = Field(pattern=r"^\d{6}$")
+
+
+class OpenSessionBody(BaseModel):
+    device_id: str = Field(min_length=1, max_length=120)
+    tab_id: int = Field(ge=0, le=2_147_483_647)
+    workbench_session_id: str | None = Field(default=None, max_length=120)
+    surface_id: str | None = Field(default=None, max_length=200)
+
+
+class TransferLeaseBody(BaseModel):
+    expected_epoch: int = Field(ge=0)
+    expected_owner: Literal["none", "agent", "human"]
+    new_owner: Literal["none", "agent", "human"]
+    fresh_snapshot_id: str | None = Field(default=None, max_length=200)
+
+
+class SendCommandBody(BaseModel):
+    command_id: str = Field(min_length=1, max_length=160)
+    action: str = Field(min_length=1, max_length=120)
+    expected_epoch: int | None = Field(default=None, ge=0)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+async def _control_user(request: Request, scope: str) -> str:
+    try:
+        return await authenticate_control_request(request, scope)
+    except PermissionError as exc:
+        message = str(exc)
+        raise HTTPException(
+            status_code=403 if message.startswith("missing required scope") else 401,
+            detail="control-plane access denied",
+        ) from exc
+
+
+@router.post("/pairing/request")
+async def request_pairing(body: PairingRequestBody):
+    pairing = await browser_device_store.request_pairing(device_name=body.device_name)
+    return {
+        "pairing_id": pairing.pairing_id,
+        "code": pairing.code,
+        "claim_secret": pairing.claim_secret,
+        "expires_at": pairing.expires_at,
+    }
+
+
+@router.post("/pairing/approve")
+async def approve_pairing(request: Request, body: PairingApproveBody):
+    user_id = await _control_user(request, "task:write")
+    approved = await browser_device_store.approve_pairing(
+        user_id=user_id,
+        pairing_id=body.pairing_id,
+        code=body.code,
+    )
+    if not approved:
+        raise HTTPException(status_code=404, detail="pairing challenge is unavailable")
+    return {"approved": True, "pairing_id": body.pairing_id}
+
+
+@router.post("/pairing/claim")
+async def claim_pairing(body: PairingClaimBody):
+    claimed = await browser_device_store.claim_pairing(
+        pairing_id=body.pairing_id,
+        claim_secret=body.claim_secret,
+    )
+    if claimed is None:
+        raise HTTPException(status_code=401, detail="pairing claim is invalid or expired")
+    device, credential = claimed
+    return {
+        "device_id": device.id,
+        "device_name": device.name,
+        "device_credential": credential,
+        "credential_version": int(device.credential_version),
+    }
+
+
+@router.get("/devices")
+async def list_devices(request: Request):
+    user_id = await _control_user(request, "task:read")
+    return {"devices": await browser_device_store.list_devices(user_id=user_id)}
+
+
+@router.post("/devices/{device_id}/revoke")
+async def revoke_device(request: Request, device_id: str):
+    user_id = await _control_user(request, "task:write")
+    if not await browser_device_store.revoke_device(user_id=user_id, device_id=device_id):
+        raise HTTPException(status_code=404, detail="browser device not found")
+    return {"revoked": True, "device_id": device_id}
+
+
+@router.post("/devices/{device_id}/rotate")
+async def rotate_device_credential(request: Request, device_id: str):
+    user_id = await _control_user(request, "task:write")
+    credential = await browser_device_store.rotate_credential(user_id=user_id, device_id=device_id)
+    if credential is None:
+        raise HTTPException(status_code=404, detail="active browser device not found")
+    return {"device_id": device_id, "device_credential": credential}
+
+
+@router.post("/sessions")
+async def open_browser_session(request: Request, body: OpenSessionBody):
+    user_id = await _control_user(request, "task:write")
+    try:
+        session = await browser_device_store.open_session(
+            user_id=user_id,
+            device_id=body.device_id,
+            tab_id=body.tab_id,
+            workbench_session_id=body.workbench_session_id,
+            surface_id=body.surface_id,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=404, detail="browser device not found") from exc
+    return {
+        "session_id": session.id,
+        "device_id": session.device_id,
+        "tab_id": int(session.tab_id),
+        "state": session.state,
+        "surface_id": session.surface_id,
+    }
+
+
+@router.post("/sessions/{session_id}/command")
+async def send_browser_command(request: Request, session_id: str, body: SendCommandBody):
+    user_id = await _control_user(request, "task:write")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="browser session not found")
+    if body.expected_epoch is not None:
+        try:
+            await browser_device_store.assert_mutation(
+                session_id=session_id,
+                actor="agent",
+                expected_epoch=body.expected_epoch,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+    delivered = await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.command",
+            "device_id": session.device_id,
+            "session_id": session_id,
+            "command_id": body.command_id,
+            "action": body.action,
+            "expected_epoch": body.expected_epoch,
+            "payload": body.payload,
+        },
+    )
+    if not delivered:
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    return {"accepted": True, "command_id": body.command_id, "device_id": session.device_id}
+
+
+@router.post("/sessions/{session_id}/lease")
+async def transfer_browser_lease(request: Request, session_id: str, body: TransferLeaseBody):
+    user_id = await _control_user(request, "task:write")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="browser session not found")
+    try:
+        return await browser_device_store.transfer_lease(
+            session_id=session_id,
+            expected_epoch=body.expected_epoch,
+            expected_owner=body.expected_owner,
+            new_owner=body.new_owner,
+            fresh_snapshot_id=body.fresh_snapshot_id,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="browser session not found") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+async def _receive_auth(websocket: WebSocket) -> tuple[str, str, int] | None:
+    try:
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=10)
+        message = json.loads(raw)
+    except (asyncio.TimeoutError, json.JSONDecodeError, WebSocketDisconnect):
+        return None
+    if not isinstance(message, dict) or message.get("type") != "device.authenticate":
+        return None
+    if message.get("protocol_version") != 1:
+        return None
+    device_id = message.get("device_id")
+    credential = message.get("device_credential")
+    resume_from = message.get("resume_from", 0)
+    if not isinstance(device_id, str) or not isinstance(credential, str):
+        return None
+    if not isinstance(resume_from, int) or resume_from < 0:
+        return None
+    return device_id, credential, resume_from
+
+
+@router.websocket("/connect/control")
+async def browser_device_control_socket(websocket: WebSocket):
+    await websocket.accept()
+    auth = await _receive_auth(websocket)
+    if auth is None:
+        await websocket.close(code=1008, reason="device authentication required")
+        return
+    device_id, credential, resume_from = auth
+    device = await browser_device_store.authenticate_device(
+        device_id=device_id,
+        credential=credential,
+    )
+    if device is None:
+        await websocket.close(code=1008, reason="device authentication failed")
+        return
+
+    await browser_device_connections.attach(device_id=device_id, websocket=websocket)
+    await websocket.send_json(
+        {
+            "protocol_version": 1,
+            "type": "device.authenticated",
+            "device_id": device_id,
+            "resume_from": resume_from,
+        }
+    )
+    replay = await browser_device_store.replay_device_events(
+        device_id=device_id,
+        after_sequence=resume_from,
+    )
+    for event in replay:
+        await websocket.send_json({"protocol_version": 1, **event})
+
+    try:
+        while True:
+            message = await websocket.receive_json()
+            if not isinstance(message, dict):
+                await websocket.close(code=1008, reason="invalid device message")
+                return
+            if message.get("protocol_version") != 1 or message.get("device_id") != device_id:
+                await websocket.close(code=1008, reason="device protocol violation")
+                return
+            event_type = message.get("type")
+            if not isinstance(event_type, str) or len(event_type) > 120:
+                await websocket.close(code=1008, reason="invalid device event type")
+                return
+            payload = message.get("payload")
+            if not isinstance(payload, dict):
+                payload = {}
+            await browser_device_store.append_device_event(
+                device_id=device_id,
+                event_type=event_type,
+                payload=payload,
+            )
+    except WebSocketDisconnect:
+        return
+    finally:
+        await browser_device_connections.detach(device_id=device_id, websocket=websocket)
