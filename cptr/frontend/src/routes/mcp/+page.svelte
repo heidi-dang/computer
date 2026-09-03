@@ -22,7 +22,7 @@
 
 <div class="app-theme flex h-full flex-col overflow-hidden">
 	<header class="app-surface shrink-0 border-b px-2 py-2 sm:px-4 sm:py-2.5">
-		<div class="flex min-w-0 items-center gap-2">
+		<div class="flex min-w-0 flex-wrap items-center gap-2 sm:flex-nowrap">
 			<a
 				href="/"
 				aria-label="Back to CPTR Home"
@@ -69,12 +69,12 @@
 			</div>
 
 			<div
-				class="app-subtle-surface scrollbar-none flex max-w-[66vw] shrink-0 overflow-x-auto rounded-xl border p-1 sm:max-w-none"
+				class="app-subtle-surface scrollbar-none order-3 flex w-full min-w-0 overflow-x-auto rounded-xl border p-1 sm:order-none sm:w-auto sm:max-w-none sm:shrink-0"
 				role="tablist"
 				aria-label="MCP view"
 			>
 				<button
-					class="app-interactive min-h-11 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
+					class="app-interactive min-h-11 min-w-max flex-1 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
 					'topology'
 						? 'app-interactive-active'
 						: 'app-muted'}"
@@ -85,7 +85,7 @@
 					Topology
 				</button>
 				<button
-					class="app-interactive min-h-11 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
+					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
 					'console'
 						? 'app-interactive-active'
 						: 'app-muted'}"
@@ -96,7 +96,7 @@
 					Console
 				</button>
 				<button
-					class="app-interactive min-h-11 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
+					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
 					'factory'
 						? 'app-interactive-active'
 						: 'app-muted'}"
@@ -107,7 +107,7 @@
 					Dark Factory
 				</button>
 				<button
-					class="app-interactive min-h-11 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:py-1.5 {view ===
+					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
 					'memory'
 						? 'app-interactive-active'
 						: 'app-muted'}"

@@ -42,6 +42,38 @@ _MAX_CAPABILITY_OUTCOMES = 80
 _MAX_CI_RUNS = 80
 _MAX_PAYLOAD_BYTES = 8 * 1024
 
+# Canonical success-path phases. Transient states (pause, approval, repair,
+# failure) project onto the last/effective phase rather than inventing client
+# percentages. This keeps progress server-authoritative and auditable.
+_PROGRESS_STATES = (
+    FactoryState.MISSION,
+    FactoryState.RECOVERING,
+    FactoryState.BASELINING,
+    FactoryState.UNDERSTANDING,
+    FactoryState.AUDITING,
+    FactoryState.SELECTING_FINDING,
+    FactoryState.CAPABILITY_ANALYSIS,
+    FactoryState.SKILL_DISCOVERY,
+    FactoryState.TRUST_EVALUATION,
+    FactoryState.SKILL_SELECTION,
+    FactoryState.REPRODUCING,
+    FactoryState.ROOT_CAUSE_ANALYSIS,
+    FactoryState.PLANNING,
+    FactoryState.IMPLEMENTING,
+    FactoryState.TARGETED_VERIFYING,
+    FactoryState.FULL_VERIFYING,
+    FactoryState.ADVERSARIAL_REVIEW,
+    FactoryState.SECURITY_REVIEW,
+    FactoryState.LIVE_VERIFYING,
+    FactoryState.VICTORY_JUDGING,
+    FactoryState.COMMITTING,
+    FactoryState.PUSHING,
+    FactoryState.CI_VERIFYING,
+    FactoryState.CYCLE_COMPLETE,
+    FactoryState.COMPLETE,
+)
+_PROGRESS_INDEX = {state.value: index for index, state in enumerate(_PROGRESS_STATES)}
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
@@ -62,6 +94,68 @@ def _bounded_payload(value: Any, *, max_bytes: int = _MAX_PAYLOAD_BYTES) -> Any:
         "truncated": True,
         "bytes": len(encoded),
         "preview": encoded[: max(0, max_bytes - 256)].decode("utf-8", errors="replace"),
+    }
+
+
+def _progress_dict(run: FactoryRun, events: list[FactoryEvent]) -> dict[str, Any]:
+    state = FactoryState(run.state)
+    effective_state = state.value
+
+    if state in {
+        FactoryState.RECOVERING,
+        FactoryState.PAUSED,
+        FactoryState.APPROVAL_REQUIRED,
+        FactoryState.REPAIR_REQUIRED,
+        FactoryState.BLOCKED,
+        FactoryState.FAILED,
+        FactoryState.CANCELLED,
+    }:
+        if run.resumable_state in _PROGRESS_INDEX:
+            effective_state = str(run.resumable_state)
+        elif state is not FactoryState.RECOVERING or run.resumable_state:
+            for event in reversed(events):
+                for candidate in (event.to_state, event.from_state):
+                    if candidate in _PROGRESS_INDEX:
+                        effective_state = str(candidate)
+                        break
+                if effective_state in _PROGRESS_INDEX:
+                    break
+
+    index = _PROGRESS_INDEX.get(effective_state, 0)
+    denominator = max(1, len(_PROGRESS_STATES) - 1)
+    percent = max(0, min(100, round((index / denominator) * 100)))
+    if state is FactoryState.COMPLETE:
+        percent = 100
+
+    if state is FactoryState.COMPLETE:
+        outcome = "success"
+    elif state is FactoryState.FAILED:
+        outcome = "failed"
+    elif state is FactoryState.BLOCKED:
+        outcome = "blocked"
+    elif state is FactoryState.CANCELLED:
+        outcome = "cancelled"
+    elif state is FactoryState.PAUSED:
+        outcome = "paused"
+    elif state is FactoryState.APPROVAL_REQUIRED:
+        outcome = "approval_required"
+    elif state is FactoryState.REPAIR_REQUIRED:
+        outcome = "repairing"
+    elif state is FactoryState.RECOVERING and run.resumable_state:
+        outcome = "recovering"
+    else:
+        outcome = "running"
+
+    return {
+        "percent": percent,
+        "state": state.value,
+        "effective_state": effective_state,
+        "phase_index": index + 1,
+        "phase_count": len(_PROGRESS_STATES),
+        "outcome": outcome,
+        "terminal": is_terminal_factory_state(state),
+        "basis": "server_state_machine",
+        "updated_at_ms": int(run.updated_at),
     }
 
 
@@ -304,6 +398,41 @@ class FactoryObservabilityService:
 
     def __init__(self, *, session_factory: async_sessionmaker | None = None) -> None:
         self._session_factory = session_factory or get_session_factory()
+
+    async def activity_since(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        after_sequence: int,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return every persisted activity event after a durable sequence cursor."""
+        limit = max(1, min(int(limit), 500))
+        cursor = max(0, int(after_sequence))
+        async with self._session_factory() as db:
+            owner = await db.scalar(
+                select(FactoryRun.id).where(
+                    FactoryRun.id == run_id,
+                    FactoryRun.user_id == user_id,
+                )
+            )
+            if owner is None:
+                raise KeyError("factory run not found")
+            rows = list(
+                (
+                    await db.scalars(
+                        select(FactoryEvent)
+                        .where(
+                            FactoryEvent.run_id == run_id,
+                            FactoryEvent.sequence > cursor,
+                        )
+                        .order_by(FactoryEvent.sequence.asc())
+                        .limit(limit)
+                    )
+                ).all()
+            )
+        return [_event_dict(row) for row in rows]
 
     async def snapshot(
         self,
@@ -572,6 +701,7 @@ class FactoryObservabilityService:
             ],
             "commit_intents": [_commit_dict(row) for row in commit_rows],
             "ci_runs": [_ci_dict(row) for row in ci_rows],
+            "progress": _progress_dict(selected, event_rows),
             "summary": {
                 "cycle_count": len(cycles),
                 "current_cycle_ordinal": int(current_cycle.ordinal) if current_cycle else 0,

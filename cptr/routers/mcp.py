@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections import deque
 from typing import Any
 
@@ -115,6 +116,14 @@ def _diagnostics_sse(event: str, data: dict[str, Any]) -> str:
 
 def _factory_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
+
+
+def _bounded_env_float(name: str, default: float, minimum: float, maximum: float) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(maximum, value))
 
 
 def _memory_sse(event: str, data: dict[str, Any]) -> str:
@@ -407,7 +416,16 @@ async def stream_factory_observability(
 
     async def _event_stream():
         previous_fingerprint: str | None = None
-        quiet_ticks = 0
+        previous_event_sequence = 0
+        previous_progress: str | None = None
+        interval_seconds = _bounded_env_float(
+            "CPTR_FACTORY_STREAM_INTERVAL_SECONDS", 0.5, 0.25, 5.0
+        )
+        keepalive_seconds = _bounded_env_float(
+            "CPTR_FACTORY_STREAM_KEEPALIVE_SECONDS", 15.0, 5.0, 60.0
+        )
+        loop = asyncio.get_running_loop()
+        last_emit_at = loop.time()
         yield "retry: 1500\n\n"
         while True:
             if await request.is_disconnected():
@@ -421,17 +439,70 @@ async def stream_factory_observability(
             except KeyError:
                 yield _factory_sse("factory_error", {"code": "FACTORY_RUN_NOT_FOUND"})
                 break
+
             fingerprint = str(snapshot.get("fingerprint") or "")
+            selected = snapshot.get("selected") if isinstance(snapshot, dict) else None
+            selected = selected if isinstance(selected, dict) else None
+            progress = selected.get("progress") if selected else None
+            progress_key = (
+                json.dumps(progress, sort_keys=True, separators=(",", ":"), default=str)
+                if isinstance(progress, dict)
+                else None
+            )
+            summary = selected.get("summary", {}) if selected else {}
+            summary = summary if isinstance(summary, dict) else {}
+            current_event_sequence = int(summary.get("last_event_sequence") or 0)
+
             if fingerprint != previous_fingerprint:
-                previous_fingerprint = fingerprint
-                quiet_ticks = 0
+                initial = previous_fingerprint is None
+                if not initial:
+                    selected_run_id = str(selected.get("run_id") or "") if selected else ""
+                    cursor = previous_event_sequence
+                    while selected_run_id and cursor < current_event_sequence:
+                        try:
+                            activity_batch = await factory_observability.activity_since(
+                                user_id=admin.user_id,
+                                run_id=selected_run_id,
+                                after_sequence=cursor,
+                                limit=500,
+                            )
+                        except KeyError:
+                            yield _factory_sse("factory_error", {"code": "FACTORY_RUN_NOT_FOUND"})
+                            return
+                        if not activity_batch:
+                            break
+                        advanced_cursor = cursor
+                        for event in activity_batch:
+                            sequence = int(event.get("sequence") or 0)
+                            if sequence <= cursor:
+                                continue
+                            yield _factory_sse("activity", event)
+                            last_emit_at = loop.time()
+                            advanced_cursor = max(advanced_cursor, sequence)
+                        if advanced_cursor <= cursor:
+                            break
+                        cursor = advanced_cursor
+                    if progress_key != previous_progress and isinstance(progress, dict):
+                        yield _factory_sse("progress", progress)
+                        last_emit_at = loop.time()
+
+                # Keep snapshot first on initial connect for backwards-compatible
+                # hydration; subsequent fine-grained events arrive before the
+                # snapshot so activity/progress surfaces react immediately.
                 yield _factory_sse("snapshot", snapshot)
-            else:
-                quiet_ticks += 1
-                if quiet_ticks >= 10:
-                    quiet_ticks = 0
-                    yield ": keepalive\n\n"
-            await asyncio.sleep(1.5)
+                last_emit_at = loop.time()
+                if initial and isinstance(progress, dict):
+                    yield _factory_sse("progress", progress)
+                    last_emit_at = loop.time()
+
+                previous_fingerprint = fingerprint
+                previous_event_sequence = current_event_sequence
+                previous_progress = progress_key
+            elif loop.time() - last_emit_at >= keepalive_seconds:
+                yield ": keepalive\n\n"
+                last_emit_at = loop.time()
+
+            await asyncio.sleep(interval_seconds)
 
     return StreamingResponse(
         _event_stream(),

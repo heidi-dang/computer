@@ -625,6 +625,27 @@ export interface McpFactoryCiRun {
 	diagnosed_at: number | null;
 }
 
+export interface McpFactoryProgress {
+	percent: number;
+	state: string;
+	effective_state: string;
+	phase_index: number;
+	phase_count: number;
+	outcome:
+		| 'running'
+		| 'recovering'
+		| 'repairing'
+		| 'paused'
+		| 'approval_required'
+		| 'success'
+		| 'failed'
+		| 'blocked'
+		| 'cancelled';
+	terminal: boolean;
+	basis: 'server_state_machine';
+	updated_at_ms: number;
+}
+
 export interface McpFactorySummary {
 	cycle_count: number;
 	current_cycle_ordinal: number;
@@ -663,6 +684,7 @@ export interface McpFactoryRunDetail extends McpFactoryRunSummary {
 	capability_outcomes: McpFactoryCapabilityOutcome[];
 	commit_intents: McpFactoryCommitIntent[];
 	ci_runs: McpFactoryCiRun[];
+	progress: McpFactoryProgress;
 	summary: McpFactorySummary;
 }
 
@@ -676,6 +698,8 @@ export interface McpFactorySnapshot {
 
 export interface McpFactoryStreamCallbacks {
 	onSnapshot: (snapshot: McpFactorySnapshot) => void;
+	onActivity?: (event: McpFactoryEvent) => void;
+	onProgress?: (progress: McpFactoryProgress) => void;
 	onOpen?: () => void;
 	onError?: (error: unknown) => void;
 }
@@ -1030,15 +1054,31 @@ export function openMcpFactoryStream(
 	const params = new URLSearchParams({ run_limit: String(runLimit) });
 	if (runId) params.set('run_id', runId);
 	const source = new EventSource(`/api/mcp/factory/stream?${params.toString()}`);
-	const parse = (message: MessageEvent<string>) => {
+	const parseSnapshot = (message: MessageEvent<string>) => {
 		try {
 			callbacks.onSnapshot(JSON.parse(message.data) as McpFactorySnapshot);
 		} catch (error) {
 			callbacks.onError?.(error);
 		}
 	};
+	const parseActivity = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onActivity?.(JSON.parse(message.data) as McpFactoryEvent);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+	const parseProgress = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onProgress?.(JSON.parse(message.data) as McpFactoryProgress);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
 
-	source.addEventListener('snapshot', (event) => parse(event as MessageEvent<string>));
+	source.addEventListener('snapshot', (event) => parseSnapshot(event as MessageEvent<string>));
+	source.addEventListener('activity', (event) => parseActivity(event as MessageEvent<string>));
+	source.addEventListener('progress', (event) => parseProgress(event as MessageEvent<string>));
 	source.addEventListener('factory_error', (event) => {
 		callbacks.onError?.(new Error((event as MessageEvent<string>).data || 'Factory stream failed'));
 	});

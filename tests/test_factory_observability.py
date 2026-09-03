@@ -18,6 +18,7 @@ from cptr.models import (
     Workspace,
 )
 from cptr.routers import mcp as mcp_router
+from cptr.services.factory_domain import FactoryActor, FactoryState
 from cptr.services.factory_gates import EvidenceAuthority
 from cptr.services.factory_observability import FactoryObservabilityService
 from cptr.services.factory_store import SqlFactoryStore
@@ -281,6 +282,47 @@ class FactoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selected["commit_intents"][0]["commit_sha"], "commit-sha")
         self.assertEqual(selected["ci_runs"][0]["conclusion"], "SUCCESS")
 
+    async def test_progress_is_server_authoritative_and_tracks_canonical_factory_phase(self):
+        run = await self._run()
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.RECOVERING,
+            actor=FactoryActor.SYSTEM,
+            reason="mission accepted",
+            idempotency_key="progress-recovering",
+        )
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.BASELINING,
+            actor=FactoryActor.SYSTEM,
+            reason="recovery complete",
+            idempotency_key="progress-baselining",
+        )
+        snapshot = await self.service.snapshot(user_id="user-1", run_id=run.id)
+        progress = snapshot["selected"]["progress"]
+        self.assertEqual(progress["state"], FactoryState.BASELINING.value)
+        self.assertEqual(progress["effective_state"], FactoryState.BASELINING.value)
+        self.assertEqual(progress["basis"], "server_state_machine")
+        self.assertEqual(progress["phase_index"], 3)
+        self.assertEqual(progress["phase_count"], 25)
+        self.assertGreater(progress["percent"], 0)
+        self.assertLess(progress["percent"], 100)
+        self.assertEqual(progress["outcome"], "running")
+
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.PAUSED,
+            actor=FactoryActor.USER,
+            reason="operator pause",
+            idempotency_key="progress-paused",
+        )
+        paused = await self.service.snapshot(user_id="user-1", run_id=run.id)
+        paused_progress = paused["selected"]["progress"]
+        self.assertEqual(paused_progress["state"], FactoryState.PAUSED.value)
+        self.assertEqual(paused_progress["effective_state"], FactoryState.BASELINING.value)
+        self.assertEqual(paused_progress["percent"], progress["percent"])
+        self.assertEqual(paused_progress["outcome"], "paused")
+
     async def test_snapshot_fingerprint_changes_only_when_durable_content_changes(self):
         run = await self._run()
         first = await self.service.snapshot(user_id="user-1", run_id=run.id)
@@ -298,9 +340,16 @@ class FactoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first["fingerprint"], changed["fingerprint"])
 
     async def test_explicit_run_id_cannot_cross_owner_boundary(self):
+        run = await self._run()
         other = await self._run(user_id="user-2", workspace_id="workspace-2", key="other-run")
+        events = await self.service.activity_since(
+            user_id="user-1", run_id=run.id, after_sequence=0
+        )
+        self.assertEqual([event["sequence"] for event in events], [1])
         with self.assertRaises(KeyError):
             await self.service.snapshot(user_id="user-1", run_id=other.id)
+        with self.assertRaises(KeyError):
+            await self.service.activity_since(user_id="user-1", run_id=other.id, after_sequence=0)
 
 
 class FactoryObservabilityApiTests(unittest.IsolatedAsyncioTestCase):
@@ -344,6 +393,100 @@ class FactoryObservabilityApiTests(unittest.IsolatedAsyncioTestCase):
                     request, run_id="other-user-run", run_limit=20
                 )
         self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_stream_emits_fine_grained_activity_and_progress_before_changed_snapshot(self):
+        request = self._request()
+        admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
+        event_one = {
+            "event_id": "event-1",
+            "cycle_id": "cycle-1",
+            "sequence": 1,
+            "actor": "SYSTEM",
+            "event_type": "state.transition",
+            "from_state": "MISSION",
+            "to_state": "RECOVERING",
+            "payload": {},
+            "created_at": 1,
+        }
+        event_two = {
+            **event_one,
+            "event_id": "event-2",
+            "sequence": 2,
+            "from_state": "RECOVERING",
+            "to_state": "BASELINING",
+        }
+        progress_one = {
+            "percent": 4,
+            "state": "RECOVERING",
+            "effective_state": "RECOVERING",
+            "phase_index": 2,
+            "phase_count": 25,
+            "outcome": "running",
+            "terminal": False,
+            "basis": "server_state_machine",
+            "updated_at_ms": 1,
+        }
+        progress_two = {
+            **progress_one,
+            "percent": 8,
+            "state": "BASELINING",
+            "effective_state": "BASELINING",
+            "phase_index": 3,
+            "updated_at_ms": 2,
+        }
+        first = {
+            "version": 1,
+            "runs": [],
+            "selected": {
+                "run_id": "factory-1",
+                "events": [event_one],
+                "progress": progress_one,
+                "summary": {"last_event_sequence": 1},
+            },
+            "fingerprint": "1" * 64,
+            "generated_at_ms": 1,
+        }
+        second = {
+            **first,
+            "selected": {
+                "run_id": "factory-1",
+                "events": [event_one, event_two],
+                "progress": progress_two,
+                "summary": {"last_event_sequence": 2},
+            },
+            "fingerprint": "2" * 64,
+            "generated_at_ms": 2,
+        }
+        service = SimpleNamespace(
+            snapshot=AsyncMock(side_effect=[first, second, second]),
+            activity_since=AsyncMock(return_value=[event_two]),
+        )
+        with (
+            patch.object(mcp_router, "require_admin", admin),
+            patch.object(mcp_router, "factory_observability", service),
+            patch.object(mcp_router.asyncio, "sleep", new=AsyncMock(return_value=None)),
+        ):
+            response = await mcp_router.stream_factory_observability(
+                request, run_id="factory-1", run_limit=9
+            )
+            iterator = response.body_iterator.__aiter__()
+            self.assertEqual(await iterator.__anext__(), "retry: 1500\n\n")
+            initial_snapshot = await iterator.__anext__()
+            initial_progress = await iterator.__anext__()
+            activity = await iterator.__anext__()
+            progress = await iterator.__anext__()
+            changed_snapshot = await iterator.__anext__()
+            await iterator.aclose()
+        self.assertIn("event: snapshot", initial_snapshot)
+        self.assertIn("event: progress", initial_progress)
+        self.assertIn("event: activity", activity)
+        self.assertIn('"event_id":"event-2"', activity)
+        self.assertIn("event: progress", progress)
+        self.assertIn('"percent":8', progress)
+        self.assertIn("event: snapshot", changed_snapshot)
+        service.activity_since.assert_awaited_once_with(
+            user_id="admin-1", run_id="factory-1", after_sequence=1, limit=500
+        )
 
     async def test_stream_emits_retry_then_owner_scoped_changed_snapshot(self):
         request = self._request()

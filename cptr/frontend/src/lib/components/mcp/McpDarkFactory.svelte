@@ -3,6 +3,8 @@
 	import {
 		getMcpFactorySnapshot,
 		openMcpFactoryStream,
+		type McpFactoryEvent,
+		type McpFactoryProgress,
 		type McpFactorySnapshot,
 		type McpFactoryRunSummary
 	} from '$lib/apis/mcp';
@@ -13,12 +15,17 @@
 
 	const lifecycleStates = [
 		'MISSION',
+		'RECOVERING',
+		'BASELINING',
+		'UNDERSTANDING',
 		'AUDITING',
-		'REPRODUCING',
-		'RCA',
-		'RESEARCHING',
+		'SELECTING_FINDING',
 		'CAPABILITY_ANALYSIS',
 		'SKILL_DISCOVERY',
+		'TRUST_EVALUATION',
+		'SKILL_SELECTION',
+		'REPRODUCING',
+		'ROOT_CAUSE_ANALYSIS',
 		'PLANNING',
 		'IMPLEMENTING',
 		'TARGETED_VERIFYING',
@@ -60,10 +67,46 @@
 			? Math.round((selected.summary.passed_required_gates / selected.summary.required_gates) * 100)
 			: 0
 	);
+	const progressPercent = $derived(selected?.progress.percent ?? 0);
 
 	function applySnapshot(next: McpFactorySnapshot) {
 		snapshot = next;
 		if (!selectedRunId && next.selected) selectedRunId = next.selected.run_id;
+		streamStatus = 'live';
+		errorMessage = null;
+	}
+
+	function applyActivity(event: McpFactoryEvent) {
+		if (!snapshot?.selected) return;
+		if (snapshot.selected.events.some((item) => item.event_id === event.event_id)) return;
+		const events = [...snapshot.selected.events, event]
+			.sort((a, b) => a.sequence - b.sequence)
+			.slice(-160);
+		snapshot = {
+			...snapshot,
+			selected: {
+				...snapshot.selected,
+				events,
+				summary: {
+					...snapshot.selected.summary,
+					event_count: snapshot.selected.summary.event_count + 1,
+					last_event_sequence: Math.max(
+						snapshot.selected.summary.last_event_sequence,
+						event.sequence
+					)
+				}
+			}
+		};
+		streamStatus = 'live';
+		errorMessage = null;
+	}
+
+	function applyProgress(progress: McpFactoryProgress) {
+		if (!snapshot?.selected) return;
+		snapshot = {
+			...snapshot,
+			selected: { ...snapshot.selected, progress }
+		};
 		streamStatus = 'live';
 		errorMessage = null;
 	}
@@ -83,6 +126,12 @@
 			closeStream = openMcpFactoryStream(effectiveRunId, {
 				onSnapshot: (next) => {
 					if (generation === connectionGeneration) applySnapshot(next);
+				},
+				onActivity: (event) => {
+					if (generation === connectionGeneration) applyActivity(event);
+				},
+				onProgress: (progress) => {
+					if (generation === connectionGeneration) applyProgress(progress);
 				},
 				onOpen: () => {
 					if (generation === connectionGeneration) streamStatus = 'live';
@@ -149,10 +198,7 @@
 	}
 
 	function pipelineTone(stage: string): 'done' | 'current' | 'pending' {
-		const current =
-			selected?.state === 'PAUSED' && selected.resumable_state
-				? selected.resumable_state
-				: selected?.state;
+		const current = selected?.progress.effective_state;
 		const currentIndex = lifecycleStates.indexOf(current as (typeof lifecycleStates)[number]);
 		const stageIndex = lifecycleStates.indexOf(stage as (typeof lifecycleStates)[number]);
 		if (currentIndex < 0) return 'pending';
@@ -163,8 +209,12 @@
 
 	function shortState(stage: string): string {
 		const labels: Record<string, string> = {
+			SELECTING_FINDING: 'Finding',
 			CAPABILITY_ANALYSIS: 'Capability',
 			SKILL_DISCOVERY: 'Skills',
+			TRUST_EVALUATION: 'Trust',
+			SKILL_SELECTION: 'Select skill',
+			ROOT_CAUSE_ANALYSIS: 'Root cause',
 			TARGETED_VERIFYING: 'Targeted',
 			FULL_VERIFYING: 'Full verify',
 			ADVERSARIAL_REVIEW: 'Adversarial',
@@ -487,6 +537,37 @@
 									</p>
 								</div>
 							</div>
+						</div>
+					</section>
+
+					<section
+						class="overall-progress mt-4"
+						role="progressbar"
+						aria-label="Dark Factory progress"
+						aria-valuemin="0"
+						aria-valuemax="100"
+						aria-valuenow={progressPercent}
+					>
+						<div class="progress-copy">
+							<div class="min-w-0">
+								<p class="meta-label">Factory progress</p>
+								<div class="mt-1 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+									<strong class="progress-phase"
+										>{stateLabel(selected.progress.effective_state)}</strong
+									>
+									<span class="progress-position">
+										Phase {selected.progress.phase_index}/{selected.progress.phase_count}
+									</span>
+								</div>
+							</div>
+							<div class="progress-percent">{progressPercent}%</div>
+						</div>
+						<div class="overall-progress-track" aria-hidden="true">
+							<span style={`width: ${progressPercent}%`}></span>
+						</div>
+						<div class="progress-footer">
+							<span class="capitalize">{selected.progress.outcome.replace('_', ' ')}</span>
+							<span>Server-authoritative · seq {selected.summary.last_event_sequence}</span>
 						</div>
 					</section>
 
@@ -968,6 +1049,7 @@
 
 <style>
 	.factory-root {
+		min-width: 0;
 		--factory-success: #16a36a;
 		--factory-danger: #df4d58;
 		--factory-warning: #d28a16;
@@ -1054,6 +1136,8 @@
 		animation: factory-shimmer 1.5s linear infinite;
 	}
 	.factory-main {
+		min-width: 0;
+		overscroll-behavior: contain;
 		background:
 			radial-gradient(
 				circle at 50% -10rem,
@@ -1146,6 +1230,55 @@
 		max-width: 12rem;
 		font-size: 0.72rem;
 		font-weight: 650;
+	}
+	.overall-progress {
+		border: 1px solid color-mix(in oklab, var(--app-accent) 24%, var(--app-border));
+		border-radius: 0.9rem;
+		padding: 0.9rem 1rem;
+		background: color-mix(in oklab, var(--app-accent-soft) 42%, var(--app-surface));
+	}
+	.progress-copy,
+	.progress-footer {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 1rem;
+	}
+	.progress-phase {
+		font-size: 0.9rem;
+		font-weight: 720;
+		line-height: 1.25;
+		overflow-wrap: anywhere;
+	}
+	.progress-position,
+	.progress-footer {
+		font-size: 0.62rem;
+		color: var(--app-fg-muted);
+	}
+	.progress-percent {
+		flex: 0 0 auto;
+		font-size: clamp(1.45rem, 3vw, 2.1rem);
+		font-weight: 760;
+		line-height: 1;
+		letter-spacing: -0.04em;
+		font-variant-numeric: tabular-nums;
+	}
+	.overall-progress-track {
+		height: 0.48rem;
+		margin-top: 0.8rem;
+		overflow: hidden;
+		border-radius: 999px;
+		background: color-mix(in oklab, var(--app-border) 86%, transparent);
+	}
+	.overall-progress-track span {
+		display: block;
+		height: 100%;
+		border-radius: inherit;
+		background: var(--app-accent);
+		transition: width 220ms ease;
+	}
+	.progress-footer {
+		margin-top: 0.55rem;
 	}
 	.pipeline-wrap {
 		border-color: var(--app-divider);
@@ -1622,27 +1755,70 @@
 		}
 	}
 	@media (max-width: 639px) {
+		.factory-content {
+			padding: 0.7rem;
+		}
 		.run-rail {
 			display: block;
+			max-width: 100vw;
+		}
+		.run-rail-header {
+			padding: 0.6rem 0.7rem;
+		}
+		.filter-button {
+			min-height: 2.75rem;
+		}
+		.stream-indicator {
+			min-height: 2rem;
+		}
+		.run-hero h2,
+		.next-action p,
+		.detail-copy {
+			overflow-wrap: anywhere;
 		}
 		.run-rail-header {
 			border-right: 0;
 			border-bottom: 1px solid var(--app-divider);
 		}
 		.run-list {
-			max-height: 6.2rem;
+			max-height: none;
+			padding: 0.4rem 0.5rem;
+			scroll-snap-type: x proximity;
 		}
 		.run-item {
-			width: 13.8rem;
-			min-width: 13.8rem;
-			padding: 0.55rem 0.65rem;
+			width: min(78vw, 15rem);
+			min-width: min(78vw, 15rem);
+			min-height: 4.75rem;
+			padding: 0.62rem 0.7rem;
+			scroll-snap-align: start;
 		}
 		.run-item p.mt-2 {
 			-webkit-line-clamp: 1;
 			line-clamp: 1;
 		}
 		.hero-meta {
+			width: 100%;
+			min-width: 0;
 			grid-template-columns: repeat(2, minmax(0, 1fr));
+			gap: 0.7rem 1rem;
+		}
+		.meta-value {
+			max-width: 100%;
+		}
+		.overall-progress {
+			padding: 0.8rem;
+		}
+		.progress-copy {
+			align-items: flex-start;
+		}
+		.progress-footer {
+			align-items: flex-start;
+			flex-direction: column;
+			gap: 0.2rem;
+		}
+		.pipeline-wrap {
+			margin-inline: -0.7rem;
+			padding-inline: 0.7rem;
 		}
 		.metric-cell {
 			min-height: 5rem;
@@ -1681,7 +1857,8 @@
 		.run-skeleton {
 			animation: none;
 		}
-		.metric-progress span {
+		.metric-progress span,
+		.overall-progress-track span {
 			transition: none;
 		}
 	}
