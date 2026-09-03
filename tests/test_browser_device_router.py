@@ -373,7 +373,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["payload"]["owner"], "human")
         self.assertEqual(message["payload"]["epoch"], 10)
 
-    async def test_release_to_none_notifies_detach_and_clears_cached_frame(self):
+    async def test_release_to_none_waits_for_detach_then_notifies_and_clears_cached_frame(self):
         request = SimpleNamespace()
         session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1")
         result = {
@@ -388,11 +388,17 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
             patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()) as assert_mutation,
             patch("cptr.routers.browser_device.browser_device_store.transfer_lease", new=AsyncMock(return_value=result)),
             patch(
                 "cptr.routers.browser_device.browser_device_store.append_device_event",
-                new=AsyncMock(return_value=SimpleNamespace(sequence=23)),
+                new=AsyncMock(side_effect=[SimpleNamespace(sequence=23), SimpleNamespace(sequence=24)]),
             ),
+            patch("cptr.routers.browser_device.browser_command_results.reserve", new=AsyncMock()) as reserve,
+            patch(
+                "cptr.routers.browser_device.browser_command_results.wait",
+                new=AsyncMock(return_value={"type": "browser.command.completed", "payload": {"detached": True}}),
+            ) as wait,
             patch(
                 "cptr.routers.browser_device.browser_device_connections.send_control",
                 new=AsyncMock(return_value=True),
@@ -405,11 +411,50 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                 TransferLeaseBody(expected_epoch=10, expected_owner="agent", new_owner="none"),
             )
         self.assertEqual(response["state"], "DISCONNECTED")
-        message = send.await_args.kwargs["message"]
-        self.assertEqual(message["type"], "browser.handoff.cancelled")
-        self.assertEqual(message["mode"], "DISCONNECTED")
-        self.assertEqual(message["payload"]["owner"], "none")
+        assert_mutation.assert_awaited_once_with(session_id="brs_1", actor="agent", expected_epoch=10)
+        detach_command_id = reserve.await_args.args[0]
+        wait.assert_awaited_once_with(detach_command_id, timeout_seconds=15.0)
+        messages = [call.kwargs["message"] for call in send.await_args_list]
+        self.assertEqual(messages[0]["type"], "browser.command")
+        self.assertEqual(messages[0]["command_id"], detach_command_id)
+        self.assertEqual(messages[0]["payload"]["action"], "detach")
+        self.assertEqual(messages[0]["payload"]["expected_epoch"], 10)
+        self.assertEqual(messages[1]["type"], "browser.handoff.cancelled")
+        self.assertEqual(messages[1]["mode"], "DISCONNECTED")
+        self.assertEqual(messages[1]["payload"]["owner"], "none")
         clear.assert_awaited_once_with(device_id="bdv_1", session_id="brs_1")
+
+    async def test_release_to_none_keeps_agent_lease_when_detach_fails(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1")
+        transfer = AsyncMock()
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_device_store.transfer_lease", new=transfer),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=23)),
+            ),
+            patch("cptr.routers.browser_device.browser_command_results.reserve", new=AsyncMock()),
+            patch(
+                "cptr.routers.browser_device.browser_command_results.wait",
+                new=AsyncMock(return_value={"type": "browser.command.failed", "payload": {}}),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await transfer_browser_lease(
+                    request,
+                    "brs_1",
+                    TransferLeaseBody(expected_epoch=10, expected_owner="agent", new_owner="none"),
+                )
+        self.assertEqual(raised.exception.status_code, 409)
+        transfer.assert_not_awaited()
 
     async def test_frame_read_is_owner_scoped_and_no_store(self):
         request = SimpleNamespace()

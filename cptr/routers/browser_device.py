@@ -663,12 +663,63 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
     }
 
 
+async def _detach_agent_session(session_id: str, session: Any, expected_epoch: int) -> None:
+    """Detach Chrome and wait for acknowledgement before releasing an agent lease."""
+    try:
+        await browser_device_store.assert_mutation(
+            session_id=session_id,
+            actor="agent",
+            expected_epoch=expected_epoch,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    command_id = f"detach_{session_id}_{expected_epoch}_{uuid4().hex[:8]}"
+    await browser_command_results.reserve(command_id)
+    event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.session.detach",
+        payload={"session_id": session_id, "command_id": command_id, "epoch": expected_epoch},
+    )
+    delivered = await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.command",
+            "device_id": session.device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "AGENT_CONTROL",
+            "command_id": command_id,
+            "payload": {
+                "action": "detach",
+                "expected_epoch": expected_epoch,
+                "args": {},
+            },
+        },
+    )
+    if not delivered:
+        await browser_command_results.abandon(command_id)
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    try:
+        detached = await browser_command_results.wait(command_id, timeout_seconds=15.0)
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="browser detach timed out") from exc
+    if detached.get("type") != "browser.command.completed":
+        raise HTTPException(status_code=409, detail="browser detach failed")
+
+
 @router.post("/sessions/{session_id}/lease")
 async def transfer_browser_lease(request: Request, session_id: str, body: TransferLeaseBody):
     user_id = await _control_user(request, "task:write")
     session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="browser session not found")
+    if body.expected_owner == "agent" and body.new_owner == "none":
+        await _detach_agent_session(session_id, session, body.expected_epoch)
     try:
         result = await browser_device_store.transfer_lease(
             session_id=session_id,
