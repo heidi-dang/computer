@@ -241,7 +241,9 @@ class SqlMemoryStore:
                 row.source_event_ids = list(
                     dict.fromkeys([*(row.source_event_ids or []), *event_ids])
                 )[:200]
-                row.updated_at_ms = _now_ms()
+                now = _now_ms()
+                row.observed_at_ms = now
+                row.updated_at_ms = now
                 await self._bump_version_in_session(db, row.user_id, row.workspace)
                 return MemoryRecordRef(row.id, row.kind, row.status, row.branch_id)
 

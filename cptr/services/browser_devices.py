@@ -79,7 +79,9 @@ class BrowserDeviceStore:
             expires_at=int(row.expires_at),
         )
 
-    async def approve_pairing(self, *, user_id: str, pairing_id: str, code: str | None = None) -> bool:
+    async def approve_pairing(
+        self, *, user_id: str, pairing_id: str, code: str | None = None
+    ) -> bool:
         now = _now_ms()
         async with await get_db() as db:
             row = await db.get(BrowserPairingChallenge, pairing_id)
@@ -97,7 +99,9 @@ class BrowserDeviceStore:
             await db.commit()
             return True
 
-    async def claim_pairing(self, *, pairing_id: str, claim_secret: str) -> tuple[BrowserDevice, str] | None:
+    async def claim_pairing(
+        self, *, pairing_id: str, claim_secret: str
+    ) -> tuple[BrowserDevice, str] | None:
         now = _now_ms()
         async with await get_db() as db:
             row = await db.get(BrowserPairingChallenge, pairing_id)
@@ -170,9 +174,7 @@ class BrowserDeviceStore:
         async with await get_db() as db:
             device = await db.get(BrowserDevice, device_id)
             return bool(
-                device is not None
-                and device.user_id == user_id
-                and device.status == "ACTIVE"
+                device is not None and device.user_id == user_id and device.status == "ACTIVE"
             )
 
     async def open_session(
@@ -204,11 +206,12 @@ class BrowserDeviceStore:
                     and current_session.closed_at is None
                     and current_session.state != "DISCONNECTED"
                 ):
-                    if lease.owner != "none":
+                    if lease.owner != "none" or current_session.state != "OBSERVING":
                         raise BrowserTabInUseError("browser tab already has an active session")
                     # Older releases represented agent -> none as OBSERVING even
                     # though the extension had already detached its debugger.
-                    # Retire that stale session before repointing the per-tab lease.
+                    # Only that legacy state is recyclable. New session bootstrap
+                    # uses CONNECTING so a concurrent open cannot steal its lease.
                     current_session.state = "DISCONNECTED"
                     current_session.closed_at = now
                     current_session.updated_at = now
@@ -218,7 +221,7 @@ class BrowserDeviceStore:
                 device_id=device_id,
                 workbench_session_id=workbench_session_id,
                 tab_id=tab_id,
-                state="OBSERVING",
+                state="CONNECTING",
                 surface_id=surface_id,
                 created_at=now,
                 updated_at=now,
@@ -422,12 +425,17 @@ class BrowserDeviceStore:
         now = _now_ms()
         async with await get_db() as db:
             latest = await db.scalar(
-                select(func.max(BrowserDeviceEvent.sequence)).where(BrowserDeviceEvent.device_id == device_id)
+                select(func.max(BrowserDeviceEvent.sequence)).where(
+                    BrowserDeviceEvent.device_id == device_id
+                )
             )
             safe_payload = redact_sensitive(payload)
             encoded = str(safe_payload)
             if len(encoded) > MAX_DEVICE_EVENT_JSON_CHARS:
-                safe_payload = {"truncated": True, "summary": "device event payload exceeded bounded storage"}
+                safe_payload = {
+                    "truncated": True,
+                    "summary": "device event payload exceeded bounded storage",
+                }
             event = BrowserDeviceEvent(
                 device_id=device_id,
                 sequence=int(latest or 0) + 1,
@@ -441,7 +449,9 @@ class BrowserDeviceStore:
             except IntegrityError:
                 await db.rollback()
                 latest = await db.scalar(
-                    select(func.max(BrowserDeviceEvent.sequence)).where(BrowserDeviceEvent.device_id == device_id)
+                    select(func.max(BrowserDeviceEvent.sequence)).where(
+                        BrowserDeviceEvent.device_id == device_id
+                    )
                 )
                 event.sequence = int(latest or 0) + 1
                 db.add(event)

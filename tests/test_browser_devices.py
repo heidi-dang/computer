@@ -47,7 +47,9 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
             patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
             patch("cptr.services.browser_devices._matches", return_value=False) as matches,
         ):
-            result = await store.approve_pairing(user_id="user_1", pairing_id="pair_1", code="123456")
+            result = await store.approve_pairing(
+                user_id="user_1", pairing_id="pair_1", code="123456"
+            )
         self.assertFalse(result)
         self.assertIsNone(pairing_row.user_id)
         self.assertEqual(pairing_row.status, "PENDING")
@@ -78,6 +80,7 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         db.get.return_value = pairing_row
         db.__aenter__.return_value = db
         db.__aexit__.return_value = False
+
         def add(value):
             setattr(value, "id", getattr(value, "id", None) or device.id)
 
@@ -85,8 +88,14 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
             patch("cptr.services.browser_devices._matches", return_value=True),
-            patch("cptr.services.browser_devices.secrets.token_urlsafe", return_value="device-credential-secret"),
-            patch("cptr.services.browser_devices._hash_secret", side_effect=lambda value: f"hashed:{value}"),
+            patch(
+                "cptr.services.browser_devices.secrets.token_urlsafe",
+                return_value="device-credential-secret",
+            ),
+            patch(
+                "cptr.services.browser_devices._hash_secret",
+                side_effect=lambda value: f"hashed:{value}",
+            ),
         ):
             result = await store.claim_pairing(pairing_id="pair_1", claim_secret="claim-secret")
 
@@ -146,6 +155,7 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         db.scalars.return_value = SimpleNamespace(first=lambda: lease)
         db.__aenter__.return_value = db
         db.__aexit__.return_value = False
+
         with (
             patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
             self.assertRaises(BrowserTabInUseError),
@@ -158,10 +168,48 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         db.add.assert_not_called()
         db.commit.assert_not_awaited()
 
+    async def test_open_session_rejects_inflight_bootstrap_with_owner_none(self):
+        store = BrowserDeviceStore()
+        device = SimpleNamespace(user_id="user_1", status="ACTIVE")
+        bootstrap_session = SimpleNamespace(
+            id="brs_connecting",
+            closed_at=None,
+            state="CONNECTING",
+        )
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_connecting",
+            owner="none",
+            epoch=4,
+        )
+        db = AsyncMock()
+        db.add = MagicMock()
+        db.get.side_effect = [device, bootstrap_session]
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            self.assertRaises(BrowserTabInUseError),
+        ):
+            await store.open_session(user_id="user_1", device_id="bdv_1", tab_id=7)
+
+        self.assertIsNone(bootstrap_session.closed_at)
+        self.assertEqual(bootstrap_session.state, "CONNECTING")
+        self.assertEqual(lease.session_id, "brs_connecting")
+        self.assertEqual(lease.owner, "none")
+        self.assertEqual(lease.epoch, 4)
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
+
     async def test_open_session_retires_released_observing_session_before_reusing_tab(self):
         store = BrowserDeviceStore()
         device = SimpleNamespace(user_id="user_1", status="ACTIVE")
-        released_session = SimpleNamespace(id="brs_old", closed_at=None, state="OBSERVING", updated_at=1)
+        released_session = SimpleNamespace(
+            id="brs_old", closed_at=None, state="OBSERVING", updated_at=1
+        )
         lease = SimpleNamespace(
             device_id="bdv_1",
             tab_id=7,
@@ -197,7 +245,9 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_transfer_rejects_stale_epoch(self):
         store = BrowserDeviceStore()
-        session = SimpleNamespace(id="brs_1", closed_at=None, snapshot_id="snap_old", state="AGENT_CONTROL", updated_at=1)
+        session = SimpleNamespace(
+            id="brs_1", closed_at=None, snapshot_id="snap_old", state="AGENT_CONTROL", updated_at=1
+        )
         lease = SimpleNamespace(
             device_id="bdv_1",
             tab_id=7,
@@ -227,7 +277,9 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_transfer_to_none_closes_session_and_marks_it_disconnected(self):
         store = BrowserDeviceStore()
-        session = SimpleNamespace(id="brs_1", closed_at=None, snapshot_id="snap_old", state="AGENT_CONTROL", updated_at=1)
+        session = SimpleNamespace(
+            id="brs_1", closed_at=None, snapshot_id="snap_old", state="AGENT_CONTROL", updated_at=1
+        )
         lease = SimpleNamespace(
             device_id="bdv_1",
             tab_id=7,
@@ -263,7 +315,9 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_return_to_agent_requires_fresh_snapshot_and_increments_epoch(self):
         store = BrowserDeviceStore()
-        session = SimpleNamespace(id="brs_1", closed_at=None, snapshot_id="snap_old", state="HUMAN_CONTROL", updated_at=1)
+        session = SimpleNamespace(
+            id="brs_1", closed_at=None, snapshot_id="snap_old", state="HUMAN_CONTROL", updated_at=1
+        )
         lease = SimpleNamespace(
             device_id="bdv_1",
             tab_id=7,

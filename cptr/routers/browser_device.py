@@ -82,10 +82,24 @@ class HumanInputBody(BaseModel):
     command_id: str = Field(min_length=1, max_length=160)
     expected_epoch: int = Field(ge=0)
     input_type: Literal[
-        "pointer_move", "pointer_down", "pointer_up", "click", "double_click",
-        "wheel", "key_down", "key_up", "text_input", "touch_start",
-        "touch_move", "touch_end", "focus", "blur", "viewport_resize",
-        "drag_start", "drag_move", "drag_end",
+        "pointer_move",
+        "pointer_down",
+        "pointer_up",
+        "click",
+        "double_click",
+        "wheel",
+        "key_down",
+        "key_up",
+        "text_input",
+        "touch_start",
+        "touch_move",
+        "touch_end",
+        "focus",
+        "blur",
+        "viewport_resize",
+        "drag_start",
+        "drag_move",
+        "drag_end",
     ]
     x: float | None = Field(default=None, ge=0.0, le=1.0)
     y: float | None = Field(default=None, ge=0.0, le=1.0)
@@ -95,7 +109,9 @@ class HumanInputBody(BaseModel):
     key: str | None = Field(default=None, max_length=128)
     code: str | None = Field(default=None, max_length=128)
     text: str | None = Field(default=None, max_length=20_000)
-    modifiers: list[Literal["Alt", "Control", "Meta", "Shift"]] = Field(default_factory=list, max_length=4)
+    modifiers: list[Literal["Alt", "Control", "Meta", "Shift"]] = Field(
+        default_factory=list, max_length=4
+    )
     pointer_id: int | None = Field(default=None, ge=0)
     width: float | None = Field(default=None, gt=0, le=16_384)
     height: float | None = Field(default=None, gt=0, le=16_384)
@@ -107,12 +123,12 @@ async def _control_user(request: Request, scope: str) -> str:
     try:
         return await authenticate_control_request(request, scope)
     except PermissionError as exc:
-        message = str(exc)
         if isinstance(exc, ControlMemoryUnavailable):
             raise HTTPException(
                 status_code=503,
                 detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
             ) from exc
+        message = str(exc)
         raise HTTPException(
             status_code=403 if message.startswith("missing required scope") else 401,
             detail="control-plane access denied",
@@ -183,22 +199,44 @@ def _safe_discovered_tabs(result: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         tab_id = value.get("id")
         window_id = value.get("windowId")
-        if not isinstance(tab_id, int) or tab_id < 0 or not isinstance(window_id, int) or window_id < 0:
+        if (
+            not isinstance(tab_id, int)
+            or tab_id < 0
+            or not isinstance(window_id, int)
+            or window_id < 0
+        ):
             continue
-        tabs.append({
-            "id": tab_id,
-            "windowId": window_id,
-            "active": bool(value.get("active")),
-            "title": str(value.get("title") or "")[:512],
-            "url": str(value.get("url") or "")[:4096],
-            "status": str(value.get("status") or "unknown")[:32],
-            "pinned": bool(value.get("pinned")),
-            "incognito": bool(value.get("incognito")),
-        })
+        tabs.append(
+            {
+                "id": tab_id,
+                "windowId": window_id,
+                "active": bool(value.get("active")),
+                "title": str(value.get("title") or "")[:512],
+                "url": str(value.get("url") or "")[:4096],
+                "status": str(value.get("status") or "unknown")[:32],
+                "pinned": bool(value.get("pinned")),
+                "incognito": bool(value.get("incognito")),
+            }
+        )
     return tabs
 
 
-async def _discover_device_tabs(*, user_id: str, device_id: str, wait_seconds: float = 15.0) -> list[dict[str, Any]]:
+async def _wait_browser_command(
+    command_id: str,
+    *,
+    timeout_seconds: float,
+    timeout_detail: str,
+) -> dict[str, Any]:
+    try:
+        return await browser_command_results.wait(command_id, timeout_seconds=timeout_seconds)
+    except TimeoutError as exc:
+        await browser_command_results.abandon(command_id)
+        raise HTTPException(status_code=504, detail=timeout_detail) from exc
+
+
+async def _discover_device_tabs(
+    *, user_id: str, device_id: str, wait_seconds: float = 15.0
+) -> list[dict[str, Any]]:
     if not await browser_device_store.owns_active_device(user_id=user_id, device_id=device_id):
         raise HTTPException(status_code=404, detail="browser device not found")
     if not await browser_device_connections.is_connected(device_id=device_id):
@@ -229,10 +267,11 @@ async def _discover_device_tabs(*, user_id: str, device_id: str, wait_seconds: f
     if not delivered:
         await browser_command_results.abandon(command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        result = await browser_command_results.wait(command_id, timeout_seconds=wait_seconds)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser tab discovery timed out") from exc
+    result = await _wait_browser_command(
+        command_id,
+        timeout_seconds=wait_seconds,
+        timeout_detail="browser tab discovery timed out",
+    )
     if result.get("type") != "browser.command.completed":
         raise HTTPException(status_code=409, detail="browser tab discovery failed")
     return _safe_discovered_tabs(result)
@@ -268,7 +307,9 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
     tab_id = body.tab_id
     if tab_id is None:
         tabs = await _discover_device_tabs(user_id=user_id, device_id=body.device_id)
-        selected = next((tab for tab in tabs if tab.get("active") is True), tabs[0] if tabs else None)
+        selected = next(
+            (tab for tab in tabs if tab.get("active") is True), tabs[0] if tabs else None
+        )
         if selected is None:
             raise HTTPException(status_code=409, detail="browser device has no discoverable tabs")
         tab_id = int(selected["id"])
@@ -303,7 +344,12 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
     event = await browser_device_store.append_device_event(
         device_id=session.device_id,
         event_type="browser.session.attach",
-        payload={"session_id": session.id, "command_id": command_id, "tab_id": int(session.tab_id), "epoch": acquired["epoch"]},
+        payload={
+            "session_id": session.id,
+            "command_id": command_id,
+            "tab_id": int(session.tab_id),
+            "epoch": acquired["epoch"],
+        },
     )
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
@@ -333,13 +379,17 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
         )
         raise HTTPException(status_code=409, detail="browser device is offline")
     try:
-        attach_result = await browser_command_results.wait(command_id, timeout_seconds=15.0)
-    except TimeoutError as exc:
+        attach_result = await _wait_browser_command(
+            command_id,
+            timeout_seconds=15.0,
+            timeout_detail="browser attach timed out",
+        )
+    except HTTPException:
         await browser_device_store.abort_session_bootstrap(
             session_id=session.id,
             expected_epoch=int(acquired["epoch"]),
         )
-        raise HTTPException(status_code=504, detail="browser attach timed out") from exc
+        raise
     if attach_result.get("type") != "browser.command.completed":
         await browser_device_store.abort_session_bootstrap(
             session_id=session.id,
@@ -462,16 +512,19 @@ async def return_browser_to_agent(request: Request, session_id: str, body: Retur
     if not delivered:
         await browser_command_results.abandon(command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        prepared = await browser_command_results.wait(command_id, timeout_seconds=body.wait_seconds)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser handoff snapshot timed out") from exc
+    prepared = await _wait_browser_command(
+        command_id,
+        timeout_seconds=body.wait_seconds,
+        timeout_detail="browser handoff snapshot timed out",
+    )
     if prepared.get("type") != "browser.command.completed":
         raise HTTPException(status_code=409, detail="browser handoff snapshot failed")
     payload = prepared.get("payload")
     snapshot_id = payload.get("snapshot_id") if isinstance(payload, dict) else None
     if not isinstance(snapshot_id, str) or not snapshot_id:
-        raise HTTPException(status_code=409, detail="browser handoff did not return a fresh snapshot")
+        raise HTTPException(
+            status_code=409, detail="browser handoff did not return a fresh snapshot"
+        )
 
     try:
         result = await browser_device_store.transfer_lease(
@@ -562,10 +615,11 @@ async def send_browser_human_input(request: Request, session_id: str, body: Huma
     if not delivered:
         await browser_command_results.abandon(body.command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        result = await browser_command_results.wait(body.command_id, timeout_seconds=body.wait_seconds)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="human browser input timed out") from exc
+    result = await _wait_browser_command(
+        body.command_id,
+        timeout_seconds=body.wait_seconds,
+        timeout_detail="human browser input timed out",
+    )
     return {"accepted": True, "command_id": body.command_id, "result": result}
 
 
@@ -606,7 +660,9 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
         expression = body.payload.get("expression")
         approval_token = body.payload.get("approval_token")
         if not isinstance(expression, str) or not isinstance(approval_token, str):
-            raise HTTPException(status_code=403, detail="browser evaluate requires explicit approval")
+            raise HTTPException(
+                status_code=403, detail="browser evaluate requires explicit approval"
+            )
         approved = browser_evaluate_approvals.consume(
             token=approval_token,
             user_id=user_id,
@@ -614,7 +670,10 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             expression=expression,
         )
         if not approved:
-            raise HTTPException(status_code=403, detail="browser evaluate approval is invalid, expired, or already used")
+            raise HTTPException(
+                status_code=403,
+                detail="browser evaluate approval is invalid, expired, or already used",
+            )
     await browser_command_results.reserve(body.command_id)
     lease = await browser_device_store.session_lease(session_id=session_id)
     if lease is None:
@@ -640,7 +699,11 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             "command_id": body.command_id,
             "payload": {
                 "action": body.action,
-                **({"expected_epoch": body.expected_epoch} if body.expected_epoch is not None else {}),
+                **(
+                    {"expected_epoch": body.expected_epoch}
+                    if body.expected_epoch is not None
+                    else {}
+                ),
                 "args": body.payload,
             },
         },
@@ -648,13 +711,11 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
     if not delivered:
         await browser_command_results.abandon(body.command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        result = await browser_command_results.wait(
-            body.command_id,
-            timeout_seconds=body.wait_seconds,
-        )
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser command timed out") from exc
+    result = await _wait_browser_command(
+        body.command_id,
+        timeout_seconds=body.wait_seconds,
+        timeout_detail="browser command timed out",
+    )
     return {
         "accepted": True,
         "command_id": body.command_id,
@@ -704,10 +765,11 @@ async def _detach_agent_session(session_id: str, session: Any, expected_epoch: i
     if not delivered:
         await browser_command_results.abandon(command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    try:
-        detached = await browser_command_results.wait(command_id, timeout_seconds=15.0)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="browser detach timed out") from exc
+    detached = await _wait_browser_command(
+        command_id,
+        timeout_seconds=15.0,
+        timeout_detail="browser detach timed out",
+    )
     if detached.get("type") != "browser.command.completed":
         raise HTTPException(status_code=409, detail="browser detach failed")
 
@@ -826,15 +888,19 @@ async def browser_device_visual_socket(websocket: WebSocket):
         await websocket.close(code=1008, reason="device authentication required")
         return
     device_id, credential, _resume_from = auth
-    device = await browser_device_store.authenticate_device(device_id=device_id, credential=credential)
+    device = await browser_device_store.authenticate_device(
+        device_id=device_id, credential=credential
+    )
     if device is None:
         await websocket.close(code=1008, reason="device authentication failed")
         return
-    await websocket.send_json({
-        "protocol_version": 1,
-        "type": "device.visual_authenticated",
-        "device_id": device_id,
-    })
+    await websocket.send_json(
+        {
+            "protocol_version": 1,
+            "type": "device.visual_authenticated",
+            "device_id": device_id,
+        }
+    )
     try:
         while True:
             message = await websocket.receive_json()
@@ -854,30 +920,35 @@ async def browser_device_visual_socket(websocket: WebSocket):
             height = message.get("height")
             created_at_ms = message.get("created_at_ms")
             data_b64 = message.get("data_base64")
-            if not all([
-                isinstance(session_id, str),
-                isinstance(frame_id, str),
-                isinstance(mime_type, str),
-                isinstance(width, int),
-                isinstance(height, int),
-                isinstance(created_at_ms, int),
-                isinstance(data_b64, str),
-            ]):
+            if not all(
+                [
+                    isinstance(session_id, str),
+                    isinstance(frame_id, str),
+                    isinstance(mime_type, str),
+                    isinstance(width, int),
+                    isinstance(height, int),
+                    isinstance(created_at_ms, int),
+                    isinstance(data_b64, str),
+                ]
+            ):
                 await websocket.close(code=1008, reason="invalid browser frame metadata")
                 return
             import base64
+
             try:
                 data = base64.b64decode(data_b64, validate=True)
-                await browser_visual_frames.put(BrowserVisualFrame(
-                    device_id=device_id,
-                    session_id=session_id,
-                    frame_id=frame_id,
-                    mime_type=mime_type,
-                    width=width,
-                    height=height,
-                    created_at_ms=created_at_ms,
-                    data=data,
-                ))
+                await browser_visual_frames.put(
+                    BrowserVisualFrame(
+                        device_id=device_id,
+                        session_id=session_id,
+                        frame_id=frame_id,
+                        mime_type=mime_type,
+                        width=width,
+                        height=height,
+                        created_at_ms=created_at_ms,
+                        data=data,
+                    )
+                )
             except (ValueError, TypeError):
                 await websocket.close(code=1008, reason="invalid browser frame")
                 return
@@ -952,7 +1023,9 @@ async def browser_device_control_socket(websocket: WebSocket):
             await browser_device_store.append_device_event(
                 device_id=device_id,
                 event_type=event_type,
-                payload={"command_id": command_id, **payload} if isinstance(command_id, str) else payload,
+                payload={"command_id": command_id, **payload}
+                if isinstance(command_id, str)
+                else payload,
             )
     except WebSocketDisconnect:
         return
