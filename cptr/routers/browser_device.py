@@ -31,7 +31,11 @@ class PairingClaimBody(BaseModel):
 
 class PairingApproveBody(BaseModel):
     pairing_id: str = Field(min_length=1, max_length=120)
-    code: str = Field(pattern=r"^\d{6}$")
+    # Optional for authenticated MCP approval. Some hosts classify six-digit
+    # pairing challenges as OTP-like secrets and block the tool call before it
+    # reaches CPTR. The opaque pairing_id still selects the exact challenge,
+    # while claim_secret remains extension-only and is required to claim.
+    code: str | None = Field(default=None, pattern=r"^\d{6}$")
 
 
 class OpenSessionBody(BaseModel):

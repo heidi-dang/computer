@@ -133,6 +133,22 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["approved"])
         approve.assert_awaited_once_with(user_id="user_1", pairing_id="pair_1", code="123456")
 
+    async def test_authenticated_approval_can_omit_host_blocked_six_digit_code(self):
+        request = SimpleNamespace()
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.approve_pairing",
+                new=AsyncMock(return_value=True),
+            ) as approve,
+        ):
+            result = await approve_pairing(
+                request,
+                PairingApproveBody(pairing_id="pair_1"),
+            )
+        self.assertTrue(result["approved"])
+        approve.assert_awaited_once_with(user_id="user_1", pairing_id="pair_1", code=None)
+
     async def test_claim_returns_raw_device_credential_once(self):
         device = SimpleNamespace(id="bdv_1", name="Heidi Chrome", credential_version=1)
         with patch(
