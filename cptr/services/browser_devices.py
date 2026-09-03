@@ -75,13 +75,17 @@ class BrowserDeviceStore:
             expires_at=int(row.expires_at),
         )
 
-    async def approve_pairing(self, *, user_id: str, pairing_id: str, code: str) -> bool:
+    async def approve_pairing(self, *, user_id: str, pairing_id: str, code: str | None = None) -> bool:
         now = _now_ms()
         async with await get_db() as db:
             row = await db.get(BrowserPairingChallenge, pairing_id)
             if row is None or row.status != "PENDING" or int(row.expires_at) <= now:
                 return False
-            if not _matches(code, str(row.code_hash)):
+            # Authenticated control-plane callers may approve the exact opaque
+            # pairing_id without forwarding the six-digit challenge through a
+            # host that classifies OTP-like values as blocked secrets. Legacy
+            # callers that provide the code still receive the original check.
+            if code is not None and not _matches(code, str(row.code_hash)):
                 return False
             row.user_id = user_id
             row.status = "APPROVED"

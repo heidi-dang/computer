@@ -6,6 +6,53 @@ from cptr.services.browser_devices import BrowserDeviceStore
 
 
 class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_authenticated_pairing_approval_can_omit_code(self):
+        store = BrowserDeviceStore()
+        pairing_row = SimpleNamespace(
+            user_id=None,
+            code_hash="hashed-code",
+            status="PENDING",
+            expires_at=9999999999999,
+            approved_at=None,
+        )
+        db = AsyncMock()
+        db.get.return_value = pairing_row
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            patch("cptr.services.browser_devices._matches") as matches,
+        ):
+            result = await store.approve_pairing(user_id="user_1", pairing_id="pair_1")
+        self.assertTrue(result)
+        self.assertEqual(pairing_row.user_id, "user_1")
+        self.assertEqual(pairing_row.status, "APPROVED")
+        self.assertIsNotNone(pairing_row.approved_at)
+        matches.assert_not_called()
+
+    async def test_pairing_approval_still_validates_code_when_supplied(self):
+        store = BrowserDeviceStore()
+        pairing_row = SimpleNamespace(
+            user_id=None,
+            code_hash="hashed-code",
+            status="PENDING",
+            expires_at=9999999999999,
+            approved_at=None,
+        )
+        db = AsyncMock()
+        db.get.return_value = pairing_row
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            patch("cptr.services.browser_devices._matches", return_value=False) as matches,
+        ):
+            result = await store.approve_pairing(user_id="user_1", pairing_id="pair_1", code="123456")
+        self.assertFalse(result)
+        self.assertIsNone(pairing_row.user_id)
+        self.assertEqual(pairing_row.status, "PENDING")
+        matches.assert_called_once_with("123456", "hashed-code")
+
     async def test_pairing_claim_persists_hashes_only(self):
         store = BrowserDeviceStore()
         pairing_row = SimpleNamespace(
