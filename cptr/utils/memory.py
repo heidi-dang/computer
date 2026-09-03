@@ -30,6 +30,12 @@ DEFAULT_MEMORY_SETTINGS: dict[str, Any] = {
     "review_interval_turns": 10,
     "user_char_limit": 2000,
     "workspace_char_limit": 3000,
+    "required_for_execution": True,
+    "context_char_limit": 9000,
+    "canonical_char_limit": 3000,
+    "verification_ttl_seconds": 7 * 86400,
+    "maintenance_enabled": True,
+    "maintenance_interval_seconds": 30,
 }
 
 _memory_file_locks: dict[str, asyncio.Lock] = {}
@@ -1009,6 +1015,14 @@ async def get_memory_settings() -> dict[str, Any]:
     settings["review_interval_turns"] = max(1, int(settings.get("review_interval_turns") or 10))
     settings["user_char_limit"] = max(250, int(settings.get("user_char_limit") or 2000))
     settings["workspace_char_limit"] = max(250, int(settings.get("workspace_char_limit") or 3000))
+    settings["context_char_limit"] = max(1000, int(settings.get("context_char_limit") or 9000))
+    settings["canonical_char_limit"] = max(500, int(settings.get("canonical_char_limit") or 3000))
+    settings["verification_ttl_seconds"] = max(
+        0, int(settings.get("verification_ttl_seconds") or 7 * 86400)
+    )
+    settings["maintenance_interval_seconds"] = max(
+        5, int(settings.get("maintenance_interval_seconds") or 30)
+    )
     return settings
 
 
@@ -1210,7 +1224,9 @@ async def write_memory(
                 "path": str(memory_file.path),
             }
         if scope == "workspace":
-            await Runtime.write_file(request, str(memory_file.path), format_memory_entries(next_entries))
+            await Runtime.write_file(
+                request, str(memory_file.path), format_memory_entries(next_entries)
+            )
         else:
             await asyncio.to_thread(write_memory_entries, memory_file.path, next_entries)
         return {
@@ -1260,12 +1276,12 @@ async def _record_memory_fabric_event(
     memory_id: str | None = None,
     reason: str | None = None,
     payload: dict[str, Any] | None = None,
-) -> None:
+) -> str | None:
     """Best-effort durable observability; memory correctness never depends on telemetry."""
     try:
-        from cptr.services.memory_fabric import memory_fabric_store
+        from cptr.memory.service import get_memory_service
 
-        await memory_fabric_store.record_event(
+        return await get_memory_service().record_event(
             user_id=user_id,
             workspace=workspace,
             event_type=event_type,
@@ -1277,7 +1293,7 @@ async def _record_memory_fabric_event(
             payload=payload or {},
         )
     except Exception:
-        return
+        return None
 
 
 async def remember(
@@ -1293,7 +1309,7 @@ async def remember(
     else:
         result = await write_memory(request, user_id, workspace, scope, operations)
     success = bool(result.get("success"))
-    await _record_memory_fabric_event(
+    event_id = await _record_memory_fabric_event(
         user_id=user_id,
         workspace=workspace,
         event_type="write" if success else "write_rejected",
@@ -1306,6 +1322,35 @@ async def remember(
             "operations": _operation_telemetry(operations),
         },
     )
+    if success:
+        try:
+            from cptr.memory.service import get_memory_service
+
+            service = get_memory_service()
+            for operation in operations[:50]:
+                if not isinstance(operation, dict) or operation.get("action") not in {
+                    "add",
+                    "replace",
+                }:
+                    continue
+                content = str(operation.get("content") or "").strip()
+                if not content:
+                    continue
+                await service.queue_consolidation(
+                    user_id=user_id,
+                    workspace=workspace,
+                    scope=scope,
+                    text=content,
+                    heading=str(operation.get("heading") or ""),
+                    source_event_ids=[event_id] if isinstance(event_id, str) and event_id else [],
+                    trust_level="managed_memory",
+                    confidence=0.92,
+                    importance=0.65,
+                )
+        except Exception:
+            # Canonical consolidation is derived/rebuildable. The authoritative managed write
+            # must not be rolled back because the background queue is temporarily unavailable.
+            pass
     return result
 
 
@@ -1404,7 +1449,7 @@ async def recall_memory_context(
     )
 
 
-async def build_memory_prompt(
+async def build_memory_prompt_bundle(
     request: Request,
     user_id: str | None,
     workspace: str,
@@ -1412,12 +1457,12 @@ async def build_memory_prompt(
     current_message: str = "",
     recent_messages: list[dict[str, Any]] | None = None,
     mentioned_files: list[str] | None = None,
-) -> str:
+) -> tuple[str, list[dict[str, Any]]]:
     if not user_id:
-        return ""
+        return "", []
     settings = await get_memory_settings()
     if not settings["enabled"]:
-        return ""
+        return "", []
     blocks: list[str] = []
     recall_items: list[dict[str, Any]] = []
 
@@ -1508,7 +1553,27 @@ async def build_memory_prompt(
                 except Exception:
                     pass
     rendered = "\n\n".join(blocks)
-    if recall_items:
+    return rendered, recall_items
+
+
+async def build_memory_prompt(
+    request: Request,
+    user_id: str | None,
+    workspace: str,
+    *,
+    current_message: str = "",
+    recent_messages: list[dict[str, Any]] | None = None,
+    mentioned_files: list[str] | None = None,
+) -> str:
+    rendered, recall_items = await build_memory_prompt_bundle(
+        request,
+        user_id,
+        workspace,
+        current_message=current_message,
+        recent_messages=recent_messages,
+        mentioned_files=mentioned_files,
+    )
+    if user_id and recall_items:
         await _record_memory_fabric_event(
             user_id=user_id,
             workspace=workspace,

@@ -47,7 +47,7 @@ class MigrationConvergenceTests(unittest.TestCase):
 
     def test_merged_history_has_one_head_and_supports_fresh_and_both_legacy_lineages(self):
         script = ScriptDirectory.from_config(self._config(Path("unused.db")))
-        self.assertEqual(script.get_heads(), ["0027"])
+        self.assertEqual(script.get_heads(), ["0028"])
 
         browser_tables = [
             Base.metadata.tables[name]
@@ -64,9 +64,9 @@ class MigrationConvergenceTests(unittest.TestCase):
 
             fresh = root / "fresh.db"
             command.upgrade(self._config(fresh), "head")
-            self.assertEqual(self._version(fresh), "0027")
+            self.assertEqual(self._version(fresh), "0028")
             self.assertTrue(
-                {"factory_runs", "browser_devices", "memory_fabric_events"}
+                {"factory_runs", "browser_devices", "memory_fabric_events", "memory_records"}
                 <= self._tables(fresh)
             )
 
@@ -74,8 +74,11 @@ class MigrationConvergenceTests(unittest.TestCase):
             command.upgrade(self._config(factory), "0025")
             self.assertNotIn("browser_devices", self._tables(factory))
             command.upgrade(self._config(factory), "head")
-            self.assertEqual(self._version(factory), "0027")
-            self.assertTrue({"browser_devices", "memory_fabric_events"} <= self._tables(factory))
+            self.assertEqual(self._version(factory), "0028")
+            self.assertTrue(
+                {"browser_devices", "memory_fabric_events", "memory_records"}
+                <= self._tables(factory)
+            )
 
             legacy_main = root / "legacy-main.db"
             command.upgrade(self._config(legacy_main), "0018")
@@ -90,7 +93,7 @@ class MigrationConvergenceTests(unittest.TestCase):
             self.assertIn("browser_devices", self._tables(legacy_main))
 
             command.upgrade(self._config(legacy_main), "head")
-            self.assertEqual(self._version(legacy_main), "0027")
+            self.assertEqual(self._version(legacy_main), "0028")
             self.assertTrue(
                 {
                     "factory_runs",
@@ -98,6 +101,8 @@ class MigrationConvergenceTests(unittest.TestCase):
                     "factory_metric_projections",
                     "browser_devices",
                     "memory_fabric_events",
+                    "memory_records",
+                    "memory_checkpoints",
                 }
                 <= self._tables(legacy_main)
             )

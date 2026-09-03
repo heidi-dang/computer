@@ -12,6 +12,9 @@ from typing import Any, Callable
 
 from sqlalchemy import select
 
+from cptr.memory.graph import MemoryGraphStore, memory_graph_store
+from cptr.memory.jobs import MemoryJobStore, memory_job_store
+from cptr.memory.store import SqlMemoryStore
 from cptr.models import Workspace
 from cptr.services.memory_fabric import MemoryFabricStore, memory_fabric_store
 from cptr.utils import memory as managed_memory
@@ -115,7 +118,9 @@ def build_memory_inventory(
                 "path": "",
                 "heading": "",
                 "memory_id": "",
-                "preview": "Persistent user memory" if root.scope == "user" else "Persistent workspace memory",
+                "preview": "Persistent user memory"
+                if root.scope == "user"
+                else "Persistent workspace memory",
                 "modified_at_ms": 0,
                 "size": 0,
                 "trust_level": "managed_memory",
@@ -256,11 +261,25 @@ class MemoryObservabilityService:
         store: MemoryFabricStore | None = None,
         inventory_builder: InventoryBuilder | None = None,
         settings_loader=None,
+        core_store: SqlMemoryStore | None = None,
+        job_store: MemoryJobStore | None = None,
+        graph_store: MemoryGraphStore | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._store = store or memory_fabric_store
         self._inventory_builder = inventory_builder or build_memory_inventory
         self._settings_loader = settings_loader or managed_memory.get_memory_settings
+        self._core_store = core_store or SqlMemoryStore(session_factory=session_factory)
+        self._job_store = job_store or (
+            memory_job_store
+            if session_factory is None
+            else MemoryJobStore(session_factory=session_factory)
+        )
+        self._graph_store = graph_store or (
+            memory_graph_store
+            if session_factory is None
+            else MemoryGraphStore(session_factory=session_factory)
+        )
 
     @asynccontextmanager
     async def _session(self):
@@ -310,6 +329,9 @@ class MemoryObservabilityService:
                 raise KeyError("memory workspace not found")
             scan_workspaces = [selected_workspace]
 
+        selected_workspace_path = (
+            (selected_workspace or {}).get("workspace_path") if workspace_id else None
+        )
         inventory = await asyncio.to_thread(
             self._inventory_builder,
             user_id,
@@ -318,12 +340,204 @@ class MemoryObservabilityService:
         )
         events = await self._store.list_events(
             user_id,
-            workspace=(selected_workspace or {}).get("workspace_path") if workspace_id else None,
+            workspace=selected_workspace_path,
             limit=event_limit,
         )
         settings = await self._settings_loader()
+        core_state = await self._core_store.observability_snapshot(
+            user_id=user_id,
+            workspace=selected_workspace_path,
+            limit=node_limit,
+        )
+        graph_state = await self._graph_store.snapshot(
+            user_id=user_id,
+            workspace=selected_workspace_path,
+            limit=node_limit,
+        )
+        job_counts = await self._job_store.counts(
+            user_id=user_id,
+            workspace=selected_workspace_path,
+        )
+
+        now_ms = int(time.time() * 1000)
+        workspace_by_path = {str(row.get("workspace_path") or ""): row for row in all_workspaces}
         nodes = [dict(node) for node in inventory.get("nodes", [])]
+        edges = [dict(edge) for edge in inventory.get("edges", [])]
         node_by_id = {str(node.get("id")): node for node in nodes}
+
+        def ensure_scope_node(scope: str, workspace_path: str) -> str:
+            workspace = workspace_by_path.get(workspace_path) if workspace_path else None
+            scope_id = _scope_node_id(
+                scope,
+                str((workspace or {}).get("workspace_id") or "") or None,
+            )
+            if scope_id not in node_by_id:
+                label = (
+                    str((workspace or {}).get("workspace_name") or "")
+                    or (Path(workspace_path).name if workspace_path else "User Memory")
+                    or "Workspace"
+                )
+                node = {
+                    "id": scope_id,
+                    "label": label,
+                    "kind": "scope",
+                    "scope": scope,
+                    "workspace_id": (workspace or {}).get("workspace_id"),
+                    "workspace_name": (workspace or {}).get("workspace_name"),
+                    "path": "",
+                    "heading": "",
+                    "memory_id": "",
+                    "preview": "Persistent user memory"
+                    if scope == "user"
+                    else "Persistent workspace memory",
+                    "modified_at_ms": 0,
+                    "size": 0,
+                    "trust_level": "managed_memory",
+                    "confidence": 1.0,
+                    "status": "active",
+                    "source_layer": "scope",
+                }
+                nodes.append(node)
+                node_by_id[scope_id] = node
+            return scope_id
+
+        canonical_records = list(core_state.get("records") or [])
+        for record in canonical_records:
+            memory_id = str(record.get("memory_id") or "")
+            if not memory_id or memory_id in node_by_id:
+                continue
+            workspace_path = str(record.get("workspace") or "")
+            scope = str(record.get("scope") or "")
+            if scope not in {"user", "workspace"}:
+                scope = "workspace" if workspace_path else "user"
+            workspace = workspace_by_path.get(workspace_path) if workspace_path else None
+            confidence = max(0.0, min(1.0, int(record.get("confidence_ppm") or 0) / 1_000_000))
+            importance = max(0.0, min(1.0, int(record.get("importance_ppm") or 0) / 1_000_000))
+            verification_expires_at_ms = record.get("verification_expires_at_ms")
+            node = {
+                "id": memory_id,
+                "label": _safe_preview(str(record.get("canonical_text") or ""), 72)
+                or str(record.get("kind") or "Memory").replace("_", " ").title(),
+                "kind": "memory",
+                "scope": scope,
+                "workspace_id": (workspace or {}).get("workspace_id"),
+                "workspace_name": (workspace or {}).get("workspace_name"),
+                "path": "canonical",
+                "heading": str(record.get("kind") or "semantic").replace("_", " ").title(),
+                "memory_id": memory_id,
+                "preview": _safe_preview(str(record.get("canonical_text") or "")),
+                "modified_at_ms": int(record.get("updated_at_ms") or 0),
+                "size": len(str(record.get("canonical_text") or "").encode("utf-8")),
+                "trust_level": str(record.get("trust_level") or "agent_observation"),
+                "confidence": confidence,
+                "importance": importance,
+                "status": str(record.get("status") or "active"),
+                "source_layer": "canonical",
+                "valid_from_ms": record.get("valid_from_ms"),
+                "valid_until_ms": record.get("valid_until_ms"),
+                "superseded_by_id": record.get("superseded_by_id"),
+                "parent_memory_id": record.get("parent_memory_id"),
+                "branch_id": record.get("branch_id"),
+                "verified_at_ms": record.get("verified_at_ms"),
+                "verification_expires_at_ms": verification_expires_at_ms,
+                "verification_stale": verification_expires_at_ms is not None
+                and int(verification_expires_at_ms) <= now_ms,
+                "recall_count": int(record.get("access_count") or 0),
+                "last_recalled_at_ms": int(record.get("last_accessed_at_ms") or 0),
+            }
+            nodes.append(node)
+            node_by_id[memory_id] = node
+            scope_id = ensure_scope_node(scope, workspace_path)
+            edges.append(
+                {
+                    "id": f"edge_scope_{memory_id}",
+                    "source": memory_id,
+                    "target": scope_id,
+                    "kind": "belongs_to",
+                }
+            )
+
+        for record in canonical_records:
+            memory_id = str(record.get("memory_id") or "")
+            superseded_by = str(record.get("superseded_by_id") or "")
+            parent_memory = str(record.get("parent_memory_id") or "")
+            if memory_id in node_by_id and superseded_by in node_by_id:
+                edges.append(
+                    {
+                        "id": f"edge_superseded_{memory_id}_{superseded_by}",
+                        "source": memory_id,
+                        "target": superseded_by,
+                        "kind": "related",
+                        "label": "superseded by",
+                    }
+                )
+            if memory_id in node_by_id and parent_memory in node_by_id:
+                edges.append(
+                    {
+                        "id": f"edge_parent_{memory_id}_{parent_memory}",
+                        "source": memory_id,
+                        "target": parent_memory,
+                        "kind": "related",
+                        "label": "derived from",
+                    }
+                )
+
+        for entity in graph_state.get("entities") or []:
+            entity_id = str(entity.get("entity_id") or "")
+            if not entity_id or entity_id in node_by_id:
+                continue
+            workspace_path = str(entity.get("workspace") or "")
+            scope = "workspace" if workspace_path else "user"
+            workspace = workspace_by_path.get(workspace_path) if workspace_path else None
+            node = {
+                "id": entity_id,
+                "label": _safe_preview(str(entity.get("canonical_name") or "Entity"), 72),
+                "kind": "entity",
+                "scope": scope,
+                "workspace_id": (workspace or {}).get("workspace_id"),
+                "workspace_name": (workspace or {}).get("workspace_name"),
+                "path": "entity",
+                "heading": str(entity.get("entity_type") or "concept").replace("_", " ").title(),
+                "memory_id": "",
+                "preview": ", ".join(str(alias) for alias in entity.get("aliases") or [])[:380],
+                "modified_at_ms": int(entity.get("updated_at_ms") or 0),
+                "size": 0,
+                "trust_level": "derived_entity",
+                "confidence": 1.0,
+                "status": str(entity.get("status") or "active"),
+                "source_layer": "entity",
+                "entity_type": str(entity.get("entity_type") or "concept"),
+                "valid_from_ms": entity.get("valid_from_ms"),
+                "valid_until_ms": entity.get("valid_until_ms"),
+            }
+            nodes.append(node)
+            node_by_id[entity_id] = node
+            scope_id = ensure_scope_node(scope, workspace_path)
+            edges.append(
+                {
+                    "id": f"edge_scope_{entity_id}",
+                    "source": entity_id,
+                    "target": scope_id,
+                    "kind": "belongs_to",
+                }
+            )
+
+        for relationship in graph_state.get("relationships") or []:
+            source = str(relationship.get("source_entity_id") or "")
+            target = str(relationship.get("target_entity_id") or "")
+            if source in node_by_id and target in node_by_id:
+                edges.append(
+                    {
+                        "id": str(
+                            relationship.get("relationship_id") or f"edge_entity_{source}_{target}"
+                        ),
+                        "source": source,
+                        "target": target,
+                        "kind": "related",
+                        "label": str(relationship.get("relation") or "related to"),
+                    }
+                )
+
         recall_traces: list[dict[str, Any]] = []
         for event in events:
             if event.get("event_type") != "recall":
@@ -355,13 +569,18 @@ class MemoryObservabilityService:
                 }
             )
         for node in nodes:
-            if node.get("kind") == "memory":
+            if node.get("kind") in {"memory", "entity"}:
                 node.setdefault("recall_count", 0)
                 node.setdefault("last_recalled_at_ms", 0)
 
-        now_ms = int(time.time() * 1000)
         day_ago = now_ms - 86_400_000
         recent = [event for event in events if int(event.get("created_at_ms") or 0) >= day_ago]
+        managed_count = int(inventory.get("metrics", {}).get("memory_nodes") or 0)
+        canonical_count = len(canonical_records)
+        entity_count = len(graph_state.get("entities") or [])
+        namespace_versions = [
+            int(row.get("version") or 0) for row in core_state.get("namespaces") or []
+        ]
         event_metrics = {
             "recalls_24h": sum(1 for event in recent if event.get("event_type") == "recall"),
             "writes_24h": sum(1 for event in recent if event.get("event_type") == "write"),
@@ -370,40 +589,77 @@ class MemoryObservabilityService:
             ),
             "event_count_visible": len(events),
         }
-        metrics = {**inventory.get("metrics", {}), **event_metrics}
+        metrics = {
+            **inventory.get("metrics", {}),
+            **event_metrics,
+            "managed_memory_nodes": managed_count,
+            "canonical_memory_nodes": canonical_count,
+            "entity_nodes": entity_count,
+            "memory_nodes": managed_count + canonical_count,
+            "edge_count": len(edges),
+            "superseded_memory_nodes": sum(
+                1 for row in canonical_records if row.get("status") == "superseded"
+            ),
+            "stale_verification_nodes": sum(
+                1
+                for row in canonical_records
+                if row.get("verification_expires_at_ms") is not None
+                and int(row["verification_expires_at_ms"]) <= now_ms
+            ),
+            "snapshot_count": len(core_state.get("snapshots") or []),
+            "branch_count": len(core_state.get("branches") or []),
+            "checkpoint_count": len(core_state.get("checkpoints") or []),
+            "memory_version": max(namespace_versions, default=0),
+            "pending_memory_jobs": int(job_counts.get("pending") or 0),
+            "running_memory_jobs": int(job_counts.get("running") or 0),
+            "failed_memory_jobs": int(job_counts.get("failed") or 0),
+        }
         health = {
             "enabled": bool(settings.get("enabled", True)),
             "tool_enabled": bool(settings.get("tool_enabled", True)),
             "background_review_enabled": bool(settings.get("background_review_enabled", False)),
             "review_interval_turns": int(settings.get("review_interval_turns") or 0),
-            "canonical_store": "managed_markdown",
+            "canonical_store": "managed_markdown_plus_versioned_memory_records",
             "event_store": "sqlite_append_only",
-            "retrieval": "lexical_plus_wiki_graph",
+            "retrieval": "hybrid_lexical_similarity_vector_port_plus_graph",
             "realtime": "sse_snapshot_diff",
-            "trust_policy": "prompt_injection_filtered",
+            "trust_policy": "prompt_injection_filtered_and_secret_redacted",
+            "required_for_execution": bool(settings.get("required_for_execution", True)),
+            "context_char_limit": int(settings.get("context_char_limit") or 9000),
+            "verification_ttl_seconds": int(settings.get("verification_ttl_seconds") or 0),
+            "maintenance_enabled": bool(settings.get("maintenance_enabled", True)),
+            "maintenance_queue": job_counts,
+        }
+        lifecycle = {
+            "namespaces": list(core_state.get("namespaces") or []),
+            "checkpoints": list(core_state.get("checkpoints") or []),
+            "snapshots": list(core_state.get("snapshots") or []),
+            "branches": list(core_state.get("branches") or []),
         }
         fingerprint_payload = {
             "workspace_id": workspace_id,
             "nodes": nodes,
-            "edges": inventory.get("edges", []),
+            "edges": edges,
             "event_ids": [event.get("event_id") for event in events],
             "health": health,
+            "lifecycle": lifecycle,
         }
         fingerprint = hashlib.sha256(
-            json.dumps(fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str).encode(
-                "utf-8"
-            )
+            json.dumps(
+                fingerprint_payload, sort_keys=True, separators=(",", ":"), default=str
+            ).encode("utf-8")
         ).hexdigest()
         return {
-            "version": 1,
+            "version": 2,
             "workspaces": all_workspaces,
             "selected_workspace_id": workspace_id,
             "nodes": nodes,
-            "edges": inventory.get("edges", []),
+            "edges": edges,
             "events": events,
             "recall_traces": recall_traces[:30],
             "metrics": metrics,
             "health": health,
+            "lifecycle": lifecycle,
             "fingerprint": fingerprint,
             "generated_at_ms": now_ms,
         }

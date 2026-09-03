@@ -595,6 +595,10 @@ class DirectCodingHttpFlowTests(unittest.TestCase):
                     ),
                 ),
                 patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+                patch(
+                    "cptr.services.control_auth.require_control_action_memory",
+                    new=AsyncMock(return_value=SimpleNamespace(context_id="memctx-direct-coding")),
+                ),
                 patch("cptr.services.live_events.live_event_hub", hub),
                 TestClient(app) as client,
             ):

@@ -1787,12 +1787,14 @@ async def run_chat_task(
                     "diff_available": True,
                     "file_count": len(files),
                     "files": [
-                        redact_external({
-                            "path": item.get("path"),
-                            "status": item.get("status"),
-                            "additions": item.get("additions"),
-                            "deletions": item.get("deletions"),
-                        })
+                        redact_external(
+                            {
+                                "path": item.get("path"),
+                                "status": item.get("status"),
+                                "additions": item.get("additions"),
+                                "deletions": item.get("deletions"),
+                            }
+                        )
                         for item in files[:100]
                     ],
                     "files_truncated": len(files) > 100,
@@ -2101,6 +2103,7 @@ async def run_chat_task(
             current_message=memory_message,
             recent_messages=messages,
             mentioned_files=memory_files,
+            memory_task_key=message_id,
         )
         if loaded_summary:
             system += f"\n\n[CONVERSATION SUMMARY]\n{loaded_summary}"
@@ -2430,6 +2433,7 @@ async def run_chat_task(
             current_message=memory_message,
             recent_messages=messages,
             mentioned_files=memory_files,
+            memory_task_key=message_id,
         )
         if loaded_summary:
             system += f"\n\n[CONVERSATION SUMMARY]\n{loaded_summary}"
@@ -2648,6 +2652,22 @@ async def run_chat_task(
                         _sync_state()
 
                 await _save_message("tool call complete", content=content, output=output_items)
+                from cptr.memory.domain import CheckpointState
+                from cptr.memory.service import get_memory_service
+
+                await get_memory_service().checkpoint(
+                    CheckpointState(
+                        user_id=user_id,
+                        workspace=workspace,
+                        task_key=message_id,
+                        stage="tool_complete",
+                        state={
+                            "tool_name": name,
+                            "call_id": str(item.get("call_id") or ""),
+                            "status": "completed",
+                        },
+                    )
+                )
                 processed_any = True
 
             return "completed" if processed_any else "idle"
@@ -2740,6 +2760,7 @@ async def run_chat_task(
                     current_message=memory_message,
                     recent_messages=keep_zone,
                     mentioned_files=memory_files,
+                    memory_task_key=message_id,
                 )
                 system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
                 # Re-inject attached skills after compaction (protect from pruning)

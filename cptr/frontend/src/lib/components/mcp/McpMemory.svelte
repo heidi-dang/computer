@@ -40,6 +40,9 @@
 	const selectedRelations = $derived(
 		selectedNode ? relationRows(selectedNode, snapshot?.nodes ?? [], snapshot?.edges ?? []) : []
 	);
+	const recentCheckpoints = $derived(snapshot?.lifecycle?.checkpoints.slice(0, 6) ?? []);
+	const recentSnapshots = $derived(snapshot?.lifecycle?.snapshots.slice(0, 4) ?? []);
+	const recentBranches = $derived(snapshot?.lifecycle?.branches.slice(0, 4) ?? []);
 
 	function filterNodes(nodes: McpMemoryNode[], query: string): McpMemoryNode[] {
 		const term = query.trim().toLowerCase();
@@ -214,11 +217,13 @@
 			</div>
 			<div class="health-rail border-t">
 				<span class="health-chip"><i data-ok={snapshot?.health.enabled}></i>Memory {snapshot?.health.enabled ? 'enabled' : 'disabled'}</span>
-				<span class="health-chip"><i data-ok={snapshot?.health.background_review_enabled}></i>Background review</span>
+				<span class="health-chip"><i data-ok={snapshot?.health.required_for_execution}></i><strong>Gate</strong> {snapshot?.health.required_for_execution ? 'fail closed' : 'optional'}</span>
+				<span class="health-chip"><i data-ok={snapshot?.health.maintenance_enabled}></i>Maintenance</span>
+				<span class="health-chip"><strong>Version</strong> {snapshot?.metrics.memory_version ?? 0}</span>
+				<span class="health-chip"><strong>Queue</strong> {snapshot?.metrics.pending_memory_jobs ?? 0} pending · {snapshot?.metrics.running_memory_jobs ?? 0} running</span>
+				<span class="health-chip"><strong>Stale</strong> {snapshot?.metrics.stale_verification_nodes ?? 0}</span>
 				<span class="health-chip"><strong>Truth</strong> {snapshot?.health.canonical_store ?? '—'}</span>
-				<span class="health-chip"><strong>Journal</strong> {snapshot?.health.event_store ?? '—'}</span>
 				<span class="health-chip"><strong>Recall</strong> {snapshot?.health.retrieval ?? '—'}</span>
-				<span class="health-chip"><strong>Safety</strong> injection filtered</span>
 			</div>
 		</section>
 
@@ -232,12 +237,12 @@
 			</section>
 		{:else}
 			<section class="metric-grid app-raised-surface border">
-				<div class="metric-cell"><p>Memories</p><strong>{snapshot?.metrics.memory_nodes ?? 0}</strong><small>{snapshot?.metrics.user_memory_nodes ?? 0} user · {snapshot?.metrics.workspace_memory_nodes ?? 0} workspace</small></div>
-				<div class="metric-cell"><p>Relations</p><strong>{snapshot?.metrics.edge_count ?? 0}</strong><small>scope + linked knowledge</small></div>
-				<div class="metric-cell"><p>Recalls · 24h</p><strong>{snapshot?.metrics.recalls_24h ?? 0}</strong><small>{latestRecall ? `${latestRecall.items.length} in latest trace` : 'no trace yet'}</small></div>
-				<div class="metric-cell"><p>Writes · 24h</p><strong>{snapshot?.metrics.writes_24h ?? 0}</strong><small>{snapshot?.metrics.rejected_writes_24h ?? 0} rejected by policy</small></div>
-				<div class="metric-cell"><p>Vault files</p><strong>{snapshot?.metrics.file_count ?? 0}</strong><small>canonical Markdown</small></div>
-				<div class="metric-cell"><p>Vault size</p><strong>{formatBytes(snapshot?.metrics.total_bytes)}</strong><small>{snapshot?.metrics.truncated ? 'graph view bounded' : 'fully projected'}</small></div>
+				<div class="metric-cell"><p>Memories</p><strong>{snapshot?.metrics.memory_nodes ?? 0}</strong><small>{snapshot?.metrics.managed_memory_nodes ?? 0} managed · {snapshot?.metrics.canonical_memory_nodes ?? 0} canonical</small></div>
+				<div class="metric-cell"><p>Entities</p><strong>{snapshot?.metrics.entity_nodes ?? 0}</strong><small>{snapshot?.metrics.edge_count ?? 0} graph edges</small></div>
+				<div class="metric-cell"><p>Recalls · 24h</p><strong>{snapshot?.metrics.recalls_24h ?? 0}</strong><small>{snapshot?.metrics.writes_24h ?? 0} writes · {latestRecall ? `${latestRecall.items.length} latest refs` : 'no trace yet'}</small></div>
+				<div class="metric-cell"><p>Memory version</p><strong>{snapshot?.metrics.memory_version ?? 0}</strong><small>{snapshot?.metrics.checkpoint_count ?? 0} durable checkpoints</small></div>
+				<div class="metric-cell"><p>Snapshots</p><strong>{snapshot?.metrics.snapshot_count ?? 0}</strong><small>{snapshot?.metrics.branch_count ?? 0} non-destructive branches</small></div>
+				<div class="metric-cell"><p>Maintenance</p><strong>{(snapshot?.metrics.pending_memory_jobs ?? 0) + (snapshot?.metrics.running_memory_jobs ?? 0)}</strong><small>{snapshot?.metrics.failed_memory_jobs ?? 0} failed · {snapshot?.metrics.stale_verification_nodes ?? 0} stale</small></div>
 			</section>
 
 			<div class="observatory-grid">
@@ -277,8 +282,8 @@
 
 				<aside class="inspector app-raised-surface border">
 					<div class="panel-heading border-b">
-						<div><p class="kicker">Inspector</p><h3>{selectedNode?.kind === 'scope' ? 'Memory scope' : 'Memory provenance'}</h3></div>
-						{#if selectedNode?.kind === 'memory'}<span class="confidence">{Math.round((selectedNode.confidence || 0) * 100)}% confidence</span>{/if}
+						<div><p class="kicker">Inspector</p><h3>{selectedNode?.kind === 'scope' ? 'Memory scope' : selectedNode?.kind === 'entity' ? 'Derived entity' : 'Memory provenance'}</h3></div>
+						{#if selectedNode?.kind !== 'scope' && selectedNode}<span class="confidence">{Math.round((selectedNode.confidence || 0) * 100)}% confidence</span>{/if}
 					</div>
 					{#if selectedNode}
 						<div class="inspector-scroll">
@@ -290,10 +295,12 @@
 							<div class="property-grid">
 								<div><span>Trust</span><strong>{selectedNode.trust_level}</strong></div>
 								<div><span>Status</span><strong>{selectedNode.status}</strong></div>
+								<div><span>Layer</span><strong>{selectedNode.source_layer ?? 'managed markdown'}</strong></div>
+								<div><span>Importance</span><strong>{selectedNode.importance == null ? '—' : `${Math.round(selectedNode.importance * 100)}%`}</strong></div>
 								<div><span>Recalled</span><strong>{selectedNode.recall_count ?? 0}×</strong></div>
 								<div><span>Last recall</span><strong>{relativeTime(selectedNode.last_recalled_at_ms)}</strong></div>
 								<div><span>Updated</span><strong>{relativeTime(selectedNode.modified_at_ms)}</strong></div>
-								<div><span>Size</span><strong>{formatBytes(selectedNode.size)}</strong></div>
+								<div><span>Verification</span><strong>{selectedNode.verification_stale ? 'stale · reverify' : selectedNode.verified_at_ms ? 'fresh' : 'not verified'}</strong></div>
 							</div>
 							{#if selectedNode.path}
 								<div class="inspector-section"><span>Canonical path</span><code>{selectedNode.path}</code>{#if selectedNode.memory_id}<code class="mt-1">id: {selectedNode.memory_id}</code>{/if}</div>
@@ -313,6 +320,39 @@
 						<div class="flex min-h-72 items-center justify-center p-6 text-center"><p class="text-xs app-muted">Select a node to inspect its provenance.</p></div>
 					{/if}
 				</aside>
+			</div>
+
+			<div class="lifecycle-grid">
+				<section class="stream-panel app-raised-surface border">
+					<div class="panel-heading border-b"><div><p class="kicker">Restart continuity</p><h3>Recent checkpoints</h3></div><span class="panel-count">{snapshot?.metrics.checkpoint_count ?? 0}</span></div>
+					<div class="compact-list">
+						{#if recentCheckpoints.length === 0}<div class="panel-empty">Task checkpoints appear after memory context and tool completion.</div>{:else}
+							{#each recentCheckpoints as checkpoint (checkpoint.checkpoint_id)}
+								<div class="compact-row"><span><strong>{checkpoint.stage.replaceAll('_', ' ')}</strong><small>task {checkpoint.task_key_hash} · checkpoint v{checkpoint.version}</small></span><time>mem v{checkpoint.memory_version} · {relativeTime(checkpoint.created_at_ms)}</time></div>
+							{/each}
+						{/if}
+					</div>
+				</section>
+				<section class="stream-panel app-raised-surface border">
+					<div class="panel-heading border-b"><div><p class="kicker">Time travel</p><h3>Snapshots & branches</h3></div><span class="panel-count">{(snapshot?.metrics.snapshot_count ?? 0) + (snapshot?.metrics.branch_count ?? 0)}</span></div>
+					<div class="compact-list">
+						{#if recentSnapshots.length === 0 && recentBranches.length === 0}<div class="panel-empty">No memory snapshots or branches yet.</div>{:else}
+							{#each recentSnapshots as item (item.snapshot_id)}<div class="compact-row"><span><strong>{item.label || 'Snapshot'}</strong><small>{item.record_count} records · memory v{item.memory_version}</small></span><time>{relativeTime(item.created_at_ms)}</time></div>{/each}
+							{#each recentBranches as item (item.branch_id)}<div class="compact-row"><span><strong>{item.name}</strong><small>branch · {item.status}</small></span><time>{relativeTime(item.updated_at_ms)}</time></div>{/each}
+						{/if}
+					</div>
+				</section>
+				<section class="stream-panel app-raised-surface border">
+					<div class="panel-heading border-b"><div><p class="kicker">Durability health</p><h3>Temporal & queue state</h3></div><span class="panel-count">v{snapshot?.metrics.memory_version ?? 0}</span></div>
+					<div class="health-summary">
+						<div><span>Fail-closed gate</span><strong>{snapshot?.health.required_for_execution ? 'Required' : 'Optional'}</strong></div>
+						<div><span>Stale verification</span><strong>{snapshot?.metrics.stale_verification_nodes ?? 0}</strong></div>
+						<div><span>Superseded history</span><strong>{snapshot?.metrics.superseded_memory_nodes ?? 0}</strong></div>
+						<div><span>Queued jobs</span><strong>{snapshot?.metrics.pending_memory_jobs ?? 0}</strong></div>
+						<div><span>Running jobs</span><strong>{snapshot?.metrics.running_memory_jobs ?? 0}</strong></div>
+						<div><span>Failed jobs</span><strong>{snapshot?.metrics.failed_memory_jobs ?? 0}</strong></div>
+					</div>
+				</section>
 			</div>
 
 			<div class="stream-grid">
@@ -405,7 +445,13 @@
 	.relation-list button { display:flex; width:100%; align-items:center; gap:.55rem; border-radius:.55rem; padding:.45rem .5rem; text-align:left; }
 	.relation-list i { width:.45rem; height:.45rem; flex:0 0 auto; border-radius:99px; background:#a78bfa; }.relation-list i[data-scope='workspace'] { background:#38bdf8; }
 	.relation-list span { min-width:0; }.relation-list strong, .relation-list small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.relation-list strong { font-size:.64rem; }.relation-list small { margin-top:.08rem; font-size:.55rem; color:var(--app-fg-muted); }
+	.lifecycle-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1rem; }
 	.stream-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:1rem; }
+	.compact-list { max-height:16rem; overflow-y:auto; }
+	.compact-row { display:flex; align-items:flex-start; justify-content:space-between; gap:.75rem; border-bottom:1px solid var(--app-divider); padding:.58rem .75rem; }
+	.compact-row:last-child { border-bottom:0; }.compact-row span { min-width:0; }.compact-row strong,.compact-row small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.compact-row strong { font-size:.63rem; }.compact-row small { margin-top:.1rem; font-size:.54rem; color:var(--app-fg-muted); }.compact-row time { flex:0 0 auto; max-width:48%; text-align:right; font-size:.54rem; color:var(--app-fg-subtle); }
+	.health-summary { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+	.health-summary div { min-width:0; border-right:1px solid var(--app-divider); border-bottom:1px solid var(--app-divider); padding:.7rem .75rem; }.health-summary div:nth-child(2n) { border-right:0; }.health-summary div:nth-last-child(-n+2) { border-bottom:0; }.health-summary span { display:block; font-size:.54rem; color:var(--app-fg-muted); }.health-summary strong { display:block; margin-top:.18rem; font-size:.72rem; font-variant-numeric:tabular-nums; }
 	.event-list, .trace-list { max-height:24rem; overflow-y:auto; }
 	.event-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:start; gap:.6rem; border-bottom:1px solid var(--app-divider); padding:.65rem .8rem; }
 	.event-orb { width:.48rem; height:.48rem; margin-top:.2rem; border-radius:99px; background:var(--app-fg-subtle); box-shadow:0 0 0 .16rem color-mix(in oklab,var(--app-fg-subtle) 12%,transparent); }
@@ -418,7 +464,7 @@
 	.panel-empty { padding:1.4rem .9rem; text-align:center; font-size:.68rem; color:var(--app-fg-muted); }
 	@keyframes pulse { 50% { opacity:.35; transform:scale(.75); } }
 	@media (max-width:1279px) { .metric-grid { grid-template-columns:repeat(3,minmax(0,1fr)); }.metric-cell:nth-child(3n) { border-right:0; }.metric-cell:nth-child(-n+3) { border-bottom:1px solid var(--app-divider); } }
-	@media (max-width:1023px) { .observatory-grid { grid-template-columns:1fr; }.inspector { min-height:20rem; }.stream-grid { grid-template-columns:1fr; } }
+	@media (max-width:1023px) { .observatory-grid { grid-template-columns:1fr; }.inspector { min-height:20rem; }.lifecycle-grid,.stream-grid { grid-template-columns:1fr; } }
 	@media (max-width:639px) { .metric-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.metric-cell:nth-child(3n) { border-right:1px solid var(--app-divider); }.metric-cell:nth-child(2n) { border-right:0; }.metric-cell:nth-child(-n+4) { border-bottom:1px solid var(--app-divider); }.health-rail { padding-inline:.55rem; }.observatory-grid { gap:.7rem; }.stream-grid { gap:.7rem; }.panel-heading { padding-inline:.7rem; }.graph-legend { gap:.5rem .7rem; } }
 	@media (prefers-reduced-motion:reduce) { .live-pill span { animation:none!important; } }
 </style>

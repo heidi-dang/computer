@@ -104,6 +104,11 @@ async def lifespan(app: FastAPI):
     app.state.event_loop_lag_task = asyncio.create_task(
         event_loop_lag_worker(), name="cptr-event-loop-lag"
     )
+    from cptr.memory.worker import memory_worker_loop
+
+    app.state.memory_worker_task = asyncio.create_task(
+        memory_worker_loop(), name="cptr-memory-maintenance"
+    )
 
     from cptr.routers.control import recover_monitors
 
@@ -164,7 +169,11 @@ async def lifespan(app: FastAPI):
             with suppress(asyncio.CancelledError):
                 await scheduler_task
 
-        for task_name in ("command_session_reaper_task", "event_loop_lag_task"):
+        for task_name in (
+            "command_session_reaper_task",
+            "event_loop_lag_task",
+            "memory_worker_task",
+        ):
             background_task = getattr(app.state, task_name, None)
             if background_task:
                 background_task.cancel()

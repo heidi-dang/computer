@@ -11,6 +11,7 @@ from sqlalchemy import select
 
 from cptr.models.memory_fabric import MemoryFabricEvent
 from cptr.utils.db import get_db
+from cptr.utils.redaction import redact_sensitive, redact_text
 
 _MAX_PAYLOAD_BYTES = 32_000
 _MAX_TEXT_FIELD = 2_000
@@ -19,12 +20,12 @@ _MAX_TEXT_FIELD = 2_000
 def _bounded_text(value: str | None, limit: int = _MAX_TEXT_FIELD) -> str | None:
     if value is None:
         return None
-    text = str(value)
+    text = redact_text(str(value))
     return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
 
 
 def _bounded_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
-    value = payload if isinstance(payload, dict) else {}
+    value = redact_sensitive(payload) if isinstance(payload, dict) else {}
     try:
         encoded = json.dumps(value, separators=(",", ":"), default=str)
     except Exception:
@@ -123,7 +124,9 @@ class MemoryFabricStore:
                     await db.scalars(
                         select(MemoryFabricEvent)
                         .where(*predicates)
-                        .order_by(MemoryFabricEvent.created_at_ms.desc(), MemoryFabricEvent.id.desc())
+                        .order_by(
+                            MemoryFabricEvent.created_at_ms.desc(), MemoryFabricEvent.id.desc()
+                        )
                         .limit(safe_limit)
                     )
                 ).all()

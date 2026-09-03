@@ -8,6 +8,9 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from cptr.memory.graph import MemoryGraphStore
+from cptr.memory.jobs import MemoryJobStore
+from cptr.memory.store import SqlMemoryStore
 from cptr.models import Base, User, Workspace
 from cptr.routers import mcp as mcp_router
 from cptr.services.memory_fabric import MemoryFabricStore
@@ -66,7 +69,9 @@ class MemoryInventoryTests(unittest.TestCase):
             with patch.object(managed_memory, "DATA_DIR", data_dir):
                 user_root = managed_memory.resolve_memory_roots("user-1")[0]
                 user_root.root.mkdir(parents=True, exist_ok=True)
-                user_root.baseline_path.write_text("- Prefer exact verification\n", encoding="utf-8")
+                user_root.baseline_path.write_text(
+                    "- Prefer exact verification\n", encoding="utf-8"
+                )
                 project_root = managed_memory.resolve_memory_roots("user-1", str(workspace))[1]
                 project_root.root.mkdir(parents=True, exist_ok=True)
                 (project_root.root / "deploy.md").write_text(
@@ -106,7 +111,9 @@ class ManagedMemoryInstrumentationTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         with (
-            patch.object(managed_memory, "get_memory_settings", AsyncMock(return_value={"enabled": True})),
+            patch.object(
+                managed_memory, "get_memory_settings", AsyncMock(return_value={"enabled": True})
+            ),
             patch.object(
                 managed_memory,
                 "write_memory",
@@ -150,7 +157,9 @@ class ManagedMemoryInstrumentationTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 patch.object(managed_memory, "DATA_DIR", Path(tmp) / "data"),
-                patch.object(managed_memory, "get_memory_settings", AsyncMock(return_value=settings)),
+                patch.object(
+                    managed_memory, "get_memory_settings", AsyncMock(return_value=settings)
+                ),
                 patch.object(managed_memory, "_record_memory_fabric_event", recorder),
             ):
                 root = managed_memory.resolve_memory_roots("user-1")[0]
@@ -168,7 +177,9 @@ class ManagedMemoryInstrumentationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["event_type"], "recall")
         self.assertEqual(event["reason"], "compiled for prompt")
         self.assertGreater(event["payload"]["context_chars"], 0)
-        self.assertTrue(any(item["reason"] == "baseline memory" for item in event["payload"]["items"]))
+        self.assertTrue(
+            any(item["reason"] == "baseline memory" for item in event["payload"]["items"])
+        )
 
 
 class MemoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
@@ -296,8 +307,103 @@ class MemoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["recall_traces"][0]["items"][0]["heading"], "Deploy")
         self.assertEqual(snapshot["metrics"]["recalls_24h"], 1)
         self.assertTrue(snapshot["health"]["enabled"])
-        self.assertEqual(snapshot["health"]["canonical_store"], "managed_markdown")
+        self.assertEqual(
+            snapshot["health"]["canonical_store"],
+            "managed_markdown_plus_versioned_memory_records",
+        )
         self.assertEqual(len(snapshot["fingerprint"]), 64)
+
+    async def test_snapshot_projects_canonical_temporal_graph_lifecycle_and_queue_state(self):
+        core = SqlMemoryStore(session_factory=self.sessions)
+        graph = MemoryGraphStore(session_factory=self.sessions)
+        jobs = MemoryJobStore(session_factory=self.sessions)
+        now_ms = int(time.time() * 1000)
+        memory = await core.create_memory(
+            user_id="user-1",
+            workspace="/repo-1",
+            scope="workspace",
+            kind="procedure",
+            canonical_text="Deploy [[Payments]] from heidi/repo only after verification.",
+            trust_level="verified_system_fact",
+            confidence_ppm=930_000,
+            importance_ppm=880_000,
+            verification_expires_at_ms=now_ms - 1,
+        )
+        await core.save_checkpoint(
+            user_id="user-1",
+            workspace="/repo-1",
+            task_key="task-observatory",
+            stage="tool_complete",
+            state={"tool": "pytest"},
+            memory_version=None,
+        )
+        saved_snapshot = await core.create_snapshot("user-1", "/repo-1", label="before release")
+        await core.create_branch(
+            "user-1",
+            "/repo-1",
+            name="experiment",
+            from_snapshot_id=saved_snapshot.snapshot_id,
+        )
+        await graph.project_memory(
+            user_id="user-1",
+            workspace="/repo-1",
+            memory_id=memory.memory_id,
+            heading="Deploy",
+            text="Deploy [[Payments]] from heidi/repo only after verification.",
+        )
+        await jobs.enqueue(
+            user_id="user-1",
+            workspace="/repo-1",
+            job_type="consolidate",
+            payload={"scope": "workspace", "text": "queued"},
+        )
+        service = MemoryObservabilityService(
+            session_factory=self.sessions,
+            store=self.store,
+            core_store=core,
+            graph_store=graph,
+            job_store=jobs,
+            inventory_builder=lambda *_args, **_kwargs: {
+                "nodes": [],
+                "edges": [],
+                "metrics": {
+                    "memory_nodes": 0,
+                    "user_memory_nodes": 0,
+                    "workspace_memory_nodes": 0,
+                    "scope_nodes": 0,
+                    "edge_count": 0,
+                    "file_count": 0,
+                    "total_bytes": 0,
+                },
+            },
+            settings_loader=AsyncMock(
+                return_value={
+                    "enabled": True,
+                    "required_for_execution": True,
+                    "maintenance_enabled": True,
+                }
+            ),
+        )
+        snapshot = await service.snapshot(user_id="user-1", workspace_id="workspace-1")
+        self.assertEqual(snapshot["version"], 2)
+        canonical = next(node for node in snapshot["nodes"] if node["id"] == memory.memory_id)
+        self.assertEqual(canonical["source_layer"], "canonical")
+        self.assertEqual(canonical["heading"], "Procedure")
+        self.assertTrue(canonical["verification_stale"])
+        self.assertEqual(canonical["importance"], 0.88)
+        self.assertTrue(any(node["kind"] == "entity" for node in snapshot["nodes"]))
+        self.assertTrue(any(edge["kind"] == "related" for edge in snapshot["edges"]))
+        self.assertEqual(snapshot["metrics"]["canonical_memory_nodes"], 1)
+        self.assertGreaterEqual(snapshot["metrics"]["entity_nodes"], 2)
+        self.assertEqual(snapshot["metrics"]["snapshot_count"], 1)
+        self.assertEqual(snapshot["metrics"]["branch_count"], 1)
+        self.assertEqual(snapshot["metrics"]["checkpoint_count"], 1)
+        self.assertGreaterEqual(snapshot["metrics"]["memory_version"], 1)
+        self.assertEqual(snapshot["metrics"]["pending_memory_jobs"], 1)
+        self.assertEqual(snapshot["health"]["maintenance_queue"]["pending"], 1)
+        self.assertEqual(snapshot["lifecycle"]["snapshots"][0]["label"], "before release")
+        self.assertEqual(snapshot["lifecycle"]["branches"][0]["name"], "experiment")
+        self.assertEqual(snapshot["lifecycle"]["checkpoints"][0]["stage"], "tool_complete")
 
     async def test_explicit_workspace_cannot_cross_owner_boundary(self):
         service = MemoryObservabilityService(

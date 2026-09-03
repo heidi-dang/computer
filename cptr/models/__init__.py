@@ -50,6 +50,18 @@ from cptr.models.factory_lifecycle import FactoryCiRun, FactoryCommitIntent
 from cptr.models.factory_metrics import FactoryCapabilityOutcome, FactoryMetricProjection
 from cptr.models.factory_workers import FactoryWorkerAssignment
 from cptr.models.files import File
+from cptr.models.memory_core import (
+    MemoryBranch,
+    MemoryCheckpoint,
+    MemoryEmbedding,
+    MemoryEntity,
+    MemoryJob,
+    MemoryNamespaceState,
+    MemoryRecord,
+    MemoryRelationship,
+    MemoryRetrievalFeedback,
+    MemorySnapshot,
+)
 from cptr.models.memory_fabric import MemoryFabricEvent
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
@@ -97,7 +109,17 @@ __all__ = [
     "File",
     "McpEngineeringSession",
     "McpUsageEvent",
+    "MemoryBranch",
+    "MemoryCheckpoint",
+    "MemoryEmbedding",
+    "MemoryEntity",
     "MemoryFabricEvent",
+    "MemoryJob",
+    "MemoryNamespaceState",
+    "MemoryRecord",
+    "MemoryRelationship",
+    "MemoryRetrievalFeedback",
+    "MemorySnapshot",
     "User",
     "UserStates",
     "Workspace",

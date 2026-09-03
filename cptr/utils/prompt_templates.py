@@ -306,6 +306,7 @@ async def load_system_prompt(
     current_message: str = "",
     recent_messages: list[dict] | None = None,
     mentioned_files: list[str] | None = None,
+    memory_task_key: str = "",
 ) -> str:
     """Load and render the system prompt for a workspace/model.
 
@@ -352,19 +353,21 @@ async def load_system_prompt(
 
     memory = ""
     if user_id:
-        try:
-            from cptr.utils.memory import build_memory_prompt
+        from cptr.memory.domain import PrepareContextInput
+        from cptr.memory.service import get_memory_service
 
-            memory = await build_memory_prompt(
-                request,
-                user_id,
-                workspace,
+        memory_bundle = await get_memory_service().prepare_context(
+            PrepareContextInput(
+                user_id=user_id,
+                workspace=workspace,
+                task_key=memory_task_key,
                 current_message=current_message,
                 recent_messages=recent_messages or [],
                 mentioned_files=mentioned_files or [],
+                runtime_request=request,
             )
-        except Exception:
-            logger.debug("[memory] Failed to load managed memory", exc_info=True)
+        )
+        memory = memory_bundle.rendered
 
     if memory and "{{MEMORY}}" not in template:
         template = template.rstrip() + "\n\n{{MEMORY}}"

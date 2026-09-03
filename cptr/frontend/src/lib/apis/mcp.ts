@@ -689,7 +689,7 @@ export interface McpMemoryWorkspace {
 export interface McpMemoryNode {
 	id: string;
 	label: string;
-	kind: 'scope' | 'memory';
+	kind: 'scope' | 'memory' | 'entity';
 	scope: 'user' | 'workspace';
 	workspace_id: string | null;
 	workspace_name: string | null;
@@ -703,6 +703,17 @@ export interface McpMemoryNode {
 	trust_level: string;
 	confidence: number;
 	status: string;
+	source_layer?: 'scope' | 'canonical' | 'entity' | string;
+	importance?: number;
+	valid_from_ms?: number | null;
+	valid_until_ms?: number | null;
+	verified_at_ms?: number | null;
+	verification_expires_at_ms?: number | null;
+	verification_stale?: boolean;
+	branch_id?: string | null;
+	parent_memory_id?: string | null;
+	superseded_by_id?: string | null;
+	entity_type?: string;
 	recall_count?: number;
 	last_recalled_at_ms?: number;
 }
@@ -747,8 +758,45 @@ export interface McpMemoryRecallTrace {
 	items: McpMemoryRecallItem[];
 }
 
+export interface McpMemoryNamespaceState {
+	workspace: string;
+	version: number;
+	active_branch_id: string | null;
+	active_snapshot_id: string | null;
+	updated_at_ms: number;
+}
+
+export interface McpMemoryCheckpointState {
+	checkpoint_id: string;
+	workspace: string;
+	task_key_hash: string;
+	version: number;
+	stage: string;
+	memory_version: number;
+	created_at_ms: number;
+}
+
+export interface McpMemorySnapshotState {
+	snapshot_id: string;
+	workspace: string;
+	label: string;
+	memory_version: number;
+	record_count: number;
+	created_at_ms: number;
+}
+
+export interface McpMemoryBranchState {
+	branch_id: string;
+	workspace: string;
+	name: string;
+	from_snapshot_id: string | null;
+	status: string;
+	created_at_ms: number;
+	updated_at_ms: number;
+}
+
 export interface McpMemorySnapshot {
-	version: 1;
+	version: 1 | 2;
 	workspaces: McpMemoryWorkspace[];
 	selected_workspace_id: string | null;
 	nodes: McpMemoryNode[];
@@ -757,6 +805,9 @@ export interface McpMemorySnapshot {
 	recall_traces: McpMemoryRecallTrace[];
 	metrics: {
 		memory_nodes?: number;
+		managed_memory_nodes?: number;
+		canonical_memory_nodes?: number;
+		entity_nodes?: number;
 		user_memory_nodes?: number;
 		workspace_memory_nodes?: number;
 		scope_nodes?: number;
@@ -768,6 +819,15 @@ export interface McpMemorySnapshot {
 		writes_24h?: number;
 		rejected_writes_24h?: number;
 		event_count_visible?: number;
+		superseded_memory_nodes?: number;
+		stale_verification_nodes?: number;
+		snapshot_count?: number;
+		branch_count?: number;
+		checkpoint_count?: number;
+		memory_version?: number;
+		pending_memory_jobs?: number;
+		running_memory_jobs?: number;
+		failed_memory_jobs?: number;
 	};
 	health: {
 		enabled?: boolean;
@@ -779,6 +839,22 @@ export interface McpMemorySnapshot {
 		retrieval?: string;
 		realtime?: string;
 		trust_policy?: string;
+		required_for_execution?: boolean;
+		context_char_limit?: number;
+		verification_ttl_seconds?: number;
+		maintenance_enabled?: boolean;
+		maintenance_queue?: {
+			pending?: number;
+			running?: number;
+			complete?: number;
+			failed?: number;
+		};
+	};
+	lifecycle?: {
+		namespaces: McpMemoryNamespaceState[];
+		checkpoints: McpMemoryCheckpointState[];
+		snapshots: McpMemorySnapshotState[];
+		branches: McpMemoryBranchState[];
 	};
 	fingerprint: string;
 	generated_at_ms: number;
