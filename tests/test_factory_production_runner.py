@@ -14,6 +14,7 @@ from cptr.services.factory_domain import FactoryState
 from cptr.services.factory_orchestrator import FactoryOrchestrator
 from cptr.services.factory_phases import PhaseContext, RecoveryPhaseHandler
 from cptr.services.factory_production import (
+    AdvisoryPhaseHandler,
     FactoryProductionRunner,
     ProductionCiPhaseHandler,
     _run_fixed_target,
@@ -77,6 +78,154 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         subprocess.run(["git", "-C", str(root), "add", "test_smoke.py"], check=True)
         subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"], check=True)
         return temp
+
+    async def test_advisory_recovers_redacted_legacy_phase_evidence(self):
+        agent = SimpleNamespace(
+            start_task=AsyncMock(),
+            get_task=AsyncMock(
+                return_value={
+                    "id": "task-1",
+                    "status": "COMPLETE",
+                    "created_at": 1,
+                    "raw_output": [],
+                    "output": "bounded understanding",
+                }
+            ),
+            get_output=AsyncMock(return_value={"content": "bounded understanding"}),
+        )
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.UNDERSTANDING,
+            next_state=FactoryState.AUDITING,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-1",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="understand quickly",
+                acceptance_criteria=("find one actionable defect",),
+                model_id="agent:model",
+                policy={},
+            ),
+            cycle=SimpleNamespace(id="cycle-1", attempt_count=0),
+            evidence=(
+                SimpleNamespace(
+                    kind="factory_phase_task",
+                    payload={"state": "[REDACTED]", "attempt": 0, "task_id": "task-1"},
+                    idempotency_key=(
+                        "phase:run-1:cycle-1:UNDERSTANDING:entry-fev-1:artifact:phase-task"
+                    ),
+                ),
+            ),
+            gates=(),
+        )
+
+        outcome = await handler.execute(context)
+
+        self.assertEqual(outcome.next_state, FactoryState.AUDITING)
+        self.assertEqual(outcome.artifacts[0].payload["phase_state"], "UNDERSTANDING")
+        self.assertNotIn("state", outcome.artifacts[0].payload)
+        agent.start_task.assert_not_awaited()
+        agent.get_task.assert_awaited_once_with("task-1", user_id="user-1")
+        agent.get_output.assert_awaited_once_with("task-1", user_id="user-1")
+
+    async def test_advisory_start_uses_fast_execution_contract_and_safe_phase_key(self):
+        agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-fast"}))
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.AUDITING,
+            next_state=FactoryState.SELECTING_FINDING,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-fast",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="audit quickly",
+                acceptance_criteria=("find one actionable defect",),
+                model_id="agent:model",
+                policy={"advisory_timeout_seconds": 90, "advisory_max_tool_calls": 6},
+            ),
+            cycle=SimpleNamespace(id="cycle-fast", attempt_count=0),
+            evidence=(),
+            gates=(),
+        )
+
+        outcome = await handler.execute(context)
+
+        prompt = agent.start_task.await_args.kwargs["prompt"]
+        self.assertIn("finish within 90 seconds", prompt)
+        self.assertIn("at most 6 tool actions", prompt)
+        self.assertIn("Do not run test suites", prompt)
+        self.assertIn("Stop exploring", prompt)
+        payload = outcome.artifacts[0].payload
+        self.assertEqual(payload["phase_state"], "AUDITING")
+        self.assertEqual(payload["timeout_seconds"], 90)
+        self.assertEqual(payload["max_tool_calls"], 6)
+        self.assertNotIn("state", payload)
+
+    async def test_advisory_cancels_over_tool_budget_and_advances_with_partial_advice(self):
+        running = {
+            "id": "task-budget",
+            "status": "RUNNING",
+            "created_at": 999_000,
+            "output": "partial machine-guided finding",
+            "raw_output": [
+                {"type": "function_call", "call_id": "call-1"},
+                {"type": "function_call", "call_id": "call-2"},
+                {"type": "function_call", "call_id": "call-3"},
+            ],
+        }
+        cancelled = {**running, "status": "CANCELLED"}
+        agent = SimpleNamespace(
+            get_task=AsyncMock(return_value=running),
+            cancel_task=AsyncMock(return_value=cancelled),
+            get_output=AsyncMock(),
+        )
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.ROOT_CAUSE_ANALYSIS,
+            next_state=FactoryState.PLANNING,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-budget",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="root cause quickly",
+                acceptance_criteria=("identify root cause",),
+                model_id="agent:model",
+                policy={"advisory_timeout_seconds": 120, "advisory_max_tool_calls": 2},
+            ),
+            cycle=SimpleNamespace(id="cycle-budget", attempt_count=0),
+            evidence=(
+                SimpleNamespace(
+                    kind="factory_phase_task",
+                    payload={
+                        "phase_state": "ROOT_CAUSE_ANALYSIS",
+                        "attempt": 0,
+                        "task_id": "task-budget",
+                    },
+                    idempotency_key=(
+                        "phase:run-budget:cycle-budget:ROOT_CAUSE_ANALYSIS:"
+                        "entry-fev-budget:artifact:phase-task"
+                    ),
+                ),
+            ),
+            gates=(),
+        )
+
+        with patch("cptr.services.factory_production.time.time", return_value=1_000):
+            outcome = await handler.execute(context)
+
+        self.assertEqual(outcome.next_state, FactoryState.PLANNING)
+        self.assertTrue(outcome.artifacts[0].payload["budget_exhausted"])
+        self.assertEqual(outcome.artifacts[0].payload["tool_calls"], 3)
+        self.assertIn("2-tool budget", outcome.artifacts[0].payload["budget_reason"])
+        self.assertIn("partial machine-guided finding", outcome.artifacts[0].payload["summary"])
+        agent.cancel_task.assert_awaited_once_with("task-budget", user_id="user-1")
+        agent.get_output.assert_not_awaited()
 
     async def test_no_mutation_machine_verified_run_reaches_complete(self):
         temp = self._git_repo()
