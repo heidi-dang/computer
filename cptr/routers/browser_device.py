@@ -14,11 +14,12 @@ from pydantic import BaseModel, Field
 from cptr.services.browser_command_results import browser_command_results
 from cptr.services.browser_evaluate_approvals import browser_evaluate_approvals
 from cptr.services.browser_device_connections import browser_device_connections
-from cptr.services.browser_devices import browser_device_store
+from cptr.services.browser_devices import BrowserTabInUseError, browser_device_store
 from cptr.services.browser_visual_frames import BrowserVisualFrame, browser_visual_frames
 from cptr.services.control_auth import authenticate_control_request
 
 router = APIRouter(prefix="/api/browser-device/v1", tags=["browser-device"])
+CONTROL_HEARTBEAT_SECONDS = 20.0
 
 
 class PairingRequestBody(BaseModel):
@@ -274,6 +275,8 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
             workbench_session_id=body.workbench_session_id,
             surface_id=body.surface_id,
         )
+    except BrowserTabInUseError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="browser device not found") from exc
 
@@ -357,10 +360,11 @@ async def get_browser_frame(request: Request, session_id: str, after_frame_id: s
         raise HTTPException(status_code=404, detail="browser session not found")
     frame = await browser_visual_frames.wait_next(
         device_id=session.device_id,
+        session_id=session_id,
         after_frame_id=after_frame_id,
         timeout_seconds=15.0,
     )
-    if frame is None or frame.session_id != session_id:
+    if frame is None:
         return Response(status_code=204)
     return Response(
         content=frame.data,
@@ -631,7 +635,7 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             "command_id": body.command_id,
             "payload": {
                 "action": body.action,
-                "expected_epoch": body.expected_epoch,
+                **({"expected_epoch": body.expected_epoch} if body.expected_epoch is not None else {}),
                 "args": body.payload,
             },
         },
@@ -738,6 +742,24 @@ async def _receive_auth(websocket: WebSocket) -> tuple[str, str, int] | None:
     return device_id, credential, resume_from
 
 
+async def _browser_device_control_heartbeat(device_id: str) -> None:
+    try:
+        while True:
+            await asyncio.sleep(CONTROL_HEARTBEAT_SECONDS)
+            delivered = await browser_device_connections.send_control(
+                device_id=device_id,
+                message={
+                    "protocol_version": 1,
+                    "type": "device.ping",
+                    "device_id": device_id,
+                },
+            )
+            if not delivered:
+                return
+    except asyncio.CancelledError:
+        raise
+
+
 @router.websocket("/connect/visual")
 async def browser_device_visual_socket(websocket: WebSocket):
     await websocket.accept()
@@ -838,6 +860,7 @@ async def browser_device_control_socket(websocket: WebSocket):
     # In-flight commands interrupted by a disconnect time out and are retried
     # by their caller instead of replaying potentially sensitive payloads.
     _ = resume_from
+    heartbeat_task = asyncio.create_task(_browser_device_control_heartbeat(device_id))
 
     try:
         while True:
@@ -876,4 +899,9 @@ async def browser_device_control_socket(websocket: WebSocket):
     except WebSocketDisconnect:
         return
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         await browser_device_connections.detach(device_id=device_id, websocket=websocket)

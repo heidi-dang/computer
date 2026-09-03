@@ -28,6 +28,10 @@ CLAIM_SECRET_BYTES = 32
 MAX_DEVICE_EVENT_JSON_CHARS = 24_000
 
 
+class BrowserTabInUseError(RuntimeError):
+    """Raised when a live CPTR browser session already owns a Chrome tab."""
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -185,6 +189,23 @@ class BrowserDeviceStore:
             device = await db.get(BrowserDevice, device_id)
             if device is None or device.user_id != user_id or device.status != "ACTIVE":
                 raise PermissionError("browser device is unavailable")
+            lease = (
+                await db.scalars(
+                    select(BrowserLease).where(
+                        BrowserLease.device_id == device_id,
+                        BrowserLease.tab_id == tab_id,
+                    )
+                )
+            ).first()
+            if lease is not None:
+                current_session = await db.get(BrowserSession, lease.session_id)
+                if (
+                    current_session is not None
+                    and current_session.closed_at is None
+                    and current_session.state != "DISCONNECTED"
+                ):
+                    raise BrowserTabInUseError("browser tab already has an active session")
+
             session = BrowserSession(
                 user_id=user_id,
                 device_id=device_id,
@@ -197,14 +218,6 @@ class BrowserDeviceStore:
             )
             db.add(session)
             await db.flush()
-            lease = (
-                await db.scalars(
-                    select(BrowserLease).where(
-                        BrowserLease.device_id == device_id,
-                        BrowserLease.tab_id == tab_id,
-                    )
-                )
-            ).first()
             if lease is None:
                 lease = BrowserLease(
                     device_id=device_id,

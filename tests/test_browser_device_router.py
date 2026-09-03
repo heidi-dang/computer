@@ -31,8 +31,9 @@ from cptr.routers.browser_device import (
     list_device_tabs,
     open_browser_session,
     transfer_browser_lease,
+    _browser_device_control_heartbeat,
 )
-from cptr.services.browser_devices import PairingRequest
+from cptr.services.browser_devices import BrowserTabInUseError, PairingRequest
 
 
 class FakeWebSocket:
@@ -224,6 +225,20 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["tab_id"], 8)
         self.assertEqual(open_session.await_args.kwargs["tab_id"], 8)
 
+    async def test_open_session_returns_conflict_when_tab_already_has_live_session(self):
+        request = SimpleNamespace()
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.open_session",
+                new=AsyncMock(side_effect=BrowserTabInUseError("browser tab already has an active session")),
+            ),
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await open_browser_session(request, OpenSessionBody(device_id="bdv_1", tab_id=7))
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertIn("active session", raised.exception.detail)
+
     async def test_open_session_acquires_agent_epoch_and_confirms_attach(self):
         request = SimpleNamespace()
         session = SimpleNamespace(id="brs_1", device_id="bdv_1", tab_id=7, surface_id="surf_1")
@@ -373,9 +388,12 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
             patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
-            patch("cptr.routers.browser_device.browser_visual_frames.wait_next", new=AsyncMock(return_value=frame)),
+            patch("cptr.routers.browser_device.browser_visual_frames.wait_next", new=AsyncMock(return_value=frame)) as wait_next,
         ):
             response = await get_browser_frame(request, "brs_1", "frm_0")
+        wait_next.assert_awaited_once_with(
+            device_id="bdv_1", session_id="brs_1", after_frame_id="frm_0", timeout_seconds=15.0
+        )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.body, b"jpeg-bytes")
         self.assertEqual(response.headers["cache-control"], "no-store")
@@ -546,6 +564,70 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["payload"]["action"], "click")
         self.assertEqual(message["payload"]["args"], {"ref": "ref_1"})
         self.assertEqual(result["result"]["type"], "browser.command.completed")
+
+    async def test_read_only_agent_command_omits_null_expected_epoch(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="AGENT_CONTROL")
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.get_session",
+                new=AsyncMock(return_value=session),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.session_lease",
+                new=AsyncMock(return_value={"owner": "agent", "epoch": 9}),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=13)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+            patch(
+                "cptr.routers.browser_device.browser_command_results.reserve",
+                new=AsyncMock(),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_command_results.wait",
+                new=AsyncMock(return_value={"type": "browser.command.completed", "command_id": "cmd_read_1", "payload": {"title": "Example"}}),
+            ),
+        ):
+            result = await send_browser_command(
+                request,
+                "brs_1",
+                SendCommandBody(
+                    command_id="cmd_read_1",
+                    action="get_title",
+                    payload={},
+                ),
+            )
+        self.assertTrue(result["accepted"])
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["payload"]["action"], "get_title")
+        self.assertNotIn("expected_epoch", message["payload"])
+        self.assertEqual(message["payload"]["args"], {})
+
+    async def test_control_heartbeat_sends_sequence_free_device_ping(self):
+        send = AsyncMock(side_effect=[True, False])
+        sleep = AsyncMock()
+        with (
+            patch("cptr.routers.browser_device.browser_device_connections.send_control", new=send),
+            patch("cptr.routers.browser_device.asyncio.sleep", new=sleep),
+        ):
+            await _browser_device_control_heartbeat("bdv_1")
+
+        self.assertEqual(send.await_count, 2)
+        message = send.await_args_list[0].kwargs["message"]
+        self.assertEqual(message, {
+            "protocol_version": 1,
+            "type": "device.ping",
+            "device_id": "bdv_1",
+        })
+        self.assertNotIn("sequence", message)
+        self.assertNotIn("session_id", message)
 
     async def test_websocket_completes_matching_command_id(self):
         socket = FakeWebSocket(

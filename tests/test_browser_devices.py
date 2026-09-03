@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from cptr.services.browser_devices import BrowserDeviceStore
+from cptr.services.browser_devices import BrowserDeviceStore, BrowserTabInUseError
 
 
 class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -129,6 +129,34 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await store.owns_active_device(user_id="user_2", device_id="bdv_1"))
             db.get.return_value = SimpleNamespace(user_id="user_1", status="REVOKED")
             self.assertFalse(await store.owns_active_device(user_id="user_1", device_id="bdv_1"))
+
+    async def test_open_session_rejects_live_session_on_same_tab_before_repointing_lease(self):
+        store = BrowserDeviceStore()
+        device = SimpleNamespace(user_id="user_1", status="ACTIVE")
+        active_session = SimpleNamespace(id="brs_existing", closed_at=None, state="AGENT_CONTROL")
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_existing",
+            owner="agent",
+            epoch=4,
+        )
+        db = AsyncMock()
+        db.get.side_effect = [device, active_session]
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            self.assertRaises(BrowserTabInUseError),
+        ):
+            await store.open_session(user_id="user_1", device_id="bdv_1", tab_id=7)
+
+        self.assertEqual(lease.session_id, "brs_existing")
+        self.assertEqual(lease.owner, "agent")
+        self.assertEqual(lease.epoch, 4)
+        db.add.assert_not_called()
+        db.commit.assert_not_awaited()
 
     async def test_transfer_rejects_stale_epoch(self):
         store = BrowserDeviceStore()
