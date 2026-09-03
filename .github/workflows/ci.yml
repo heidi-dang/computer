@@ -18,8 +18,6 @@ jobs:
     needs: frontend
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    env:
-      CPTR_DATA_DIR: ${{ runner.temp }}/cptr-ci
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -51,9 +49,13 @@ jobs:
         run: git diff --check HEAD^ HEAD
 
       - name: Initialize isolated CPTR database
+        env:
+          CPTR_DATA_DIR: ${{ runner.temp }}/cptr-ci
         run: python -c "import asyncio; from cptr.utils.db import init_db; asyncio.run(init_db())"
 
       - name: Python suite
+        env:
+          CPTR_DATA_DIR: ${{ runner.temp }}/cptr-ci
         run: python -m pytest -q
 
   frontend:
