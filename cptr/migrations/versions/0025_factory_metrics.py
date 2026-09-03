@@ -77,7 +77,12 @@ def upgrade() -> None:
         sa.Column("repository_family", sa.Text(), nullable=False),
         sa.Column("task_family", sa.Text(), nullable=False),
         sa.Column("verified_success", sa.Boolean(), nullable=False),
-        sa.Column("proof_event_id", sa.Text(), sa.ForeignKey("factory_events.id", ondelete="RESTRICT"), nullable=False),
+        sa.Column(
+            "proof_event_id",
+            sa.Text(),
+            sa.ForeignKey("factory_events.id", ondelete="RESTRICT"),
+            nullable=False,
+        ),
         sa.Column("regression", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("repair_iterations", sa.BigInteger(), nullable=False, server_default="0"),
         sa.Column("input_tokens", sa.BigInteger(), nullable=False, server_default="0"),

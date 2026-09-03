@@ -129,9 +129,8 @@ def rank_capabilities(
             continue
         item_history = history.get(candidate.identity, CapabilityHistory())
         history_confidence = item_history.confidence
-        history_score = (
-            item_history.objective_quality * history_confidence
-            + 0.5 * (1.0 - history_confidence)
+        history_score = item_history.objective_quality * history_confidence + 0.5 * (
+            1.0 - history_confidence
         )
         maintenance = _metadata_score(candidate.maintenance_metadata, "maintenance_score", 0.5)
         freshness = _metadata_score(candidate.maintenance_metadata, "freshness_score", 0.5)
@@ -283,10 +282,13 @@ class SqlCapabilityHistoryStore:
         task_family = _normalize_family(task_family, "task family")
         now = _now_ms()
         cost_microusd = int(round(cost_usd * 1_000_000))
-        outcome_id = "fcapout_" + uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"cptr-factory:{run_id}:{cycle_id}:{manifest.identity}",
-        ).hex
+        outcome_id = (
+            "fcapout_"
+            + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"cptr-factory:{run_id}:{cycle_id}:{manifest.identity}",
+            ).hex
+        )
 
         async with self._session_factory() as db:
             async with db.begin():
@@ -302,7 +304,9 @@ class SqlCapabilityHistoryStore:
                     else {FactoryState.BLOCKED.value, FactoryState.FAILED.value}
                 )
                 if run.state not in allowed_states:
-                    raise ValueError("capability outcomes require machine-verified terminal factory evidence")
+                    raise ValueError(
+                        "capability outcomes require machine-verified terminal factory evidence"
+                    )
                 proof = (
                     await db.execute(
                         select(FactoryEvent)
@@ -317,7 +321,9 @@ class SqlCapabilityHistoryStore:
                     )
                 ).scalar_one_or_none()
                 if proof is None:
-                    raise ValueError("capability outcomes require machine-verified factory evidence")
+                    raise ValueError(
+                        "capability outcomes require machine-verified factory evidence"
+                    )
 
                 existing_outcome = await db.get(FactoryCapabilityOutcome, outcome_id)
                 if existing_outcome is not None:
@@ -346,7 +352,9 @@ class SqlCapabilityHistoryStore:
                         int(existing_outcome.cost_microusd),
                     )
                     if observed != expected:
-                        raise ValueError("capability outcome replay changed immutable verified metrics")
+                        raise ValueError(
+                            "capability outcome replay changed immutable verified metrics"
+                        )
                     result = await db.execute(
                         select(FactoryCapabilityPerformance).where(
                             FactoryCapabilityPerformance.capability_id == manifest.identity,
@@ -386,7 +394,8 @@ class SqlCapabilityHistoryStore:
                     ],
                     set_={
                         "attempts": table.c.attempts + 1,
-                        "verified_successes": table.c.verified_successes + excluded.verified_successes,
+                        "verified_successes": table.c.verified_successes
+                        + excluded.verified_successes,
                         "verified_failures": table.c.verified_failures + excluded.verified_failures,
                         "regressions": table.c.regressions + excluded.regressions,
                         "repair_iterations": table.c.repair_iterations + excluded.repair_iterations,
@@ -460,37 +469,41 @@ class SqlCapabilityHistoryStore:
 
     async def _upsert_manifest(self, db: Any, manifest: CapabilityManifest, *, now: int) -> None:
         table = FactoryCapabilityRecord.__table__
-        statement = sqlite_insert(table).values(
-            id=manifest.identity,
-            stable_id=manifest.stable_id,
-            version=manifest.version,
-            origin_type=manifest.origin_type,
-            origin_uri=manifest.origin_uri,
-            pinned_version_or_commit=manifest.pinned_version_or_commit,
-            digest=manifest.digest,
-            capabilities=list(manifest.capabilities),
-            permissions=list(manifest.permissions),
-            network_requirements=list(manifest.network_requirements),
-            execution_requirements=list(manifest.execution_requirements),
-            risk_classification=manifest.risk_classification,
-            trust_status=manifest.trust_status.value,
-            verification_status=manifest.verification_status.value,
-            maintenance_metadata=manifest.maintenance_metadata,
-            historical_factory_score_ppm=(
-                int(round(manifest.historical_factory_score * 1_000_000))
-                if manifest.historical_factory_score is not None
-                else None
-            ),
-            created_at=manifest.created_at or now,
-            evaluated_at=manifest.evaluated_at,
-        ).on_conflict_do_update(
-            index_elements=[table.c.id],
-            set_={
-                "trust_status": manifest.trust_status.value,
-                "verification_status": manifest.verification_status.value,
-                "maintenance_metadata": manifest.maintenance_metadata,
-                "evaluated_at": manifest.evaluated_at or now,
-            },
+        statement = (
+            sqlite_insert(table)
+            .values(
+                id=manifest.identity,
+                stable_id=manifest.stable_id,
+                version=manifest.version,
+                origin_type=manifest.origin_type,
+                origin_uri=manifest.origin_uri,
+                pinned_version_or_commit=manifest.pinned_version_or_commit,
+                digest=manifest.digest,
+                capabilities=list(manifest.capabilities),
+                permissions=list(manifest.permissions),
+                network_requirements=list(manifest.network_requirements),
+                execution_requirements=list(manifest.execution_requirements),
+                risk_classification=manifest.risk_classification,
+                trust_status=manifest.trust_status.value,
+                verification_status=manifest.verification_status.value,
+                maintenance_metadata=manifest.maintenance_metadata,
+                historical_factory_score_ppm=(
+                    int(round(manifest.historical_factory_score * 1_000_000))
+                    if manifest.historical_factory_score is not None
+                    else None
+                ),
+                created_at=manifest.created_at or now,
+                evaluated_at=manifest.evaluated_at,
+            )
+            .on_conflict_do_update(
+                index_elements=[table.c.id],
+                set_={
+                    "trust_status": manifest.trust_status.value,
+                    "verification_status": manifest.verification_status.value,
+                    "maintenance_metadata": manifest.maintenance_metadata,
+                    "evaluated_at": manifest.evaluated_at or now,
+                },
+            )
         )
         await db.execute(statement)
 

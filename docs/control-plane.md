@@ -210,6 +210,25 @@ For example:
 ]
 ```
 
+## Dark Factory production qualification
+
+Production qualification is evidence-driven and uses the same durable state boundaries as recovery. Before deployment, verify all critical restart points (run creation, worker creation, mutation, verification PASS, Victory authorization, commit intent, commit, push, and CI observation), race recovery leases, inject malicious external capability descriptions, run the Victory false-positive campaign, and capture bounded resource telemetry.
+
+The 2026-09-03 qualification campaign measured 96 concurrent factory run operations with zero database errors and zero SQLite busy events, 27.628 ms maximum event-loop lag, 3,612,672 bytes RSS growth, zero open-FD growth, zero retained command handles, and bounded live-subscriber pressure that returned to zero subscribers after disconnect. Fresh database migration and upgrade from the prior production-compatible schema both reached Alembic `0025`.
+
+Deployment remains ordered and fail-closed:
+
+1. deploy/migrate the CPTR backend first;
+2. verify backend liveness/readiness and the factory Control API;
+3. deploy the thin MCP adapter;
+4. verify the adapter health/contract and exact release SHA;
+5. execute start/status/events/evidence and restart recovery against a disposable factory mission;
+6. only then leave the new revisions active.
+
+Application rollback should target a revision that understands the current Alembic head. Do not downgrade the database as part of a normal application rollback. After a rollback smoke succeeds, redeploy the verified target revision and repeat health plus factory recovery checks.
+
+CI wait logic must be event/status driven rather than `sleep` polling. GitHub workflows should identify the paired run and use `gh run watch <run-id> --exit-status`, exiting immediately on failure before any release upload or retry.
+
 ## ChatGPT Developer Mode
 
 Start CPTR and the companion MCP adapter, expose the adapter through an HTTPS tunnel or deployment, and add the adapter's `/mcp` URL in ChatGPT Developer Mode under Settings → Connectors. Use the plugin README for adapter-specific commands. Refresh the connector after changing tool schemas or annotations.
@@ -220,4 +239,4 @@ Start CPTR and the companion MCP adapter, expose the adapter through an HTTPS tu
 - The first pass has no widget.
 - The local director is a deterministic development fallback; production autonomous verification should use the configured director and real evidence.
 - CPTR inherits its host-level single-user filesystem/shell security model. It should not be exposed to untrusted users without an appropriate authentication and network boundary.
-- The existing CPTR repository has pre-existing full-tree lint findings; new control-plane files are checked separately and cleanly.
+- Repository-wide Ruff lint passes, but the pre-existing global formatter/typecheck baselines are not clean: Ruff format would change unrelated legacy Python files and Svelte typecheck reports broad pre-existing i18n/component typing debt. Dark Factory changes are formatter-clean and are not used as justification for unrelated repository-wide churn.

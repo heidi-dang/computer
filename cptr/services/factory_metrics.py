@@ -206,11 +206,7 @@ class FactoryMetricsService:
                 ).all()
             )
             events = list(
-                (
-                    await db.scalars(
-                        select(FactoryEvent).where(FactoryEvent.run_id == run_id)
-                    )
-                ).all()
+                (await db.scalars(select(FactoryEvent).where(FactoryEvent.run_id == run_id))).all()
             )
 
             selected_ids = {
@@ -315,14 +311,23 @@ class FactoryMetricsService:
                     "verified_outcome": cycle_outcome,
                 }
                 role_metrics.append(metric)
-                role_summaries.append({
-                    "cycle_id": cycle_id,
-                    "role": role,
-                    **{key: metric[key] for key in (
-                        "attempts", "input_tokens", "output_tokens", "runtime_ms", "cost_microusd"
-                    )},
-                    "verified_outcome": cycle_outcome,
-                })
+                role_summaries.append(
+                    {
+                        "cycle_id": cycle_id,
+                        "role": role,
+                        **{
+                            key: metric[key]
+                            for key in (
+                                "attempts",
+                                "input_tokens",
+                                "output_tokens",
+                                "runtime_ms",
+                                "cost_microusd",
+                            )
+                        },
+                        "verified_outcome": cycle_outcome,
+                    }
+                )
                 projection_rows.append(metric)
 
             latest_gates: dict[str, FactoryGateResult] = {}
@@ -349,14 +354,16 @@ class FactoryMetricsService:
                         "SUCCESS" if gate.status == "PASS" and cycle_outcome == "SUCCESS" else None
                     ),
                 }
-                gate_summaries.append({
-                    "cycle_id": cycle_id,
-                    "gate_id": gate_id,
-                    "attempts": metric["attempts"],
-                    "regressions": metric["regressions"],
-                    "gate_latency_ms": latency,
-                    "verified_outcome": metric["verified_outcome"],
-                })
+                gate_summaries.append(
+                    {
+                        "cycle_id": cycle_id,
+                        "gate_id": gate_id,
+                        "attempts": metric["attempts"],
+                        "regressions": metric["regressions"],
+                        "gate_latency_ms": latency,
+                        "verified_outcome": metric["verified_outcome"],
+                    }
+                )
                 projection_rows.append(metric)
 
             capability_metrics: list[dict[str, Any]] = []
@@ -385,24 +392,40 @@ class FactoryMetricsService:
                     "verified_outcome": cycle_outcome,
                 }
                 capability_metrics.append(metric)
-                capability_summaries.append({
-                    "cycle_id": cycle_id,
-                    "capability_id": identity,
-                    **{key: metric[key] for key in (
-                        "attempts", "repair_iterations", "regressions", "input_tokens",
-                        "output_tokens", "runtime_ms", "cost_microusd"
-                    )},
-                    "verified_outcome": cycle_outcome,
-                })
+                capability_summaries.append(
+                    {
+                        "cycle_id": cycle_id,
+                        "capability_id": identity,
+                        **{
+                            key: metric[key]
+                            for key in (
+                                "attempts",
+                                "repair_iterations",
+                                "regressions",
+                                "input_tokens",
+                                "output_tokens",
+                                "runtime_ms",
+                                "cost_microusd",
+                            )
+                        },
+                        "verified_outcome": cycle_outcome,
+                    }
+                )
                 projection_rows.append(metric)
 
             reasoning_totals = _sum_metric(role_metrics)
             capability_execution_totals = {
                 "attempts": sum(item["attempts"] for item in execution_by_capability.values()),
-                "input_tokens": sum(item["input_tokens"] for item in execution_by_capability.values()),
-                "output_tokens": sum(item["output_tokens"] for item in execution_by_capability.values()),
+                "input_tokens": sum(
+                    item["input_tokens"] for item in execution_by_capability.values()
+                ),
+                "output_tokens": sum(
+                    item["output_tokens"] for item in execution_by_capability.values()
+                ),
                 "runtime_ms": sum(item["runtime_ms"] for item in execution_by_capability.values()),
-                "cost_microusd": sum(item["cost_microusd"] for item in execution_by_capability.values()),
+                "cost_microusd": sum(
+                    item["cost_microusd"] for item in execution_by_capability.values()
+                ),
             }
             cycle_metric = {
                 "run_id": run_id,
@@ -416,25 +439,40 @@ class FactoryMetricsService:
                 ),
                 "repair_iterations": repair_iterations,
                 "regressions": regression_count,
-                "input_tokens": reasoning_totals["input_tokens"] + capability_execution_totals["input_tokens"],
-                "output_tokens": reasoning_totals["output_tokens"] + capability_execution_totals["output_tokens"],
-                "runtime_ms": reasoning_totals["runtime_ms"] + capability_execution_totals["runtime_ms"],
-                "cost_microusd": reasoning_totals["cost_microusd"] + capability_execution_totals["cost_microusd"],
+                "input_tokens": reasoning_totals["input_tokens"]
+                + capability_execution_totals["input_tokens"],
+                "output_tokens": reasoning_totals["output_tokens"]
+                + capability_execution_totals["output_tokens"],
+                "runtime_ms": reasoning_totals["runtime_ms"]
+                + capability_execution_totals["runtime_ms"],
+                "cost_microusd": reasoning_totals["cost_microusd"]
+                + capability_execution_totals["cost_microusd"],
                 "gate_latency_ms": sum(
                     max(0, int(gate.updated_at or 0) - int(cycle.created_at or 0))
                     for gate in latest_gates.values()
                 ),
                 "verified_outcome": cycle_outcome,
             }
-            cycle_summaries.append({
-                "cycle_id": cycle_id,
-                "ordinal": int(cycle.ordinal),
-                **{key: cycle_metric[key] for key in (
-                    "attempts", "repair_iterations", "regressions", "input_tokens", "output_tokens",
-                    "runtime_ms", "cost_microusd", "gate_latency_ms"
-                )},
-                "verified_outcome": cycle_outcome,
-            })
+            cycle_summaries.append(
+                {
+                    "cycle_id": cycle_id,
+                    "ordinal": int(cycle.ordinal),
+                    **{
+                        key: cycle_metric[key]
+                        for key in (
+                            "attempts",
+                            "repair_iterations",
+                            "regressions",
+                            "input_tokens",
+                            "output_tokens",
+                            "runtime_ms",
+                            "cost_microusd",
+                            "gate_latency_ms",
+                        )
+                    },
+                    "verified_outcome": cycle_outcome,
+                }
+            )
             projection_rows.append(cycle_metric)
 
         run_totals = _sum_metric(cycle_summaries)
@@ -476,10 +514,19 @@ class FactoryMetricsService:
             "comparable": False,
             "comparability": "observed_real_work_only",
             "run": {
-                **{key: run_metric[key] for key in (
-                    "attempts", "repair_iterations", "regressions", "input_tokens", "output_tokens",
-                    "runtime_ms", "cost_microusd", "gate_latency_ms"
-                )},
+                **{
+                    key: run_metric[key]
+                    for key in (
+                        "attempts",
+                        "repair_iterations",
+                        "regressions",
+                        "input_tokens",
+                        "output_tokens",
+                        "runtime_ms",
+                        "cost_microusd",
+                        "gate_latency_ms",
+                    )
+                },
                 "verified_outcome": run_outcome,
             },
             "cycles": cycle_summaries,
@@ -565,12 +612,13 @@ class FactoryMetricsService:
                     "attempts": attempts,
                     "verified_successes": int(row.verified_successes or 0),
                     "verified_failures": int(row.verified_failures or 0),
-                    "verified_success_rate": round(
-                        int(row.verified_successes or 0) / verified, 6
-                    ) if verified else None,
+                    "verified_success_rate": round(int(row.verified_successes or 0) / verified, 6)
+                    if verified
+                    else None,
                     "regressions": int(row.regressions or 0),
                     "regression_rate": round(int(row.regressions or 0) / attempts, 6)
-                    if attempts else 0.0,
+                    if attempts
+                    else 0.0,
                     "repair_iterations": int(row.repair_iterations or 0),
                     "input_tokens": int(row.input_tokens or 0),
                     "output_tokens": int(row.output_tokens or 0),
@@ -581,7 +629,11 @@ class FactoryMetricsService:
             )
         capabilities.sort(
             key=lambda item: (
-                -(item["verified_success_rate"] if item["verified_success_rate"] is not None else -1),
+                -(
+                    item["verified_success_rate"]
+                    if item["verified_success_rate"] is not None
+                    else -1
+                ),
                 item["regression_rate"],
                 item["capability_id"],
             )

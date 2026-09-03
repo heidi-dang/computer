@@ -410,15 +410,17 @@
 - Add focused tests under `tests/` for restart/concurrency/security/live behavior.
 - Extend deployment/runbooks in `docs/architecture/dark-factory.md` and `docs/control-plane.md` after evidence exists.
 
-- [ ] Restart CPTR at each critical boundary: after run create, worker create, mutation, verification PASS, Victory PASS, commit intent, commit, push, and CI observation.
-- [ ] Race two recovery owners and prove one lease winner/no duplicate worker/action.
-- [ ] Inject malicious skill/doc/MCP descriptions and prove policy/trust cannot be changed.
-- [ ] Run explicit Victory false-positive campaign with failed required gates.
-- [ ] Run bounded concurrency/soak and measure RSS, FDs, DB busy/error count, event-loop lag, queue pressure and leaked execution handles.
-- [ ] Run full Python suite, backend lint/format check, frontend tests/build, plugin tests/typecheck/build, migration-from-fresh and migration-from-current database.
-- [ ] Inspect final diffs and `git diff --check`; scan for secrets, host-specific values, debug artifacts and unrelated churn.
+- [x] Restart CPTR at each critical boundary: after run create, worker create, mutation, verification PASS, Victory PASS, commit intent, commit, push, and CI observation.
+- [x] Race two recovery owners and prove one lease winner/no duplicate worker/action.
+- [x] Inject malicious skill/doc/MCP descriptions and prove policy/trust cannot be changed.
+- [x] Run explicit Victory false-positive campaign with failed required gates.
+- [x] Run bounded concurrency/soak and measure RSS, FDs, DB busy/error count, event-loop lag, queue pressure and leaked execution handles.
+- [x] Run full Python suite, backend lint/format check, frontend tests/build, plugin tests/typecheck/build, migration-from-fresh and migration-from-current database.
+- [x] Inspect final diffs and `git diff --check`; scan for secrets, host-specific values, debug artifacts and unrelated churn.
 - [ ] Push verified coherent commits to the same implementation branch/PR; monitor CI and repair failures before rerun.
 - [ ] Deploy only under the repository's production policy/approval, then verify health plus a real factory start/status/evidence/restart flow from ChatGPT.
+
+**Phase 10 pre-deployment verification (2026-09-03):** real CPTR subprocess restart injection passed at all nine durable boundaries; the two-owner recovery race produced one lease winner and one recovery transition; malicious skill/official-doc/MCP descriptions remained untrusted and could not widen policy; failed/missing/stale/advisory/security-blocked evidence all prevented Victory. The bounded soak executed 96 concurrent run operations with 0 DB errors, 0 SQLite busy events, 27.628 ms maximum measured event-loop lag, +3,612,672 bytes RSS, 0 FD growth, 0 retained command handles, and slow-subscriber disconnect/recovery returning subscriber count to zero. Focused Phase 9/10 tests pass; fresh and current-schema migrations both reach `0025`; full Python suite passes 452/452; repository-wide Ruff lint and touched-file Ruff format checks pass; frontend tests pass 48/48 and the clean production build passes; the companion plugin, after merging current `main`, passes 138/138 tests, TypeScript typecheck and production build with a 169,993-byte Workbench bundle under the 450,000-byte limit. Repository-wide Ruff format and Svelte typecheck remain non-Dark-Factory baseline debt (61 Python files would be reformatted; Svelte check reports 1,474 errors/48 warnings across 107 files), so Phase 10 does not create unrelated formatting/type-system churn to manufacture those global gates.
 
 ## Completion evidence
 

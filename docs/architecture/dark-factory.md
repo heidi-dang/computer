@@ -770,6 +770,18 @@ Factory schema changes use additive Alembic migrations. New code must tolerate r
 
 Application rollback must not destroy factory evidence. When code is rolled back to a version that cannot safely resume a newer factory schema/state, runs remain durable and should be paused/blocked rather than coerced into older semantics. Database downgrade is a deliberate operator action and is not part of normal application rollback.
 
+A production rollback candidate must understand the database's current Alembic head. The Phase 10 rollback exercise therefore rolls application code back only to a previously verified revision that already contains migration `0025`, proves health/recovery, then redeploys the target revision. Rolling back to an application whose migration graph cannot resolve the current database revision is intentionally rejected rather than treated as a valid rollback test.
+
+## Phase 10 qualification evidence
+
+The 2026-09-03 production-hardening campaign exercised actual CPTR process restart against isolated durable databases at nine boundaries: run creation, mutation-worker creation, mutation evidence, machine verification PASS, machine Victory authorization, commit intent, commit observation, push observation, and CI observation. Restart recovery preserved each marker and created exactly one `RECOVERING` transition. Concurrent recovery owners produced one lease winner.
+
+External-content adversarial cases used malicious skill, official-document, and MCP-server descriptions that attempted to override trust, enable network access, and request secrets. Trust evaluation rejected the candidates and left the immutable policy fingerprint unchanged. The Victory campaign separately rejected failed, missing, stale-revision, advisory-only, and unresolved-security cases.
+
+A bounded concurrency/pressure campaign executed 96 concurrent factory operations with zero database errors and zero SQLite busy events. Maximum measured event-loop lag was 27.628 ms; RSS increased by 3,612,672 bytes; open-FD delta was zero; all 64 completed command handles were reaped; slow live subscribers were disconnected under pressure and subscriber count returned to zero after closure.
+
+Local release gates reached 452/452 Python tests, 48/48 frontend tests plus a clean production build, and 138/138 companion-plugin tests after merging current plugin `main`; plugin TypeScript typecheck/build passed with a 169,993-byte Workbench bundle under its 450,000-byte limit. Fresh and prior-compatible schema migrations both reached `0025`. Repository-wide Ruff lint passes and all Phase 9/10 Python changes are Ruff-format clean. The wider repository still has pre-existing global Ruff-format and Svelte typecheck debt; Phase 10 records that debt explicitly instead of modifying unrelated files to manufacture a green global baseline.
+
 ## Test strategy
 
 ### Domain/unit

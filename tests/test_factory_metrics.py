@@ -266,7 +266,9 @@ class FactoryMetricsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outcomes, [])
         self.assertEqual(performance, [])
 
-    async def test_machine_complete_run_records_capability_success_once_from_persisted_victory(self):
+    async def test_machine_complete_run_records_capability_success_once_from_persisted_victory(
+        self,
+    ):
         run, cycle = await self._run_cycle(key="success")
         await self._mark_machine_success(run.id, cycle.id)
 
@@ -311,9 +313,13 @@ class FactoryMetricsTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(summary["run"]["verified_outcome"])
         async with self.sessions() as db:
             self.assertEqual(list((await db.scalars(select(FactoryCapabilityOutcome))).all()), [])
-            self.assertEqual(list((await db.scalars(select(FactoryCapabilityPerformance))).all()), [])
+            self.assertEqual(
+                list((await db.scalars(select(FactoryCapabilityPerformance))).all()), []
+            )
 
-    async def test_longitudinal_summary_is_observational_and_separate_from_standardized_benchmarks(self):
+    async def test_longitudinal_summary_is_observational_and_separate_from_standardized_benchmarks(
+        self,
+    ):
         run, cycle = await self._run_cycle(key="longitudinal")
         await self._mark_machine_success(run.id, cycle.id)
         await self.metrics.refresh_run(

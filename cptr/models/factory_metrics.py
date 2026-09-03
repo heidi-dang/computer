@@ -54,7 +54,9 @@ class FactoryCapabilityOutcome(Base):
     repository_family = Column(Text, nullable=False)
     task_family = Column(Text, nullable=False)
     verified_success = Column(Boolean, nullable=False)
-    proof_event_id = Column(Text, ForeignKey("factory_events.id", ondelete="RESTRICT"), nullable=False)
+    proof_event_id = Column(
+        Text, ForeignKey("factory_events.id", ondelete="RESTRICT"), nullable=False
+    )
     regression = Column(Boolean, nullable=False, default=False)
     repair_iterations = Column(BigInteger, nullable=False, default=0)
     input_tokens = Column(BigInteger, nullable=False, default=0)
