@@ -7,6 +7,7 @@ from fastapi import HTTPException
 
 from cptr.routers.browser_device import (
     OpenSessionBody,
+    EvaluateApprovalBody,
     PairingApproveBody,
     PairingClaimBody,
     PairingRequestBody,
@@ -16,6 +17,7 @@ from cptr.routers.browser_device import (
     SendCommandBody,
     TransferLeaseBody,
     approve_pairing,
+    approve_browser_evaluate,
     browser_device_control_socket,
     browser_device_visual_socket,
     claim_pairing,
@@ -77,6 +79,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/human-input", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/return-to-agent", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/stream-config", paths)
+        self.assertIn("/api/browser-device/v1/sessions/{session_id}/evaluate-approval", paths)
 
     async def test_pairing_request_returns_claim_secret_only_to_extension(self):
         with patch(
@@ -165,6 +168,38 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             await open_browser_session(request, OpenSessionBody(device_id="bdv_1", tab_id=7, surface_id="surf_1"))
         self.assertEqual(raised.exception.status_code, 409)
         abort.assert_awaited_once_with(session_id="brs_1", expected_epoch=9)
+
+    async def test_evaluate_requires_one_time_exact_approval_before_dispatch(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="AGENT_CONTROL")
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_evaluate_approvals.issue", return_value=SimpleNamespace(token="approval_1")),
+        ):
+            approval = await approve_browser_evaluate(request, "brs_1", EvaluateApprovalBody(expression="document.title"))
+        self.assertEqual(approval["approval_token"], "approval_1")
+
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()),
+            patch("cptr.routers.browser_device.browser_evaluate_approvals.consume", return_value=False) as consume,
+            self.assertRaises(HTTPException) as raised,
+        ):
+            await send_browser_command(
+                request,
+                "brs_1",
+                SendCommandBody(
+                    command_id="cmd_eval",
+                    action="evaluate",
+                    expected_epoch=4,
+                    payload={"expression": "document.title", "approval_token": "approval_1"},
+                ),
+            )
+        self.assertEqual(raised.exception.status_code, 403)
+        consume.assert_called_once_with(token="approval_1", user_id="user_1", session_id="brs_1", expression="document.title")
 
     async def test_lease_transfer_rejects_cross_owner_session(self):
         request = SimpleNamespace()

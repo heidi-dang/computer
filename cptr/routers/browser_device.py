@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebS
 from pydantic import BaseModel, Field
 
 from cptr.services.browser_command_results import browser_command_results
+from cptr.services.browser_evaluate_approvals import browser_evaluate_approvals
 from cptr.services.browser_device_connections import browser_device_connections
 from cptr.services.browser_devices import browser_device_store
 from cptr.services.browser_visual_frames import BrowserVisualFrame, browser_visual_frames
@@ -53,6 +54,10 @@ class SendCommandBody(BaseModel):
     expected_epoch: int | None = Field(default=None, ge=0)
     payload: dict[str, Any] = Field(default_factory=dict)
     wait_seconds: float = Field(default=15.0, ge=0.1, le=60.0)
+
+
+class EvaluateApprovalBody(BaseModel):
+    expression: str = Field(min_length=1, max_length=20_000)
 
 
 class ReturnToAgentBody(BaseModel):
@@ -464,6 +469,24 @@ async def send_browser_human_input(request: Request, session_id: str, body: Huma
     return {"accepted": True, "command_id": body.command_id, "result": result}
 
 
+@router.post("/sessions/{session_id}/evaluate-approval")
+async def approve_browser_evaluate(request: Request, session_id: str, body: EvaluateApprovalBody):
+    user_id = await _control_user(request, "task:write")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="browser session not found")
+    approval = browser_evaluate_approvals.issue(
+        user_id=user_id,
+        session_id=session_id,
+        expression=body.expression,
+    )
+    return {
+        "approval_token": approval.token,
+        "expires_in_seconds": 120,
+        "session_id": session_id,
+    }
+
+
 @router.post("/sessions/{session_id}/command")
 async def send_browser_command(request: Request, session_id: str, body: SendCommandBody):
     user_id = await _control_user(request, "task:write")
@@ -479,6 +502,19 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             )
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if body.action == "evaluate":
+        expression = body.payload.get("expression")
+        approval_token = body.payload.get("approval_token")
+        if not isinstance(expression, str) or not isinstance(approval_token, str):
+            raise HTTPException(status_code=403, detail="browser evaluate requires explicit approval")
+        approved = browser_evaluate_approvals.consume(
+            token=approval_token,
+            user_id=user_id,
+            session_id=session_id,
+            expression=expression,
+        )
+        if not approved:
+            raise HTTPException(status_code=403, detail="browser evaluate approval is invalid, expired, or already used")
     await browser_command_results.reserve(body.command_id)
     lease = await browser_device_store.session_lease(session_id=session_id)
     if lease is None:
