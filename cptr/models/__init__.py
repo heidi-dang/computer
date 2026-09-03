@@ -40,6 +40,7 @@ from cptr.models.factory_capabilities import (
 )
 from cptr.models.factory_control import FactoryApproval
 from cptr.models.factory_lifecycle import FactoryCiRun, FactoryCommitIntent
+from cptr.models.factory_metrics import FactoryCapabilityOutcome, FactoryMetricProjection
 from cptr.models.factory_workers import FactoryWorkerAssignment
 from cptr.models.files import File
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
@@ -69,12 +70,14 @@ __all__ = [
     "FactoryCapabilityPerformance",
     "FactoryApproval",
     "FactoryCapabilityRecord",
+    "FactoryCapabilityOutcome",
     "FactoryCiRun",
     "FactoryCommitIntent",
     "FactoryCycle",
     "FactoryEvent",
     "FactoryEvidence",
     "FactoryGateResult",
+    "FactoryMetricProjection",
     "FactoryReasoningCall",
     "FactoryRun",
     "FactoryWorkerAssignment",

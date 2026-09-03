@@ -394,9 +394,11 @@
 - Persist per-run/cycle/role/capability runtime, token, cost, attempts, repair iterations, gate latency and verified outcome.
 - Real-work metrics remain observational; standardized benchmark scores remain separately comparable.
 
-- [ ] RED-test that failed/blocked runs do not count as verified capability successes.
-- [ ] RED-test no prompt/source/hidden reasoning is required in metrics.
-- [ ] Implement longitudinal score inputs and regression summaries.
+- [x] RED-test that failed/blocked runs do not count as verified capability successes.
+- [x] RED-test no prompt/source/hidden reasoning is required in metrics.
+- [x] Implement longitudinal score inputs and regression summaries.
+
+**Phase 9 verification (2026-09-03):** proof-bound capability learning now requires persisted terminal run/cycle state plus the server-owned `victory.authorized`/`failure.recorded` event rather than a caller-provided machine-verification Boolean; capability outcomes are idempotent per run/cycle/capability and cannot double-count after restart. Numeric-only metric projections persist run/cycle/role/capability/gate attempts, repair iterations, regressions, tokens, runtime, cost and gate latency without mission/prompt/source/hidden-reasoning payloads. Observed real-work summaries remain explicitly non-comparable and do not read or write standardized coding benchmark scores. Focused Phase 9/ranking tests 11/11 passed; `0024 -> 0025 -> 0024 -> 0025` passed; Dark Factory/restart regression gate 163/163 passed; full repository 446/446 passed; full Ruff and `git diff --check` passed.
 
 ---
 

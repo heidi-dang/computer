@@ -2,13 +2,15 @@ import unittest
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from cptr.models import Base
+from cptr.models import Base, FactoryCycle, FactoryEvent, FactoryRun
 from cptr.services.factory_capabilities import (
     CapabilityManifest,
     CapabilityRequirement,
     CapabilityTrustStatus,
     CapabilityVerificationStatus,
 )
+from cptr.services.factory_domain import FactoryActor, FactoryState
+from cptr.services.factory_store import SqlFactoryStore
 from cptr.services.factory_capability_ranking import (
     CapabilityHistory,
     CapabilityRankingPolicy,
@@ -151,19 +153,76 @@ class CapabilityHistoryStoreTests(unittest.IsolatedAsyncioTestCase):
             await connection.run_sync(Base.metadata.create_all)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
         self.store = SqlCapabilityHistoryStore(session_factory=self.sessions)
+        self.factory_store = SqlFactoryStore(session_factory=self.sessions)
         self.manifest = _manifest("history")
 
     async def asyncTearDown(self):
         await self.engine.dispose()
 
-    async def test_outcomes_require_machine_verified_factory_result(self):
+    async def _terminal_proof(self, key: str, *, success: bool, include_proof: bool = True):
+        run = await self.factory_store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission=f"metric proof {key}",
+            acceptance_criteria=["machine evidence"],
+            policy={},
+            budget={},
+            model_id="configured-model",
+            idempotency_key=key,
+        )
+        cycle = await self.factory_store.create_cycle(
+            run.id,
+            base_revision="base",
+            base_fingerprint="base-fp",
+            idempotency_key=f"{key}-cycle",
+        )
+        async with self.sessions() as db:
+            persistent_run = await db.get(FactoryRun, run.id)
+            persistent_cycle = await db.get(FactoryCycle, cycle.id)
+            persistent_run.current_cycle_id = cycle.id
+            persistent_run.state = (
+                FactoryState.COMPLETE.value if success else FactoryState.BLOCKED.value
+            )
+            persistent_run.completed_at = 2_000
+            persistent_cycle.state = persistent_run.state
+            persistent_cycle.completed_at = 1_900
+            if include_proof:
+                db.add(
+                    FactoryEvent(
+                        run_id=run.id,
+                        cycle_id=cycle.id,
+                        sequence=999,
+                        actor=FactoryActor.SYSTEM.value,
+                        event_type="victory.authorized" if success else "failure.recorded",
+                        from_state=(
+                            FactoryState.VICTORY_JUDGING.value
+                            if success
+                            else FactoryState.REPAIR_REQUIRED.value
+                        ),
+                        to_state=(
+                            FactoryState.COMMITTING.value
+                            if success
+                            else FactoryState.REPAIR_REQUIRED.value
+                        ),
+                        idempotency_key=f"proof-{key}",
+                        payload_digest="d" * 64,
+                        payload={},
+                        created_at=1_500,
+                    )
+                )
+            await db.commit()
+        return run, cycle
+
+    async def test_outcomes_require_persisted_machine_verified_factory_result(self):
+        run, cycle = await self._terminal_proof("missing-proof", success=True, include_proof=False)
         with self.assertRaisesRegex(ValueError, "machine-verified"):
             await self.store.record_capability_outcome(
                 manifest=self.manifest,
+                run_id=run.id,
+                cycle_id=cycle.id,
                 repository_family="python",
                 task_family="debugging",
                 verified_success=True,
-                machine_verified=False,
                 regression=False,
                 repair_iterations=0,
                 input_tokens=10,
@@ -181,12 +240,14 @@ class CapabilityHistoryStoreTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_verified_outcomes_accumulate_objective_metrics_and_confidence(self):
+        success_run, success_cycle = await self._terminal_proof("success-proof", success=True)
         await self.store.record_capability_outcome(
             manifest=self.manifest,
+            run_id=success_run.id,
+            cycle_id=success_cycle.id,
             repository_family="python",
             task_family="debugging",
             verified_success=True,
-            machine_verified=True,
             regression=False,
             repair_iterations=1,
             input_tokens=10,
@@ -194,12 +255,14 @@ class CapabilityHistoryStoreTests(unittest.IsolatedAsyncioTestCase):
             runtime_ms=100,
             cost_usd=0.01,
         )
+        failure_run, failure_cycle = await self._terminal_proof("failure-proof", success=False)
         await self.store.record_capability_outcome(
             manifest=self.manifest,
+            run_id=failure_run.id,
+            cycle_id=failure_cycle.id,
             repository_family="python",
             task_family="debugging",
             verified_success=False,
-            machine_verified=True,
             regression=True,
             repair_iterations=2,
             input_tokens=20,

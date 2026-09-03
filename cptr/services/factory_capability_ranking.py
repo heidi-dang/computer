@@ -11,7 +11,15 @@ from sqlalchemy import select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
-from cptr.models import FactoryCapabilityPerformance, FactoryCapabilityRecord
+from cptr.models import (
+    FactoryCapabilityOutcome,
+    FactoryCapabilityPerformance,
+    FactoryCapabilityRecord,
+    FactoryCycle,
+    FactoryEvent,
+    FactoryRun,
+)
+from cptr.services.factory_domain import FactoryActor, FactoryState
 from cptr.services.factory_capabilities import (
     CapabilityManifest,
     CapabilityRequirement,
@@ -248,10 +256,11 @@ class SqlCapabilityHistoryStore:
         self,
         *,
         manifest: CapabilityManifest,
+        run_id: str,
+        cycle_id: str,
         repository_family: str,
         task_family: str,
         verified_success: bool,
-        machine_verified: bool,
         regression: bool,
         repair_iterations: int,
         input_tokens: int,
@@ -259,8 +268,14 @@ class SqlCapabilityHistoryStore:
         runtime_ms: int,
         cost_usd: float,
     ) -> CapabilityHistory:
-        if not machine_verified:
-            raise ValueError("capability outcomes require machine-verified factory evidence")
+        """Record one idempotent capability outcome after verifying durable machine proof.
+
+        A caller cannot turn a Boolean into success authority. Successful learning
+        requires a COMPLETE factory run plus the server-owned ``victory.authorized``
+        event for the same cycle. Verified failures require a terminal BLOCKED/FAILED
+        run plus a persisted machine ``failure.recorded`` event.
+        """
+
         metrics = (repair_iterations, input_tokens, output_tokens, runtime_ms)
         if any(value < 0 for value in metrics) or cost_usd < 0:
             raise ValueError("capability outcome metrics must not be negative")
@@ -268,9 +283,80 @@ class SqlCapabilityHistoryStore:
         task_family = _normalize_family(task_family, "task family")
         now = _now_ms()
         cost_microusd = int(round(cost_usd * 1_000_000))
+        outcome_id = "fcapout_" + uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"cptr-factory:{run_id}:{cycle_id}:{manifest.identity}",
+        ).hex
 
         async with self._session_factory() as db:
             async with db.begin():
+                run = await db.get(FactoryRun, run_id)
+                cycle = await db.get(FactoryCycle, cycle_id)
+                if run is None or cycle is None or cycle.run_id != run_id:
+                    raise ValueError("capability outcome requires an existing factory run/cycle")
+
+                proof_type = "victory.authorized" if verified_success else "failure.recorded"
+                allowed_states = (
+                    {FactoryState.COMPLETE.value}
+                    if verified_success
+                    else {FactoryState.BLOCKED.value, FactoryState.FAILED.value}
+                )
+                if run.state not in allowed_states:
+                    raise ValueError("capability outcomes require machine-verified terminal factory evidence")
+                proof = (
+                    await db.execute(
+                        select(FactoryEvent)
+                        .where(
+                            FactoryEvent.run_id == run_id,
+                            FactoryEvent.cycle_id == cycle_id,
+                            FactoryEvent.event_type == proof_type,
+                            FactoryEvent.actor == FactoryActor.SYSTEM.value,
+                        )
+                        .order_by(FactoryEvent.sequence.desc())
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if proof is None:
+                    raise ValueError("capability outcomes require machine-verified factory evidence")
+
+                existing_outcome = await db.get(FactoryCapabilityOutcome, outcome_id)
+                if existing_outcome is not None:
+                    expected = (
+                        repository_family,
+                        task_family,
+                        bool(verified_success),
+                        proof.id,
+                        bool(regression),
+                        repair_iterations,
+                        input_tokens,
+                        output_tokens,
+                        runtime_ms,
+                        cost_microusd,
+                    )
+                    observed = (
+                        existing_outcome.repository_family,
+                        existing_outcome.task_family,
+                        bool(existing_outcome.verified_success),
+                        existing_outcome.proof_event_id,
+                        bool(existing_outcome.regression),
+                        int(existing_outcome.repair_iterations),
+                        int(existing_outcome.input_tokens),
+                        int(existing_outcome.output_tokens),
+                        int(existing_outcome.runtime_ms),
+                        int(existing_outcome.cost_microusd),
+                    )
+                    if observed != expected:
+                        raise ValueError("capability outcome replay changed immutable verified metrics")
+                    result = await db.execute(
+                        select(FactoryCapabilityPerformance).where(
+                            FactoryCapabilityPerformance.capability_id == manifest.identity,
+                            FactoryCapabilityPerformance.repository_family == repository_family,
+                            FactoryCapabilityPerformance.task_family == task_family,
+                        )
+                    )
+                    row = result.scalar_one()
+                    return self._history_from_row(row)
+
                 await self._upsert_manifest(db, manifest, now=now)
                 table = FactoryCapabilityPerformance.__table__
                 insert = sqlite_insert(table).values(
@@ -300,24 +386,38 @@ class SqlCapabilityHistoryStore:
                     ],
                     set_={
                         "attempts": table.c.attempts + 1,
-                        "verified_successes": table.c.verified_successes
-                        + excluded.verified_successes,
-                        "verified_failures": table.c.verified_failures
-                        + excluded.verified_failures,
+                        "verified_successes": table.c.verified_successes + excluded.verified_successes,
+                        "verified_failures": table.c.verified_failures + excluded.verified_failures,
                         "regressions": table.c.regressions + excluded.regressions,
-                        "repair_iterations": table.c.repair_iterations
-                        + excluded.repair_iterations,
+                        "repair_iterations": table.c.repair_iterations + excluded.repair_iterations,
                         "input_tokens": table.c.input_tokens + excluded.input_tokens,
                         "output_tokens": table.c.output_tokens + excluded.output_tokens,
                         "runtime_ms": table.c.runtime_ms + excluded.runtime_ms,
                         "cost_microusd": table.c.cost_microusd + excluded.cost_microusd,
-                        "confidence_ppm": (
-                            table.c.attempts + 1
-                        ) * 100_000,
+                        "confidence_ppm": (table.c.attempts + 1) * 100_000,
                         "updated_at": now,
                     },
                 )
                 await db.execute(statement)
+                db.add(
+                    FactoryCapabilityOutcome(
+                        id=outcome_id,
+                        run_id=run_id,
+                        cycle_id=cycle_id,
+                        capability_id=manifest.identity,
+                        repository_family=repository_family,
+                        task_family=task_family,
+                        verified_success=verified_success,
+                        proof_event_id=proof.id,
+                        regression=regression,
+                        repair_iterations=repair_iterations,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        runtime_ms=runtime_ms,
+                        cost_microusd=cost_microusd,
+                        created_at=now,
+                    )
+                )
 
                 result = await db.execute(
                     select(FactoryCapabilityPerformance).where(
