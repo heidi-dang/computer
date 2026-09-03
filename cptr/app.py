@@ -87,7 +87,9 @@ async def lifespan(app: FastAPI):
         store=factory_store,
         lease_ms=FACTORY_RUN_LEASE_MS,
     )
-    app.state.factory_scheduled_run_ids = await app.state.factory_production_runner.schedule_active()
+    app.state.factory_scheduled_run_ids = (
+        await app.state.factory_production_runner.schedule_active()
+    )
 
     from cptr.services.live_events import live_event_hub
     from cptr.services.runtime_metrics import event_loop_lag_worker
