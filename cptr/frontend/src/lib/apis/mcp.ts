@@ -796,7 +796,7 @@ export interface McpMemoryBranchState {
 }
 
 export interface McpMemorySnapshot {
-	version: 1 | 2;
+	version: 1 | 2 | 3;
 	workspaces: McpMemoryWorkspace[];
 	selected_workspace_id: string | null;
 	nodes: McpMemoryNode[];
@@ -828,6 +828,12 @@ export interface McpMemorySnapshot {
 		pending_memory_jobs?: number;
 		running_memory_jobs?: number;
 		failed_memory_jobs?: number;
+		vector_indexed_memories?: number;
+		lexical_indexed_memories?: number;
+		retrieval_learning_observations?: number;
+		open_memory_conflicts?: number;
+		procedure_profiles?: number;
+		failure_profiles?: number;
 	};
 	health: {
 		enabled?: boolean;
@@ -849,6 +855,31 @@ export interface McpMemorySnapshot {
 			complete?: number;
 			failed?: number;
 		};
+		advanced_status?: string;
+		vector_index?: {
+			backend?: string;
+			model_id?: string;
+			dimensions?: number;
+			coverage?: number;
+			hnsw?: boolean;
+		};
+		lexical_index?: {
+			backend?: string;
+			k1?: number;
+			b?: number;
+			coverage?: number;
+		};
+		retrieval_learning?: {
+			weights?: Record<string, number>;
+			observations?: number;
+			updated_at_ms?: number;
+		};
+		open_conflicts?: number;
+		intelligence?: {
+			procedures?: number;
+			failures?: number;
+		};
+		index_errors?: Record<string, { error_type?: string; at_ms?: number }>;
 	};
 	lifecycle?: {
 		namespaces: McpMemoryNamespaceState[];
@@ -857,6 +888,31 @@ export interface McpMemorySnapshot {
 		branches: McpMemoryBranchState[];
 	};
 	fingerprint: string;
+	generated_at_ms: number;
+}
+
+export interface McpMemoryTimelineRecord {
+	memory_id: string;
+	scope: string;
+	kind: string;
+	preview: string;
+	status: string;
+	trust_level: string;
+	confidence: number;
+	importance: number;
+	valid_from_ms: number | null;
+	valid_until_ms: number | null;
+	observed_at_ms: number | null;
+	superseded_at_ms: number | null;
+	branch_id: string | null;
+}
+
+export interface McpMemoryTimeline {
+	version: 2;
+	workspace_id: string | null;
+	at_ms: number;
+	known_at_ms: number | null;
+	records: McpMemoryTimelineRecord[];
 	generated_at_ms: number;
 }
 
@@ -914,6 +970,21 @@ export const getMcpMemorySnapshot = (
 	});
 	if (workspaceId) params.set('workspace_id', workspaceId);
 	return fetchJSON<McpMemorySnapshot>(`/api/mcp/memory/snapshot?${params.toString()}`);
+};
+
+export const getMcpMemoryTimeline = (
+	atMs: number,
+	workspaceId?: string | null,
+	limit = 300,
+	knownAtMs?: number | null
+) => {
+	const params = new URLSearchParams({
+		at_ms: String(Math.max(0, Math.trunc(atMs))),
+		limit: String(limit)
+	});
+	if (knownAtMs != null) params.set('known_at_ms', String(Math.max(0, Math.trunc(knownAtMs))));
+	if (workspaceId) params.set('workspace_id', workspaceId);
+	return fetchJSON<McpMemoryTimeline>(`/api/mcp/memory/timeline?${params.toString()}`);
 };
 
 export function openMcpMemoryStream(

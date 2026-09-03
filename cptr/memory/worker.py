@@ -11,8 +11,8 @@ import logging
 from typing import Any
 
 from cptr.memory.domain import ConsolidationInput
-from cptr.memory.graph import MemoryGraphStore, memory_graph_store
-from cptr.memory.jobs import MemoryJobStore, memory_job_store
+from cptr.memory.graph import MemoryGraphStore
+from cptr.memory.jobs import MemoryJobStore
 from cptr.memory.service import EmbeddedMemoryService, get_memory_service
 
 logger = logging.getLogger(__name__)
@@ -27,8 +27,8 @@ class MemoryWorker:
         graph_store: MemoryGraphStore | None = None,
     ) -> None:
         self.service = service or get_memory_service()
-        self.job_store = job_store or memory_job_store
-        self.graph_store = graph_store or memory_graph_store
+        self.job_store = job_store or self.service.job_store
+        self.graph_store = graph_store or self.service.graph_store
 
     async def process(self, job: dict[str, Any]) -> None:
         job_id = str(job.get("job_id") or "")
@@ -61,18 +61,47 @@ class MemoryWorker:
                         importance=float(payload.get("importance") or 0.5),
                     )
                 )
+                user_id = str(job.get("user_id") or "")
+                workspace = str(job.get("workspace") or "")
                 await self.service.project_graph(
-                    user_id=str(job.get("user_id") or ""),
-                    workspace=str(job.get("workspace") or ""),
+                    user_id=user_id,
+                    workspace=workspace,
                     memory_id=ref.memory_id,
                     heading=str(payload.get("heading") or ""),
                 )
+                await self.service.index_memory(
+                    ref.memory_id,
+                    user_id=user_id,
+                    workspace=workspace,
+                )
+                await self.service.analyze_conflicts(ref.memory_id)
+            elif job_type == "index_memory":
+                memory_id = str(payload.get("memory_id") or "")
+                user_id = str(job.get("user_id") or "")
+                workspace = str(job.get("workspace") or "")
+                await self.service.project_graph(
+                    user_id=user_id,
+                    workspace=workspace,
+                    memory_id=memory_id,
+                    heading=str(payload.get("heading") or ""),
+                )
+                await self.service.index_memory(
+                    memory_id,
+                    user_id=user_id,
+                    workspace=workspace,
+                )
+                await self.service.analyze_conflicts(memory_id)
             elif job_type == "graph_project":
                 await self.service.project_graph(
                     user_id=str(job.get("user_id") or ""),
                     workspace=str(job.get("workspace") or ""),
                     memory_id=str(payload.get("memory_id") or ""),
                     heading=str(payload.get("heading") or ""),
+                )
+            elif job_type == "rebuild_indexes":
+                await self.service.rebuild_derived_indexes(
+                    str(job.get("user_id") or ""),
+                    str(job.get("workspace") or ""),
                 )
             else:
                 raise ValueError(f"unsupported memory job type: {job_type}")

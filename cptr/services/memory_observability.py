@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from cptr.memory.graph import MemoryGraphStore, memory_graph_store
 from cptr.memory.jobs import MemoryJobStore, memory_job_store
+from cptr.memory.service import EmbeddedMemoryService
 from cptr.memory.store import SqlMemoryStore
 from cptr.models import Workspace
 from cptr.services.memory_fabric import MemoryFabricStore, memory_fabric_store
@@ -264,6 +265,7 @@ class MemoryObservabilityService:
         core_store: SqlMemoryStore | None = None,
         job_store: MemoryJobStore | None = None,
         graph_store: MemoryGraphStore | None = None,
+        core_service: EmbeddedMemoryService | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._store = store or memory_fabric_store
@@ -279,6 +281,12 @@ class MemoryObservabilityService:
             memory_graph_store
             if session_factory is None
             else MemoryGraphStore(session_factory=session_factory)
+        )
+        self._core_service = core_service or EmbeddedMemoryService(
+            store=self._core_store,
+            event_store=self._store,
+            job_store=self._job_store,
+            graph_store=self._graph_store,
         )
 
     @asynccontextmanager
@@ -309,6 +317,75 @@ class MemoryObservabilityService:
             }
             for row in rows
         ]
+
+    async def resolve_workspace_path(self, user_id: str, workspace_id: str | None) -> str:
+        if not workspace_id:
+            return ""
+        rows = await self._workspaces(user_id)
+        selected = next((row for row in rows if row["workspace_id"] == workspace_id), None)
+        if selected is None:
+            raise KeyError("memory workspace not found")
+        return str(selected.get("workspace_path") or "")
+
+    async def timeline(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None,
+        at_ms: int,
+        known_at_ms: int | None = None,
+        limit: int = 300,
+    ) -> dict[str, Any]:
+        all_workspaces = await self._workspaces(user_id)
+        workspace_path = ""
+        if workspace_id:
+            selected = next(
+                (row for row in all_workspaces if row["workspace_id"] == workspace_id),
+                None,
+            )
+            if selected is None:
+                raise KeyError("memory workspace not found")
+            workspace_path = str(selected.get("workspace_path") or "")
+        valid_at = max(0, int(at_ms))
+        known_at = max(0, int(known_at_ms)) if known_at_ms is not None else None
+        rows = await self._core_service.time_travel(
+            user_id,
+            workspace_path,
+            at_ms=valid_at,
+            known_at_ms=known_at,
+            limit=max(1, min(int(limit), 1000)),
+        )
+        return {
+            "version": 2,
+            "workspace_id": workspace_id,
+            "at_ms": valid_at,
+            "known_at_ms": known_at,
+            "records": [
+                {
+                    "memory_id": str(row.get("memory_id") or ""),
+                    "scope": str(row.get("scope") or ""),
+                    "kind": str(row.get("kind") or "semantic"),
+                    "preview": _safe_preview(str(row.get("canonical_text") or ""), 500),
+                    "status": str(row.get("status") or "active"),
+                    "trust_level": str(row.get("trust_level") or "agent_observation"),
+                    "confidence": max(
+                        0.0,
+                        min(1.0, int(row.get("confidence_ppm") or 0) / 1_000_000),
+                    ),
+                    "importance": max(
+                        0.0,
+                        min(1.0, int(row.get("importance_ppm") or 0) / 1_000_000),
+                    ),
+                    "valid_from_ms": row.get("valid_from_ms"),
+                    "valid_until_ms": row.get("valid_until_ms"),
+                    "observed_at_ms": row.get("observed_at_ms"),
+                    "superseded_at_ms": row.get("superseded_at_ms"),
+                    "branch_id": row.get("branch_id"),
+                }
+                for row in rows
+            ],
+            "generated_at_ms": int(time.time() * 1000),
+        }
 
     async def snapshot(
         self,
@@ -355,6 +432,10 @@ class MemoryObservabilityService:
             limit=node_limit,
         )
         job_counts = await self._job_store.counts(
+            user_id=user_id,
+            workspace=selected_workspace_path,
+        )
+        advanced_health = await self._core_service.health(
             user_id=user_id,
             workspace=selected_workspace_path,
         )
@@ -613,6 +694,18 @@ class MemoryObservabilityService:
             "pending_memory_jobs": int(job_counts.get("pending") or 0),
             "running_memory_jobs": int(job_counts.get("running") or 0),
             "failed_memory_jobs": int(job_counts.get("failed") or 0),
+            "vector_indexed_memories": int(advanced_health.get("vector", {}).get("coverage") or 0),
+            "lexical_indexed_memories": int(
+                advanced_health.get("lexical", {}).get("coverage") or 0
+            ),
+            "retrieval_learning_observations": int(
+                advanced_health.get("retrieval_learning", {}).get("observations") or 0
+            ),
+            "open_memory_conflicts": int(advanced_health.get("open_conflicts") or 0),
+            "procedure_profiles": int(
+                advanced_health.get("intelligence", {}).get("procedures") or 0
+            ),
+            "failure_profiles": int(advanced_health.get("intelligence", {}).get("failures") or 0),
         }
         health = {
             "enabled": bool(settings.get("enabled", True)),
@@ -629,6 +722,13 @@ class MemoryObservabilityService:
             "verification_ttl_seconds": int(settings.get("verification_ttl_seconds") or 0),
             "maintenance_enabled": bool(settings.get("maintenance_enabled", True)),
             "maintenance_queue": job_counts,
+            "advanced_status": str(advanced_health.get("status") or "unknown"),
+            "vector_index": dict(advanced_health.get("vector") or {}),
+            "lexical_index": dict(advanced_health.get("lexical") or {}),
+            "retrieval_learning": dict(advanced_health.get("retrieval_learning") or {}),
+            "open_conflicts": int(advanced_health.get("open_conflicts") or 0),
+            "intelligence": dict(advanced_health.get("intelligence") or {}),
+            "index_errors": dict(advanced_health.get("index_errors") or {}),
         }
         lifecycle = {
             "namespaces": list(core_state.get("namespaces") or []),
@@ -650,7 +750,7 @@ class MemoryObservabilityService:
             ).encode("utf-8")
         ).hexdigest()
         return {
-            "version": 2,
+            "version": 3,
             "workspaces": all_workspaces,
             "selected_workspace_id": workspace_id,
             "nodes": nodes,

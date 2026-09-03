@@ -12,12 +12,14 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from cptr.memory.conflicts import MemoryConflictStore, conflict_classification, fact_signature
 from cptr.memory.domain import (
     BranchRef,
     Checkpoint,
     CheckpointState,
     ConsolidationInput,
     ManagedContext,
+    MemoryConflictRef,
     MemoryContextBundle,
     MemoryQuery,
     MemoryRecordRef,
@@ -28,9 +30,13 @@ from cptr.memory.domain import (
     SnapshotRef,
     VerificationResult,
 )
-from cptr.memory.graph import MemoryGraphStore, memory_graph_store
-from cptr.memory.jobs import MemoryJobStore, memory_job_store
-from cptr.memory.retrieval import NullVectorSearch, VectorSearchPort, score_candidate
+from cptr.memory.embeddings import SqlVectorIndex, embedding_provider_from_env
+from cptr.memory.graph import MemoryGraphStore
+from cptr.memory.intelligence import MemoryIntelligenceStore
+from cptr.memory.jobs import MemoryJobStore
+from cptr.memory.lexical import MemoryLexicalIndex
+from cptr.memory.pgvector import PgVectorIndex
+from cptr.memory.retrieval import VectorSearchPort, score_candidate
 from cptr.memory.store import SqlMemoryStore, content_hash
 from cptr.services.memory_fabric import MemoryFabricStore, memory_fabric_store
 from cptr.utils.redaction import redact_sensitive, redact_text
@@ -42,6 +48,7 @@ class MemoryUnavailableError(RuntimeError):
 
 ManagedLoader = Callable[[PrepareContextInput], Awaitable[ManagedContext]]
 SettingsLoader = Callable[[], Awaitable[dict[str, Any]]]
+SourceForgetter = Callable[[dict[str, Any]], Awaitable[None]]
 
 _MUTATION_EVENTS = {
     "write",
@@ -123,6 +130,9 @@ class EmbeddedMemoryService:
         managed_context_loader: ManagedLoader | None = None,
         settings_loader: SettingsLoader | None = None,
         vector_search: VectorSearchPort | None = None,
+        lexical_search: MemoryLexicalIndex | None = None,
+        conflict_store: MemoryConflictStore | None = None,
+        intelligence_store: MemoryIntelligenceStore | None = None,
         job_store: MemoryJobStore | None = None,
         graph_store: MemoryGraphStore | None = None,
     ) -> None:
@@ -130,9 +140,22 @@ class EmbeddedMemoryService:
         self.event_store = event_store or memory_fabric_store
         self._managed_context_loader = managed_context_loader or _default_managed_loader
         self._settings_loader = settings_loader or _default_settings_loader
-        self._vector_search = vector_search or NullVectorSearch()
-        self.job_store = job_store or memory_job_store
-        self.graph_store = graph_store or memory_graph_store
+        session_factory = self.store.session_factory
+        if vector_search is None:
+            provider = embedding_provider_from_env()
+            vector_search = PgVectorIndex.from_env(provider=provider) or SqlVectorIndex(
+                session_factory=session_factory,
+                provider=provider,
+            )
+        self._vector_search = vector_search
+        self._lexical_search = lexical_search or MemoryLexicalIndex(session_factory=session_factory)
+        self.conflict_store = conflict_store or MemoryConflictStore(session_factory=session_factory)
+        self.intelligence_store = intelligence_store or MemoryIntelligenceStore(
+            session_factory=session_factory
+        )
+        self.job_store = job_store or MemoryJobStore(session_factory=session_factory)
+        self.graph_store = graph_store or MemoryGraphStore(session_factory=session_factory)
+        self._index_errors: dict[str, dict[str, Any]] = {}
 
     async def prepare_context(self, value: PrepareContextInput) -> MemoryContextBundle:
         settings = await self._settings_loader()
@@ -470,23 +493,73 @@ class EmbeddedMemoryService:
                 for row in rows
                 if row.get("branch_id") == effective_branch or row.get("memory_id") in snapshot_ids
             ]
-        vector_scores = await self._vector_search.score(
-            user_id=value.user_id,
-            workspace=value.workspace,
-            query=value.query,
-            memory_ids=[str(row["memory_id"]) for row in rows],
-        )
+        memory_ids = [str(row["memory_id"]) for row in rows]
+        vector_scores: dict[str, float] = {}
+        bm25_scores: dict[str, float] = {}
+        graph_scores: dict[str, float] = {}
+        try:
+            vector_scores = dict(
+                await self._vector_search.score(
+                    user_id=value.user_id,
+                    workspace=value.workspace,
+                    query=value.query,
+                    memory_ids=memory_ids,
+                )
+            )
+            self._index_errors.pop("vector", None)
+        except Exception as exc:
+            self._index_errors["vector"] = {
+                "error_type": type(exc).__name__,
+                "at_ms": _now_ms(),
+            }
+        try:
+            bm25_scores = dict(
+                await self._lexical_search.score(
+                    user_id=value.user_id,
+                    workspace=value.workspace,
+                    query=value.query,
+                    memory_ids=memory_ids,
+                )
+            )
+            self._index_errors.pop("lexical", None)
+        except Exception as exc:
+            self._index_errors["lexical"] = {
+                "error_type": type(exc).__name__,
+                "at_ms": _now_ms(),
+            }
+        try:
+            graph_scores = dict(
+                await self.graph_store.related_memory_scores(
+                    user_id=value.user_id,
+                    workspace=value.workspace,
+                    query=value.query,
+                    limit=max(100, value.limit * 30),
+                )
+            )
+            self._index_errors.pop("graph", None)
+        except Exception as exc:
+            self._index_errors["graph"] = {
+                "error_type": type(exc).__name__,
+                "at_ms": _now_ms(),
+            }
+        profile = await self.store.get_retrieval_profile(value.user_id, value.workspace)
+        intelligence = await self.intelligence_store.metrics(memory_ids)
         ranked: list[MemoryResult] = []
         for row in rows:
-            score, reason, verification_stale = score_candidate(
+            memory_id = str(row["memory_id"])
+            score, reason, verification_stale, features = score_candidate(
                 row,
                 query=value.query,
                 now_ms=now_ms,
-                vector_score=float(vector_scores.get(str(row["memory_id"]), 0.0)),
+                vector_score=float(vector_scores.get(memory_id, 0.0)),
+                bm25_score=float(bm25_scores.get(memory_id, 0.0)),
+                graph_score=float(graph_scores.get(memory_id, 0.0)),
+                weights=profile["weights"],
+                intelligence=intelligence.get(memory_id, {}),
             )
             ranked.append(
                 MemoryResult(
-                    memory_id=str(row["memory_id"]),
+                    memory_id=memory_id,
                     scope=str(row["scope"]),
                     kind=str(row["kind"]),
                     canonical_text=str(row["canonical_text"]),
@@ -500,6 +573,7 @@ class EmbeddedMemoryService:
                     valid_from_ms=row.get("valid_from_ms"),
                     valid_until_ms=row.get("valid_until_ms"),
                     branch_id=row.get("branch_id"),
+                    features=features,
                 )
             )
         ranked.sort(key=lambda row: (row.score, row.importance, row.confidence), reverse=True)
@@ -567,6 +641,12 @@ class EmbeddedMemoryService:
             trust_level=replacement.trust_level,
             payload={"supersedes": old_memory_id, "kind": replacement.kind},
         )
+        await self.job_store.enqueue(
+            user_id=replacement.user_id,
+            workspace=replacement.workspace,
+            job_type="index_memory",
+            payload={"memory_id": ref.memory_id, "heading": replacement.kind},
+        )
         return ref
 
     async def feedback(self, value: RetrievalFeedback) -> None:
@@ -581,7 +661,416 @@ class EmbeddedMemoryService:
             used=value.used,
             helpful=value.helpful,
             outcome=value.outcome,
+            features=value.features,
         )
+        normalized_outcome = str(value.outcome or "").strip().lower()
+        positive = value.helpful is True or normalized_outcome in {
+            "success",
+            "passed",
+            "complete",
+            "helpful",
+        }
+        negative = value.helpful is False or normalized_outcome in {
+            "failure",
+            "failed",
+            "error",
+            "unhelpful",
+        }
+        if value.features and (positive or negative):
+            await self.store.learn_retrieval_profile(
+                value.user_id,
+                value.workspace,
+                features=value.features,
+                positive=positive and not negative,
+            )
+        if normalized_outcome:
+            await self.intelligence_store.record_outcome(
+                value.memory_id,
+                outcome=normalized_outcome,
+            )
+
+    async def inspect(self, memory_id: str, *, user_id: str, workspace: str) -> dict[str, Any]:
+        row = await self.store.get_memory(memory_id)
+        if row["user_id"] != user_id or row["workspace"] not in {"", str(workspace or "")}:
+            raise KeyError("memory not found")
+        return row
+
+    async def index_memory(self, memory_id: str, *, user_id: str, workspace: str) -> None:
+        row = await self.inspect(memory_id, user_id=user_id, workspace=workspace)
+        await self._lexical_search.index_memory(row)
+        index_method = getattr(self._vector_search, "index_memory", None)
+        if callable(index_method):
+            await index_method(row)
+        await self.intelligence_store.project(row)
+        await self.event_store.record_event(
+            user_id=user_id,
+            workspace=workspace,
+            event_type="index_updated",
+            memory_id=memory_id,
+            reason="rebuildable BM25, vector, and intelligence indexes updated",
+            payload={
+                "lexical_backend": self._lexical_search.sanitized_config().get("backend"),
+                "vector_backend": getattr(
+                    self._vector_search, "sanitized_config", lambda: {}
+                )().get("backend"),
+            },
+        )
+
+    async def analyze_conflicts(self, memory_id: str) -> list[MemoryConflictRef]:
+        row = await self.store.get_memory(memory_id)
+        signature = fact_signature(row)
+        if signature is None or row["status"] != "active":
+            return []
+        fact_key, fact_value = signature
+        candidates = await self.store.list_candidates(
+            user_id=row["user_id"],
+            workspace=row["workspace"],
+            include_historical=False,
+            scope=row["scope"],
+            branch_id=row.get("branch_id"),
+            limit=1000,
+        )
+        conflicts: list[MemoryConflictRef] = []
+        for candidate in candidates:
+            if candidate["memory_id"] == memory_id:
+                continue
+            candidate_signature = fact_signature(candidate)
+            if candidate_signature is None:
+                continue
+            candidate_key, candidate_value = candidate_signature
+            if candidate_key != fact_key or candidate_value == fact_value:
+                continue
+            classification, confidence, reason = conflict_classification(candidate, row)
+            ref = await self.conflict_store.record(
+                user_id=row["user_id"],
+                workspace=row["workspace"],
+                fact_key=fact_key,
+                left_memory_id=candidate["memory_id"],
+                right_memory_id=memory_id,
+                classification=classification,
+                confidence=confidence,
+                reason=reason,
+            )
+            conflicts.append(ref)
+        if conflicts:
+            await self.event_store.record_event(
+                user_id=row["user_id"],
+                workspace=row["workspace"],
+                event_type="conflict_detected",
+                memory_id=memory_id,
+                reason="active canonical facts disagree on the same fact key",
+                payload={"conflict_count": len(conflicts)},
+            )
+        return conflicts
+
+    async def list_conflicts(
+        self,
+        *,
+        user_id: str,
+        workspace: str | None = None,
+        status: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        return await self.conflict_store.list(
+            user_id=user_id,
+            workspace=workspace,
+            status=status,
+            limit=limit,
+        )
+
+    async def resolve_conflict(self, conflict_id: str, *, resolution: str) -> dict[str, Any]:
+        allowed = {"temporal_change", "prefer_new", "prefer_old", "keep_both"}
+        if resolution not in allowed:
+            raise ValueError("unsupported conflict resolution")
+        # The opaque conflict ID identifies a durable owner-scoped record; callers cannot supply identity.
+        conflict = await self.conflict_store.lookup(conflict_id)
+        user_id = str(conflict["user_id"])
+        workspace = str(conflict["workspace"])
+        if resolution in {"temporal_change", "prefer_new"}:
+            await self.store.supersede_with_existing(
+                old_memory_id=conflict["left_memory_id"],
+                new_memory_id=conflict["right_memory_id"],
+                user_id=user_id,
+                workspace=workspace,
+            )
+        elif resolution == "prefer_old":
+            await self.store.supersede_with_existing(
+                old_memory_id=conflict["right_memory_id"],
+                new_memory_id=conflict["left_memory_id"],
+                user_id=user_id,
+                workspace=workspace,
+            )
+        resolved = await self.conflict_store.resolve(
+            conflict_id,
+            user_id=user_id,
+            resolution=resolution,
+        )
+        await self.event_store.record_event(
+            user_id=user_id,
+            workspace=workspace,
+            event_type="conflict_resolved",
+            reason="memory conflict resolved without deleting historical evidence",
+            payload={"conflict_id": conflict_id, "resolution": resolution},
+        )
+        return resolved
+
+    async def time_travel(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        at_ms: int,
+        known_at_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        return await self.store.time_travel_records(
+            user_id,
+            workspace,
+            at_ms=at_ms,
+            known_at_ms=known_at_ms,
+            limit=limit,
+        )
+
+    async def compare_snapshots(
+        self,
+        user_id: str,
+        workspace: str,
+        left_snapshot_id: str,
+        right_snapshot_id: str,
+    ) -> dict[str, Any]:
+        return await self.store.compare_snapshots(
+            user_id,
+            workspace,
+            left_snapshot_id,
+            right_snapshot_id,
+        )
+
+    async def merge_branch(
+        self,
+        user_id: str,
+        workspace: str,
+        branch_id: str,
+        *,
+        strategy: str = "verified_only",
+    ) -> dict[str, Any]:
+        result = await self.store.merge_branch(
+            user_id,
+            workspace,
+            branch_id,
+            strategy=strategy,
+        )
+        for memory_id in result["merged_memory_ids"]:
+            await self.job_store.enqueue(
+                user_id=user_id,
+                workspace=workspace,
+                job_type="index_memory",
+                payload={"memory_id": memory_id},
+            )
+        await self.event_store.record_event(
+            user_id=user_id,
+            workspace=workspace,
+            event_type="branch_merged",
+            reason="verified branch knowledge merged into canonical memory",
+            payload={
+                "branch_id": branch_id,
+                "strategy": strategy,
+                "merged_count": result["merged_count"],
+                "skipped_count": result["skipped_count"],
+                "conflicted_count": result.get("conflicted_count", 0),
+            },
+        )
+        return result
+
+    async def forget(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        workspace: str,
+        source_forgetter: SourceForgetter | None = None,
+    ) -> bool:
+        row = await self.inspect(memory_id, user_id=user_id, workspace=workspace)
+        actual_workspace = str(row.get("workspace") or "")
+        structured = (
+            row.get("structured_value") if isinstance(row.get("structured_value"), dict) else {}
+        )
+        managed_source = structured.get("managed_source") if isinstance(structured, dict) else None
+        if isinstance(managed_source, dict) and managed_source and source_forgetter is None:
+            raise MemoryUnavailableError(
+                "managed memory source requires an authenticated source-forget capability"
+            )
+
+        await self.store.begin_forget(
+            memory_id,
+            user_id=user_id,
+            workspace=actual_workspace,
+        )
+        if source_forgetter is not None and isinstance(managed_source, dict) and managed_source:
+            try:
+                await source_forgetter(row)
+            except Exception as exc:
+                raise MemoryUnavailableError(
+                    "managed memory source deletion failed; memory remains non-recallable and retryable"
+                ) from exc
+
+        vector_remove = getattr(self._vector_search, "remove_memory", None)
+        if callable(vector_remove):
+            await vector_remove(
+                memory_id,
+                user_id=user_id,
+                workspace=actual_workspace,
+            )
+        await self._lexical_search.remove_memory(
+            memory_id,
+            user_id=user_id,
+            workspace=actual_workspace,
+        )
+        await self.graph_store.remove_memory(
+            user_id=user_id,
+            workspace=actual_workspace,
+            memory_id=memory_id,
+        )
+        await self.store.forget_memory(
+            memory_id,
+            user_id=user_id,
+            workspace=actual_workspace,
+        )
+        await self.event_store.record_event(
+            user_id=user_id,
+            workspace=actual_workspace,
+            event_type="memory_forgotten",
+            scope=str(row.get("scope") or "workspace"),
+            memory_id=memory_id,
+            reason="explicit owner-authorized memory deletion",
+            trust_level="user_directive",
+            confidence_ppm=1_000_000,
+            payload={"kind": str(row.get("kind") or "semantic")},
+        )
+        return True
+
+    async def rebuild_derived_indexes(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        batch_size: int = 200,
+    ) -> dict[str, Any]:
+        safe_batch = max(1, min(int(batch_size), 1000))
+        await self._lexical_search.clear_scope(user_id=user_id, workspace=workspace)
+        vector_clear = getattr(self._vector_search, "clear_scope", None)
+        if callable(vector_clear):
+            await vector_clear(user_id=user_id, workspace=workspace)
+        await self.graph_store.clear_scope(user_id=user_id, workspace=workspace)
+        await self.intelligence_store.clear_scope(user_id=user_id, workspace=workspace)
+        await self.conflict_store.clear_scope(user_id=user_id, workspace=workspace)
+        offset = 0
+        scanned = 0
+        indexed = 0
+        memory_ids: list[str] = []
+        while True:
+            rows = await self.store.list_records_page(
+                user_id,
+                workspace,
+                offset=offset,
+                limit=safe_batch,
+            )
+            if not rows:
+                break
+            for row in rows:
+                scanned += 1
+                memory_id = str(row.get("memory_id") or "")
+                if not memory_id or str(row.get("status") or "") == "deleting":
+                    continue
+                actual_workspace = str(row.get("workspace") or "")
+                await self.graph_store.project_memory(
+                    user_id=user_id,
+                    workspace=actual_workspace,
+                    memory_id=memory_id,
+                    heading=str(row.get("kind") or "Memory"),
+                    text=str(row.get("canonical_text") or ""),
+                    valid_from_ms=row.get("valid_from_ms"),
+                )
+                await self._lexical_search.index_memory(row)
+                vector_index = getattr(self._vector_search, "index_memory", None)
+                if callable(vector_index):
+                    await vector_index(row)
+                await self.intelligence_store.project(row)
+                if str(row.get("status") or "") == "active":
+                    await self.analyze_conflicts(memory_id)
+                indexed += 1
+                if len(memory_ids) < 1000:
+                    memory_ids.append(memory_id)
+            offset += len(rows)
+            if len(rows) < safe_batch:
+                break
+        await self.event_store.record_event(
+            user_id=user_id,
+            workspace=workspace,
+            event_type="indexes_rebuilt",
+            reason="derived memory indexes rebuilt from canonical truth",
+            trust_level="verified_system_fact",
+            confidence_ppm=1_000_000,
+            payload={"scanned": scanned, "indexed": indexed},
+        )
+        return {"scanned": scanned, "indexed": indexed, "memory_ids": memory_ids}
+
+    async def queue_rebuild(self, user_id: str, workspace: str) -> str:
+        job_id = await self.job_store.enqueue(
+            user_id=user_id,
+            workspace=workspace,
+            job_type="rebuild_indexes",
+            payload={},
+        )
+        await self.event_store.record_event(
+            user_id=user_id,
+            workspace=workspace,
+            event_type="index_rebuild_queued",
+            reason="derived index rebuild queued from canonical truth",
+            payload={"job_id": job_id},
+        )
+        return job_id
+
+    async def health(self, *, user_id: str, workspace: str | None) -> dict[str, Any]:
+        vector_config = getattr(
+            self._vector_search, "sanitized_config", lambda: {"backend": "custom"}
+        )()
+        vector_coverage = 0
+        lexical_coverage = 0
+        try:
+            vector_coverage = int(
+                await getattr(self._vector_search, "coverage")(user_id=user_id, workspace=workspace)
+            )
+        except Exception as exc:
+            self._index_errors["vector"] = {"error_type": type(exc).__name__, "at_ms": _now_ms()}
+        try:
+            lexical_coverage = int(
+                await self._lexical_search.coverage(user_id=user_id, workspace=workspace)
+            )
+        except Exception as exc:
+            self._index_errors["lexical"] = {"error_type": type(exc).__name__, "at_ms": _now_ms()}
+        conflicts = await self.conflict_store.list(
+            user_id=user_id,
+            workspace=workspace,
+            status="open",
+            limit=500,
+        )
+        intelligence = await self.intelligence_store.counts(
+            user_id=user_id,
+            workspace=workspace,
+        )
+        profile = await self.store.get_retrieval_profile(user_id, str(workspace or ""))
+        jobs = await self.job_store.counts(user_id=user_id, workspace=workspace)
+        return {
+            "status": "degraded" if self._index_errors else "healthy",
+            "canonical_store": "embedded-sql-versioned",
+            "vector": {**vector_config, "coverage": vector_coverage},
+            "lexical": {**self._lexical_search.sanitized_config(), "coverage": lexical_coverage},
+            "retrieval_learning": profile,
+            "open_conflicts": len(conflicts),
+            "intelligence": intelligence,
+            "jobs": jobs,
+            "index_errors": dict(self._index_errors),
+        }
 
     async def snapshot(self, user_id: str, workspace: str, *, label: str = "") -> SnapshotRef:
         ref = await self.store.create_snapshot(user_id, workspace, label=label)

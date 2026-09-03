@@ -80,6 +80,7 @@ class MemoryGraphStore:
         name: str,
         entity_type: str | None = None,
         alias: str | None = None,
+        memory_id: str | None = None,
         valid_from_ms: int | None = None,
     ) -> str:
         safe_name = redact_text(name).strip()[:500]
@@ -108,6 +109,7 @@ class MemoryGraphStore:
                         normalized_name=normalized,
                         entity_type=kind,
                         aliases=[redact_text(alias).strip()[:500]] if alias else [],
+                        source_memory_ids=[memory_id] if memory_id else [],
                         status="active",
                         valid_from_ms=valid_from_ms if valid_from_ms is not None else now,
                         created_at_ms=now,
@@ -115,12 +117,22 @@ class MemoryGraphStore:
                     )
                     db.add(row)
                     await db.flush()
-                elif alias:
-                    aliases = list(row.aliases or [])
-                    safe_alias = redact_text(alias).strip()[:500]
-                    if safe_alias and safe_alias not in aliases:
-                        aliases.append(safe_alias)
-                        row.aliases = aliases[:100]
+                else:
+                    changed = False
+                    if alias:
+                        aliases = list(row.aliases or [])
+                        safe_alias = redact_text(alias).strip()[:500]
+                        if safe_alias and safe_alias not in aliases:
+                            aliases.append(safe_alias)
+                            row.aliases = aliases[:100]
+                            changed = True
+                    if memory_id:
+                        sources = list(row.source_memory_ids or [])
+                        if memory_id not in sources:
+                            sources.append(memory_id)
+                            row.source_memory_ids = sources[:200]
+                            changed = True
+                    if changed:
                         row.updated_at_ms = now
                 return row.id
 
@@ -199,6 +211,7 @@ class MemoryGraphStore:
                     workspace=workspace,
                     name=name,
                     entity_type=entity_type,
+                    memory_id=memory_id,
                     valid_from_ms=valid_from_ms,
                 )
             )
@@ -220,6 +233,193 @@ class MemoryGraphStore:
                     )
                 )
         return {"entity_ids": entity_ids, "relationship_ids": relationship_ids}
+
+    async def clear_scope(self, *, user_id: str, workspace: str) -> None:
+        workspace = str(workspace or "")
+        async with self._session() as db:
+            async with db.begin():
+                relationships = list(
+                    (
+                        await db.scalars(
+                            select(MemoryRelationship).where(
+                                MemoryRelationship.user_id == user_id,
+                                MemoryRelationship.workspace == workspace,
+                            )
+                        )
+                    ).all()
+                )
+                for row in relationships:
+                    await db.delete(row)
+                entities = list(
+                    (
+                        await db.scalars(
+                            select(MemoryEntity).where(
+                                MemoryEntity.user_id == user_id,
+                                MemoryEntity.workspace == workspace,
+                            )
+                        )
+                    ).all()
+                )
+                for row in entities:
+                    await db.delete(row)
+
+    async def related_memory_scores(
+        self,
+        *,
+        user_id: str,
+        workspace: str,
+        query: str,
+        limit: int = 500,
+    ) -> dict[str, float]:
+        normalized_query = _normalize(query)
+        query_terms = set(re.findall(r"[a-z0-9_.:/#-]+", normalized_query))
+        if not normalized_query or not query_terms:
+            return {}
+        workspace = str(workspace or "")
+        entity_predicates = [MemoryEntity.user_id == user_id, MemoryEntity.status == "active"]
+        relationship_predicates = [
+            MemoryRelationship.user_id == user_id,
+            MemoryRelationship.status == "active",
+        ]
+        if workspace:
+            entity_predicates.append(
+                or_(MemoryEntity.workspace == "", MemoryEntity.workspace == workspace)
+            )
+            relationship_predicates.append(
+                or_(MemoryRelationship.workspace == "", MemoryRelationship.workspace == workspace)
+            )
+        else:
+            entity_predicates.append(MemoryEntity.workspace == "")
+            relationship_predicates.append(MemoryRelationship.workspace == "")
+        safe_limit = max(1, min(int(limit), 2000))
+        async with self._session() as db:
+            entities = list(
+                (
+                    await db.scalars(
+                        select(MemoryEntity).where(*entity_predicates).limit(safe_limit)
+                    )
+                ).all()
+            )
+            entity_scores: dict[str, float] = {}
+            for entity in entities:
+                terms = set(re.findall(r"[a-z0-9_.:/#-]+", entity.normalized_name or ""))
+                overlap = len(query_terms & terms)
+                phrase = (
+                    normalized_query in str(entity.normalized_name or "")
+                    or str(entity.normalized_name or "") in normalized_query
+                )
+                score = min(1.0, (0.7 if phrase else 0.0) + 0.3 * overlap / max(1, len(terms)))
+                if score >= 0.2:
+                    entity_scores[entity.id] = score
+            if not entity_scores:
+                return {}
+            matched_ids = list(entity_scores)
+            relationships = list(
+                (
+                    await db.scalars(
+                        select(MemoryRelationship)
+                        .where(
+                            *relationship_predicates,
+                            or_(
+                                MemoryRelationship.source_entity_id.in_(matched_ids),
+                                MemoryRelationship.target_entity_id.in_(matched_ids),
+                            ),
+                        )
+                        .limit(safe_limit * 2)
+                    )
+                ).all()
+            )
+
+        by_id = {entity.id: entity for entity in entities}
+        scores: dict[str, float] = {}
+        for entity_id, entity_score in entity_scores.items():
+            entity = by_id.get(entity_id)
+            if entity is None:
+                continue
+            for memory_id in list(entity.source_memory_ids or []):
+                scores[str(memory_id)] = max(scores.get(str(memory_id), 0.0), entity_score)
+        for relationship in relationships:
+            endpoint_scores = [
+                entity_scores.get(str(relationship.source_entity_id), 0.0),
+                entity_scores.get(str(relationship.target_entity_id), 0.0),
+            ]
+            relation_score = max(endpoint_scores) * 0.82
+            for memory_id in list(relationship.source_memory_ids or []):
+                scores[str(memory_id)] = max(scores.get(str(memory_id), 0.0), relation_score)
+            related_entity_id = (
+                relationship.target_entity_id
+                if relationship.source_entity_id in entity_scores
+                else relationship.source_entity_id
+            )
+            related = by_id.get(str(related_entity_id))
+            if related is not None:
+                for memory_id in list(related.source_memory_ids or []):
+                    scores[str(memory_id)] = max(
+                        scores.get(str(memory_id), 0.0), relation_score * 0.75
+                    )
+        return scores
+
+    async def remove_memory(
+        self, *, user_id: str, workspace: str, memory_id: str
+    ) -> dict[str, int]:
+        workspace = str(workspace or "")
+        removed_relationships = 0
+        updated_relationships = 0
+        removed_entities = 0
+        updated_entities = 0
+        async with self._session() as db:
+            async with db.begin():
+                relationships = list(
+                    (
+                        await db.scalars(
+                            select(MemoryRelationship).where(
+                                MemoryRelationship.user_id == user_id,
+                                MemoryRelationship.workspace == workspace,
+                            )
+                        )
+                    ).all()
+                )
+                for row in relationships:
+                    sources = list(row.source_memory_ids or [])
+                    if memory_id not in sources:
+                        continue
+                    remaining = [item for item in sources if item != memory_id]
+                    if remaining:
+                        row.source_memory_ids = remaining
+                        row.updated_at_ms = _now_ms()
+                        updated_relationships += 1
+                    else:
+                        await db.delete(row)
+                        removed_relationships += 1
+
+                entities = list(
+                    (
+                        await db.scalars(
+                            select(MemoryEntity).where(
+                                MemoryEntity.user_id == user_id,
+                                MemoryEntity.workspace == workspace,
+                            )
+                        )
+                    ).all()
+                )
+                for row in entities:
+                    sources = list(row.source_memory_ids or [])
+                    if memory_id not in sources:
+                        continue
+                    remaining = [item for item in sources if item != memory_id]
+                    if remaining:
+                        row.source_memory_ids = remaining
+                        row.updated_at_ms = _now_ms()
+                        updated_entities += 1
+                    else:
+                        await db.delete(row)
+                        removed_entities += 1
+        return {
+            "removed_relationships": removed_relationships,
+            "updated_relationships": updated_relationships,
+            "removed_entities": removed_entities,
+            "updated_entities": updated_entities,
+        }
 
     async def snapshot(
         self, *, user_id: str, workspace: str | None = None, limit: int = 500
@@ -274,6 +474,7 @@ class MemoryGraphStore:
                     "canonical_name": row.canonical_name,
                     "entity_type": row.entity_type,
                     "aliases": list(row.aliases or []),
+                    "source_memory_ids": list(row.source_memory_ids or []),
                     "status": row.status,
                     "valid_from_ms": row.valid_from_ms,
                     "valid_until_ms": row.valid_until_ms,

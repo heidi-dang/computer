@@ -30,6 +30,8 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from cptr.memory.mcp_adapter import MemoryMcpAdapter
+from cptr.memory.service import MemoryUnavailableError
 from cptr.routers.admin import require_admin
 from cptr.services.coding_benchmark import SUITE_ID, coding_benchmark_store
 from cptr.services.control_auth import authenticate_control_request
@@ -45,6 +47,7 @@ from cptr.services.mcp_usage_store import mcp_usage_store
 from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
 from cptr.services.memory_observability import MemoryObservabilityService
 from cptr.services.system_metrics import mcp_metrics_sampler
+from cptr.utils import memory as managed_memory
 from cptr.utils.crypto import decrypt_key
 
 logger = logging.getLogger(__name__)
@@ -187,6 +190,12 @@ class ResourceReadRequest(BaseModel):
     uri: str
 
 
+class MemoryToolInvokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    arguments: dict[str, Any] = {}
+
+
 class McpTopologyConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -194,6 +203,88 @@ class McpTopologyConfigUpdate(BaseModel):
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+def _memory_source_forgetter(request: Request, user_id: str):
+    async def _forget(row: dict[str, Any]) -> None:
+        structured = (
+            row.get("structured_value") if isinstance(row.get("structured_value"), dict) else {}
+        )
+        source = structured.get("managed_source") if isinstance(structured, dict) else None
+        if not isinstance(source, dict) or not source:
+            return
+        operation = {
+            "action": "remove",
+            "path": str(source.get("path") or ""),
+            "heading": str(source.get("heading") or ""),
+            "memory_id": str(source.get("memory_id") or ""),
+            "old_text": str(row.get("canonical_text") or ""),
+        }
+        result = await managed_memory.write_memory(
+            request,
+            user_id,
+            str(row.get("workspace") or ""),
+            str(source.get("scope") or row.get("scope") or "workspace"),
+            [operation],
+        )
+        if not bool(result.get("success")):
+            error = str(
+                result.get("error") or result.get("message") or "managed source delete failed"
+            )
+            if "no matching section or text" not in error.lower():
+                raise RuntimeError(error)
+
+    return _forget
+
+
+@router.get("/memory/tools")
+async def list_memory_core_tools(
+    request: Request,
+    workspace_id: str | None = Query(default=None, max_length=200),
+):
+    """Expose the embedded Memory Core through an owner-bound MCP-style adapter."""
+    admin = require_admin(request)
+    try:
+        workspace = await memory_observability.resolve_workspace_path(admin.user_id, workspace_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory workspace not found") from exc
+    adapter = MemoryMcpAdapter(
+        user_id=admin.user_id,
+        workspace=workspace,
+        allow_mutations=True,
+        source_forgetter=_memory_source_forgetter(request, admin.user_id),
+    )
+    tools = adapter.tool_definitions()
+    return {"tools": tools, "count": len(tools), "workspace_id": workspace_id}
+
+
+@router.post("/memory/tools/{tool_name}/invoke")
+async def invoke_memory_core_tool(
+    request: Request,
+    tool_name: str,
+    body: MemoryToolInvokeRequest,
+    workspace_id: str | None = Query(default=None, max_length=200),
+):
+    """Invoke one embedded Memory Core tool with server-bound identity/workspace."""
+    admin = require_admin(request)
+    try:
+        workspace = await memory_observability.resolve_workspace_path(admin.user_id, workspace_id)
+        adapter = MemoryMcpAdapter(
+            user_id=admin.user_id,
+            workspace=workspace,
+            allow_mutations=True,
+            source_forgetter=_memory_source_forgetter(request, admin.user_id),
+        )
+        result = await adapter.call_tool(tool_name, body.arguments)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MemoryUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"tool": tool_name, "workspace_id": workspace_id, "result": result}
 
 
 @router.get("/memory/snapshot")
@@ -211,6 +302,28 @@ async def get_memory_observability_snapshot(
             workspace_id=workspace_id,
             node_limit=node_limit,
             event_limit=event_limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="memory workspace not found") from exc
+
+
+@router.get("/memory/timeline")
+async def get_memory_observability_timeline(
+    request: Request,
+    at_ms: int = Query(ge=0),
+    known_at_ms: int | None = Query(default=None, ge=0),
+    workspace_id: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=300, ge=1, le=1000),
+):
+    """Return bi-temporal memory: valid at ``at_ms`` and optionally known by ``known_at_ms``."""
+    admin = require_admin(request)
+    try:
+        return await memory_observability.timeline(
+            user_id=admin.user_id,
+            workspace_id=workspace_id,
+            at_ms=at_ms,
+            known_at_ms=known_at_ms,
+            limit=limit,
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="memory workspace not found") from exc

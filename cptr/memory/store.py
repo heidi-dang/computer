@@ -16,8 +16,10 @@ from cptr.models import (
     MemoryNamespaceState,
     MemoryRecord,
     MemoryRetrievalFeedback,
+    MemoryRetrievalProfile,
     MemorySnapshot,
 )
+from cptr.memory.retrieval import DEFAULT_RETRIEVAL_WEIGHTS, normalize_retrieval_weights
 from cptr.utils.db import get_session_factory
 from cptr.utils.redaction import redact_sensitive, redact_text
 
@@ -59,6 +61,8 @@ def _record_dict(row: MemoryRecord) -> dict[str, Any]:
         "status": row.status,
         "valid_from_ms": row.valid_from_ms,
         "valid_until_ms": row.valid_until_ms,
+        "observed_at_ms": int(row.observed_at_ms or row.created_at_ms or 0),
+        "superseded_at_ms": row.superseded_at_ms,
         "superseded_by_id": row.superseded_by_id,
         "source_event_ids": list(row.source_event_ids or []),
         "branch_id": row.branch_id,
@@ -77,6 +81,10 @@ class SqlMemoryStore:
 
     def __init__(self, *, session_factory=None) -> None:
         self._session_factory = session_factory or get_session_factory()
+
+    @property
+    def session_factory(self):
+        return self._session_factory
 
     @asynccontextmanager
     async def _session(self):
@@ -174,6 +182,7 @@ class SqlMemoryStore:
                     status=status or "active",
                     valid_from_ms=valid_from_ms if valid_from_ms is not None else now,
                     valid_until_ms=valid_until_ms,
+                    observed_at_ms=now,
                     source_event_ids=list(dict.fromkeys(source_event_ids or []))[:200],
                     branch_id=effective_branch,
                     parent_memory_id=parent_memory_id,
@@ -281,6 +290,36 @@ class SqlMemoryStore:
             )
         return [_record_dict(row) for row in rows]
 
+    async def list_records_page(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        offset: int = 0,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        workspace = _workspace(workspace)
+        predicates = [MemoryRecord.user_id == user_id]
+        if workspace:
+            predicates.append(
+                or_(MemoryRecord.workspace == "", MemoryRecord.workspace == workspace)
+            )
+        else:
+            predicates.append(MemoryRecord.workspace == "")
+        async with self._session() as db:
+            rows = list(
+                (
+                    await db.scalars(
+                        select(MemoryRecord)
+                        .where(*predicates)
+                        .order_by(MemoryRecord.created_at_ms.asc(), MemoryRecord.id.asc())
+                        .offset(max(0, int(offset)))
+                        .limit(max(1, min(int(limit), 1000)))
+                    )
+                ).all()
+            )
+        return [_record_dict(row) for row in rows]
+
     async def supersede_memory(
         self,
         *,
@@ -327,6 +366,7 @@ class SqlMemoryStore:
                     trust_level=trust_level,
                     status="active",
                     valid_from_ms=valid_from_ms,
+                    observed_at_ms=now,
                     source_event_ids=list(dict.fromkeys(source_event_ids))[:200],
                     branch_id=replacement_branch,
                     parent_memory_id=old.id,
@@ -340,6 +380,7 @@ class SqlMemoryStore:
                 if replacement_branch is None:
                     old.status = "superseded"
                     old.valid_until_ms = valid_from_ms
+                    old.superseded_at_ms = now
                     old.superseded_by_id = replacement.id
                     old.updated_at_ms = now
                 await self._bump_version_in_session(db, user_id, workspace)
@@ -464,6 +505,7 @@ class SqlMemoryStore:
         used: bool,
         helpful: bool | None,
         outcome: str | None,
+        features: dict[str, float] | None = None,
     ) -> None:
         now = _now_ms()
         async with self._session() as db:
@@ -485,6 +527,11 @@ class SqlMemoryStore:
                         used=bool(used),
                         helpful=helpful,
                         outcome=redact_text(outcome) if outcome else None,
+                        features={
+                            str(key): max(0.0, min(1.0, float(value)))
+                            for key, value in (features or {}).items()
+                            if key in DEFAULT_RETRIEVAL_WEIGHTS
+                        },
                         created_at_ms=now,
                     )
                 )
@@ -515,10 +562,82 @@ class SqlMemoryStore:
                 "used": bool(row.used),
                 "helpful": row.helpful,
                 "outcome": row.outcome,
+                "features": row.features if isinstance(row.features, dict) else {},
                 "created_at_ms": int(row.created_at_ms),
             }
             for row in rows
         ]
+
+    async def get_retrieval_profile(self, user_id: str, workspace: str) -> dict[str, Any]:
+        async with self._session() as db:
+            row = (
+                await db.execute(
+                    select(MemoryRetrievalProfile).where(
+                        MemoryRetrievalProfile.user_id == user_id,
+                        MemoryRetrievalProfile.workspace == _workspace(workspace),
+                    )
+                )
+            ).scalar_one_or_none()
+        return {
+            "weights": normalize_retrieval_weights(
+                row.weights if row is not None and isinstance(row.weights, dict) else None
+            ),
+            "observations": int(row.observations or 0) if row is not None else 0,
+            "updated_at_ms": int(row.updated_at_ms or 0) if row is not None else 0,
+        }
+
+    async def learn_retrieval_profile(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        features: dict[str, float],
+        positive: bool,
+    ) -> dict[str, Any]:
+        safe_features = {
+            key: max(0.0, min(1.0, float(value)))
+            for key, value in features.items()
+            if key in DEFAULT_RETRIEVAL_WEIGHTS
+        }
+        workspace = _workspace(workspace)
+        now = _now_ms()
+        async with self._session() as db:
+            async with db.begin():
+                row = (
+                    await db.execute(
+                        select(MemoryRetrievalProfile).where(
+                            MemoryRetrievalProfile.user_id == user_id,
+                            MemoryRetrievalProfile.workspace == workspace,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    row = MemoryRetrievalProfile(
+                        user_id=user_id,
+                        workspace=workspace,
+                        weights=dict(DEFAULT_RETRIEVAL_WEIGHTS),
+                        observations=0,
+                        updated_at_ms=now,
+                    )
+                    db.add(row)
+                    await db.flush()
+                current = normalize_retrieval_weights(
+                    row.weights if isinstance(row.weights, dict) else None
+                )
+                observations = int(row.observations or 0)
+                learning_rate = max(0.025, 0.18 / (1.0 + observations / 20.0))
+                for key, feature in safe_features.items():
+                    target = feature if positive else 1.0 - feature
+                    current[key] = current[key] * (1.0 - learning_rate) + target * learning_rate
+                row.weights = normalize_retrieval_weights(current)
+                row.observations = observations + 1
+                row.updated_at_ms = now
+                await db.flush()
+                return {
+                    "weights": dict(row.weights),
+                    "observations": int(row.observations),
+                    "updated_at_ms": now,
+                }
 
     async def create_snapshot(
         self, user_id: str, workspace: str, *, label: str = ""
@@ -629,6 +748,286 @@ class SqlMemoryStore:
             snapshot["label"],
             snapshot["created_at_ms"],
         )
+
+    async def supersede_with_existing(
+        self,
+        *,
+        old_memory_id: str,
+        new_memory_id: str,
+        user_id: str,
+        workspace: str,
+    ) -> None:
+        workspace = _workspace(workspace)
+        async with self._session() as db:
+            async with db.begin():
+                old = await db.get(MemoryRecord, old_memory_id)
+                new = await db.get(MemoryRecord, new_memory_id)
+                if (
+                    old is None
+                    or new is None
+                    or old.user_id != user_id
+                    or new.user_id != user_id
+                    or old.workspace != workspace
+                    or new.workspace != workspace
+                ):
+                    raise KeyError("memory not found")
+                if old.id == new.id:
+                    raise ValueError("memory cannot supersede itself")
+                valid_from = int(new.valid_from_ms or new.created_at_ms or _now_ms())
+                old.status = "superseded"
+                old.valid_until_ms = valid_from
+                old.superseded_by_id = new.id
+                old.updated_at_ms = _now_ms()
+                await self._bump_version_in_session(db, user_id, workspace)
+
+    async def begin_forget(self, memory_id: str, *, user_id: str, workspace: str) -> dict[str, Any]:
+        workspace = _workspace(workspace)
+        async with self._session() as db:
+            async with db.begin():
+                row = await db.get(MemoryRecord, memory_id)
+                if row is None or row.user_id != user_id or row.workspace != workspace:
+                    raise KeyError("memory not found")
+                row.status = "deleting"
+                row.updated_at_ms = _now_ms()
+                await self._bump_version_in_session(db, user_id, workspace)
+                await db.flush()
+                return _record_dict(row)
+
+    async def forget_memory(self, memory_id: str, *, user_id: str, workspace: str) -> None:
+        workspace = _workspace(workspace)
+        async with self._session() as db:
+            async with db.begin():
+                row = await db.get(MemoryRecord, memory_id)
+                if row is None or row.user_id != user_id or row.workspace != workspace:
+                    raise KeyError("memory not found")
+                await db.delete(row)
+                await self._bump_version_in_session(db, user_id, workspace)
+
+    async def mark_disputed(self, memory_id: str, *, user_id: str, workspace: str) -> None:
+        workspace = _workspace(workspace)
+        async with self._session() as db:
+            async with db.begin():
+                row = await db.get(MemoryRecord, memory_id)
+                if row is None or row.user_id != user_id or row.workspace != workspace:
+                    raise KeyError("memory not found")
+                row.status = "disputed"
+                row.updated_at_ms = _now_ms()
+                await self._bump_version_in_session(db, user_id, workspace)
+
+    async def time_travel_records(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        at_ms: int,
+        known_at_ms: int | None = None,
+        limit: int = 1000,
+    ) -> list[dict[str, Any]]:
+        workspace = _workspace(workspace)
+        valid_at = int(at_ms)
+        known_at = int(known_at_ms) if known_at_ms is not None else None
+        predicates = [
+            MemoryRecord.user_id == user_id,
+            MemoryRecord.branch_id.is_(None),
+            MemoryRecord.valid_from_ms <= valid_at,
+        ]
+        if known_at is None:
+            predicates.append(
+                or_(MemoryRecord.valid_until_ms.is_(None), MemoryRecord.valid_until_ms > valid_at)
+            )
+        else:
+            predicates.extend(
+                [
+                    MemoryRecord.observed_at_ms <= known_at,
+                    or_(
+                        MemoryRecord.superseded_at_ms > known_at,
+                        MemoryRecord.valid_until_ms.is_(None),
+                        MemoryRecord.valid_until_ms > valid_at,
+                    ),
+                ]
+            )
+        if workspace:
+            predicates.append(
+                or_(MemoryRecord.workspace == "", MemoryRecord.workspace == workspace)
+            )
+        else:
+            predicates.append(MemoryRecord.workspace == "")
+        async with self._session() as db:
+            rows = list(
+                (
+                    await db.scalars(
+                        select(MemoryRecord)
+                        .where(*predicates)
+                        .order_by(MemoryRecord.valid_from_ms.asc(), MemoryRecord.id.asc())
+                        .limit(max(1, min(int(limit), 5000)))
+                    )
+                ).all()
+            )
+        records = [_record_dict(row) for row in rows]
+        if known_at is not None:
+            for record in records:
+                superseded_at = record.get("superseded_at_ms")
+                if superseded_at is not None and int(superseded_at) > known_at:
+                    if record.get("status") == "superseded":
+                        record["status"] = "active"
+                    record["valid_until_ms"] = None
+                    record["superseded_by_id"] = None
+                    record["superseded_at_ms"] = None
+        return records
+
+    async def compare_snapshots(
+        self,
+        user_id: str,
+        workspace: str,
+        left_snapshot_id: str,
+        right_snapshot_id: str,
+    ) -> dict[str, Any]:
+        left = await self.get_snapshot(user_id, workspace, left_snapshot_id)
+        right = await self.get_snapshot(user_id, workspace, right_snapshot_id)
+        left_ids = set(str(item) for item in left["manifest"].get("memory_ids", []))
+        right_ids = set(str(item) for item in right["manifest"].get("memory_ids", []))
+        added = sorted(right_ids - left_ids)
+        removed = sorted(left_ids - right_ids)
+        changed: list[dict[str, str]] = []
+        if added and removed:
+            async with self._session() as db:
+                rows = list(
+                    (
+                        await db.scalars(
+                            select(MemoryRecord).where(MemoryRecord.id.in_(list(added)))
+                        )
+                    ).all()
+                )
+            for row in rows:
+                if row.parent_memory_id and row.parent_memory_id in removed:
+                    changed.append({"from": row.parent_memory_id, "to": row.id})
+        return {
+            "left_snapshot_id": left_snapshot_id,
+            "right_snapshot_id": right_snapshot_id,
+            "left_memory_version": left["memory_version"],
+            "right_memory_version": right["memory_version"],
+            "added": added,
+            "removed": removed,
+            "changed": changed,
+        }
+
+    async def merge_branch(
+        self,
+        user_id: str,
+        workspace: str,
+        branch_id: str,
+        *,
+        strategy: str = "verified_only",
+    ) -> dict[str, Any]:
+        if strategy not in {"verified_only", "all"}:
+            raise ValueError("unsupported branch merge strategy")
+        workspace = _workspace(workspace)
+        high_trust = {"user_directive", "verified_system_fact", "tool_result"}
+        merged_ids: list[str] = []
+        skipped_ids: list[str] = []
+        conflicted_ids: list[str] = []
+        now = _now_ms()
+        async with self._session() as db:
+            async with db.begin():
+                branch = await db.get(MemoryBranch, branch_id)
+                if branch is None or branch.user_id != user_id or branch.workspace != workspace:
+                    raise KeyError("memory branch not found")
+                rows = list(
+                    (
+                        await db.scalars(
+                            select(MemoryRecord)
+                            .where(
+                                MemoryRecord.user_id == user_id,
+                                MemoryRecord.workspace == workspace,
+                                MemoryRecord.branch_id == branch_id,
+                                MemoryRecord.status == "active",
+                            )
+                            .order_by(MemoryRecord.created_at_ms.asc())
+                        )
+                    ).all()
+                )
+                for row in rows:
+                    verified = row.verified_at_ms is not None or row.trust_level in high_trust
+                    if strategy == "verified_only" and not verified:
+                        skipped_ids.append(row.id)
+                        continue
+                    parent_id = row.parent_memory_id
+                    parent = await db.get(MemoryRecord, parent_id) if parent_id else None
+                    if parent_id and (
+                        parent is None
+                        or parent.user_id != user_id
+                        or parent.workspace != workspace
+                        or parent.branch_id is not None
+                        or parent.status != "active"
+                        or parent.superseded_by_id is not None
+                    ):
+                        conflicted_ids.append(row.id)
+                        continue
+                    existing = (
+                        await db.execute(
+                            select(MemoryRecord)
+                            .where(
+                                MemoryRecord.user_id == user_id,
+                                MemoryRecord.workspace == workspace,
+                                MemoryRecord.branch_id.is_(None),
+                                MemoryRecord.status == "active",
+                                MemoryRecord.content_hash == row.content_hash,
+                            )
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    if existing is None:
+                        existing = MemoryRecord(
+                            user_id=user_id,
+                            workspace=workspace,
+                            scope=row.scope,
+                            kind=row.kind,
+                            canonical_text=row.canonical_text,
+                            structured_value=redact_sensitive(row.structured_value or {}),
+                            content_hash=row.content_hash,
+                            confidence_ppm=int(row.confidence_ppm or 0),
+                            importance_ppm=int(row.importance_ppm or 0),
+                            trust_level=row.trust_level,
+                            status="active",
+                            valid_from_ms=now,
+                            valid_until_ms=None,
+                            observed_at_ms=now,
+                            source_event_ids=list(row.source_event_ids or []),
+                            branch_id=None,
+                            parent_memory_id=row.parent_memory_id or row.id,
+                            verified_at_ms=row.verified_at_ms,
+                            verification_expires_at_ms=row.verification_expires_at_ms,
+                            access_count=0,
+                            created_at_ms=now,
+                            updated_at_ms=now,
+                        )
+                        db.add(existing)
+                        await db.flush()
+                    if parent is not None and parent.id != existing.id:
+                        parent.status = "superseded"
+                        parent.valid_until_ms = int(existing.valid_from_ms or now)
+                        parent.superseded_at_ms = now
+                        parent.superseded_by_id = existing.id
+                        parent.updated_at_ms = now
+                    merged_ids.append(existing.id)
+                branch.status = "merged"
+                branch.updated_at_ms = now
+                namespace = await self._namespace_in_session(db, user_id, workspace)
+                if namespace.active_branch_id == branch_id:
+                    namespace.active_branch_id = None
+                    namespace.active_snapshot_id = None
+                namespace.version = int(namespace.version or 0) + 1
+                namespace.updated_at_ms = now
+        return {
+            "branch_id": branch_id,
+            "strategy": strategy,
+            "merged_count": len(merged_ids),
+            "skipped_count": len(skipped_ids),
+            "conflicted_count": len(conflicted_ids),
+            "merged_memory_ids": merged_ids,
+            "skipped_memory_ids": skipped_ids,
+            "conflicted_memory_ids": conflicted_ids,
+        }
 
     async def observability_snapshot(
         self,

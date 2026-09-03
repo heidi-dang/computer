@@ -119,6 +119,7 @@ class MemoryResult:
     valid_from_ms: int | None
     valid_until_ms: int | None
     branch_id: str | None
+    features: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,18 @@ class RetrievalFeedback:
     used: bool
     helpful: bool | None = None
     outcome: str | None = None
+    features: dict[str, float] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MemoryConflictRef:
+    conflict_id: str
+    fact_key: str
+    left_memory_id: str
+    right_memory_id: str
+    classification: str
+    status: str
+    confidence: float
 
 
 @dataclass(frozen=True)

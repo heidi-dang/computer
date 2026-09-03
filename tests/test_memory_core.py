@@ -217,6 +217,58 @@ class MemoryCoreTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(any(row.memory_id == old.memory_id for row in historical_results))
 
+    async def test_bitemporal_time_travel_separates_valid_time_from_known_time(self):
+        service = self.service()
+        old = await self.store.create_memory(
+            user_id="user-1",
+            workspace="/repo",
+            scope="workspace",
+            kind="semantic",
+            canonical_text="Production database is SQLite.",
+            trust_level="verified_system_fact",
+            valid_from_ms=1000,
+            created_at_ms=1500,
+        )
+        replacement = await service.supersede(
+            old.memory_id,
+            MemoryReplacement(
+                user_id="user-1",
+                workspace="/repo",
+                scope="workspace",
+                canonical_text="Production database is PostgreSQL.",
+                kind="semantic",
+                trust_level="verified_system_fact",
+                valid_from_ms=2000,
+            ),
+        )
+        old_row = await self.store.get_memory(old.memory_id)
+        replacement_row = await self.store.get_memory(replacement.memory_id)
+        self.assertEqual(old_row["observed_at_ms"], 1500)
+        self.assertIsNotNone(old_row["superseded_at_ms"])
+        self.assertEqual(replacement_row["observed_at_ms"], old_row["superseded_at_ms"])
+
+        known_before_cutover_was_observed = await service.time_travel(
+            "user-1", "/repo", at_ms=2500, known_at_ms=2500
+        )
+        self.assertEqual(
+            [row["memory_id"] for row in known_before_cutover_was_observed],
+            [old.memory_id],
+        )
+        self.assertEqual(known_before_cutover_was_observed[0]["status"], "active")
+        self.assertIsNone(known_before_cutover_was_observed[0]["valid_until_ms"])
+        self.assertIsNone(known_before_cutover_was_observed[0]["superseded_at_ms"])
+
+        known_after_cutover_was_observed = await service.time_travel(
+            "user-1",
+            "/repo",
+            at_ms=2500,
+            known_at_ms=int(replacement_row["observed_at_ms"]),
+        )
+        self.assertEqual(
+            [row["memory_id"] for row in known_after_cutover_was_observed],
+            [replacement.memory_id],
+        )
+
     async def test_consolidation_deduplicates_and_classifies_procedure_and_failure(self):
         service = self.service()
         first = await service.consolidate(

@@ -1342,6 +1342,14 @@ async def remember(
                     scope=scope,
                     text=content,
                     heading=str(operation.get("heading") or ""),
+                    structured_value={
+                        "managed_source": {
+                            "scope": scope,
+                            "path": str(operation.get("path") or ""),
+                            "heading": str(operation.get("heading") or ""),
+                            "memory_id": str(operation.get("memory_id") or ""),
+                        }
+                    },
                     source_event_ids=[event_id] if isinstance(event_id, str) and event_id else [],
                     trust_level="managed_memory",
                     confidence=0.92,

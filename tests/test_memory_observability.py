@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.memory.graph import MemoryGraphStore
@@ -385,7 +386,7 @@ class MemoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         snapshot = await service.snapshot(user_id="user-1", workspace_id="workspace-1")
-        self.assertEqual(snapshot["version"], 2)
+        self.assertEqual(snapshot["version"], 3)
         canonical = next(node for node in snapshot["nodes"] if node["id"] == memory.memory_id)
         self.assertEqual(canonical["source_layer"], "canonical")
         self.assertEqual(canonical["heading"], "Procedure")
@@ -401,6 +402,11 @@ class MemoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(snapshot["metrics"]["memory_version"], 1)
         self.assertEqual(snapshot["metrics"]["pending_memory_jobs"], 1)
         self.assertEqual(snapshot["health"]["maintenance_queue"]["pending"], 1)
+        self.assertEqual(snapshot["health"]["advanced_status"], "healthy")
+        self.assertEqual(snapshot["health"]["lexical_index"]["backend"], "portable-sql-bm25")
+        self.assertIn("backend", snapshot["health"]["vector_index"])
+        self.assertEqual(snapshot["metrics"]["open_memory_conflicts"], 0)
+        self.assertEqual(snapshot["metrics"]["retrieval_learning_observations"], 0)
         self.assertEqual(snapshot["lifecycle"]["snapshots"][0]["label"], "before release")
         self.assertEqual(snapshot["lifecycle"]["branches"][0]["name"], "experiment")
         self.assertEqual(snapshot["lifecycle"]["checkpoints"][0]["stage"], "tool_complete")
@@ -419,6 +425,76 @@ class MemoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
 class MemoryObservabilityApiTests(unittest.IsolatedAsyncioTestCase):
     def _request(self):
         return SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+
+    async def test_memory_tool_surface_binds_authenticated_identity_and_rejects_identity_injection(
+        self,
+    ):
+        request = self._request()
+        admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
+        observability = SimpleNamespace(resolve_workspace_path=AsyncMock(return_value="/repo"))
+        with (
+            patch.object(mcp_router, "require_admin", admin),
+            patch.object(mcp_router, "memory_observability", observability),
+        ):
+            listed = await mcp_router.list_memory_core_tools(request, workspace_id="workspace-1")
+            with self.assertRaises(HTTPException) as caught:
+                await mcp_router.invoke_memory_core_tool(
+                    request,
+                    "memory.search",
+                    mcp_router.MemoryToolInvokeRequest(
+                        arguments={"query": "database", "user_id": "attacker"}
+                    ),
+                    workspace_id="workspace-1",
+                )
+        self.assertEqual(listed["workspace_id"], "workspace-1")
+        self.assertIn("memory.forget", {tool["name"] for tool in listed["tools"]})
+        self.assertIn("memory.rebuild", {tool["name"] for tool in listed["tools"]})
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertEqual(observability.resolve_workspace_path.await_count, 2)
+
+    async def test_managed_source_forgetter_removes_markdown_section_and_is_idempotent(self):
+        request = self._request()
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            workspace = Path(tmp) / "repo"
+            workspace.mkdir()
+            with patch.object(managed_memory, "DATA_DIR", data_dir):
+                result = await managed_memory.write_memory(
+                    request,
+                    "user-1",
+                    str(workspace),
+                    "workspace",
+                    [
+                        {
+                            "action": "add",
+                            "path": "facts.md",
+                            "heading": "Deploy",
+                            "memory_id": "managed-deploy",
+                            "content": "Run exact verification before deployment.",
+                        }
+                    ],
+                )
+                self.assertTrue(result["success"])
+                row = {
+                    "workspace": str(workspace),
+                    "scope": "workspace",
+                    "canonical_text": "Run exact verification before deployment.",
+                    "structured_value": {
+                        "managed_source": {
+                            "scope": "workspace",
+                            "path": "facts.md",
+                            "heading": "Deploy",
+                            "memory_id": "managed-deploy",
+                        }
+                    },
+                }
+                forgetter = mcp_router._memory_source_forgetter(request, "user-1")
+                await forgetter(row)
+                await forgetter(row)
+                source = managed_memory.resolve_memory_roots("user-1", str(workspace))[1]
+                text = (source.root / "facts.md").read_text(errors="replace")
+        self.assertNotIn("Run exact verification before deployment.", text)
+        self.assertNotIn("managed-deploy", text)
 
     async def test_snapshot_and_stream_use_admin_identity(self):
         request = self._request()
