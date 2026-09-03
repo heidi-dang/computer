@@ -8,6 +8,8 @@ before it performs at most one state transition.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from collections.abc import Mapping
 from typing import Callable
@@ -33,6 +35,30 @@ _WAITING_STATES = {FactoryState.PAUSED, FactoryState.APPROVAL_REQUIRED}
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _projection_key(phase_key: str, outcome: PhaseOutcome) -> str:
+    """Bind phase projection idempotency to the exact projection intent.
+
+    One durable state entry may legitimately emit multiple projections while a
+    long-running phase advances (for example WAIT -> STOPPING during bounded
+    cancellation). Exact replays must remain idempotent, while distinct
+    projections must not collide under one phase-wide key.
+    """
+
+    payload = {
+        "updates": outcome.cycle_updates,
+        "run_next_action": outcome.run_next_action,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        default=str,
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()[:24]
+    return f"{phase_key}:projection:{digest}"
 
 
 class FactoryOrchestrator:
@@ -136,7 +162,7 @@ class FactoryOrchestrator:
                     cycle.id,
                     updates=outcome.cycle_updates,
                     run_next_action=outcome.run_next_action,
-                    idempotency_key=f"{phase_key}:projection",
+                    idempotency_key=_projection_key(phase_key, outcome),
                 )
             if outcome.target_revision is not None and outcome.target_fingerprint is not None:
                 cycle = await self._store.set_cycle_target(

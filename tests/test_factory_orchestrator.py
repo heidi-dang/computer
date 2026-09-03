@@ -170,14 +170,22 @@ class FactoryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed.state, FactoryState.COMPLETE.value)
         self.assertIsNotNone(completed.completed_at)
         self.assertEqual(observed[0], (FactoryState.MISSION.value, FactoryState.RECOVERING.value))
-        self.assertIn(
-            (FactoryState.VICTORY_JUDGING.value, FactoryState.COMMITTING.value), observed
+        self.assertIn((FactoryState.VICTORY_JUDGING.value, FactoryState.COMMITTING.value), observed)
+        self.assertEqual(
+            observed[-1], (FactoryState.CYCLE_COMPLETE.value, FactoryState.COMPLETE.value)
         )
-        self.assertEqual(observed[-1], (FactoryState.CYCLE_COMPLETE.value, FactoryState.COMPLETE.value))
-        self.assertTrue(all(handler.calls == 1 for handler in handlers.values() if isinstance(handler, _Handler)))
+        self.assertTrue(
+            all(
+                handler.calls == 1 for handler in handlers.values() if isinstance(handler, _Handler)
+            )
+        )
 
         events = await self.store.list_events(self.run.id, limit=200)
-        transitions = [event for event in events if event.event_type in {"state.transition", "victory.authorized"}]
+        transitions = [
+            event
+            for event in events
+            if event.event_type in {"state.transition", "victory.authorized"}
+        ]
         self.assertEqual(len(transitions), len(observed))
 
     async def test_multi_cycle_advance_is_one_atomic_transition_not_create_then_transition(self):
@@ -332,6 +340,72 @@ class FactoryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence[0].kind, "mission_profile")
         transition = next(event for event in events if event.event_type == "state.transition")
         self.assertIn(evidence[0].id, transition.payload["evidence_ids"])
+
+    async def test_phase_projection_supports_distinct_poll_intents_without_weakening_replay(self):
+        cycle = await self.store.create_cycle(
+            self.run.id,
+            base_revision="rev-base",
+            base_fingerprint="fp-base",
+            idempotency_key="projection-poll-cycle",
+        )
+        async with self.sessions() as db:
+            async with db.begin():
+                persistent_run = await db.get(type(self.run), self.run.id)
+                persistent_cycle = await db.get(type(cycle), cycle.id)
+                persistent_run.state = FactoryState.PLANNING.value
+                persistent_run.current_cycle_id = cycle.id
+                persistent_cycle.state = FactoryState.PLANNING.value
+                db.add(
+                    FactoryEvent(
+                        id="fev-planning-entry",
+                        run_id=self.run.id,
+                        cycle_id=cycle.id,
+                        sequence=3,
+                        actor="SYSTEM",
+                        event_type="state.transition",
+                        from_state=FactoryState.ROOT_CAUSE_ANALYSIS.value,
+                        to_state=FactoryState.PLANNING.value,
+                        idempotency_key="projection-poll-planning-entry",
+                        payload_digest="0" * 64,
+                        payload={},
+                        created_at=1,
+                    )
+                )
+
+        handler = None
+
+        def outcome(_context):
+            assert handler is not None
+            if handler.calls == 1:
+                return PhaseOutcome(
+                    reason="planning task is running",
+                    run_next_action="wait for planning advisory task",
+                )
+            return PhaseOutcome(
+                reason="planning task cancellation is pending",
+                run_next_action="stop over-budget planning advisory task",
+            )
+
+        handler = _Handler(outcome)
+        orchestrator = FactoryOrchestrator(
+            store=self.store,
+            handlers={FactoryState.PLANNING: handler},
+            owner_token="orchestrator-projection-poll",
+            lease_ms=10_000,
+        )
+
+        await orchestrator.run_once(self.run.id)
+        await orchestrator.run_once(self.run.id)
+        await orchestrator.run_once(self.run.id)  # exact replay of the second intent
+
+        run = await self.store.get_run(self.run.id)
+        cycle = await self.store.get_cycle(cycle.id)
+        self.assertEqual(run.next_action, "stop over-budget planning advisory task")
+        self.assertEqual(cycle.next_action, "stop over-budget planning advisory task")
+        events = await self.store.list_events(self.run.id, limit=100)
+        projections = [event for event in events if event.event_type == "phase.projection_updated"]
+        self.assertEqual(len(projections), 2)
+        self.assertNotEqual(projections[0].idempotency_key, projections[1].idempotency_key)
 
 
 if __name__ == "__main__":
