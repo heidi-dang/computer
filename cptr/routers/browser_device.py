@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timezone
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -167,6 +168,15 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     await browser_command_results.reserve(body.command_id)
+    lease = await browser_device_store.session_lease(session_id=session_id)
+    if lease is None:
+        await browser_command_results.abandon(body.command_id)
+        raise HTTPException(status_code=409, detail="browser lease is unavailable")
+    command_event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.command.dispatched",
+        payload={"session_id": session_id, "command_id": body.command_id, "action": body.action},
+    )
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
@@ -174,10 +184,17 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             "type": "browser.command",
             "device_id": session.device_id,
             "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(command_event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": session.state,
             "command_id": body.command_id,
-            "action": body.action,
-            "expected_epoch": body.expected_epoch,
-            "payload": body.payload,
+            "payload": {
+                "action": body.action,
+                "expected_epoch": body.expected_epoch,
+                "args": body.payload,
+            },
         },
     )
     if not delivered:

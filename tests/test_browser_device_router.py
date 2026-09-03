@@ -134,7 +134,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_agent_command_requires_current_lease_epoch_before_delivery(self):
         request = SimpleNamespace()
-        session = SimpleNamespace(device_id="bdv_1")
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="AGENT_CONTROL")
         with (
             patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
             patch(
@@ -145,6 +145,14 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                 "cptr.routers.browser_device.browser_device_store.assert_mutation",
                 new=AsyncMock(),
             ) as assert_mutation,
+            patch(
+                "cptr.routers.browser_device.browser_device_store.session_lease",
+                new=AsyncMock(return_value={"owner": "agent", "epoch": 9}),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=12)),
+            ),
             patch(
                 "cptr.routers.browser_device.browser_device_connections.send_control",
                 new=AsyncMock(return_value=True),
@@ -172,7 +180,13 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         assert_mutation.assert_awaited_once_with(
             session_id="brs_1", actor="agent", expected_epoch=9
         )
-        self.assertEqual(send.await_args.kwargs["message"]["expected_epoch"], 9)
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["surface_id"], "surf_1")
+        self.assertEqual(message["sequence"], 12)
+        self.assertEqual(message["mode"], "AGENT_CONTROL")
+        self.assertEqual(message["payload"]["expected_epoch"], 9)
+        self.assertEqual(message["payload"]["action"], "click")
+        self.assertEqual(message["payload"]["args"], {"ref": "ref_1"})
         self.assertEqual(result["result"]["type"], "browser.command.completed")
 
     async def test_websocket_completes_matching_command_id(self):
