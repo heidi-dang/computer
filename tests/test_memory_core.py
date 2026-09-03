@@ -193,9 +193,14 @@ class MemoryCoreTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         historical = await self.store.get_memory(old.memory_id)
+        replacement_row = await self.store.get_memory(replacement.memory_id)
         self.assertEqual(historical["status"], "superseded")
         self.assertEqual(historical["valid_until_ms"], 2000)
         self.assertEqual(historical["superseded_by_id"], replacement.memory_id)
+        self.assertIsNotNone(historical["superseded_at_ms"])
+        self.assertGreaterEqual(historical["superseded_at_ms"], historical["observed_at_ms"])
+        self.assertEqual(replacement_row["superseded_at_ms"], None)
+        self.assertGreaterEqual(replacement_row["observed_at_ms"], replacement_row["created_at_ms"])
         results = await service.search(
             MemoryQuery(
                 user_id="user-1",

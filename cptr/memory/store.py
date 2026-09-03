@@ -61,6 +61,8 @@ def _record_dict(row: MemoryRecord) -> dict[str, Any]:
         "valid_until_ms": row.valid_until_ms,
         "superseded_by_id": row.superseded_by_id,
         "source_event_ids": list(row.source_event_ids or []),
+        "observed_at_ms": int(row.observed_at_ms or row.created_at_ms),
+        "superseded_at_ms": int(row.superseded_at_ms) if row.superseded_at_ms is not None else None,
         "branch_id": row.branch_id,
         "parent_memory_id": row.parent_memory_id,
         "verified_at_ms": row.verified_at_ms,
@@ -175,6 +177,8 @@ class SqlMemoryStore:
                     valid_from_ms=valid_from_ms if valid_from_ms is not None else now,
                     valid_until_ms=valid_until_ms,
                     source_event_ids=list(dict.fromkeys(source_event_ids or []))[:200],
+                    observed_at_ms=now,
+                    superseded_at_ms=None,
                     branch_id=effective_branch,
                     parent_memory_id=parent_memory_id,
                     verified_at_ms=verified_at_ms,
@@ -232,7 +236,9 @@ class SqlMemoryStore:
                 row.source_event_ids = list(
                     dict.fromkeys([*(row.source_event_ids or []), *event_ids])
                 )[:200]
-                row.updated_at_ms = _now_ms()
+                now = _now_ms()
+                row.observed_at_ms = now
+                row.updated_at_ms = now
                 await self._bump_version_in_session(db, row.user_id, row.workspace)
                 return MemoryRecordRef(row.id, row.kind, row.status, row.branch_id)
 
@@ -328,6 +334,8 @@ class SqlMemoryStore:
                     status="active",
                     valid_from_ms=valid_from_ms,
                     source_event_ids=list(dict.fromkeys(source_event_ids))[:200],
+                    observed_at_ms=now,
+                    superseded_at_ms=None,
                     branch_id=replacement_branch,
                     parent_memory_id=old.id,
                     verification_expires_at_ms=verification_expires_at_ms,
@@ -341,6 +349,7 @@ class SqlMemoryStore:
                     old.status = "superseded"
                     old.valid_until_ms = valid_from_ms
                     old.superseded_by_id = replacement.id
+                    old.superseded_at_ms = now
                     old.updated_at_ms = now
                 await self._bump_version_in_session(db, user_id, workspace)
                 return MemoryRecordRef(

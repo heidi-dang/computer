@@ -81,6 +81,7 @@ class MemoryGraphStore:
         entity_type: str | None = None,
         alias: str | None = None,
         valid_from_ms: int | None = None,
+        memory_id: str | None = None,
     ) -> str:
         safe_name = redact_text(name).strip()[:500]
         normalized = _normalize(safe_name)
@@ -108,6 +109,7 @@ class MemoryGraphStore:
                         normalized_name=normalized,
                         entity_type=kind,
                         aliases=[redact_text(alias).strip()[:500]] if alias else [],
+                        source_memory_ids=[memory_id] if memory_id else [],
                         status="active",
                         valid_from_ms=valid_from_ms if valid_from_ms is not None else now,
                         created_at_ms=now,
@@ -115,12 +117,22 @@ class MemoryGraphStore:
                     )
                     db.add(row)
                     await db.flush()
-                elif alias:
-                    aliases = list(row.aliases or [])
-                    safe_alias = redact_text(alias).strip()[:500]
-                    if safe_alias and safe_alias not in aliases:
-                        aliases.append(safe_alias)
-                        row.aliases = aliases[:100]
+                else:
+                    changed = False
+                    if alias:
+                        aliases = list(row.aliases or [])
+                        safe_alias = redact_text(alias).strip()[:500]
+                        if safe_alias and safe_alias not in aliases:
+                            aliases.append(safe_alias)
+                            row.aliases = aliases[:100]
+                            changed = True
+                    if memory_id:
+                        sources = list(row.source_memory_ids or [])
+                        if memory_id not in sources:
+                            sources.append(memory_id)
+                            row.source_memory_ids = sources[:200]
+                            changed = True
+                    if changed:
                         row.updated_at_ms = now
                 return row.id
 
@@ -200,6 +212,7 @@ class MemoryGraphStore:
                     name=name,
                     entity_type=entity_type,
                     valid_from_ms=valid_from_ms,
+                    memory_id=memory_id,
                 )
             )
         relationship_ids: list[str] = []
@@ -274,6 +287,7 @@ class MemoryGraphStore:
                     "canonical_name": row.canonical_name,
                     "entity_type": row.entity_type,
                     "aliases": list(row.aliases or []),
+                    "source_memory_ids": list(row.source_memory_ids or []),
                     "status": row.status,
                     "valid_from_ms": row.valid_from_ms,
                     "valid_until_ms": row.valid_until_ms,

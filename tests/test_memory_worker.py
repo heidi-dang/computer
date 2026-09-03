@@ -80,6 +80,9 @@ class MemoryWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Deployment", names)
         self.assertIn("Rollback", names)
         self.assertIn("heidi-dang/computer", names)
+        self.assertTrue(
+            all(memories[0]["memory_id"] in row["source_memory_ids"] for row in graph["entities"])
+        )
         self.assertGreaterEqual(len(graph["relationships"]), 1)
 
     async def test_failed_job_retries_without_persisting_raw_exception_text(self):

@@ -51,6 +51,8 @@ class MemoryRecord(Base):
         Text, ForeignKey("memory_records.id", ondelete="SET NULL"), nullable=True
     )
     source_event_ids = Column(JSON, nullable=False, default=list)
+    observed_at_ms = Column(BigInteger, nullable=False, default=0)
+    superseded_at_ms = Column(BigInteger, nullable=True)
     branch_id = Column(Text, nullable=True)
     parent_memory_id = Column(
         Text, ForeignKey("memory_records.id", ondelete="SET NULL"), nullable=True
@@ -105,6 +107,7 @@ class MemoryEntity(Base):
     normalized_name = Column(Text, nullable=False)
     entity_type = Column(Text, nullable=False, default="concept")
     aliases = Column(JSON, nullable=False, default=list)
+    source_memory_ids = Column(JSON, nullable=False, default=list)
     status = Column(Text, nullable=False, default="active")
     valid_from_ms = Column(BigInteger, nullable=True)
     valid_until_ms = Column(BigInteger, nullable=True)
