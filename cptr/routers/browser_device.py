@@ -9,6 +9,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from cptr.services.browser_command_results import browser_command_results
 from cptr.services.browser_device_connections import browser_device_connections
 from cptr.services.browser_devices import browser_device_store
 from cptr.services.control_auth import authenticate_control_request
@@ -49,6 +50,7 @@ class SendCommandBody(BaseModel):
     action: str = Field(min_length=1, max_length=120)
     expected_epoch: int | None = Field(default=None, ge=0)
     payload: dict[str, Any] = Field(default_factory=dict)
+    wait_seconds: float = Field(default=15.0, ge=0.1, le=60.0)
 
 
 async def _control_user(request: Request, scope: str) -> str:
@@ -163,6 +165,7 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             )
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+    await browser_command_results.reserve(body.command_id)
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
@@ -177,8 +180,21 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
         },
     )
     if not delivered:
+        await browser_command_results.abandon(body.command_id)
         raise HTTPException(status_code=409, detail="browser device is offline")
-    return {"accepted": True, "command_id": body.command_id, "device_id": session.device_id}
+    try:
+        result = await browser_command_results.wait(
+            body.command_id,
+            timeout_seconds=body.wait_seconds,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="browser command timed out") from exc
+    return {
+        "accepted": True,
+        "command_id": body.command_id,
+        "device_id": session.device_id,
+        "result": result,
+    }
 
 
 @router.post("/sessions/{session_id}/lease")
@@ -188,13 +204,31 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
     if session is None:
         raise HTTPException(status_code=404, detail="browser session not found")
     try:
-        return await browser_device_store.transfer_lease(
+        result = await browser_device_store.transfer_lease(
             session_id=session_id,
             expected_epoch=body.expected_epoch,
             expected_owner=body.expected_owner,
             new_owner=body.new_owner,
             fresh_snapshot_id=body.fresh_snapshot_id,
         )
+        event_type = (
+            "browser.handoff.returned"
+            if body.expected_owner == "human" and body.new_owner == "agent"
+            else "browser.lease.transferred"
+        )
+        await browser_device_store.append_device_event(
+            device_id=session.device_id,
+            event_type=event_type,
+            payload={
+                "session_id": session_id,
+                "tab_id": result["tab_id"],
+                "owner": result["owner"],
+                "epoch": result["epoch"],
+                "snapshot_id": result["snapshot_id"],
+                "state": result["state"],
+            },
+        )
+        return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="browser session not found") from exc
     except PermissionError as exc:
@@ -269,10 +303,23 @@ async def browser_device_control_socket(websocket: WebSocket):
             payload = message.get("payload")
             if not isinstance(payload, dict):
                 payload = {}
+            command_id = message.get("command_id")
+            if event_type in {"browser.command.completed", "browser.command.failed"}:
+                if not isinstance(command_id, str) or not command_id:
+                    await websocket.close(code=1008, reason="browser result missing command id")
+                    return
+                await browser_command_results.complete(
+                    command_id,
+                    {
+                        "type": event_type,
+                        "command_id": command_id,
+                        "payload": payload,
+                    },
+                )
             await browser_device_store.append_device_event(
                 device_id=device_id,
                 event_type=event_type,
-                payload=payload,
+                payload={"command_id": command_id, **payload} if isinstance(command_id, str) else payload,
             )
     except WebSocketDisconnect:
         return

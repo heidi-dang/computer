@@ -247,7 +247,7 @@ class BrowserDeviceStore:
             }[new_owner]
             session.updated_at = now
             await db.commit()
-            return {
+            result = {
                 "device_id": lease.device_id,
                 "tab_id": int(lease.tab_id),
                 "session_id": session_id,
@@ -256,6 +256,7 @@ class BrowserDeviceStore:
                 "snapshot_id": session.snapshot_id,
                 "state": session.state,
             }
+            return result
 
     async def assert_mutation(
         self,
@@ -300,6 +301,22 @@ class BrowserDeviceStore:
             if session is None or session.user_id != user_id:
                 return None
             return session
+
+    async def session_lease(self, *, session_id: str) -> dict[str, Any] | None:
+        async with await get_db() as db:
+            lease = (
+                await db.scalars(select(BrowserLease).where(BrowserLease.session_id == session_id))
+            ).first()
+            if lease is None:
+                return None
+            return {
+                "device_id": lease.device_id,
+                "tab_id": int(lease.tab_id),
+                "session_id": lease.session_id,
+                "owner": lease.owner,
+                "epoch": int(lease.epoch),
+                "expires_at": int(lease.expires_at) if lease.expires_at is not None else None,
+            }
 
     async def replay_device_events(
         self,
