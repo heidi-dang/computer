@@ -60,6 +60,13 @@ class ReturnToAgentBody(BaseModel):
     wait_seconds: float = Field(default=15.0, ge=0.1, le=30.0)
 
 
+class StreamConfigureBody(BaseModel):
+    visible: bool
+    max_fps: int = Field(ge=0, le=12)
+    max_width: int = Field(ge=320, le=3_840)
+    quality: int = Field(ge=20, le=90)
+
+
 class HumanInputBody(BaseModel):
     command_id: str = Field(min_length=1, max_length=160)
     expected_epoch: int = Field(ge=0)
@@ -270,6 +277,43 @@ async def get_browser_frame(request: Request, session_id: str, after_frame_id: s
             "X-CPTR-Frame-Time": str(frame.created_at_ms),
         },
     )
+
+
+@router.post("/sessions/{session_id}/stream-config")
+async def configure_browser_stream(request: Request, session_id: str, body: StreamConfigureBody):
+    user_id = await _control_user(request, "task:write")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="browser session not found")
+    event = await browser_device_store.append_device_event(
+        device_id=session.device_id,
+        event_type="browser.stream.configure",
+        payload={
+            "session_id": session_id,
+            "visible": body.visible,
+            "max_fps": body.max_fps,
+            "max_width": body.max_width,
+            "quality": body.quality,
+        },
+    )
+    delivered = await browser_device_connections.send_control(
+        device_id=session.device_id,
+        message={
+            "protocol_version": 1,
+            "type": "browser.stream.configure",
+            "device_id": session.device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": session.state,
+            "payload": body.model_dump(),
+        },
+    )
+    if not delivered:
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    return {"configured": True, "session_id": session_id, **body.model_dump()}
 
 
 @router.post("/sessions/{session_id}/return-to-agent")

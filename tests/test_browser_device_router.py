@@ -12,6 +12,7 @@ from cptr.routers.browser_device import (
     PairingRequestBody,
     HumanInputBody,
     ReturnToAgentBody,
+    StreamConfigureBody,
     SendCommandBody,
     TransferLeaseBody,
     approve_pairing,
@@ -23,6 +24,7 @@ from cptr.routers.browser_device import (
     send_browser_command,
     send_browser_human_input,
     return_browser_to_agent,
+    configure_browser_stream,
     get_browser_frame,
     open_browser_session,
     transfer_browser_lease,
@@ -74,6 +76,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/command", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/human-input", paths)
         self.assertIn("/api/browser-device/v1/sessions/{session_id}/return-to-agent", paths)
+        self.assertIn("/api/browser-device/v1/sessions/{session_id}/stream-config", paths)
 
     async def test_pairing_request_returns_claim_secret_only_to_extension(self):
         with patch(
@@ -252,6 +255,27 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         ):
             await get_browser_frame(request, "brs_1", None)
         self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_stream_configuration_is_owner_scoped_and_forwarded(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="HUMAN_CONTROL")
+        with (
+            patch("cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.browser_device.browser_device_store.get_session", new=AsyncMock(return_value=session)),
+            patch("cptr.routers.browser_device.browser_device_store.append_device_event", new=AsyncMock(return_value=SimpleNamespace(sequence=35))),
+            patch("cptr.routers.browser_device.browser_device_connections.send_control", new=AsyncMock(return_value=True)) as send,
+        ):
+            result = await configure_browser_stream(
+                request,
+                "brs_1",
+                StreamConfigureBody(visible=False, max_fps=0, max_width=960, quality=55),
+            )
+        self.assertTrue(result["configured"])
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["type"], "browser.stream.configure")
+        self.assertEqual(message["mode"], "HUMAN_CONTROL")
+        self.assertFalse(message["payload"]["visible"])
+        self.assertEqual(message["payload"]["max_fps"], 0)
 
     async def test_return_to_agent_requires_fresh_snapshot_before_transfer(self):
         request = SimpleNamespace()
