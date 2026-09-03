@@ -14,7 +14,10 @@ from typing import Any, Iterable
 
 from cptr.models import FactoryRun, Workspace
 from cptr.services.agent_service import AgentService
-from cptr.services.direct_coding_workers import service as direct_worker_service
+from cptr.services.direct_coding_workers import (
+    DirectCodingWorkerError,
+    service as direct_worker_service,
+)
 from cptr.services.factory_capabilities import CapabilityInventory, CapabilityTrustStatus
 from cptr.services.factory_ci import (
     FactoryCiError,
@@ -47,6 +50,7 @@ from cptr.services.factory_workers import (
     FactoryWorkerAssignmentMode,
     FactoryWorkerAssignmentStatus,
     FactoryWorkerController,
+    FactoryWorkerError,
     SqlFactoryWorkerStore,
 )
 from cptr.utils import git as git_utils
@@ -268,7 +272,81 @@ class MissionPhaseHandler:
         )
 
 
+async def _active_mutation_assignment(context: PhaseContext, worker_store: SqlFactoryWorkerStore):
+    rows = await worker_store.list_for_run(context.run.id)
+    return next(
+        (
+            row
+            for row in rows
+            if row.cycle_id == context.cycle.id
+            and row.mode == FactoryWorkerAssignmentMode.MUTATION.value
+            and row.status != FactoryWorkerAssignmentStatus.CLOSED.value
+        ),
+        None,
+    )
+
+
+async def _ensure_mutation_assignment(
+    context: PhaseContext,
+    *,
+    workers: FactoryWorkerController,
+    worker_store: SqlFactoryWorkerStore,
+):
+    assignment = await _active_mutation_assignment(context, worker_store)
+    if assignment is not None:
+        return assignment
+    responsibility = f"dark-factory:{context.run.id}:{context.cycle.id}"
+    repo_path = _safe_relative((context.run.policy or {}).get("repo_path"), label="repo_path")
+    for summary in await direct_worker_service.list(
+        user_id=context.run.user_id, workspace_id=context.run.workspace_id
+    ):
+        if summary.get("responsibility") != responsibility or summary.get("status") == "CLOSED":
+            continue
+        return await workers.assign_mutation(
+            context.run,
+            context.cycle,
+            worker_id=str(summary["worker_id"]),
+            repo_path=repo_path,
+            scope=(".",),
+        )
+    return await workers.create_mutation_worker(
+        context.run,
+        context.cycle,
+        repo_path,
+        scope=(".",),
+        name="factory-mutation",
+    )
+
+
+async def _factory_worker_workspace(context: PhaseContext, worker_id: str):
+    root = await direct_worker_service.resolve_root(
+        user_id=context.run.user_id,
+        workspace_id=context.run.workspace_id,
+        worker_id=worker_id,
+    )
+    workspace = await Workspace.upsert(
+        context.run.user_id,
+        str(root),
+        f"Dark Factory {context.run.id[:12]}",
+        {
+            "factory_ephemeral": True,
+            "factory_run_id": context.run.id,
+            "worker_id": worker_id,
+        },
+    )
+    return root, workspace
+
+
 class BaselinePhaseHandler:
+    def __init__(
+        self,
+        *,
+        workers: FactoryWorkerController,
+        worker_store: SqlFactoryWorkerStore,
+    ) -> None:
+        self._workers = workers
+        self._worker_store = worker_store
+
     async def execute(self, context: PhaseContext) -> PhaseOutcome:
         try:
             specs = verification_specs(context.run)
@@ -285,31 +363,74 @@ class BaselinePhaseHandler:
         adapter = CptrGitAdapter(identity=identity)
         revision = await adapter.current_revision(root)
         fingerprint = await adapter.workspace_fingerprint(root)
+        policy = context.run.policy if isinstance(context.run.policy, dict) else {}
+        cycle_updates: dict[str, Any] = {
+            "base_revision": revision,
+            "base_fingerprint": fingerprint,
+            "gate_plan": _gate_plan(context.run, specs),
+        }
+        artifacts: list[PhaseArtifact] = [
+            PhaseArtifact(
+                key="baseline",
+                kind="repository_baseline",
+                source="cptr-git",
+                authority=EvidenceAuthority.MACHINE,
+                revision=revision,
+                fingerprint=fingerprint,
+                payload={
+                    "repo_path": _safe_relative(
+                        (context.run.policy or {}).get("repo_path"), label="repo_path"
+                    )
+                },
+            )
+        ]
+        if bool(policy.get("implementation_required", True)):
+            try:
+                assignment = await _ensure_mutation_assignment(
+                    context,
+                    workers=self._workers,
+                    worker_store=self._worker_store,
+                )
+            except (DirectCodingWorkerError, FactoryWorkerError) as exc:
+                reason = (
+                    f"isolated mutation lane could not be prepared from the clean baseline: {exc}"[
+                        :4_000
+                    ]
+                )
+                return PhaseOutcome(
+                    next_state=FactoryState.BLOCKED,
+                    reason=reason,
+                    run_next_action=reason,
+                )
+            if assignment.base_revision != revision:
+                reason = "isolated mutation lane base revision differs from the captured repository baseline"
+                return PhaseOutcome(
+                    next_state=FactoryState.BLOCKED,
+                    reason=reason,
+                    run_next_action=reason,
+                )
+            cycle_updates["mutation_worker_id"] = assignment.worker_id
+            artifacts.append(
+                PhaseArtifact(
+                    key="mutation-worker",
+                    kind="factory_worker",
+                    source="direct-coding-worker",
+                    authority=EvidenceAuthority.MACHINE,
+                    revision=assignment.base_revision,
+                    payload={
+                        "worker_id": assignment.worker_id,
+                        "branch": assignment.branch,
+                        "prepared_at": "BASELINING",
+                    },
+                )
+            )
         return PhaseOutcome(
             next_state=FactoryState.UNDERSTANDING,
-            reason="repository baseline and machine gate plan captured",
-            cycle_updates={
-                "base_revision": revision,
-                "base_fingerprint": fingerprint,
-                "gate_plan": _gate_plan(context.run, specs),
-            },
+            reason="repository baseline, machine gate plan, and isolated execution lane captured",
+            cycle_updates=cycle_updates,
             target_revision=revision,
             target_fingerprint=fingerprint,
-            artifacts=(
-                PhaseArtifact(
-                    key="baseline",
-                    kind="repository_baseline",
-                    source="cptr-git",
-                    authority=EvidenceAuthority.MACHINE,
-                    revision=revision,
-                    fingerprint=fingerprint,
-                    payload={
-                        "repo_path": _safe_relative(
-                            (context.run.policy or {}).get("repo_path"), label="repo_path"
-                        )
-                    },
-                ),
-            ),
+            artifacts=tuple(artifacts),
         )
 
 
@@ -477,15 +598,25 @@ class AdvisoryPhaseHandler:
         timeout_seconds, max_tool_calls = self._execution_limits(policy)
         evidence = self._task_evidence(context)
         if evidence is None:
-            if self._state is FactoryState.REPRODUCING:
+            task_workspace_id = context.run.workspace_id
+            isolated_execution = False
+            if self._state is FactoryState.REPRODUCING and context.cycle.mutation_worker_id:
+                _, worker_workspace = await _factory_worker_workspace(
+                    context, str(context.cycle.mutation_worker_id)
+                )
+                task_workspace_id = worker_workspace.id
+                isolated_execution = True
+            if self._state is FactoryState.REPRODUCING and isolated_execution:
                 phase_contract = (
-                    "Reproduce only the highest-value suspected defect with the smallest targeted command or test. "
+                    "Reproduce only the highest-value suspected defect with the smallest targeted command or test "
+                    "inside the already-prepared isolated worktree. Do not intentionally modify source files. "
                     "Do not run a full test suite, full build, package install, benchmark, or broad repository scan."
                 )
             else:
                 phase_contract = (
-                    "This phase is bounded analysis. Do not run test suites, builds, package managers, benchmarks, "
-                    "or long-running/background commands. Prefer targeted git status, grep/search, and focused file reads."
+                    "This phase is bounded read-only analysis. Shell commands are disabled so the source repository "
+                    "cannot be dirtied by advisory work. Use repository list/search/read tools only; do not run tests, "
+                    "builds, package managers, benchmarks, or background commands."
                 )
             prompt = (
                 f"Dark Factory phase {self._state.value}.\n"
@@ -499,7 +630,7 @@ class AdvisoryPhaseHandler:
             )
             task = await self._agent.start_task(
                 user_id=context.run.user_id,
-                workspace_id=context.run.workspace_id,
+                workspace_id=task_workspace_id,
                 prompt=prompt,
                 model_id=context.run.model_id,
                 idempotency_key=(
@@ -508,7 +639,9 @@ class AdvisoryPhaseHandler:
                 ),
                 execution_policy={
                     "allow_file_writes": False,
-                    "allow_commands": True,
+                    "allow_commands": bool(
+                        self._state is FactoryState.REPRODUCING and isolated_execution
+                    ),
                     "allow_network": bool(policy.get("allow_network_research", False)),
                     "allow_package_install": False,
                 },
@@ -532,6 +665,11 @@ class AdvisoryPhaseHandler:
                             "task_id": task_id,
                             "timeout_seconds": timeout_seconds,
                             "max_tool_calls": max_tool_calls,
+                            "execution_scope": (
+                                "isolated_mutation_worker"
+                                if isolated_execution
+                                else "source_read_only"
+                            ),
                         },
                     ),
                 ),
@@ -673,46 +811,45 @@ class ImplementationPhaseHandler:
         self._agent = agent
 
     async def _assignment(self, context: PhaseContext):
-        rows = await self._worker_store.list_for_run(context.run.id)
-        return next(
-            (
-                row
-                for row in rows
-                if row.cycle_id == context.cycle.id
-                and row.mode == FactoryWorkerAssignmentMode.MUTATION.value
-                and row.status != FactoryWorkerAssignmentStatus.CLOSED.value
-            ),
-            None,
-        )
+        return await _active_mutation_assignment(context, self._worker_store)
 
     async def _ensure_assignment(self, context: PhaseContext):
-        assignment = await self._assignment(context)
-        if assignment is not None:
-            return assignment
-        responsibility = f"dark-factory:{context.run.id}:{context.cycle.id}"
-        for summary in await direct_worker_service.list(
-            user_id=context.run.user_id, workspace_id=context.run.workspace_id
-        ):
-            if (
-                summary.get("responsibility") == responsibility
-                and summary.get("status") != "CLOSED"
-            ):
-                return await self._workers.assign_mutation(
-                    context.run,
-                    context.cycle,
-                    worker_id=str(summary["worker_id"]),
-                    repo_path=_safe_relative(
-                        (context.run.policy or {}).get("repo_path"), label="repo_path"
-                    ),
-                    scope=(".",),
-                )
-        return await self._workers.create_mutation_worker(
-            context.run,
-            context.cycle,
-            _safe_relative((context.run.policy or {}).get("repo_path"), label="repo_path"),
-            scope=(".",),
-            name="factory-mutation",
+        return await _ensure_mutation_assignment(
+            context,
+            workers=self._workers,
+            worker_store=self._worker_store,
         )
+
+    @staticmethod
+    def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            parsed = default
+        return max(minimum, min(maximum, parsed))
+
+    def _execution_limits(self, policy: dict[str, Any]) -> tuple[int, int]:
+        timeout_default = 600
+        tools_default = 60
+        timeout_seconds = self._bounded_int(
+            policy.get(
+                "implementation_timeout_seconds",
+                os.environ.get("CPTR_FACTORY_IMPLEMENTATION_TIMEOUT_SECONDS", timeout_default),
+            ),
+            default=timeout_default,
+            minimum=60,
+            maximum=3_600,
+        )
+        max_tool_calls = self._bounded_int(
+            policy.get(
+                "implementation_max_tool_calls",
+                os.environ.get("CPTR_FACTORY_IMPLEMENTATION_MAX_TOOL_CALLS", tools_default),
+            ),
+            default=tools_default,
+            minimum=8,
+            maximum=250,
+        )
+        return timeout_seconds, max_tool_calls
 
     def _task_evidence(self, context: PhaseContext):
         return next(
@@ -757,29 +894,19 @@ class ImplementationPhaseHandler:
                     ),
                 ),
             )
-        root = await direct_worker_service.resolve_root(
-            user_id=context.run.user_id,
-            workspace_id=context.run.workspace_id,
-            worker_id=str(assignment.worker_id),
-        )
-        worker_workspace = await Workspace.upsert(
-            context.run.user_id,
-            str(root),
-            f"Dark Factory {context.run.id[:12]}",
-            {
-                "factory_ephemeral": True,
-                "factory_run_id": context.run.id,
-                "worker_id": assignment.worker_id,
-            },
-        )
+        root, worker_workspace = await _factory_worker_workspace(context, str(assignment.worker_id))
+        timeout_seconds, max_tool_calls = self._execution_limits(policy)
         evidence = self._task_evidence(context)
         if evidence is None:
             prompt = (
                 f"Implement this Dark Factory mission in the isolated worktree.\nMission: {context.run.mission}\n"
                 "Acceptance criteria:\n- "
                 + "\n- ".join(str(item) for item in context.run.acceptance_criteria or ())
-                + "\nWork only inside this workspace. Reproduce/root-cause before changing code when needed. "
-                "Make the smallest production-quality fix. Run useful targeted checks, but do not push, deploy, or claim Victory."
+                + f"\nFAST IMPLEMENTATION CONTRACT: finish within {timeout_seconds} seconds and at most "
+                f"{max_tool_calls} tool actions. Work only inside this isolated workspace. Use the existing reproduced/root-cause "
+                "evidence, make the smallest production-quality fix, and stop once the targeted fix is implemented. "
+                "Run only focused checks needed while editing; do not run the full suite or broad build because machine-owned "
+                "verification phases run them next. Do not push, deploy, or claim Victory."
             )
             task = await self._agent.start_task(
                 user_id=context.run.user_id,
@@ -811,6 +938,8 @@ class ImplementationPhaseHandler:
                             "task_id": str(task.get("id") or ""),
                             "attempt": int(context.cycle.attempt_count or 0),
                             "worker_id": assignment.worker_id,
+                            "timeout_seconds": timeout_seconds,
+                            "max_tool_calls": max_tool_calls,
                         },
                     ),
                 ),
@@ -818,6 +947,35 @@ class ImplementationPhaseHandler:
         task_id = str(evidence.payload.get("task_id") or "")
         task = await self._agent.get_task(task_id, user_id=context.run.user_id)
         status = str(task.get("status") or "").upper()
+        tool_calls = AdvisoryPhaseHandler._tool_call_count(task)
+        elapsed_ms = AdvisoryPhaseHandler._elapsed_ms(task)
+        budget_reasons: list[str] = []
+        if elapsed_ms >= timeout_seconds * 1000:
+            budget_reasons.append(f"{timeout_seconds}s time budget")
+        if tool_calls >= max_tool_calls:
+            budget_reasons.append(f"{max_tool_calls}-tool budget")
+        budget_reason = " and ".join(budget_reasons) or None
+        if status not in _TERMINAL_TASK_STATUSES and budget_reason is not None:
+            cancelled = await self._agent.cancel_task(task_id, user_id=context.run.user_id)
+            task = cancelled if isinstance(cancelled, dict) else task
+            status = str(task.get("status") or "").upper()
+            if status not in _TERMINAL_TASK_STATUSES:
+                return PhaseOutcome(
+                    reason="isolated implementation exceeded its fast-execution budget",
+                    run_next_action="stop over-budget implementation task",
+                )
+        if status == "CANCELLED" and budget_reason is not None:
+            return PhaseOutcome(
+                reason="isolated implementation fast-execution budget reached",
+                failure=PhaseFailure(
+                    category=PhaseFailureCategory.IMPLEMENTATION,
+                    code="FACTORY_IMPLEMENTATION_BUDGET_EXCEEDED",
+                    summary=(
+                        f"implementation stopped after {elapsed_ms} ms / {tool_calls} tools: "
+                        f"{budget_reason}"
+                    ),
+                ),
+            )
         if status not in _TERMINAL_TASK_STATUSES:
             return PhaseOutcome(
                 reason="isolated implementation task is still running",
@@ -1305,10 +1463,12 @@ def build_production_orchestrator(
     owner_token: str,
     lease_ms: int,
     agent: AgentService | None = None,
+    worker_store: SqlFactoryWorkerStore | None = None,
+    workers: FactoryWorkerController | None = None,
 ) -> FactoryOrchestrator:
     agent = agent or AgentService()
-    worker_store = SqlFactoryWorkerStore()
-    workers = FactoryWorkerController(store=worker_store)
+    worker_store = worker_store or SqlFactoryWorkerStore()
+    workers = workers or FactoryWorkerController(store=worker_store)
     control = FactoryControlService(store=store, worker_controller=workers)
     identityless_git = FactoryGitService()
     github_ci = GitHubActionsCliProvider()
@@ -1323,7 +1483,10 @@ def build_production_orchestrator(
     handlers: dict[FactoryState, Any] = {
         FactoryState.MISSION: MissionPhaseHandler(),
         FactoryState.RECOVERING: RecoveryPhaseHandler(reconciler=workers.reconcile),
-        FactoryState.BASELINING: BaselinePhaseHandler(),
+        FactoryState.BASELINING: BaselinePhaseHandler(
+            workers=workers,
+            worker_store=worker_store,
+        ),
         FactoryState.SELECTING_FINDING: DeterministicPhaseHandler(
             next_state=FactoryState.CAPABILITY_ANALYSIS,
             reason="bounded audit finding selected for the current cycle",
@@ -1391,6 +1554,9 @@ class FactoryProductionRunner:
         lease_ms: int,
         poll_interval: float | None = None,
         orchestrator: FactoryOrchestrator | None = None,
+        worker_store: SqlFactoryWorkerStore | None = None,
+        worker_controller: FactoryWorkerController | None = None,
+        terminal_quiesce_timeout_ms: int | None = None,
     ) -> None:
         self._store = store
         self._owner_token = f"factory-production-{uuid.uuid4().hex}"
@@ -1402,8 +1568,20 @@ class FactoryProductionRunner:
         )
         if self._lease_ms <= 0 or self._poll_interval <= 0:
             raise ValueError("factory production runner timing must be positive")
+        self._worker_store = worker_store or SqlFactoryWorkerStore()
+        self._workers = worker_controller or FactoryWorkerController(store=self._worker_store)
+        raw_terminal_timeout = (
+            terminal_quiesce_timeout_ms
+            if terminal_quiesce_timeout_ms is not None
+            else os.environ.get("CPTR_FACTORY_TERMINAL_QUIESCE_TIMEOUT_MS", "5000")
+        )
+        self._terminal_quiesce_timeout_ms = max(100, min(120_000, int(raw_terminal_timeout)))
         self._orchestrator = orchestrator or build_production_orchestrator(
-            store=store, owner_token=self._owner_token, lease_ms=self._lease_ms
+            store=store,
+            owner_token=self._owner_token,
+            lease_ms=self._lease_ms,
+            worker_store=self._worker_store,
+            workers=self._workers,
         )
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._closed = False
@@ -1418,7 +1596,32 @@ class FactoryProductionRunner:
         self._tasks[run_id] = task
         task.add_done_callback(lambda _task, rid=run_id: self._tasks.pop(rid, None))
 
+    async def _quiesce_terminal_workers(self, run: FactoryRun) -> None:
+        try:
+            result = await self._workers.cancel_run(
+                run, timeout_ms=self._terminal_quiesce_timeout_ms
+            )
+        except Exception:
+            logger.exception("failed to quiesce terminal factory workers for %s", run.id)
+            return
+        if not result.quiescent:
+            logger.error(
+                "terminal factory run %s retains unresolved worker ownership: assignments=%s commands=%s",
+                run.id,
+                result.unresolved_assignment_ids,
+                result.failed_command_ids,
+            )
+
     async def schedule_active(self) -> list[str]:
+        # A prior process may have stopped immediately after a terminal state
+        # transition but before worker ownership was quiesced. Reconcile those
+        # writer leases first so terminal history cannot permanently lock the
+        # workspace after restart.
+        for run_id in await self._worker_store.list_terminal_blocking_run_ids():
+            run = await self._store.get_run(run_id)
+            if run is not None and is_terminal_factory_state(FactoryState(run.state)):
+                await self._quiesce_terminal_workers(run)
+
         scheduled: list[str] = []
         for run in await self._store.list_recoverable():
             state = FactoryState(run.state)
@@ -1448,11 +1651,17 @@ class FactoryProductionRunner:
                             reason=f"production runner blocked after {exc.__class__.__name__}",
                             idempotency_key=f"production-runner-error:{run_id}:{current.state}:{current.updated_at}",
                         )
+                        blocked = await self._store.get_run(run_id)
+                        if blocked is not None:
+                            await self._quiesce_terminal_workers(blocked)
                     except Exception:
                         logger.exception("failed to persist production runner block for %s", run_id)
                 return
             state = FactoryState(run.state)
-            if state in _WAITING_STATES or is_terminal_factory_state(state):
+            if is_terminal_factory_state(state):
+                await self._quiesce_terminal_workers(run)
+                return
+            if state in _WAITING_STATES:
                 return
             await asyncio.sleep(self._poll_interval)
 

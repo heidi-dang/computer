@@ -53,16 +53,14 @@ def _canonical_payload(payload: Any) -> tuple[Any, str]:
         default=str,
     ).encode("utf-8")
     if len(encoded) > _MAX_FACTORY_PAYLOAD_BYTES:
-        raise FactoryPayloadTooLarge(
-            f"factory payload exceeds {_MAX_FACTORY_PAYLOAD_BYTES} bytes"
-        )
+        raise FactoryPayloadTooLarge(f"factory payload exceeds {_MAX_FACTORY_PAYLOAD_BYTES} bytes")
     return safe, hashlib.sha256(encoded).hexdigest()
 
 
-def _config_fingerprint(*, policy: dict[str, Any], budget: dict[str, Any], model_id: str | None) -> str:
-    _, digest = _canonical_payload(
-        {"policy": policy, "budget": budget, "model_id": model_id or ""}
-    )
+def _config_fingerprint(
+    *, policy: dict[str, Any], budget: dict[str, Any], model_id: str | None
+) -> str:
+    _, digest = _canonical_payload({"policy": policy, "budget": budget, "model_id": model_id or ""})
     return digest
 
 
@@ -265,9 +263,13 @@ class SqlFactoryStore:
                             "cycle advance idempotency key was replayed with different intent"
                         )
                     next_cycle_id = str((existing.payload or {}).get("next_cycle_id") or "")
-                    next_cycle = await db.get(FactoryCycle, next_cycle_id) if next_cycle_id else None
+                    next_cycle = (
+                        await db.get(FactoryCycle, next_cycle_id) if next_cycle_id else None
+                    )
                     if next_cycle is None:
-                        raise RuntimeError("durable cycle advance event references a missing next cycle")
+                        raise RuntimeError(
+                            "durable cycle advance event references a missing next cycle"
+                        )
                     return next_cycle
                 if run.current_cycle_id != cycle_id:
                     raise ValueError("cycle advance requires the active completed factory cycle")
@@ -390,7 +392,9 @@ class SqlFactoryStore:
                 for key, value in safe_updates.items():
                     setattr(cycle, key, value)
                 if run_next_action is not None:
-                    run.next_action = str(run_next_action)[:4_000]
+                    next_action = str(run_next_action)[:4_000]
+                    run.next_action = next_action
+                    cycle.next_action = next_action
                 cycle.updated_at = now
                 run.updated_at = now
                 await self._append_event_in_transaction(
@@ -590,7 +594,9 @@ class SqlFactoryStore:
                     FactoryState.APPROVAL_REQUIRED,
                 }:
                     effective_resumable = (
-                        FactoryState(run.resumable_state) if run.resumable_state else resumable_state
+                        FactoryState(run.resumable_state)
+                        if run.resumable_state
+                        else resumable_state
                     )
                 validate_factory_transition(
                     current,
@@ -621,11 +627,25 @@ class SqlFactoryStore:
                     run.resumable_state = None
                 run.state = to_state.value
                 run.updated_at = now
+                cycle = None
                 if run.current_cycle_id:
                     cycle = await db.get(FactoryCycle, run.current_cycle_id)
                     if cycle is not None:
                         cycle.state = to_state.value
                         cycle.updated_at = now
+                if to_state is FactoryState.BLOCKED:
+                    next_action = reason[:4_000]
+                    run.next_action = next_action
+                    if cycle is not None:
+                        cycle.next_action = next_action
+                elif to_state not in {
+                    FactoryState.PAUSED,
+                    FactoryState.APPROVAL_REQUIRED,
+                    FactoryState.REPAIR_REQUIRED,
+                }:
+                    run.next_action = None
+                    if cycle is not None:
+                        cycle.next_action = None
                 if is_terminal_factory_state(to_state):
                     run.completed_at = now
                 await self._append_event_in_transaction(
@@ -651,7 +671,9 @@ class SqlFactoryStore:
         idempotency_key: str,
     ) -> FactoryRun:
         if not is_machine_issued_victory(decision):
-            raise TypeError("Victory authorization requires a machine-issued FactoryVictoryDecision")
+            raise TypeError(
+                "Victory authorization requires a machine-issued FactoryVictoryDecision"
+            )
         if not decision.passed:
             raise ValueError("failed Victory decision cannot authorize the commit path")
         payload = {

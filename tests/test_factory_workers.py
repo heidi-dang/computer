@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models import Base
 from cptr.services.direct_coding_workers import DirectCodingWorkerError
+from cptr.services.factory_domain import FactoryActor, FactoryState
 from cptr.services.factory_store import SqlFactoryStore
 from cptr.services.factory_workers import (
     FactoryWorkerAssignmentMode,
@@ -194,6 +195,17 @@ class FactoryWorkerControllerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.mode, FactoryWorkerAssignmentMode.MUTATION.value)
         self.assertEqual(read_one.mode, FactoryWorkerAssignmentMode.READ_ONLY.value)
         self.assertEqual(read_two.mode, FactoryWorkerAssignmentMode.READ_ONLY.value)
+
+        await self.assignment_store.set_status(first.id, FactoryWorkerAssignmentStatus.QUIESCENT)
+        released = await self.controller.assign_mutation(
+            self.run,
+            self.cycle,
+            worker_id="dcw_2",
+            repo_path=".",
+            scope=("src/api",),
+        )
+        self.assertEqual(released.worker_id, "dcw_2")
+
         with self.assertRaises(FactoryWorkerError) as read_limit:
             await self.controller.assign_read_only(
                 self.run,
@@ -202,6 +214,44 @@ class FactoryWorkerControllerTests(unittest.IsolatedAsyncioTestCase):
                 scope=("tests",),
             )
         self.assertEqual(read_limit.exception.code, "FACTORY_WORKER_READ_ONLY_LIMIT")
+
+    async def test_terminal_writer_is_discoverable_until_quiescent_then_releases_scope(self):
+        assignment = await self.controller.create_mutation_worker(
+            self.run,
+            self.cycle,
+            repo_path=".",
+            scope=("src",),
+            name="terminal-writer",
+        )
+        await self.factory_store.transition(
+            self.run.id,
+            to_state=FactoryState.RECOVERING,
+            actor=FactoryActor.SYSTEM,
+            reason="recover",
+            idempotency_key="terminal-writer-recover",
+        )
+        await self.factory_store.transition(
+            self.run.id,
+            to_state=FactoryState.BASELINING,
+            actor=FactoryActor.SYSTEM,
+            reason="baseline",
+            idempotency_key="terminal-writer-baseline",
+        )
+        await self.factory_store.transition(
+            self.run.id,
+            to_state=FactoryState.BLOCKED,
+            actor=FactoryActor.SYSTEM,
+            reason="blocked",
+            idempotency_key="terminal-writer-blocked",
+        )
+
+        self.assertEqual(
+            await self.assignment_store.list_terminal_blocking_run_ids(), [self.run.id]
+        )
+        await self.assignment_store.set_status(
+            assignment.id, FactoryWorkerAssignmentStatus.QUIESCENT
+        )
+        self.assertEqual(await self.assignment_store.list_terminal_blocking_run_ids(), [])
 
     async def test_read_only_limit_is_transactionally_enforced_under_concurrency(self):
         results = await asyncio.gather(

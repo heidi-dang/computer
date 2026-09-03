@@ -308,6 +308,10 @@ class FactoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(progress["percent"], 0)
         self.assertLess(progress["percent"], 100)
         self.assertEqual(progress["outcome"], "running")
+        durable_events = await self.store.list_events(run.id)
+        self.assertEqual(progress["last_event_at_ms"], durable_events[-1].created_at)
+        self.assertEqual(progress["state_started_at_ms"], durable_events[-1].created_at)
+        self.assertEqual(progress["effective_phase_started_at_ms"], durable_events[-1].created_at)
 
         await self.store.transition(
             run.id,

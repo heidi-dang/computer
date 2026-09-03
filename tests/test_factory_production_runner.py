@@ -10,12 +10,14 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models import Base
 from cptr.services.factory_capabilities import CapabilityInventory
-from cptr.services.factory_domain import FactoryState
+from cptr.services.factory_domain import FactoryActor, FactoryState
 from cptr.services.factory_orchestrator import FactoryOrchestrator
 from cptr.services.factory_phases import PhaseContext, RecoveryPhaseHandler
 from cptr.services.factory_production import (
     AdvisoryPhaseHandler,
+    BaselinePhaseHandler,
     FactoryProductionRunner,
+    ImplementationPhaseHandler,
     ProductionCiPhaseHandler,
     _run_fixed_target,
     build_production_orchestrator,
@@ -157,13 +159,57 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         prompt = agent.start_task.await_args.kwargs["prompt"]
         self.assertIn("finish within 90 seconds", prompt)
         self.assertIn("at most 6 tool actions", prompt)
-        self.assertIn("Do not run test suites", prompt)
+        self.assertIn("do not run tests", prompt)
         self.assertIn("Stop exploring", prompt)
         payload = outcome.artifacts[0].payload
         self.assertEqual(payload["phase_state"], "AUDITING")
         self.assertEqual(payload["timeout_seconds"], 90)
         self.assertEqual(payload["max_tool_calls"], 6)
+        self.assertEqual(payload["execution_scope"], "source_read_only")
+        self.assertFalse(agent.start_task.await_args.kwargs["execution_policy"]["allow_commands"])
         self.assertNotIn("state", payload)
+
+    async def test_reproduction_runs_commands_only_in_prepared_isolated_worker(self):
+        agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-repro"}))
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.REPRODUCING,
+            next_state=FactoryState.ROOT_CAUSE_ANALYSIS,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-repro",
+                user_id="user-1",
+                workspace_id="workspace-source",
+                mission="reproduce quickly",
+                acceptance_criteria=("reproduce one defect",),
+                model_id="agent:model",
+                policy={"reproduction_timeout_seconds": 90, "reproduction_max_tool_calls": 8},
+            ),
+            cycle=SimpleNamespace(
+                id="cycle-repro",
+                attempt_count=0,
+                mutation_worker_id="worker-1",
+            ),
+            evidence=(),
+            gates=(),
+        )
+
+        with patch(
+            "cptr.services.factory_production._factory_worker_workspace",
+            new=AsyncMock(return_value=(Path("/isolated"), SimpleNamespace(id="workspace-worker"))),
+        ):
+            outcome = await handler.execute(context)
+
+        self.assertIsNone(outcome.next_state)
+        self.assertEqual(agent.start_task.await_args.kwargs["workspace_id"], "workspace-worker")
+        self.assertTrue(agent.start_task.await_args.kwargs["execution_policy"]["allow_commands"])
+        self.assertFalse(
+            agent.start_task.await_args.kwargs["execution_policy"]["allow_file_writes"]
+        )
+        self.assertEqual(
+            outcome.artifacts[0].payload["execution_scope"], "isolated_mutation_worker"
+        )
 
     async def test_advisory_cancels_over_tool_budget_and_advances_with_partial_advice(self):
         running = {
@@ -226,6 +272,196 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("partial machine-guided finding", outcome.artifacts[0].payload["summary"])
         agent.cancel_task.assert_awaited_once_with("task-budget", user_id="user-1")
         agent.get_output.assert_not_awaited()
+
+    async def test_baseline_prepares_isolated_mutation_lane_before_advisory(self):
+        temp = self._git_repo()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        revision = subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip()
+        assignment = SimpleNamespace(
+            worker_id="worker-baseline",
+            branch="cptr/direct/worker-baseline",
+            base_revision=revision,
+        )
+        handler = BaselinePhaseHandler(
+            workers=SimpleNamespace(),
+            worker_store=SimpleNamespace(),
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-baseline",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="prepare before advisory",
+                acceptance_criteria=("smoke passes",),
+                model_id="agent:model",
+                policy={
+                    "implementation_required": True,
+                    "verification_targets": [
+                        {
+                            "gate_id": "smoke",
+                            "phase": "full",
+                            "target": "python_pytest",
+                            "test_path": "test_smoke.py",
+                            "category": "broader_tests",
+                            "acceptance_ids": [1],
+                        }
+                    ],
+                },
+                budget={},
+            ),
+            cycle=SimpleNamespace(id="cycle-baseline", attempt_count=0),
+            evidence=(),
+            gates=(),
+        )
+
+        with (
+            patch(
+                "cptr.services.factory_production._repo_root", new=AsyncMock(return_value=str(root))
+            ),
+            patch(
+                "cptr.services.factory_production.identity_for_user_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "cptr.services.factory_production._ensure_mutation_assignment",
+                new=AsyncMock(return_value=assignment),
+            ) as ensure_worker,
+        ):
+            outcome = await handler.execute(context)
+
+        self.assertEqual(outcome.next_state, FactoryState.UNDERSTANDING)
+        self.assertEqual(outcome.cycle_updates["mutation_worker_id"], "worker-baseline")
+        self.assertEqual(outcome.target_revision, revision)
+        self.assertTrue(any(item.kind == "factory_worker" for item in outcome.artifacts))
+        ensure_worker.assert_awaited_once()
+
+    async def test_implementation_budget_cancels_and_routes_to_repair(self):
+        running = {
+            "id": "task-implementation",
+            "status": "RUNNING",
+            "created_at": 999_000,
+            "raw_output": [
+                {"type": "function_call", "call_id": f"call-{index}"} for index in range(8)
+            ],
+        }
+        cancelled = {**running, "status": "CANCELLED"}
+        agent = SimpleNamespace(
+            get_task=AsyncMock(return_value=running),
+            cancel_task=AsyncMock(return_value=cancelled),
+        )
+        handler = ImplementationPhaseHandler(
+            workers=SimpleNamespace(),
+            worker_store=SimpleNamespace(),
+            agent=agent,
+        )
+        assignment = SimpleNamespace(worker_id="worker-1", base_revision="rev", branch="branch")
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-implementation",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="fix one defect",
+                acceptance_criteria=("fix is verified",),
+                model_id="agent:model",
+                policy={
+                    "implementation_required": True,
+                    "implementation_timeout_seconds": 600,
+                    "implementation_max_tool_calls": 8,
+                },
+            ),
+            cycle=SimpleNamespace(
+                id="cycle-implementation",
+                attempt_count=0,
+                mutation_worker_id="worker-1",
+            ),
+            evidence=(
+                SimpleNamespace(
+                    kind="factory_implementation_task",
+                    payload={"attempt": 0, "task_id": "task-implementation"},
+                ),
+            ),
+            gates=(),
+        )
+
+        with (
+            patch.object(handler, "_ensure_assignment", new=AsyncMock(return_value=assignment)),
+            patch(
+                "cptr.services.factory_production._factory_worker_workspace",
+                new=AsyncMock(
+                    return_value=(Path("/isolated"), SimpleNamespace(id="workspace-worker"))
+                ),
+            ),
+            patch("cptr.services.factory_production.time.time", return_value=1_000),
+        ):
+            outcome = await handler.execute(context)
+
+        self.assertIsNotNone(outcome.failure)
+        self.assertEqual(outcome.failure.code, "FACTORY_IMPLEMENTATION_BUDGET_EXCEEDED")
+        agent.cancel_task.assert_awaited_once_with("task-implementation", user_id="user-1")
+
+    async def test_transition_projection_next_action_stays_consistent(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="keep projection consistent",
+            acceptance_criteria=["state and next action agree"],
+            policy={},
+            budget={},
+            model_id=None,
+            idempotency_key="projection-consistency-run",
+        )
+        cycle = await self.store.create_cycle(
+            run.id,
+            base_revision=None,
+            base_fingerprint=None,
+            idempotency_key="projection-consistency-cycle",
+        )
+        await self.store.update_cycle_projection(
+            run.id,
+            cycle.id,
+            updates={},
+            run_next_action="wait for obsolete work",
+            idempotency_key="projection-consistency-wait",
+        )
+        projected_run = await self.store.get_run(run.id)
+        projected_cycle = await self.store.get_cycle(cycle.id)
+        self.assertEqual(projected_run.next_action, "wait for obsolete work")
+        self.assertEqual(projected_cycle.next_action, "wait for obsolete work")
+
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.RECOVERING,
+            actor=FactoryActor.SYSTEM,
+            reason="advance",
+            idempotency_key="projection-consistency-recovering",
+        )
+        recovered_run = await self.store.get_run(run.id)
+        recovered_cycle = await self.store.get_cycle(cycle.id)
+        self.assertIsNone(recovered_run.next_action)
+        self.assertIsNone(recovered_cycle.next_action)
+
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.BASELINING,
+            actor=FactoryActor.SYSTEM,
+            reason="baseline",
+            idempotency_key="projection-consistency-baselining",
+        )
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.BLOCKED,
+            actor=FactoryActor.SYSTEM,
+            reason="source repository must remain clean",
+            idempotency_key="projection-consistency-blocked",
+        )
+        blocked_run = await self.store.get_run(run.id)
+        blocked_cycle = await self.store.get_cycle(cycle.id)
+        self.assertEqual(blocked_run.next_action, "source repository must remain clean")
+        self.assertEqual(blocked_cycle.next_action, "source repository must remain clean")
+        self.assertIsNotNone(blocked_run.completed_at)
 
     async def test_no_mutation_machine_verified_run_reaches_complete(self):
         temp = self._git_repo()
@@ -449,6 +685,114 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(completed.artifacts), 1)
         self.assertEqual(completed.artifacts[0].payload["status"], "COMPLETED")
         self.assertEqual(completed.artifacts[0].payload["conclusion"], "SUCCESS")
+
+    async def test_terminal_run_quiesces_worker_ownership_before_runner_stops(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="release writer ownership on terminal state",
+            acceptance_criteria=["terminal run leaves no active writer"],
+            policy={},
+            budget={},
+            model_id=None,
+            idempotency_key="terminal-quiescence-run",
+        )
+        observed = SimpleNamespace(
+            id=run.id,
+            user_id="user-1",
+            workspace_id="workspace-1",
+            state=FactoryState.BLOCKED.value,
+        )
+        orchestrator = SimpleNamespace(run_once=AsyncMock(return_value=observed))
+        worker_controller = SimpleNamespace(
+            cancel_run=AsyncMock(
+                return_value=SimpleNamespace(
+                    quiescent=True,
+                    unresolved_assignment_ids=(),
+                    failed_command_ids=(),
+                )
+            )
+        )
+        worker_store = SimpleNamespace(list_terminal_blocking_run_ids=AsyncMock(return_value=[]))
+        runner = FactoryProductionRunner(
+            store=self.store,
+            lease_ms=10_000,
+            poll_interval=0.001,
+            orchestrator=orchestrator,
+            worker_store=worker_store,
+            worker_controller=worker_controller,
+            terminal_quiesce_timeout_ms=3210,
+        )
+
+        runner.schedule(run.id)
+        await asyncio.sleep(0.01)
+        await runner.close()
+
+        orchestrator.run_once.assert_awaited_once_with(run.id)
+        worker_controller.cancel_run.assert_awaited_once_with(observed, timeout_ms=3210)
+
+    async def test_schedule_active_reconciles_terminal_writer_leases_after_restart(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="recover terminal writer lease",
+            acceptance_criteria=["startup releases stale writer ownership"],
+            policy={},
+            budget={},
+            model_id=None,
+            idempotency_key="terminal-restart-quiescence-run",
+        )
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.RECOVERING,
+            actor=FactoryActor.SYSTEM,
+            reason="recover",
+            idempotency_key="terminal-restart-quiescence-recover",
+        )
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.BASELINING,
+            actor=FactoryActor.SYSTEM,
+            reason="baseline",
+            idempotency_key="terminal-restart-quiescence-baseline",
+        )
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.BLOCKED,
+            actor=FactoryActor.SYSTEM,
+            reason="blocked",
+            idempotency_key="terminal-restart-quiescence-blocked",
+        )
+        terminal = await self.store.get_run(run.id)
+        worker_controller = SimpleNamespace(
+            cancel_run=AsyncMock(
+                return_value=SimpleNamespace(
+                    quiescent=True,
+                    unresolved_assignment_ids=(),
+                    failed_command_ids=(),
+                )
+            )
+        )
+        worker_store = SimpleNamespace(
+            list_terminal_blocking_run_ids=AsyncMock(return_value=[run.id])
+        )
+        runner = FactoryProductionRunner(
+            store=self.store,
+            lease_ms=10_000,
+            poll_interval=0.001,
+            orchestrator=SimpleNamespace(run_once=AsyncMock()),
+            worker_store=worker_store,
+            worker_controller=worker_controller,
+        )
+
+        scheduled = await runner.schedule_active()
+        await runner.close()
+
+        self.assertEqual(scheduled, [])
+        worker_controller.cancel_run.assert_awaited_once()
+        quiesced_run = worker_controller.cancel_run.await_args.args[0]
+        self.assertEqual(quiesced_run.id, terminal.id)
+        self.assertEqual(worker_controller.cancel_run.await_args.kwargs["timeout_ms"], 5000)
 
     async def test_scheduler_is_single_flight_and_stops_at_waiting_state(self):
         run = await self.store.create_run(

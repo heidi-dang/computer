@@ -644,6 +644,9 @@ export interface McpFactoryProgress {
 	terminal: boolean;
 	basis: 'server_state_machine';
 	updated_at_ms: number;
+	state_started_at_ms: number;
+	effective_phase_started_at_ms: number;
+	last_event_at_ms: number;
 }
 
 export interface McpFactorySummary {

@@ -121,6 +121,18 @@ def _progress_dict(run: FactoryRun, events: list[FactoryEvent]) -> dict[str, Any
                 if effective_state in _PROGRESS_INDEX:
                     break
 
+    state_started_at_ms = int(run.created_at)
+    effective_phase_started_at_ms = int(run.created_at)
+    for event in reversed(events):
+        if event.to_state == state.value:
+            state_started_at_ms = int(event.created_at)
+            break
+    for event in reversed(events):
+        if event.to_state == effective_state:
+            effective_phase_started_at_ms = int(event.created_at)
+            break
+    last_event_at_ms = int(events[-1].created_at) if events else int(run.created_at)
+
     index = _PROGRESS_INDEX.get(effective_state, 0)
     denominator = max(1, len(_PROGRESS_STATES) - 1)
     percent = max(0, min(100, round((index / denominator) * 100)))
@@ -156,6 +168,9 @@ def _progress_dict(run: FactoryRun, events: list[FactoryEvent]) -> dict[str, Any
         "terminal": is_terminal_factory_state(state),
         "basis": "server_state_machine",
         "updated_at_ms": int(run.updated_at),
+        "state_started_at_ms": state_started_at_ms,
+        "effective_phase_started_at_ms": effective_phase_started_at_ms,
+        "last_event_at_ms": last_event_at_ms,
     }
 
 

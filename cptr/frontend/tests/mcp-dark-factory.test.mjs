@@ -10,6 +10,8 @@ test('Dark Factory API exposes server-authoritative realtime progress and activi
 
 	assert.match(api, /export interface McpFactoryProgress/);
 	assert.match(api, /basis:\s*'server_state_machine'/);
+	assert.match(api, /effective_phase_started_at_ms:\s*number/);
+	assert.match(api, /last_event_at_ms:\s*number/);
 	assert.match(api, /new EventSource\(`\/api\/mcp\/factory\/stream\?/);
 	assert.match(api, /addEventListener\(['"]activity['"]/);
 	assert.match(api, /addEventListener\(['"]progress['"]/);
@@ -29,6 +31,12 @@ test('Dark Factory dashboard renders authoritative progress and canonical lifecy
 	assert.doesNotMatch(component, /['"]RESEARCHING['"]/);
 	assert.match(component, /onActivity:/);
 	assert.match(component, /onProgress:/);
+	assert.match(component, /Live execution timing/);
+	assert.match(component, /Execution budget/);
+	assert.match(component, /Blocked reason/);
+	assert.match(component, /terminalMessageLabel/);
+	assert.match(component, /eventLabel\(event\.event_type\)/);
+	assert.match(component, /<details class="event-details">/);
 });
 
 test('MCP shell and Dark Factory dashboard provide mobile-first touch layout', async () => {

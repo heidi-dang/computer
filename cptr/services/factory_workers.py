@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from cptr.models import FactoryCycle, FactoryRun, FactoryWorkerAssignment, Workspace
+from cptr.services.factory_domain import FactoryState, is_terminal_factory_state
 from cptr.services.direct_coding_workers import (
     DirectCodingWorkerError,
     DirectCodingWorkerService,
@@ -53,13 +54,16 @@ class FactoryWorkerAssignmentStatus(str, Enum):
 
 
 _BLOCKING_MUTATION_STATUSES = {
+    # Only lanes that may still be writing block a new mutation lease. A
+    # quiescent or missing historical assignment remains durable evidence but
+    # must not permanently lock the workspace after a terminal run.
     FactoryWorkerAssignmentStatus.ACTIVE.value,
     FactoryWorkerAssignmentStatus.CANCELLING.value,
-    FactoryWorkerAssignmentStatus.QUIESCENT.value,
-    FactoryWorkerAssignmentStatus.MISSING.value,
 }
 _ACTIVE_READ_ONLY_STATUSES = {FactoryWorkerAssignmentStatus.ACTIVE.value}
-_LOOP_WORKSPACE_LOCKS: weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]] = weakref.WeakKeyDictionary()
+_LOOP_WORKSPACE_LOCKS: weakref.WeakKeyDictionary[Any, dict[str, asyncio.Lock]] = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _workspace_assignment_lock(workspace_id: str) -> asyncio.Lock:
@@ -222,6 +226,22 @@ class SqlFactoryWorkerStore:
                 )
             )
             return len(rows.all())
+
+    async def list_terminal_blocking_run_ids(self) -> list[str]:
+        terminal = [state.value for state in FactoryState if is_terminal_factory_state(state)]
+        async with self._session_factory() as db:
+            rows = await db.execute(
+                select(FactoryWorkerAssignment.run_id)
+                .join(FactoryRun, FactoryRun.id == FactoryWorkerAssignment.run_id)
+                .where(
+                    FactoryRun.state.in_(terminal),
+                    FactoryWorkerAssignment.mode == FactoryWorkerAssignmentMode.MUTATION.value,
+                    FactoryWorkerAssignment.status.in_(_BLOCKING_MUTATION_STATUSES),
+                )
+                .distinct()
+                .order_by(FactoryWorkerAssignment.run_id)
+            )
+            return [str(row[0]) for row in rows.all()]
 
     async def ensure_mutation_scope_available(
         self,
@@ -595,7 +615,10 @@ class FactoryWorkerController:
         records = await self._store.list_for_run(run.id)
         reconciled: list[FactoryWorkerAssignment] = []
         for record in records:
-            if record.mode != FactoryWorkerAssignmentMode.MUTATION.value or record.status == FactoryWorkerAssignmentStatus.CLOSED.value:
+            if (
+                record.mode != FactoryWorkerAssignmentMode.MUTATION.value
+                or record.status == FactoryWorkerAssignmentStatus.CLOSED.value
+            ):
                 reconciled.append(record)
                 continue
             if not record.worker_id:
@@ -690,7 +713,9 @@ class FactoryWorkerController:
                 await self._store.set_status(record.id, FactoryWorkerAssignmentStatus.MISSING)
                 unresolved.add(record.id)
                 continue
-            active_ids = tuple(sorted({str(item) for item in summary.get("active_command_ids") or [] if str(item)}))
+            active_ids = tuple(
+                sorted({str(item) for item in summary.get("active_command_ids") or [] if str(item)})
+            )
             if not active_ids:
                 await self._store.set_status(record.id, FactoryWorkerAssignmentStatus.QUIESCENT)
                 continue

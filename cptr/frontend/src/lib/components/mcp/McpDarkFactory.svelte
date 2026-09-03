@@ -5,6 +5,7 @@
 		openMcpFactoryStream,
 		type McpFactoryEvent,
 		type McpFactoryProgress,
+		type McpFactoryRunDetail,
 		type McpFactorySnapshot,
 		type McpFactoryRunSummary
 	} from '$lib/apis/mcp';
@@ -47,6 +48,7 @@
 	let detailView = $state<DetailView>('activity');
 	let runFilter = $state<RunFilter>('all');
 	let errorMessage = $state<string | null>(null);
+	let nowMs = $state(Date.now());
 	let closeStream: (() => void) | null = null;
 	let connectionGeneration = 0;
 
@@ -68,6 +70,26 @@
 			: 0
 	);
 	const progressPercent = $derived(selected?.progress.percent ?? 0);
+	const runElapsedMs = $derived(
+		selected ? Math.max(0, (selected.completed_at ?? nowMs) - selected.created_at) : 0
+	);
+	const phaseElapsedMs = $derived(
+		selected
+			? Math.max(
+					0,
+					(selected.completed_at ?? nowMs) - selected.progress.effective_phase_started_at_ms
+				)
+			: 0
+	);
+	const stateElapsedMs = $derived(
+		selected
+			? Math.max(0, (selected.completed_at ?? nowMs) - selected.progress.state_started_at_ms)
+			: 0
+	);
+	const lastEventAgeMs = $derived(
+		selected ? Math.max(0, nowMs - selected.progress.last_event_at_ms) : 0
+	);
+	const executionBudget = $derived(currentExecutionBudget(selected));
 
 	function applySnapshot(next: McpFactorySnapshot) {
 		snapshot = next;
@@ -157,7 +179,11 @@
 
 	onMount(() => {
 		void connect(null);
+		const clock = window.setInterval(() => {
+			nowMs = Date.now();
+		}, 1000);
 		return () => {
+			window.clearInterval(clock);
 			connectionGeneration += 1;
 			closeStream?.();
 		};
@@ -238,7 +264,7 @@
 
 	function relativeTime(value: number | null | undefined): string {
 		if (!value) return '—';
-		const seconds = Math.max(0, Math.round((Date.now() - value) / 1000));
+		const seconds = Math.max(0, Math.round((nowMs - value) / 1000));
 		if (seconds < 60) return `${seconds}s ago`;
 		const minutes = Math.floor(seconds / 60);
 		if (minutes < 60) return `${minutes}m ago`;
@@ -251,7 +277,8 @@
 		if (!ms) return '0 ms';
 		if (ms < 1000) return `${ms} ms`;
 		if (ms < 60_000) return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)} s`;
-		return `${(ms / 60_000).toFixed(1)} min`;
+		if (ms < 3_600_000) return `${(ms / 60_000).toFixed(1)} min`;
+		return `${(ms / 3_600_000).toFixed(1)} h`;
 	}
 
 	function formatTokens(value: number): string {
@@ -322,6 +349,89 @@
 
 	function runStateTone(run: McpFactoryRunSummary) {
 		return statusTone(run.state);
+	}
+
+	function terminalMessageLabel(state: string): string {
+		switch (state.toUpperCase()) {
+			case 'BLOCKED':
+				return 'Blocked reason';
+			case 'FAILED':
+				return 'Failure';
+			case 'CANCELLED':
+				return 'Stopped';
+			case 'COMPLETE':
+				return 'Outcome';
+			default:
+				return 'Terminal outcome';
+		}
+	}
+
+	function terminalSummary(state: string): string {
+		switch (state.toUpperCase()) {
+			case 'COMPLETE':
+				return 'All machine-authoritative Victory requirements were satisfied for this run.';
+			case 'CANCELLED':
+				return 'The run was stopped after owned execution reached a quiescent boundary.';
+			case 'FAILED':
+				return 'The run ended with a terminal execution failure. Inspect failures and activity below.';
+			case 'BLOCKED':
+				return 'The run stopped at a fail-closed boundary. Inspect the persisted reason and evidence below.';
+			default:
+				return 'This run is terminal. Inspect the durable activity and evidence below.';
+		}
+	}
+
+	function eventLabel(eventType: string): string {
+		const labels: Record<string, string> = {
+			'run.created': 'Run created',
+			'cycle.created': 'Cycle created',
+			'state.transition': 'State transition',
+			'phase.projection_updated': 'Phase projection updated',
+			'cycle.target_updated': 'Target revision updated',
+			'failure.recorded': 'Failure recorded',
+			'victory.authorized': 'Victory authorized'
+		};
+		return labels[eventType] ?? stateLabel(eventType.replaceAll('.', '_'));
+	}
+
+	function currentExecutionBudget(
+		run: McpFactoryRunDetail | null
+	): { timeoutSeconds: number; maxToolCalls: number; scope: string | null } | null {
+		if (!run || run.terminal) return null;
+		for (const evidence of run.evidence) {
+			if (!['factory_phase_task', 'factory_implementation_task'].includes(evidence.kind)) continue;
+			if (
+				!evidence.payload ||
+				typeof evidence.payload !== 'object' ||
+				Array.isArray(evidence.payload)
+			) {
+				continue;
+			}
+			const payload = evidence.payload as Record<string, unknown>;
+			if (
+				evidence.kind === 'factory_phase_task' &&
+				typeof payload.phase_state === 'string' &&
+				payload.phase_state !== run.progress.state
+			) {
+				continue;
+			}
+			if (
+				evidence.kind === 'factory_implementation_task' &&
+				run.progress.state !== 'IMPLEMENTING'
+			) {
+				continue;
+			}
+			const timeoutSeconds = Number(payload.timeout_seconds ?? 0);
+			const maxToolCalls = Number(payload.max_tool_calls ?? 0);
+			if (!Number.isFinite(timeoutSeconds) || !Number.isFinite(maxToolCalls)) continue;
+			if (timeoutSeconds <= 0 || maxToolCalls <= 0) continue;
+			return {
+				timeoutSeconds,
+				maxToolCalls,
+				scope: typeof payload.execution_scope === 'string' ? payload.execution_scope : null
+			};
+		}
+		return null;
 	}
 </script>
 
@@ -496,14 +606,33 @@
 									{selected.mission}
 								</h2>
 								{#if selected.next_action}
-									<div class="next-action mt-3 flex items-start gap-2.5">
-										<span class="mt-1.5 size-1.5 shrink-0 rounded-full bg-[var(--app-accent)]"
-										></span>
+									<div
+										class="next-action mt-3 flex items-start gap-2.5"
+										data-terminal={selected.terminal}
+										data-tone={selected.terminal ? statusTone(selected.state) : 'info'}
+									>
+										<span class="next-action-dot mt-1.5 size-1.5 shrink-0 rounded-full"></span>
 										<div class="min-w-0">
 											<p class="text-[0.62rem] font-semibold tracking-[0.11em] app-muted uppercase">
-												Next action
+												{selected.terminal ? terminalMessageLabel(selected.state) : 'Next action'}
 											</p>
 											<p class="mt-0.5 text-sm leading-relaxed">{selected.next_action}</p>
+										</div>
+									</div>
+								{:else if selected.terminal}
+									<div
+										class="next-action mt-3 flex items-start gap-2.5"
+										data-terminal="true"
+										data-tone={statusTone(selected.state)}
+									>
+										<span class="next-action-dot mt-1.5 size-1.5 shrink-0 rounded-full"></span>
+										<div class="min-w-0">
+											<p class="text-[0.62rem] font-semibold tracking-[0.11em] app-muted uppercase">
+												{terminalMessageLabel(selected.state)}
+											</p>
+											<p class="mt-0.5 text-sm leading-relaxed">
+												{terminalSummary(selected.state)}
+											</p>
 										</div>
 									</div>
 								{/if}
@@ -564,6 +693,22 @@
 						</div>
 						<div class="overall-progress-track" aria-hidden="true">
 							<span style={`width: ${progressPercent}%`}></span>
+						</div>
+						<div class="progress-vitals" aria-label="Live execution timing">
+							<div><span>Run</span><strong>{formatDuration(runElapsedMs)}</strong></div>
+							<div><span>Phase</span><strong>{formatDuration(phaseElapsedMs)}</strong></div>
+							<div><span>State</span><strong>{formatDuration(stateElapsedMs)}</strong></div>
+							<div>
+								<span>Last durable event</span><strong>{formatDuration(lastEventAgeMs)} ago</strong>
+							</div>
+							{#if executionBudget}
+								<div class="progress-budget">
+									<span>Execution budget</span><strong
+										>{executionBudget.timeoutSeconds}s · {executionBudget.maxToolCalls} tools</strong
+									>
+									{#if executionBudget.scope}<small>{stateLabel(executionBudget.scope)}</small>{/if}
+								</div>
+							{/if}
 						</div>
 						<div class="progress-footer">
 							<span class="capitalize">{selected.progress.outcome.replace('_', ' ')}</span>
@@ -871,16 +1016,19 @@
 											</div>
 											<div class="min-w-0 flex-1">
 												<div class="flex flex-wrap items-center gap-x-2 gap-y-1">
-													<span class="text-xs font-semibold">{event.event_type}</span><span
+													<span class="text-xs font-semibold">{eventLabel(event.event_type)}</span
+													><span class="event-code">{event.event_type}</span><span
 														class="text-[0.62rem] app-muted">{event.actor}</span
-													>{#if event.from_state || event.to_state}<span
-															class="text-[0.62rem] app-muted"
+													>{#if event.from_state || event.to_state}<span class="event-transition"
 															>{stateLabel(event.from_state)} → {stateLabel(event.to_state)}</span
 														>{/if}
 												</div>
-												{#if jsonText(event.payload) !== '{}'}<pre class="event-payload">{jsonText(
-															event.payload
-														)}</pre>{/if}
+												{#if jsonText(event.payload) !== '{}'}
+													<details class="event-details">
+														<summary>Event payload</summary>
+														<pre class="event-payload">{jsonText(event.payload)}</pre>
+													</details>
+												{/if}
 											</div>
 											<time
 												class="activity-time"
@@ -1211,6 +1359,19 @@
 		border-left: 2px solid color-mix(in oklab, var(--app-accent) 55%, transparent);
 		padding-left: 0.75rem;
 	}
+	.next-action-dot {
+		background: var(--app-accent);
+	}
+	.next-action[data-terminal='true'] {
+		border: 1px solid color-mix(in oklab, currentColor 26%, var(--app-border));
+		border-left-width: 3px;
+		border-radius: 0.65rem;
+		padding: 0.68rem 0.8rem;
+		background: color-mix(in oklab, currentColor 4%, var(--app-surface));
+	}
+	.next-action[data-terminal='true'] .next-action-dot {
+		background: currentColor;
+	}
 	.hero-meta {
 		min-width: min(100%, 24rem);
 		border-left: 1px solid var(--app-divider);
@@ -1276,6 +1437,42 @@
 		border-radius: inherit;
 		background: var(--app-accent);
 		transition: width 220ms ease;
+	}
+	.progress-vitals {
+		display: grid;
+		grid-template-columns: repeat(4, minmax(0, 1fr));
+		gap: 0.45rem;
+		margin-top: 0.7rem;
+	}
+	.progress-vitals > div {
+		display: flex;
+		min-width: 0;
+		flex-direction: column;
+		gap: 0.18rem;
+		border: 1px solid color-mix(in oklab, var(--app-border) 88%, transparent);
+		border-radius: 0.55rem;
+		padding: 0.5rem 0.58rem;
+		background: color-mix(in oklab, var(--app-surface) 72%, transparent);
+	}
+	.progress-vitals span,
+	.progress-vitals small {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.56rem;
+		color: var(--app-fg-subtle);
+	}
+	.progress-vitals strong {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		font-size: 0.68rem;
+		font-weight: 700;
+		font-variant-numeric: tabular-nums;
+	}
+	.progress-vitals .progress-budget {
+		border-color: color-mix(in oklab, var(--app-accent) 25%, var(--app-border));
+		background: color-mix(in oklab, var(--app-accent-soft) 42%, var(--app-surface));
 	}
 	.progress-footer {
 		margin-top: 0.55rem;
@@ -1631,6 +1828,39 @@
 		color: var(--app-fg-subtle);
 		white-space: nowrap;
 	}
+	.event-code,
+	.event-transition {
+		display: inline-flex;
+		max-width: 100%;
+		align-items: center;
+		border: 1px solid var(--app-border);
+		border-radius: 0.35rem;
+		padding: 0.08rem 0.32rem;
+		font-family: var(--font-mono);
+		font-size: 0.56rem;
+		color: var(--app-fg-muted);
+	}
+	.event-code {
+		background: var(--app-surface-subtle);
+	}
+	.event-transition {
+		border-color: color-mix(in oklab, var(--app-accent) 18%, var(--app-border));
+		background: var(--app-accent-soft);
+	}
+	.event-details {
+		margin-top: 0.42rem;
+	}
+	.event-details summary {
+		width: fit-content;
+		cursor: pointer;
+		font-size: 0.6rem;
+		font-weight: 650;
+		color: var(--app-fg-muted);
+		user-select: none;
+	}
+	.event-details[open] summary {
+		color: var(--app-fg);
+	}
 	.event-payload {
 		max-height: 10rem;
 		margin-top: 0.45rem;
@@ -1810,6 +2040,12 @@
 		}
 		.progress-copy {
 			align-items: flex-start;
+		}
+		.progress-vitals {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+		.progress-vitals .progress-budget {
+			grid-column: 1 / -1;
 		}
 		.progress-footer {
 			align-items: flex-start;
