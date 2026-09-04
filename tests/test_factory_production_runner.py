@@ -378,6 +378,100 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         agent.cancel_task.assert_awaited_once_with("task-budget", user_id="user-1")
         agent.get_output.assert_not_awaited()
 
+    async def test_optional_advisory_failure_continues_under_no_implementation_policy(self):
+        task = {
+            "id": "task-optional-failure",
+            "status": "COMPLETE_WITH_TOOL_ERRORS",
+            "output": "partial read-only advisory evidence",
+        }
+        agent = SimpleNamespace(get_task=AsyncMock(return_value=task), get_output=AsyncMock())
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.UNDERSTANDING,
+            next_state=FactoryState.AUDITING,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-optional-failure",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="read-only audit",
+                acceptance_criteria=("verify current behavior",),
+                model_id="agent:model",
+                policy={"implementation_required": False},
+            ),
+            cycle=SimpleNamespace(id="cycle-optional-failure", attempt_count=0),
+            evidence=(
+                SimpleNamespace(
+                    kind="factory_phase_task",
+                    payload={
+                        "phase_state": "UNDERSTANDING",
+                        "attempt": 0,
+                        "task_id": "task-optional-failure",
+                    },
+                    idempotency_key=(
+                        "phase:run-optional-failure:cycle-optional-failure:UNDERSTANDING:"
+                        "entry-fev-optional:artifact:phase-task"
+                    ),
+                ),
+            ),
+            gates=(),
+        )
+
+        outcome = await handler.execute(context)
+
+        self.assertIsNone(outcome.failure)
+        self.assertEqual(outcome.next_state, FactoryState.AUDITING)
+        self.assertTrue(outcome.artifacts[0].payload["optional_advisory_failed"])
+        self.assertEqual(outcome.artifacts[0].payload["task_status"], "COMPLETE_WITH_TOOL_ERRORS")
+        self.assertIn(
+            "partial read-only advisory evidence", outcome.artifacts[0].payload["summary"]
+        )
+        agent.get_output.assert_not_awaited()
+
+    async def test_required_advisory_failure_remains_fail_closed(self):
+        task = {"id": "task-required-failure", "status": "COMPLETE_WITH_TOOL_ERRORS"}
+        agent = SimpleNamespace(get_task=AsyncMock(return_value=task), get_output=AsyncMock())
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.UNDERSTANDING,
+            next_state=FactoryState.AUDITING,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-required-failure",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="implementation audit",
+                acceptance_criteria=("implement safely",),
+                model_id="agent:model",
+                policy={"implementation_required": True},
+            ),
+            cycle=SimpleNamespace(id="cycle-required-failure", attempt_count=0),
+            evidence=(
+                SimpleNamespace(
+                    kind="factory_phase_task",
+                    payload={
+                        "phase_state": "UNDERSTANDING",
+                        "attempt": 0,
+                        "task_id": "task-required-failure",
+                    },
+                    idempotency_key=(
+                        "phase:run-required-failure:cycle-required-failure:UNDERSTANDING:"
+                        "entry-fev-required:artifact:phase-task"
+                    ),
+                ),
+            ),
+            gates=(),
+        )
+
+        outcome = await handler.execute(context)
+
+        self.assertIsNone(outcome.next_state)
+        self.assertIsNotNone(outcome.failure)
+        self.assertEqual(outcome.failure.code, "FACTORY_ADVISORY_TASK_FAILED")
+        agent.get_output.assert_not_awaited()
+
     async def test_baseline_prepares_isolated_mutation_lane_before_advisory(self):
         temp = self._git_repo()
         self.addCleanup(temp.cleanup)

@@ -666,8 +666,9 @@ class AdvisoryPhaseHandler:
 
     async def execute(self, context: PhaseContext) -> PhaseOutcome:
         policy = context.run.policy if isinstance(context.run.policy, dict) else {}
+        implementation_required = bool(policy.get("implementation_required", True))
         if not context.run.model_id:
-            if bool(policy.get("implementation_required", True)):
+            if implementation_required:
                 return PhaseOutcome(
                     next_state=FactoryState.BLOCKED,
                     reason=f"{self._state.value} requires an explicit factory model_id",
@@ -851,6 +852,36 @@ class AdvisoryPhaseHandler:
             )
         if status not in _SUCCESS_TASK_STATUSES:
             await self._cleanup_reproduction_changes(context)
+            if not implementation_required:
+                summary = redact_external_text(str(task.get("output") or "")).strip()[:12_000]
+                if not summary:
+                    summary = (
+                        f"Optional {self._state.value} advisory ended with {status}; "
+                        "continue to machine-owned verification under the explicit no-implementation policy."
+                    )
+                return PhaseOutcome(
+                    next_state=self._next,
+                    reason=(
+                        f"{self._state.value} optional advisory failed; "
+                        "continue under no-implementation policy"
+                    ),
+                    run_next_action=None,
+                    artifacts=(
+                        PhaseArtifact(
+                            key="phase-advice",
+                            kind="reasoning_advice",
+                            source="cptr-agent-service",
+                            authority=EvidenceAuthority.ADVISORY,
+                            payload={
+                                "phase_state": self._state.value,
+                                "task_id": task_id,
+                                "summary": summary,
+                                "optional_advisory_failed": True,
+                                "task_status": status,
+                            },
+                        ),
+                    ),
+                )
             return PhaseOutcome(
                 reason=f"{self._state.value} advisory task failed",
                 failure=PhaseFailure(
