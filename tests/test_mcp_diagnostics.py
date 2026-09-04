@@ -108,6 +108,41 @@ class McpDiagnosticsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(aggregate["sample_count"], 5)
         self.assertEqual(aggregate["metric_type"], "backend_api_rtt")
 
+    async def test_intentional_wait_samples_do_not_degrade_transport_health(self):
+        store = McpDiagnosticsStore(observed_degraded_ms=100)
+        await store.ingest(
+            [
+                McpLatencySample(
+                    event_id="latency-fast-001",
+                    timestamp_ms=BASE_TS,
+                    edge_id="client-mcp-connector",
+                    metric_type="observed_request_time",
+                    duration_ms=50,
+                    status="ok",
+                    tool_name="cptr_list_workspaces",
+                    operation_class="immediate",
+                    health_eligible=True,
+                ),
+                McpLatencySample(
+                    event_id="latency-wait-001",
+                    timestamp_ms=BASE_TS + 1,
+                    edge_id="client-mcp-connector",
+                    metric_type="observed_request_time",
+                    duration_ms=25_000,
+                    status="ok",
+                    tool_name="cptr_execute_task",
+                    operation_class="bounded_wait",
+                    requested_wait_ms=5_000,
+                    health_eligible=False,
+                ),
+            ]
+        )
+        aggregate = (await store.snapshot())["latency"]["client-mcp-connector"]
+        self.assertEqual(aggregate["p95_ms"], 25_000)
+        self.assertEqual(aggregate["health_p95_ms"], 50)
+        self.assertEqual(aggregate["health_sample_count"], 1)
+        self.assertEqual(aggregate["health"], "healthy")
+
     async def test_dedupe_latency_failure_and_system_rings_are_bounded(self):
         store = McpDiagnosticsStore(
             max_latency_samples_per_edge=2,

@@ -24,6 +24,7 @@ LatencyMetric = Literal[
     "adapter_handoff",
     "backend_api_rtt",
 ]
+LatencyOperationClass = Literal["immediate", "bounded_wait", "long_operation"]
 FailureStage = Literal[
     "client_transport",
     "mcp_connector",
@@ -47,6 +48,10 @@ class McpLatencySample(BaseModel):
     metric_type: LatencyMetric
     duration_ms: int = Field(ge=0, le=86_400_000)
     status: Literal["ok", "error"] = "ok"
+    tool_name: str | None = Field(default=None, max_length=256)
+    operation_class: LatencyOperationClass = "immediate"
+    requested_wait_ms: int | None = Field(default=None, ge=0, le=86_400_000)
+    health_eligible: bool = True
 
 
 class McpUsageDiagnostic(BaseModel):
@@ -376,10 +381,18 @@ class McpDiagnosticsStore:
         p95 = _nearest_rank(values, 0.95)
         metric_type = str(latest["metric_type"])
         latest_status = str(latest["status"])
+        health_samples = [sample for sample in samples if bool(sample.get("health_eligible", True))]
+        health_values = [int(sample["duration_ms"]) for sample in health_samples]
+        health_p95 = _nearest_rank(health_values, 0.95) if health_values else 0
+        latest_health_status = str(health_samples[-1]["status"]) if health_samples else "ok"
         health = (
             "error"
-            if latest_status == "error"
-            else ("degraded" if p95 >= self._thresholds.get(metric_type, 86_400_000) else "healthy")
+            if latest_health_status == "error"
+            else (
+                "degraded"
+                if health_values and health_p95 >= self._thresholds.get(metric_type, 86_400_000)
+                else "healthy"
+            )
         )
         return {
             "metric_type": metric_type,
@@ -389,6 +402,8 @@ class McpDiagnosticsStore:
             "p95_ms": p95,
             "max_ms": max(values),
             "sample_count": len(values),
+            "health_p95_ms": health_p95,
+            "health_sample_count": len(health_values),
             "last_updated_ms": int(latest["timestamp_ms"]),
             "latest_status": latest_status,
             "health": health,

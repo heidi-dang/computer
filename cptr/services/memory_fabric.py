@@ -71,6 +71,39 @@ class MemoryFabricStore:
         async with await get_db() as db:
             yield db
 
+    @staticmethod
+    def _event_from_input(value: dict[str, Any]) -> MemoryFabricEvent:
+        raw_confidence = value.get("confidence_ppm")
+        raw_created_at = value.get("created_at_ms")
+        return MemoryFabricEvent(
+            user_id=str(value["user_id"]),
+            workspace=_bounded_text(value.get("workspace") or None),
+            event_type=_bounded_text(value.get("event_type"), 120) or "unknown",
+            scope=_bounded_text(value.get("scope"), 64),
+            memory_id=_bounded_text(value.get("memory_id"), 240),
+            path=_bounded_text(value.get("path"), 1_000),
+            heading=_bounded_text(value.get("heading"), 500),
+            reason=_bounded_text(value.get("reason"), 1_000),
+            trust_level=_bounded_text(value.get("trust_level"), 120) or "managed_memory",
+            confidence_ppm=max(
+                0,
+                min(1_000_000, int(raw_confidence if raw_confidence is not None else 1_000_000)),
+            ),
+            payload=_bounded_payload(value.get("payload")),
+            created_at_ms=int(raw_created_at if raw_created_at is not None else time.time() * 1000),
+        )
+
+    async def record_events(self, events: list[dict[str, Any]]) -> list[MemoryFabricEvent]:
+        """Persist a bounded batch in one transaction to avoid per-event writer churn."""
+        if not events:
+            return []
+        rows = [self._event_from_input(value) for value in events]
+        async with self._session() as db:
+            db.add_all(rows)
+            await db.flush()
+            await db.commit()
+        return rows
+
     async def record_event(
         self,
         *,
@@ -87,25 +120,25 @@ class MemoryFabricStore:
         payload: dict[str, Any] | None = None,
         created_at_ms: int | None = None,
     ) -> MemoryFabricEvent:
-        event = MemoryFabricEvent(
-            user_id=user_id,
-            workspace=_bounded_text(workspace or None),
-            event_type=_bounded_text(event_type, 120) or "unknown",
-            scope=_bounded_text(scope, 64),
-            memory_id=_bounded_text(memory_id, 240),
-            path=_bounded_text(path, 1_000),
-            heading=_bounded_text(heading, 500),
-            reason=_bounded_text(reason, 1_000),
-            trust_level=_bounded_text(trust_level, 120) or "managed_memory",
-            confidence_ppm=max(0, min(1_000_000, int(confidence_ppm))),
-            payload=_bounded_payload(payload),
-            created_at_ms=int(created_at_ms if created_at_ms is not None else time.time() * 1000),
+        rows = await self.record_events(
+            [
+                {
+                    "user_id": user_id,
+                    "event_type": event_type,
+                    "workspace": workspace,
+                    "scope": scope,
+                    "memory_id": memory_id,
+                    "path": path,
+                    "heading": heading,
+                    "reason": reason,
+                    "trust_level": trust_level,
+                    "confidence_ppm": confidence_ppm,
+                    "payload": payload,
+                    "created_at_ms": created_at_ms,
+                }
+            ]
         )
-        async with self._session() as db:
-            db.add(event)
-            await db.commit()
-            await db.refresh(event)
-        return event
+        return rows[0]
 
     async def list_events(
         self,

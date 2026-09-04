@@ -40,6 +40,19 @@ DEFAULT_MEMORY_SETTINGS: dict[str, Any] = {
 
 _memory_file_locks: dict[str, asyncio.Lock] = {}
 _reviewed_messages: set[str] = set()
+_memory_settings_lock = asyncio.Lock()
+_memory_settings_cache: tuple[float, dict[str, Any]] | None = None
+
+
+def _memory_settings_cache_ttl_seconds() -> float:
+    try:
+        value = float(os.getenv("CPTR_MEMORY_SETTINGS_CACHE_TTL_SECONDS", "5") or "5")
+    except (TypeError, ValueError):
+        value = 5.0
+    return max(0.1, min(60.0, value))
+
+
+_MEMORY_SETTINGS_CACHE_TTL_SECONDS = _memory_settings_cache_ttl_seconds()
 
 
 @dataclass(frozen=True)
@@ -1006,10 +1019,10 @@ def apply_markdown_memory_batch(
     }
 
 
-async def get_memory_settings() -> dict[str, Any]:
+def _normalize_memory_settings(values: dict[str, Any]) -> dict[str, Any]:
     settings = {**DEFAULT_MEMORY_SETTINGS}
     for key in DEFAULT_MEMORY_SETTINGS:
-        value = await Config.get(f"memory.{key}")
+        value = values.get(f"memory.{key}")
         if value is not None:
             settings[key] = value
     settings["review_interval_turns"] = max(1, int(settings.get("review_interval_turns") or 10))
@@ -1026,11 +1039,33 @@ async def get_memory_settings() -> dict[str, Any]:
     return settings
 
 
+async def get_memory_settings(*, force_refresh: bool = False) -> dict[str, Any]:
+    """Load the memory namespace in one query and reuse it briefly in-process."""
+    global _memory_settings_cache
+    now = time.monotonic()
+    cached = _memory_settings_cache
+    if not force_refresh and cached is not None and now - cached[0] < _MEMORY_SETTINGS_CACHE_TTL_SECONDS:
+        return dict(cached[1])
+
+    async with _memory_settings_lock:
+        now = time.monotonic()
+        cached = _memory_settings_cache
+        if not force_refresh and cached is not None and now - cached[0] < _MEMORY_SETTINGS_CACHE_TTL_SECONDS:
+            return dict(cached[1])
+        values = await Config.get_namespace("memory")
+        settings = _normalize_memory_settings(values)
+        _memory_settings_cache = (now, settings)
+        return dict(settings)
+
+
 async def save_memory_settings(updates: dict[str, Any]) -> dict[str, Any]:
+    global _memory_settings_cache
     await Config.upsert(
         {f"memory.{key}": value for key, value in updates.items() if key in DEFAULT_MEMORY_SETTINGS}
     )
-    return await get_memory_settings()
+    async with _memory_settings_lock:
+        _memory_settings_cache = None
+    return await get_memory_settings(force_refresh=True)
 
 
 async def resolve_memory_file(user_id: str, workspace: str, scope: str) -> MemoryFile:

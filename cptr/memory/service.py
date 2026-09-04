@@ -230,36 +230,47 @@ class EmbeddedMemoryService:
                 value.user_id, value.workspace, value.task_key
             )
             items = [*managed.items[:50], *canonical_items[:50]][:100]
+            context_events: list[dict[str, Any]] = []
             if items:
-                await self.event_store.record_event(
-                    user_id=value.user_id,
-                    workspace=value.workspace,
-                    event_type="recall",
-                    reason="compiled by embedded memory core before reasoning",
-                    payload={
-                        "context_id": context_id,
-                        "items": items[:50],
-                        "context_chars": len(rendered),
-                        "item_count": len(items),
-                    },
+                context_events.append(
+                    {
+                        "user_id": value.user_id,
+                        "workspace": value.workspace,
+                        "event_type": "recall",
+                        "reason": "compiled by embedded memory core before reasoning",
+                        "payload": {
+                            "context_id": context_id,
+                            "items": items[:50],
+                            "context_chars": len(rendered),
+                            "item_count": len(items),
+                        },
+                    }
                 )
-            await self.event_store.record_event(
-                user_id=value.user_id,
-                workspace=value.workspace,
-                event_type="context_prepared",
-                reason="memory gate prepared context before reasoning",
-                payload={
-                    "context_id": context_id,
-                    "memory_version": memory_version,
-                    "task_key_hash": hashlib.sha256(value.task_key.encode("utf-8")).hexdigest()[:16]
-                    if value.task_key
-                    else None,
-                    "candidate_count": len(canonical_results),
-                    "injected_count": len(items),
-                    "compiled_chars": len(rendered),
-                    "recovered_checkpoint_id": recovered["checkpoint_id"] if recovered else None,
-                },
+            context_events.append(
+                {
+                    "user_id": value.user_id,
+                    "workspace": value.workspace,
+                    "event_type": "context_prepared",
+                    "reason": "memory gate prepared context before reasoning",
+                    "payload": {
+                        "context_id": context_id,
+                        "memory_version": memory_version,
+                        "task_key_hash": hashlib.sha256(value.task_key.encode("utf-8")).hexdigest()[:16]
+                        if value.task_key
+                        else None,
+                        "candidate_count": len(canonical_results),
+                        "injected_count": len(items),
+                        "compiled_chars": len(rendered),
+                        "recovered_checkpoint_id": recovered["checkpoint_id"] if recovered else None,
+                    },
+                }
             )
+            record_events = getattr(self.event_store, "record_events", None)
+            if callable(record_events):
+                await record_events(context_events)
+            else:
+                for event in context_events:
+                    await self.event_store.record_event(**event)
             if value.task_key:
                 await self.checkpoint(
                     CheckpointState(
