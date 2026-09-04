@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { t } from '$lib/i18n';
+
 	interface Props {
 		onfiles: (files: FileList) => void;
 	}
@@ -31,6 +33,7 @@
 	type="button"
 	class="flex items-center justify-center w-6 h-6 rounded-full text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 hover:bg-gray-50 dark:hover:bg-white/5 transition-colors duration-100"
 	onclick={trigger}
+	aria-label={$t('plusMenu.attachFiles')}
 >
 	<svg
 		class="size-3.5"

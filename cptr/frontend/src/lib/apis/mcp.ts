@@ -191,7 +191,9 @@ export interface McpTopologyConfig {
 }
 
 export type McpLatencyEdge =
-	'client-mcp-connector' | 'mcp-connector-cptr-mcp' | 'cptr-mcp-cptr-backend';
+	| 'client-mcp-connector'
+	| 'mcp-connector-cptr-mcp'
+	| 'cptr-mcp-cptr-backend';
 export type McpLatencyMetric = 'observed_request_time' | 'adapter_handoff' | 'backend_api_rtt';
 export type McpFailureStage =
 	| 'client_transport'
@@ -950,7 +952,10 @@ export interface McpMemoryStreamCallbacks {
 }
 
 export type McpDiagnosticsEvent = (
-	McpLatencySample | McpFailureDiagnostic | McpBackendMetricsSample | McpUsageDiagnostic
+	| McpLatencySample
+	| McpFailureDiagnostic
+	| McpBackendMetricsSample
+	| McpUsageDiagnostic
 ) & { ingestion_sequence: number };
 
 export interface McpDiagnosticsSnapshot {

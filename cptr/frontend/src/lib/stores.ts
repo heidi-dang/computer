@@ -614,6 +614,7 @@ export async function loadPreferences(): Promise<void> {
 					{
 						id: 'home',
 						tabs: [{ id: 'home', type: 'home', label: 'Home', permanent: true }],
+						tabHistory: [],
 						activeTabId: 'home'
 					}
 				];

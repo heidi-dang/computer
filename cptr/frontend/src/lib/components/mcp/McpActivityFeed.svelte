@@ -23,7 +23,7 @@
 		focusCorrelationId = null,
 		onClearConsole
 	}: Props = $props();
-	let state = $state<McpActivityState | null>(null);
+	let activityState = $state<McpActivityState | null>(null);
 	let status = $state<StreamStatus>('loading');
 	let hiddenBeforeSequence = $state(0);
 	let reconnectAttempt = 0;
@@ -35,8 +35,10 @@
 	const reconnectBackoffMs = [1000, 2000, 4000, 8000];
 
 	const pluginRows = $derived(
-		state
-			? state.rows.filter((row) => row.source === 'plugin' && row.sequence > hiddenBeforeSequence)
+		activityState
+			? activityState.rows.filter(
+					(row) => row.source === 'plugin' && row.sequence > hiddenBeforeSequence
+				)
 			: []
 	);
 	const rows = $derived(
@@ -85,7 +87,7 @@
 	}
 
 	function applySnapshot(snapshot: Awaited<ReturnType<typeof getMcpActivitySnapshot>>) {
-		state = hydrateMcpActivity(snapshot);
+		activityState = hydrateMcpActivity(snapshot);
 		if (snapshot.sequence < hiddenBeforeSequence) hiddenBeforeSequence = 0;
 	}
 
@@ -102,7 +104,7 @@
 					applySnapshot(snapshot);
 				},
 				onActivity(event) {
-					if (state) state = applyMcpActivityEvent(state, event);
+					if (activityState) activityState = applyMcpActivityEvent(activityState, event);
 				},
 				onOpen() {
 					reconnectAttempt = 0;
@@ -130,7 +132,7 @@
 	}
 
 	function clearPresentation() {
-		hiddenBeforeSequence = state?.sequence ?? hiddenBeforeSequence;
+		hiddenBeforeSequence = activityState?.sequence ?? hiddenBeforeSequence;
 		onClearConsole?.();
 	}
 

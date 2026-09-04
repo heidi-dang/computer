@@ -156,7 +156,7 @@ test('Activity reconnect resnapshots before reopening, Clear is presentation-onl
 	const streamIndex = feed.indexOf('closeStream = openMcpActivityStream');
 	assert.ok(snapshotIndex >= 0 && streamIndex > snapshotIndex);
 	assert.match(feed, /1000,\s*2000,\s*4000,\s*8000/);
-	assert.match(feed, /hiddenBeforeSequence = state\?\.sequence \?\? hiddenBeforeSequence/);
+	assert.match(feed, /hiddenBeforeSequence = activityState\?\.sequence \?\? hiddenBeforeSequence/);
 	assert.match(feed, /onClearConsole\?\.\(\)/);
 	assert.match(feed, /if \(restoreHistory\) hiddenBeforeSequence = 0/);
 	assert.match(feed, /refreshAndOpen\(true\)/);

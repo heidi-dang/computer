@@ -123,7 +123,7 @@
 		closeMobileSidebar();
 	}
 
-	function openWsMenu(e: MouseEvent, path: string) {
+	function openWsMenu(e: Event, path: string) {
 		e.stopPropagation();
 		e.preventDefault();
 		closeChatMenu();

@@ -2405,7 +2405,7 @@
 										</span>
 										<button
 											class="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-gray-600 dark:hover:bg-white/6 dark:hover:text-gray-300"
-											onclick={() => checkoutPullRequest(selectedPr)}
+											onclick={() => selectedPr && checkoutPullRequest(selectedPr)}
 											use:tooltip={'Checkout'}
 										>
 											<Icon name="git-branch" size={11} />

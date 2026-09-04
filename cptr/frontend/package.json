@@ -13,8 +13,8 @@
 		"format:check": "npm run format:check:frontend && cd ../.. && uv run ruff format --check cptr",
 		"format:frontend": "prettier --write .",
 		"format:check:frontend": "prettier --check .",
-		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
-		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
+		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --diagnostic-sources \"js,svelte\"",
+		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --diagnostic-sources \"js,svelte\" --watch"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-auto": "^7.0.1",

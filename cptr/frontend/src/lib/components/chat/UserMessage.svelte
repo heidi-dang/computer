@@ -221,7 +221,7 @@
 		<!-- Bubble: right-aligned -->
 		{#if meta?.files?.length > 0}
 			<div class="mb-1 w-full flex flex-col justify-end overflow-x-auto gap-1 flex-wrap">
-				{#each meta.files as upload}
+				{#each meta?.files ?? [] as upload}
 					<div class="self-end">
 						{#if upload.type === 'image'}
 							<img src={upload.url} alt={upload.name || 'image'} class="max-h-96 rounded-lg" />

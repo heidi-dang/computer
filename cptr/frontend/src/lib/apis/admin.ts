@@ -61,10 +61,22 @@ export const updateConfig = (config: Record<string, unknown>) =>
 // ── Agents ─────────────────────────────────────────────────
 
 export type AgentType =
-	'codex' | 'claude_code' | 'cursor' | 'grok' | 'opencode' | 'cline' | 'gemini' | 'pi';
+	| 'codex'
+	| 'claude_code'
+	| 'cursor'
+	| 'grok'
+	| 'opencode'
+	| 'cline'
+	| 'gemini'
+	| 'pi';
 export type AgentMode = 'auto' | 'enabled' | 'disabled';
 export type AgentStatus =
-	'ready' | 'disabled' | 'not_found' | 'missing_dependency' | 'auth_unknown' | 'error';
+	| 'ready'
+	| 'disabled'
+	| 'not_found'
+	| 'missing_dependency'
+	| 'auth_unknown'
+	| 'error';
 
 export interface AgentProfile {
 	id: string;

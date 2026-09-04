@@ -128,11 +128,10 @@
 			padding-left: env(titlebar-area-x, 0);
 			width: env(titlebar-area-width, 100%);
 			height: env(titlebar-area-height, 2.25rem);
-			app-region: drag;
+			-webkit-app-region: drag;
 		}
-		.wco-bar button,
-		.wco-bar a {
-			app-region: no-drag;
+		.wco-bar button {
+			-webkit-app-region: no-drag;
 		}
 	}
 </style>
