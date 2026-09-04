@@ -645,10 +645,19 @@ async def get_agent_status(app_state=None, refresh: bool = False) -> dict[str, A
     entries = []
     candidates = profiles if not implicit_defaults else default_agent_profiles()
     for profile in candidates:
-        detected = await detect_profile(profile)
+        mode = profile.get("mode", "auto")
+        if mode == "disabled":
+            detected = AgentDetection(
+                "disabled",
+                None,
+                None,
+                "Detection skipped because the profile is disabled.",
+                [],
+            )
+        else:
+            detected = await detect_profile(profile)
         if implicit_defaults and detected.status in {"not_found", "error"}:
             continue
-        mode = profile.get("mode", "auto")
         models = list(dict.fromkeys([*(detected.models or []), *(profile.get("models") or [])]))
         available = mode != "disabled" and (mode != "auto" or detected.status == "ready")
         effective_profile = dict(profile)

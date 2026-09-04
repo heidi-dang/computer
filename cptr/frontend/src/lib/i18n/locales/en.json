@@ -328,6 +328,7 @@
 	"admin.agentsServerUrl": "Server URL",
 	"admin.agentsServerPassword": "Server password",
 	"admin.agentsStatusReady": "Ready",
+	"admin.agentsStatusDisabled": "Disabled",
 	"admin.agentsStatusNotFound": "Not found",
 	"admin.agentsStatusMissingDependency": "Missing dependency",
 	"admin.agentsStatusAuthUnknown": "Auth unknown",

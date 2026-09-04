@@ -31,6 +31,7 @@
 
 	const statusLabelKey: Record<string, string> = {
 		ready: 'admin.agentsStatusReady',
+		disabled: 'admin.agentsStatusDisabled',
 		not_found: 'admin.agentsStatusNotFound',
 		missing_dependency: 'admin.agentsStatusMissingDependency',
 		auth_unknown: 'admin.agentsStatusAuthUnknown',
