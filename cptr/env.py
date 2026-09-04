@@ -82,6 +82,14 @@ _execute_timeout = os.environ.get("CPTR_EXECUTE_TIMEOUT")
 if _execute_timeout is not None:
     EXECUTE_TIMEOUT = max(0.0, min(float(_execute_timeout), COMMAND_INLINE_WAIT_MAX_SECONDS))
 
+# ── Server shutdown ─────────────────────────────────────────
+# Bound only Uvicorn's HTTP connection-drain phase. Long-lived SSE/streaming
+# clients must not consume the entire service-manager stop timeout before CPTR's
+# lifespan shutdown gets a chance to quiesce owned processes and durable state.
+SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = max(
+    1, min(_env_int("CPTR_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS", 10), 60)
+)
+
 # ── AI stream settings ──────────────────────────────────────
 STREAM_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_CONNECT_TIMEOUT", "30"))
 STREAM_READ_TIMEOUT_SECONDS = float(os.environ.get("CPTR_STREAM_READ_TIMEOUT", "300"))

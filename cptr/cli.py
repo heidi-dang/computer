@@ -1,6 +1,8 @@
 import click
 import uvicorn
 
+from cptr.env import SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS
+
 
 @click.group()
 def cli():
@@ -17,8 +19,18 @@ def cli():
 )
 @click.option("--port", default=8000, type=int, help="Port to bind to.")
 @click.option("--reload", is_flag=True, default=False, help="Enable auto-reload.")
-@click.option("--open-browser", is_flag=True, default=False, help="Open the CPTR dashboard in a browser after startup.")
-@click.option("--headless", is_flag=True, default=False, help="Compatibility override: never open the dashboard browser.")
+@click.option(
+    "--open-browser",
+    is_flag=True,
+    default=False,
+    help="Open the CPTR dashboard in a browser after startup.",
+)
+@click.option(
+    "--headless",
+    is_flag=True,
+    default=False,
+    help="Compatibility override: never open the dashboard browser.",
+)
 def run(host: str, port: int, reload: bool, open_browser: bool, headless: bool):
     """Start the cptr server."""
     import os
@@ -42,6 +54,7 @@ def run(host: str, port: int, reload: bool, open_browser: bool, headless: bool):
         host=host,
         port=port,
         reload=reload,
+        timeout_graceful_shutdown=SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
     )
 
 
