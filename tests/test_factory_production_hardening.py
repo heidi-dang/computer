@@ -498,12 +498,14 @@ class FactoryCriticalBoundaryProcessRestartCampaignTests(unittest.TestCase):
             "push",
             "ci_observation",
         )
-        for boundary in boundaries:
-            with (
-                self.subTest(boundary=boundary),
-                tempfile.TemporaryDirectory() as data_dir,
-                tempfile.TemporaryDirectory() as workspace_dir,
-            ):
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            tempfile.TemporaryDirectory() as workspace_root,
+        ):
+            seeded_runs: list[tuple[str, str, int]] = []
+            for boundary in boundaries:
+                workspace_dir = os.path.join(workspace_root, boundary)
+                os.makedirs(workspace_dir)
                 subprocess.run(["git", "init", "-q", workspace_dir], check=True)
                 env = {
                     **os.environ,
@@ -519,13 +521,17 @@ class FactoryCriticalBoundaryProcessRestartCampaignTests(unittest.TestCase):
                     text=True,
                 )
                 run_id = seeded.stdout.strip().splitlines()[-1]
-                marker_before = self._marker_count(data_dir, boundary, run_id)
-                port = self._free_port()
-                process = self._start_server(data_dir, port)
-                try:
-                    self._wait_for_health(port)
-                    self._wait_until(
-                        lambda: int(
+                seeded_runs.append(
+                    (boundary, run_id, self._marker_count(data_dir, boundary, run_id))
+                )
+
+            port = self._free_port()
+            process = self._start_server(data_dir, port)
+            try:
+                self._wait_for_health(port)
+                self._wait_until(
+                    lambda: all(
+                        int(
                             self._query(
                                 data_dir,
                                 "select count(*) from factory_events where run_id=? and event_type='state.transition' and to_state='RECOVERING'",
@@ -533,22 +539,32 @@ class FactoryCriticalBoundaryProcessRestartCampaignTests(unittest.TestCase):
                             )
                         )
                         == 1
+                        for _, run_id, _ in seeded_runs
                     )
-                    self.assertEqual(self._marker_count(data_dir, boundary, run_id), marker_before)
-                    self.assertEqual(
-                        int(
-                            self._query(
-                                data_dir,
-                                "select count(*) from factory_events where run_id=? and event_type='state.transition' and to_state='RECOVERING'",
-                                (run_id,),
-                            )
-                        ),
-                        1,
-                    )
-                finally:
-                    if process.poll() is None:
-                        process.terminate()
-                        process.wait(timeout=10)
+                )
+                for boundary, run_id, marker_before in seeded_runs:
+                    with self.subTest(boundary=boundary):
+                        self.assertEqual(
+                            self._marker_count(data_dir, boundary, run_id), marker_before
+                        )
+                        self.assertEqual(
+                            int(
+                                self._query(
+                                    data_dir,
+                                    "select count(*) from factory_events where run_id=? and event_type='state.transition' and to_state='RECOVERING'",
+                                    (run_id,),
+                                )
+                            ),
+                            1,
+                        )
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
 
     @staticmethod
     def _marker_count(data_dir: str, boundary: str, run_id: str) -> int:
