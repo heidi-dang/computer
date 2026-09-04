@@ -1,4 +1,7 @@
 import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +23,7 @@ from cptr.env import (
 from cptr.models import Base, User
 from cptr.routers.coding import (
     CommandRequest,
+    TestTargetRequest as CodingTestTargetRequest,
     _COMMAND_IDEMPOTENCY,
     _command_idempotency_get,
     _command_idempotency_put,
@@ -28,8 +32,8 @@ from cptr.routers.coding import (
 
 
 class ExecutionPersistenceConfigurationTests(unittest.TestCase):
-    def test_long_running_defaults_are_high_but_bounded(self):
-        self.assertGreaterEqual(COMMAND_INLINE_WAIT_MAX_SECONDS, 60 * 60)
+    def test_long_running_state_is_durable_while_inline_wait_is_short(self):
+        self.assertEqual(COMMAND_INLINE_WAIT_MAX_SECONDS, 60)
         self.assertGreaterEqual(COMMAND_SESSION_TTL_SECONDS, 30 * 24 * 60 * 60)
         self.assertGreaterEqual(COMMAND_SESSION_MAX_RETAINED, 512)
         self.assertGreaterEqual(COMMAND_LOG_MAX_BYTES, 128 * 1024 * 1024)
@@ -37,7 +41,42 @@ class ExecutionPersistenceConfigurationTests(unittest.TestCase):
         self.assertGreaterEqual(COMMAND_IDEMPOTENCY_CACHE_MAX_ENTRIES, 4096)
         self.assertGreaterEqual(LIVE_EVENT_MAX_REPLAY_EVENTS, 5000)
 
-    def test_direct_command_schema_accepts_configured_long_inline_wait(self):
+    def _read_inline_wait_cap_from_fresh_process(self, value: str | None) -> int:
+        env = os.environ.copy()
+        if value is None:
+            env.pop("CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS", None)
+        else:
+            env["CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS"] = value
+        repo_root = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from cptr.env import COMMAND_INLINE_WAIT_MAX_SECONDS; "
+                "print(COMMAND_INLINE_WAIT_MAX_SECONDS)",
+            ],
+            cwd=repo_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return int(completed.stdout.strip())
+
+    def test_inline_wait_defaults_to_protocol_cap_without_service_override(self):
+        self.assertEqual(self._read_inline_wait_cap_from_fresh_process(None), 60)
+
+    def test_inline_wait_cannot_be_raised_above_protocol_cap(self):
+        self.assertEqual(self._read_inline_wait_cap_from_fresh_process("3600"), 60)
+
+    def test_inline_wait_can_be_tightened_to_fully_nonblocking(self):
+        self.assertEqual(self._read_inline_wait_cap_from_fresh_process("0"), 0)
+
+    def test_direct_command_and_test_profiles_are_resume_first_by_default(self):
+        self.assertEqual(CommandRequest(command="python -m pytest").wait_seconds, 0)
+        self.assertEqual(CodingTestTargetRequest(target="python_pytest").wait_seconds, 0)
+
+    def test_direct_command_schema_accepts_protocol_inline_wait_cap(self):
         request = CommandRequest(
             command="python -m pytest", wait_seconds=COMMAND_INLINE_WAIT_MAX_SECONDS
         )

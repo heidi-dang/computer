@@ -1,3 +1,4 @@
+import asyncio
 import json
 import sys
 import tempfile
@@ -10,7 +11,12 @@ from unittest.mock import AsyncMock, patch
 from cptr.routers.coding import CommandRequest, _command_snapshot, start_workspace_command
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
 from cptr.services.lsp_manager import LspManager
-from cptr.utils.tools import command_sessions, run_command
+from cptr.utils.tools import (
+    command_sessions,
+    run_command,
+    signal_command_session,
+    stop_command_session,
+)
 
 
 class TerminalParityTests(unittest.IsolatedAsyncioTestCase):
@@ -62,6 +68,81 @@ class TerminalParityTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         finally:
+            command_sessions.pop(command_id, None)
+
+    async def test_pty_child_owns_a_real_controlling_terminal(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        request = SimpleNamespace()
+        command = (
+            f'{sys.executable} -c "import os; '
+            "print('isatty=' + str(int(os.isatty(0)))); "
+            "print('foreground=' + str(int(os.tcgetpgrp(0) == os.getpgrp())))\""
+        )
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+            ):
+                result = await run_command(
+                    command,
+                    ".",
+                    5,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws_1",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                    __use_pty=True,
+                )
+        command_id = result.split(":", 1)[0].removeprefix("Task ")
+        try:
+            output = bytes(command_sessions[command_id]["output"]).decode(errors="replace")
+            self.assertIn("isatty=1", output)
+            self.assertIn("foreground=1", output)
+        finally:
+            command_sessions.pop(command_id, None)
+
+    async def test_pty_interrupt_delivers_sigint_to_owned_process_group(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        request = SimpleNamespace()
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+            ):
+                result = await run_command(
+                    f'{sys.executable} -c "import time; time.sleep(60)"',
+                    ".",
+                    0,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws_1",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                    __use_pty=True,
+                )
+        command_id = result.split(":", 1)[0].removeprefix("Task ")
+        session = command_sessions[command_id]
+        try:
+            self.assertIsNone(signal_command_session(request, command_id, "interrupt"))
+            return_code = await asyncio.wait_for(
+                asyncio.to_thread(session["proc"].wait), timeout=1.0
+            )
+            self.assertNotEqual(return_code, 0)
+        finally:
+            if session["proc"].poll() is None:
+                stop_command_session(request, command_id, force=True)
+                await asyncio.to_thread(session["proc"].wait)
             command_sessions.pop(command_id, None)
 
     async def test_direct_command_can_opt_into_pty_dimensions_and_initial_stdin(self):

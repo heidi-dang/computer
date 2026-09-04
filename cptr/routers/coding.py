@@ -155,7 +155,7 @@ class EditRequest(WorkerTargetRequest):
 class CommandRequest(WorkerTargetRequest):
     command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
-    wait_seconds: int = Field(default=30, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
+    wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
     allow_network: bool = False
     pty: bool = False
     rows: int = Field(default=24, ge=5, le=300)
@@ -272,7 +272,7 @@ class TestTargetRequest(WorkerTargetRequest):
     target: Literal["python_pytest", "node_test", "node_vitest", "node_build"]
     path: str = Field(default=".", min_length=1, max_length=1_000)
     test_path: str | None = Field(default=None, min_length=1, max_length=1_000)
-    wait_seconds: int = Field(default=30, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
+    wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
 
 
 class SshCommandRequest(BaseModel):
@@ -1431,7 +1431,12 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
     if body.test_path:
         _, test_relative = _relative_path(body.test_path, root)
     profiles: dict[str, list[str]] = {
-        "python_pytest": [sys.executable, "-m", "pytest", *([test_relative] if test_relative else [])],
+        "python_pytest": [
+            sys.executable,
+            "-m",
+            "pytest",
+            *([test_relative] if test_relative else []),
+        ],
         "node_test": ["npm", "test", "--", *([test_relative] if test_relative else [])],
         "node_vitest": [
             "./node_modules/.bin/vitest",

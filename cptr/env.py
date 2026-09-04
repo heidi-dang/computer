@@ -73,10 +73,20 @@ WORKSPACE_AUTO_GITIGNORE_DOT_CPTR = _env_bool("CPTR_AUTO_GITIGNORE_DOT_CPTR", "t
 
 # ── Execute timeout ─────────────────────────────────────────
 # ``CPTR_EXECUTE_TIMEOUT`` controls only how long an API call waits inline;
-# it does not cap the lifetime of the owned command process.  Keep the default
-# non-blocking so long work returns a durable command ID immediately, while
-# allowing trusted clients to request a much longer bounded inline wait.
-COMMAND_INLINE_WAIT_MAX_SECONDS = max(60, _env_int("CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS", 60 * 60))
+# it does not cap the lifetime of the owned command process. Long operations
+# remain durable and resume by command ID. Administrators may tighten this
+# bound, but cannot raise it above the public Direct Coding protocol cap.
+COMMAND_INLINE_WAIT_PROTOCOL_MAX_SECONDS = 60
+COMMAND_INLINE_WAIT_MAX_SECONDS = max(
+    0,
+    min(
+        _env_int(
+            "CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS",
+            COMMAND_INLINE_WAIT_PROTOCOL_MAX_SECONDS,
+        ),
+        COMMAND_INLINE_WAIT_PROTOCOL_MAX_SECONDS,
+    ),
+)
 EXECUTE_TIMEOUT: float | None = None
 _execute_timeout = os.environ.get("CPTR_EXECUTE_TIMEOUT")
 if _execute_timeout is not None:

@@ -95,19 +95,28 @@ MAX_TASK_CONTENT_CHARS = 4000
 _TASK_TRUNCATION_MARKER = "... [truncated]"
 
 
-def _compose_preexec(preexec_fn=None):
-    """Add best-effort Linux parent-death signalling without changing identity setup."""
-    if not sys.platform.startswith("linux"):
+def _compose_preexec(preexec_fn=None, *, controlling_tty: bool = False):
+    """Compose child setup before exec without weakening PTY/session ownership."""
+    if not sys.platform.startswith("linux") and not controlling_tty:
         return preexec_fn
 
     def combined() -> None:
-        try:
-            import ctypes
+        if sys.platform.startswith("linux"):
+            try:
+                import ctypes
 
-            libc = ctypes.CDLL(None)
-            libc.prctl(1, int(signal.SIGTERM))  # PR_SET_PDEATHSIG
-        except Exception:
-            pass
+                libc = ctypes.CDLL(None)
+                libc.prctl(1, int(signal.SIGTERM))  # PR_SET_PDEATHSIG
+            except Exception:
+                pass
+        if controlling_tty:
+            # The PTY slave is inherited from the parent, so start_new_session
+            # alone cannot make it the child's controlling terminal. Become a
+            # session leader first, then explicitly acquire fd 0 (the slave
+            # after Popen's stdio dup) as the controlling TTY. This matches the
+            # interactive terminal implementation in cptr.utils.terminal.
+            os.setsid()
+            fcntl.ioctl(0, termios.TIOCSCTTY, 0)
         if preexec_fn is not None:
             preexec_fn()
 
@@ -135,8 +144,8 @@ def _spawn_pty(
             stderr=slave_fd,
             cwd=cwd,
             env=env,
-            start_new_session=True,
-            preexec_fn=_compose_preexec(preexec_fn),
+            start_new_session=False,
+            preexec_fn=_compose_preexec(preexec_fn, controlling_tty=True),
         )
     except Exception:
         os.close(slave_fd)
@@ -167,8 +176,8 @@ def _spawn_pty_argv(
             stderr=slave_fd,
             cwd=cwd,
             env=env,
-            start_new_session=True,
-            preexec_fn=_compose_preexec(preexec_fn),
+            start_new_session=False,
+            preexec_fn=_compose_preexec(preexec_fn, controlling_tty=True),
         )
     except Exception:
         os.close(slave_fd)
@@ -857,6 +866,8 @@ def signal_command_session(
         master_fd = session.get("master_fd")
         if master_fd is not None:
             try:
+                # A real controlling PTY translates VINTR through the terminal
+                # line discipline to SIGINT for its foreground process group.
                 os.write(master_fd, b"\x03")
                 return None
             except OSError:
