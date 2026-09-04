@@ -186,8 +186,14 @@ def setup_logging() -> None:
 
 
 async def complete_logging() -> None:
-    """Flush queued Loguru sinks during application shutdown."""
+    """Flush and close queued Loguru sinks during application shutdown."""
+    global _configured
     await loguru_logger.complete()
+    # ``enqueue=True`` handlers own multiprocessing queues/semaphores.  Waiting
+    # for queued records is not enough to release those resources; removing the
+    # handlers closes their queues so Python's resource tracker exits cleanly.
+    loguru_logger.remove()
+    _configured = False
 
 
 def audit_logger():
