@@ -265,6 +265,57 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
             outcome.artifacts[0].payload["execution_scope"], "isolated_mutation_worker"
         )
 
+    async def test_reproduction_handoff_tightens_budget_and_keeps_isolated_commands(self):
+        agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-repro-handoff"}))
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.REPRODUCING,
+            next_state=FactoryState.ROOT_CAUSE_ANALYSIS,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-repro-handoff",
+                user_id="user-1",
+                workspace_id="workspace-source",
+                mission="reproduce quickly from prior evidence",
+                acceptance_criteria=("reproduce one defect",),
+                model_id="agent:model",
+                policy={"reproduction_timeout_seconds": 90, "reproduction_max_tool_calls": 10},
+            ),
+            cycle=SimpleNamespace(
+                id="cycle-repro-handoff",
+                attempt_count=0,
+                mutation_worker_id="worker-1",
+            ),
+            evidence=(
+                SimpleNamespace(
+                    kind="reasoning_advice",
+                    payload={
+                        "phase_state": "AUDITING",
+                        "summary": "targeted health test gap is already localized",
+                    },
+                ),
+            ),
+            gates=(),
+        )
+
+        with patch(
+            "cptr.services.factory_production._factory_worker_workspace",
+            new=AsyncMock(return_value=(Path("/isolated"), SimpleNamespace(id="workspace-worker"))),
+        ):
+            outcome = await handler.execute(context)
+
+        prompt = agent.start_task.await_args.kwargs["prompt"]
+        self.assertIn("PRIOR PHASE EVIDENCE", prompt)
+        self.assertIn("finish within 45 seconds", prompt)
+        self.assertIn("at most 6 tool actions", prompt)
+        self.assertTrue(agent.start_task.await_args.kwargs["execution_policy"]["allow_commands"])
+        payload = outcome.artifacts[0].payload
+        self.assertEqual(payload["timeout_seconds"], 45)
+        self.assertEqual(payload["max_tool_calls"], 6)
+        self.assertGreater(payload["handoff_evidence_chars"], 0)
+        self.assertEqual(payload["execution_scope"], "isolated_mutation_worker")
+
     async def test_advisory_cancels_over_tool_budget_and_advances_with_partial_advice(self):
         running = {
             "id": "task-budget",

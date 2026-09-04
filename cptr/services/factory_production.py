@@ -679,7 +679,32 @@ class AdvisoryPhaseHandler:
 
         timeout_seconds, max_tool_calls = self._execution_limits(policy)
         handoff = _reasoning_handoff(context)
-        if handoff and self._state is not FactoryState.REPRODUCING:
+        if handoff and self._state is FactoryState.REPRODUCING:
+            timeout_seconds = min(
+                timeout_seconds,
+                self._bounded_int(
+                    policy.get(
+                        "handoff_reproduction_timeout_seconds",
+                        os.environ.get("CPTR_FACTORY_HANDOFF_REPRODUCTION_TIMEOUT_SECONDS", 45),
+                    ),
+                    default=45,
+                    minimum=30,
+                    maximum=1_800,
+                ),
+            )
+            max_tool_calls = min(
+                max_tool_calls,
+                self._bounded_int(
+                    policy.get(
+                        "handoff_reproduction_max_tool_calls",
+                        os.environ.get("CPTR_FACTORY_HANDOFF_REPRODUCTION_MAX_TOOL_CALLS", 6),
+                    ),
+                    default=6,
+                    minimum=2,
+                    maximum=100,
+                ),
+            )
+        elif handoff:
             timeout_seconds = min(
                 timeout_seconds,
                 self._bounded_int(
