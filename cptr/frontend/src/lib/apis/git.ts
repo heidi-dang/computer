@@ -275,7 +275,11 @@ export const gitPrClose = (
 	root: string,
 	number: number,
 	{ comment = '', delete_branch = false }: { comment?: string; delete_branch?: boolean } = {}
-) => fetchJSON<GitOperationResult>('/api/git/pr/close', jsonBody({ root, number, comment, delete_branch }));
+) =>
+	fetchJSON<GitOperationResult>(
+		'/api/git/pr/close',
+		jsonBody({ root, number, comment, delete_branch })
+	);
 
 export const gitPrReopen = (root: string, number: number) =>
 	fetchJSON<GitOperationResult>('/api/git/pr/reopen', jsonBody({ root, number }));

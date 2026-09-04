@@ -7,7 +7,7 @@
 
 import i18next, { type TFunction } from 'i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
-import { writable, derived } from 'svelte/store';
+import { writable, derived, type Readable } from 'svelte/store';
 import en from './locales/en.json';
 import de from './locales/de.json';
 import es from './locales/es.json';
@@ -76,7 +76,10 @@ i18next.on('languageChanged', (lng: string) => {
 });
 
 /** Reactive translation function: use as `$t('key')` or `$t('key', { count: 3 })` in templates. */
-export const t = derived(_tick, () => i18next.t.bind(i18next) as TFunction);
+export const t: Readable<TFunction> = derived<typeof _tick, TFunction>(
+	_tick,
+	() => i18next.t.bind(i18next) as TFunction
+);
 
 /** Change the active locale. */
 export function changeLocale(lng: string): void {

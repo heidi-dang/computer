@@ -1,10 +1,12 @@
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from cptr.services.live_events import (
     LiveEventHub,
     LiveEventStore,
     TerminalStreamSanitizer,
+    publish_command_event,
     sanitize_terminal_text,
 )
 
@@ -145,6 +147,36 @@ class LiveEventTests(unittest.IsolatedAsyncioTestCase):
         text = sanitizer.feed("next\b!\rprogress\x1b]52;c;clipboard\x07\x1b[2Jdone", final=True)
         self.assertEqual(text, "nex!\nprogressdone")
         self.assertEqual(sanitize_terminal_text("\x1b[32mgreen\x1b[0m"), "\x1b[32mgreen\x1b[0m")
+
+    async def test_command_completion_reconciles_matching_workbench_target_without_blocking_live_event(
+        self,
+    ):
+        store = LiveEventStore()
+        hub = LiveEventHub(store=store)
+        reconcile = AsyncMock(return_value=1)
+        with (
+            patch("cptr.services.live_events.live_event_hub", hub),
+            patch(
+                "cptr.services.live_events.workbench_session_store.reconcile_command_terminal",
+                new=reconcile,
+            ),
+        ):
+            event = await publish_command_event(
+                user_id="user-1",
+                workspace_id="ws-1",
+                command_id="cmd-1",
+                event_type="command.completed",
+                payload={"status": "COMPLETE", "exit_code": 0},
+            )
+
+        self.assertEqual(event.event_type, "command.completed")
+        reconcile.assert_awaited_once_with(
+            owner_id="user-1",
+            workspace_id="ws-1",
+            command_id="cmd-1",
+            status="COMPLETE",
+            exit_code=0,
+        )
 
     async def test_snapshot_replays_only_events_after_cursor(self):
         store = LiveEventStore()

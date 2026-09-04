@@ -98,5 +98,4 @@
 		color: var(--app-fg-muted);
 		font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 	}
-
 </style>

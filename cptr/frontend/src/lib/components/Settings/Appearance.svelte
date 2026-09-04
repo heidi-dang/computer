@@ -71,8 +71,8 @@
 
 	const nightOwlActive = $derived(
 		$theme === 'dark' &&
-		resolvedConfig.background.toLowerCase() === '#011627' &&
-		resolvedConfig.foreground.toLowerCase() === '#d6deeb'
+			resolvedConfig.background.toLowerCase() === '#011627' &&
+			resolvedConfig.foreground.toLowerCase() === '#d6deeb'
 	);
 
 	function updateThemeColors(next: { background?: string; foreground?: string }) {
@@ -325,7 +325,7 @@
 				</span>
 				{#if nightOwlActive}
 					<Icon name="check" size={14} class="app-accent shrink-0" />
-			{/if}
+				{/if}
 			</button>
 		</div>
 

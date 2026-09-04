@@ -21,6 +21,7 @@ from cptr.env import (
     LIVE_EVENT_WRITE_BATCH_SIZE,
 )
 from cptr.models import ControlLiveEvent
+from cptr.services.workbench_sessions import workbench_session_store
 from cptr.utils.db import get_db
 from cptr.utils.redaction import redact_external, redact_sensitive
 
@@ -685,12 +686,28 @@ async def publish_command_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
 ) -> LiveEventEnvelope:
-    return await live_event_hub.publish(
+    event = await live_event_hub.publish(
         user_id=user_id,
         target_key=command_target_key(workspace_id, command_id),
         event_type=event_type,
         payload=payload,
     )
+    if event_type == "command.completed":
+        command_status = str((payload or {}).get("status") or "").upper()
+        if command_status in {"COMPLETE", "FAILED", "CANCELLED"}:
+            try:
+                raw_exit_code = (payload or {}).get("exit_code")
+                exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
+                await workbench_session_store.reconcile_command_terminal(
+                    owner_id=user_id,
+                    workspace_id=workspace_id,
+                    command_id=command_id,
+                    status=command_status,
+                    exit_code=exit_code,
+                )
+            except Exception:
+                logger.debug("workbench command terminal reconciliation unavailable", exc_info=True)
+    return event
 
 
 async def safe_publish_command_event(**kwargs: Any) -> LiveEventEnvelope | None:

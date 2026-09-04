@@ -35,7 +35,7 @@ from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
 from cptr.routers.admin import require_admin
 from cptr.services.coding_benchmark import SUITE_ID, coding_benchmark_store
-from cptr.services.control_auth import authenticate_control_request
+from cptr.services.control_auth import require_control_user
 from cptr.services.factory_observability import FactoryObservabilityService
 from cptr.services.mcp_activity import McpActivityBatch, mcp_activity_store
 from cptr.services.mcp_diagnostics import (
@@ -74,12 +74,7 @@ def append_server_log(server_id: str, line: str) -> None:
 
 async def _require_traffic_writer(request: Request) -> str:
     """Authenticate the plugin telemetry writer with its dedicated scope."""
-    try:
-        return await authenticate_control_request(request, "mcp:traffic:write")
-    except PermissionError as exc:
-        if str(exc).startswith("missing required scope"):
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc
+    return await require_control_user(request, "mcp:traffic:write")
 
 
 def _traffic_sse(event: str, data: dict[str, Any]) -> str:
@@ -88,12 +83,7 @@ def _traffic_sse(event: str, data: dict[str, Any]) -> str:
 
 async def _require_activity_writer(request: Request) -> str:
     """Authenticate the plugin Activity writer with its dedicated scope."""
-    try:
-        return await authenticate_control_request(request, "mcp:activity:write")
-    except PermissionError as exc:
-        if str(exc).startswith("missing required scope"):
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc
+    return await require_control_user(request, "mcp:activity:write")
 
 
 def _activity_sse(event: str, data: dict[str, Any]) -> str:
@@ -102,12 +92,7 @@ def _activity_sse(event: str, data: dict[str, Any]) -> str:
 
 async def _require_diagnostics_writer(request: Request) -> str:
     """Authenticate the plugin Diagnostics writer with its dedicated scope."""
-    try:
-        return await authenticate_control_request(request, "mcp:diagnostics:write")
-    except PermissionError as exc:
-        if str(exc).startswith("missing required scope"):
-            raise HTTPException(status_code=403, detail=str(exc)) from exc
-        raise HTTPException(status_code=401, detail="control-plane authentication failed") from exc
+    return await require_control_user(request, "mcp:diagnostics:write")
 
 
 def _diagnostics_sse(event: str, data: dict[str, Any]) -> str:

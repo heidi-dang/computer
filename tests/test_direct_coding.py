@@ -855,4 +855,11 @@ class DirectCodingHttpAuthorizationTests(unittest.TestCase):
                 )
 
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["detail"], "missing required scope: coding:write")
+        self.assertEqual(
+            response.json()["detail"],
+            {
+                "code": "CONTROL_SCOPE_REQUIRED",
+                "message": "missing required scope: coding:write",
+                "retriable": False,
+            },
+        )

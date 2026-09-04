@@ -16,13 +16,7 @@
 		onselect?: (nodeId: string) => void;
 	};
 
-	let {
-		nodes,
-		edges,
-		selectedNodeId = null,
-		recentRecallNodeIds = [],
-		onselect
-	}: Props = $props();
+	let { nodes, edges, selectedNodeId = null, recentRecallNodeIds = [], onselect }: Props = $props();
 	let host: HTMLDivElement;
 	let chart: ECharts | null = null;
 	let observer: ResizeObserver | null = null;
@@ -45,11 +39,14 @@
 				formatter: (params: any) => {
 					const data = params?.data;
 					if (!data) return '';
-					if (params.dataType === 'edge') return data.kind === 'related' ? 'Memory relationship' : 'Scope';
+					if (params.dataType === 'edge')
+						return data.kind === 'related' ? 'Memory relationship' : 'Scope';
 					const node = data.__node as McpMemoryNode | undefined;
 					if (!node) return String(data.name ?? 'Memory');
-					const scope = node.scope === 'user' ? 'User memory' : node.workspace_name || 'Workspace memory';
-					const recalledText = Number(node.recall_count || 0) > 0 ? `<br/>Recalled ${node.recall_count}×` : '';
+					const scope =
+						node.scope === 'user' ? 'User memory' : node.workspace_name || 'Workspace memory';
+					const recalledText =
+						Number(node.recall_count || 0) > 0 ? `<br/>Recalled ${node.recall_count}×` : '';
 					return `<strong>${escapeHtml(node.label)}</strong><br/>${escapeHtml(scope)}${recalledText}`;
 				}
 			},
@@ -112,7 +109,11 @@
 							itemStyle: {
 								color,
 								opacity: isScope ? 0.96 : 0.82,
-								borderColor: isSelected ? '#f8fafc' : isRecalled ? '#fde68a' : 'rgba(255,255,255,0.16)',
+								borderColor: isSelected
+									? '#f8fafc'
+									: isRecalled
+										? '#fde68a'
+										: 'rgba(255,255,255,0.16)',
 								borderWidth: isSelected ? 2.5 : isRecalled ? 1.8 : 0.7,
 								shadowBlur: isSelected ? 20 : isRecalled ? 14 : 4,
 								shadowColor: isSelected ? '#ffffff55' : `${color}55`
@@ -204,7 +205,11 @@
 		min-height: 28rem;
 		touch-action: none;
 		background:
-			radial-gradient(circle at 50% 45%, color-mix(in oklab, var(--app-accent) 5%, transparent), transparent 42%),
+			radial-gradient(
+				circle at 50% 45%,
+				color-mix(in oklab, var(--app-accent) 5%, transparent),
+				transparent 42%
+			),
 			radial-gradient(circle at 20% 75%, rgba(139, 92, 246, 0.045), transparent 30%);
 	}
 

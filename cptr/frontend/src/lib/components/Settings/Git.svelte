@@ -251,7 +251,9 @@
 			</div>
 
 			<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2 mt-5">GitHub</h3>
-			<div class="border-y border-gray-100 dark:border-white/5 divide-y divide-gray-100 dark:divide-white/5">
+			<div
+				class="border-y border-gray-100 dark:border-white/5 divide-y divide-gray-100 dark:divide-white/5"
+			>
 				<div class="py-2.5 flex items-center justify-between gap-3">
 					<div class="min-w-0">
 						<div class="text-xs text-gray-700 dark:text-gray-300">GitHub CLI</div>
@@ -308,7 +310,9 @@
 
 			<div class="mt-3">
 				<Collapsible title="Accounts and actions" summary={ghSummary()}>
-					<div class="border-y border-gray-100 dark:border-white/5 divide-y divide-gray-100 dark:divide-white/5">
+					<div
+						class="border-y border-gray-100 dark:border-white/5 divide-y divide-gray-100 dark:divide-white/5"
+					>
 						{#if !config?.gh.installed}
 							<div class="py-2.5 text-xs text-gray-700 dark:text-gray-300">
 								{config?.gh.message || 'GitHub CLI is not installed.'}
@@ -329,15 +333,15 @@
 												{#each accounts as account, index (accountKey(account, index))}
 													<span class="text-[0.625rem] text-gray-400 dark:text-gray-600">
 														{account.login || 'unknown'}
-															{#if account.active}
-																(active)
-															{:else if config.permissions.can_manage_gh && account.login}
-																<button
-																	class="ml-1 text-gray-500 hover:text-gray-900 dark:hover:text-white"
-																	disabled={ghBusy}
-																	onclick={() =>
-																		runGhAction(() => ghSwitch(host, account.login as string))}
-																	>Switch</button
+														{#if account.active}
+															(active)
+														{:else if config.permissions.can_manage_gh && account.login}
+															<button
+																class="ml-1 text-gray-500 hover:text-gray-900 dark:hover:text-white"
+																disabled={ghBusy}
+																onclick={() =>
+																	runGhAction(() => ghSwitch(host, account.login as string))}
+																>Switch</button
 															>
 														{/if}
 													</span>
@@ -384,24 +388,24 @@
 										onclick={() => beginLogin()}
 									>
 										{ghBusy ? 'Starting...' : 'Sign in'}
-										</button>
-									{/if}
-								</div>
-							{/if}
-						</div>
-					</Collapsible>
-				</div>
+									</button>
+								{/if}
+							</div>
+						{/if}
+					</div>
+				</Collapsible>
+			</div>
 
 			{#if isAdmin}
 				<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2 mt-5">
 					{tr('sidebar.admin')}
 				</h3>
 				<div class="border-y border-gray-100 dark:border-white/5">
-						<div class="py-2.5 flex items-center justify-between gap-3">
-							<div class="min-w-0">
-								<div class="text-xs text-gray-700 dark:text-gray-300">
-									{tr('admin.gitCommitMessageModel')}
-								</div>
+					<div class="py-2.5 flex items-center justify-between gap-3">
+						<div class="min-w-0">
+							<div class="text-xs text-gray-700 dark:text-gray-300">
+								{tr('admin.gitCommitMessageModel')}
+							</div>
 							<div class="text-[0.625rem] text-gray-400 dark:text-gray-600 truncate mt-0.5">
 								{tr('admin.gitCommitMessageModelHint')}
 							</div>

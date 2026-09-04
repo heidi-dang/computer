@@ -342,22 +342,42 @@
 		</div>
 		<div class="border-b px-3 py-2.5 sm:border-r sm:px-4 lg:border-b-0">
 			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This week · Weekly tokens</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums">{formatTokens(weekTotals.totalTokensEstimated)}</p>
-			<p class="text-[0.58rem] app-muted">{formatTokens(weekTotals.inputTokensEstimated)} in · {formatTokens(weekTotals.outputTokensEstimated)} out · {weekTotals.requests} requests</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums">
+				{formatTokens(weekTotals.totalTokensEstimated)}
+			</p>
+			<p class="text-[0.58rem] app-muted">
+				{formatTokens(weekTotals.inputTokensEstimated)} in · {formatTokens(
+					weekTotals.outputTokensEstimated
+				)} out · {weekTotals.requests} requests
+			</p>
 		</div>
 		<div class="border-b border-r px-3 py-2.5 sm:px-4 lg:border-b-0">
-			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This week · Simulated cost (USD)</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">{formatUsd(weekTotals.simulatedCostUsd)}</p>
+			<p class="text-[0.62rem] uppercase tracking-wide app-muted">
+				This week · Simulated cost (USD)
+			</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">
+				{formatUsd(weekTotals.simulatedCostUsd)}
+			</p>
 			<p class="text-[0.58rem] app-muted">database-backed · UTC week</p>
 		</div>
 		<div class="border-b px-3 py-2.5 sm:border-r sm:px-4 lg:border-b-0">
 			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This month · Monthly tokens</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums">{formatTokens(monthTotals.totalTokensEstimated)}</p>
-			<p class="text-[0.58rem] app-muted">{formatTokens(monthTotals.inputTokensEstimated)} in · {formatTokens(monthTotals.outputTokensEstimated)} out · {monthTotals.requests} requests</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums">
+				{formatTokens(monthTotals.totalTokensEstimated)}
+			</p>
+			<p class="text-[0.58rem] app-muted">
+				{formatTokens(monthTotals.inputTokensEstimated)} in · {formatTokens(
+					monthTotals.outputTokensEstimated
+				)} out · {monthTotals.requests} requests
+			</p>
 		</div>
 		<div class="border-r px-3 py-2.5 sm:px-4">
-			<p class="text-[0.62rem] uppercase tracking-wide app-muted">This month · Simulated cost (USD)</p>
-			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">{formatUsd(monthTotals.simulatedCostUsd)}</p>
+			<p class="text-[0.62rem] uppercase tracking-wide app-muted">
+				This month · Simulated cost (USD)
+			</p>
+			<p class="mt-1 text-lg font-semibold tabular-nums" style="color: var(--app-accent);">
+				{formatUsd(monthTotals.simulatedCostUsd)}
+			</p>
 			<p class="text-[0.58rem] app-muted">database-backed · calendar month</p>
 		</div>
 		<div class="px-3 py-2.5 sm:px-4">

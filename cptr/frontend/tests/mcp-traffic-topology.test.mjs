@@ -293,11 +293,56 @@ test('usage diagnostics hydrate bounded model state and project 60-second token/
 			by_model: {}
 		},
 		usage_periods: {
-			week: { requests: 5, input_tokens_estimated: 500, output_tokens_estimated: 100, total_tokens_estimated: 600, simulated_cost_usd: '0.004', priced_events: 5, stale_events: 0, unpriced_events: 0 },
-			month: { requests: 8, input_tokens_estimated: 800, output_tokens_estimated: 160, total_tokens_estimated: 960, simulated_cost_usd: '0.0064', priced_events: 8, stale_events: 0, unpriced_events: 0 },
-			rolling_7d: { requests: 5, input_tokens_estimated: 500, output_tokens_estimated: 100, total_tokens_estimated: 600, simulated_cost_usd: '0.004', priced_events: 5, stale_events: 0, unpriced_events: 0 },
-			rolling_30d: { requests: 8, input_tokens_estimated: 800, output_tokens_estimated: 160, total_tokens_estimated: 960, simulated_cost_usd: '0.0064', priced_events: 8, stale_events: 0, unpriced_events: 0 },
-			all_time: { requests: 9, input_tokens_estimated: 900, output_tokens_estimated: 180, total_tokens_estimated: 1080, simulated_cost_usd: '0.0072', priced_events: 9, stale_events: 0, unpriced_events: 0 },
+			week: {
+				requests: 5,
+				input_tokens_estimated: 500,
+				output_tokens_estimated: 100,
+				total_tokens_estimated: 600,
+				simulated_cost_usd: '0.004',
+				priced_events: 5,
+				stale_events: 0,
+				unpriced_events: 0
+			},
+			month: {
+				requests: 8,
+				input_tokens_estimated: 800,
+				output_tokens_estimated: 160,
+				total_tokens_estimated: 960,
+				simulated_cost_usd: '0.0064',
+				priced_events: 8,
+				stale_events: 0,
+				unpriced_events: 0
+			},
+			rolling_7d: {
+				requests: 5,
+				input_tokens_estimated: 500,
+				output_tokens_estimated: 100,
+				total_tokens_estimated: 600,
+				simulated_cost_usd: '0.004',
+				priced_events: 5,
+				stale_events: 0,
+				unpriced_events: 0
+			},
+			rolling_30d: {
+				requests: 8,
+				input_tokens_estimated: 800,
+				output_tokens_estimated: 160,
+				total_tokens_estimated: 960,
+				simulated_cost_usd: '0.0064',
+				priced_events: 8,
+				stale_events: 0,
+				unpriced_events: 0
+			},
+			all_time: {
+				requests: 9,
+				input_tokens_estimated: 900,
+				output_tokens_estimated: 180,
+				total_tokens_estimated: 1080,
+				simulated_cost_usd: '0.0072',
+				priced_events: 9,
+				stale_events: 0,
+				unpriced_events: 0
+			},
 			generated_at_ms: base + 2_000,
 			timezone: 'UTC',
 			week_starts_on: 'monday'

@@ -1,7 +1,8 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+from cptr.services.workbench_sessions import WorkbenchSessionStore
 from cptr.routers.workbench import (
     CreateWorkbenchSessionRequest,
     RenameWorkbenchSessionRequest,
@@ -10,6 +11,57 @@ from cptr.routers.workbench import (
     rename_workbench_session,
     router as workbench_router,
 )
+
+
+class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_completed_command_releases_only_matching_active_target_and_keeps_workbench_open(
+        self,
+    ):
+        session = SimpleNamespace(
+            id="wbs_command",
+            user_id="user_1",
+            status="RUNNING",
+            active_target_type="command",
+            active_target_id="cmd_1",
+            active_workspace_id="ws_1",
+            event_count=4,
+            updated_at=10,
+            last_event_at=10,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalars.return_value = SimpleNamespace(all=lambda: [session])
+        added = []
+        db.add = Mock(side_effect=added.append)
+
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            changed = await WorkbenchSessionStore().reconcile_command_terminal(
+                owner_id="user_1",
+                workspace_id="ws_1",
+                command_id="cmd_1",
+                status="COMPLETE",
+                exit_code=0,
+            )
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(session.status, "OPEN")
+        self.assertIsNone(session.active_target_type)
+        self.assertIsNone(session.active_target_id)
+        self.assertIsNone(session.active_workspace_id)
+        self.assertEqual(session.event_count, 5)
+        self.assertEqual(len(added), 1)
+        event = added[0]
+        self.assertEqual(event.event_type, "command.completed")
+        self.assertEqual(event.state, "COMPLETE")
+        self.assertEqual(event.target_id, "cmd_1")
+        self.assertEqual(event.details, {"exit_code": 0})
+        db.commit.assert_awaited_once()
 
 
 class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):

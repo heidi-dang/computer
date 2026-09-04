@@ -50,9 +50,7 @@
 		if (!trimmed) return 'Other';
 		const alias = SOURCE_LABELS[trimmed.toLowerCase()];
 		if (alias) return alias;
-		return trimmed
-			.replace(/[_-]+/g, ' ')
-			.replace(/\b\w/g, (char) => char.toUpperCase());
+		return trimmed.replace(/[_-]+/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
 	}
 
 	function sourceKey(model: ChatModel): string {
@@ -96,9 +94,7 @@
 			.toLowerCase();
 	}
 
-	const selectorMaxHeight = $derived(
-		isSmallViewport ? 'min(58dvh,30rem)' : 'min(55vh,28rem)'
-	);
+	const selectorMaxHeight = $derived(isSmallViewport ? 'min(58dvh,30rem)' : 'min(55vh,28rem)');
 
 	const matchingModels = $derived(
 		search.trim()

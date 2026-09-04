@@ -51,7 +51,7 @@ class McpTrafficApiTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch.object(mcp_router, "mcp_traffic_store", store),
-            patch.object(mcp_router, "authenticate_control_request", auth),
+            patch.object(mcp_router, "require_control_user", auth),
         ):
             result = await mcp_router.ingest_mcp_traffic(route_request(), body)
 
@@ -66,10 +66,9 @@ class McpTrafficApiTests(unittest.IsolatedAsyncioTestCase):
             ("invalid control-plane bearer token", 401),
         ):
             with self.subTest(message=message):
-                with patch.object(
-                    mcp_router,
-                    "authenticate_control_request",
-                    AsyncMock(side_effect=PermissionError(message)),
+                with patch(
+                    "cptr.services.control_auth.authenticate_control_request",
+                    new=AsyncMock(side_effect=PermissionError(message)),
                 ):
                     with self.assertRaises(HTTPException) as raised:
                         await mcp_router.ingest_mcp_traffic(route_request(), body)

@@ -60,7 +60,7 @@ class McpDurableUsageApiTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(mcp_router, "mcp_diagnostics_store", store),
             patch.object(mcp_router, "mcp_usage_store", durable),
-            patch.object(mcp_router, "authenticate_control_request", auth),
+            patch.object(mcp_router, "require_control_user", auth),
         ):
             result = await mcp_router.ingest_mcp_diagnostics(
                 request(), McpDiagnosticsBatch(events=[usage("usage-replay-1")])

@@ -253,8 +253,10 @@ class FactoryProcessRestartRecoveryTests(unittest.TestCase):
             try:
                 self._wait_for_health(port)
                 self._wait_until(
-                    lambda: self._query(data_dir, "select state from factory_runs")
-                    == FactoryState.RECOVERING.value
+                    lambda: (
+                        self._query(data_dir, "select state from factory_runs")
+                        == FactoryState.RECOVERING.value
+                    )
                 )
                 self.assertEqual(
                     self._query(
@@ -331,8 +333,11 @@ class FactoryProcessRestartRecoveryTests(unittest.TestCase):
     def _query(data_dir, query):
         import sqlite3
 
-        with sqlite3.connect(os.path.join(data_dir, "app.db")) as connection:
+        connection = sqlite3.connect(os.path.join(data_dir, "app.db"))
+        try:
             return str(connection.execute(query).fetchone()[0])
+        finally:
+            connection.close()
 
     @staticmethod
     def _wait_until(predicate):

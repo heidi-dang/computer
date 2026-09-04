@@ -181,8 +181,8 @@
 		width: 100%;
 		height: 100%;
 		overflow: hidden;
-		background: repeating-conic-gradient(var(--app-hover) 0% 25%, transparent 0% 50%) 50% /
-			1rem 1rem;
+		background: repeating-conic-gradient(var(--app-hover) 0% 25%, transparent 0% 50%) 50% / 1rem
+			1rem;
 	}
 
 	.visual-content {
@@ -212,5 +212,4 @@
 		white-space: pre-wrap;
 		word-break: break-all;
 	}
-
 </style>

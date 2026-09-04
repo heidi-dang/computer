@@ -382,12 +382,17 @@ function applyUsagePeriodEvent(
 	state: McpDiagnosticsState,
 	event: McpUsageDiagnostic
 ): McpUsagePeriodsState {
-	const crossedWeek = utcWeekKey(event.timestamp_ms) !== utcWeekKey(state.usagePeriodsGeneratedAtMs);
-	const crossedMonth = utcMonthKey(event.timestamp_ms) !== utcMonthKey(state.usagePeriodsGeneratedAtMs);
+	const crossedWeek =
+		utcWeekKey(event.timestamp_ms) !== utcWeekKey(state.usagePeriodsGeneratedAtMs);
+	const crossedMonth =
+		utcMonthKey(event.timestamp_ms) !== utcMonthKey(state.usagePeriodsGeneratedAtMs);
 	return {
 		...state.usagePeriodsState,
 		week: incrementPeriod(crossedWeek ? emptyUsagePeriod() : state.usagePeriodsState.week, event),
-		month: incrementPeriod(crossedMonth ? emptyUsagePeriod() : state.usagePeriodsState.month, event),
+		month: incrementPeriod(
+			crossedMonth ? emptyUsagePeriod() : state.usagePeriodsState.month,
+			event
+		),
 		rolling_7d: incrementPeriod(state.usagePeriodsState.rolling_7d, event),
 		rolling_30d: incrementPeriod(state.usagePeriodsState.rolling_30d, event),
 		all_time: incrementPeriod(state.usagePeriodsState.all_time, event)

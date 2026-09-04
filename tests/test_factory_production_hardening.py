@@ -650,8 +650,11 @@ class FactoryCriticalBoundaryProcessRestartCampaignTests(unittest.TestCase):
     def _query(data_dir: str, query: str, params=()):
         import sqlite3
 
-        with sqlite3.connect(os.path.join(data_dir, "app.db")) as connection:
+        connection = sqlite3.connect(os.path.join(data_dir, "app.db"))
+        try:
             return connection.execute(query, params).fetchone()[0]
+        finally:
+            connection.close()
 
     @staticmethod
     def _wait_until(predicate) -> None:

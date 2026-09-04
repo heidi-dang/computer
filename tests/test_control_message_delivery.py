@@ -240,10 +240,13 @@ class ControlMessageDeliveryTests(unittest.TestCase):
                 text=True,
             )
             self.assertTrue(result.stdout.strip())
-            with sqlite3.connect(os.path.join(data_dir, "app.db")) as connection:
+            connection = sqlite3.connect(os.path.join(data_dir, "app.db"))
+            try:
                 status, target, consumed_at = connection.execute(
                     "select status, target_message_id, consumed_at from control_messages"
                 ).fetchone()
+            finally:
+                connection.close()
             self.assertEqual(status, "CONSUMED")
             self.assertEqual(target, "worker-message")
             self.assertEqual(consumed_at, 5)

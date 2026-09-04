@@ -79,7 +79,9 @@ export function testNotificationTarget(id: string) {
 }
 
 export function setDefaultNotificationTarget(id: string) {
-	return fetchJSON<NotificationTarget>(`/api/notifications/targets/${id}/default`, { method: 'PUT' });
+	return fetchJSON<NotificationTarget>(`/api/notifications/targets/${id}/default`, {
+		method: 'PUT'
+	});
 }
 
 export async function listNotificationBotOptions(): Promise<BotOption[]> {

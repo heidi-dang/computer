@@ -277,6 +277,67 @@ class WorkbenchSessionStore:
             await db.refresh(session)
             return _session_dict(session)
 
+    async def reconcile_command_terminal(
+        self,
+        *,
+        owner_id: str,
+        workspace_id: str,
+        command_id: str,
+        status: str,
+        exit_code: int | None = None,
+    ) -> int:
+        normalized_status = str(status or "").upper()
+        if normalized_status not in {"COMPLETE", "FAILED", "CANCELLED"}:
+            raise ValueError("invalid command terminal status")
+        now = _now_ms()
+        async with await get_db() as db:
+            rows = await db.scalars(
+                select(WorkbenchSession).where(
+                    WorkbenchSession.user_id == owner_id,
+                    WorkbenchSession.deleted_at.is_(None),
+                    WorkbenchSession.archived_at.is_(None),
+                    WorkbenchSession.active_target_type == "command",
+                    WorkbenchSession.active_target_id == command_id,
+                    WorkbenchSession.active_workspace_id == workspace_id,
+                )
+            )
+            sessions = rows.all()
+            for session in sessions:
+                sequence = int(session.event_count or 0) + 1
+                db.add(
+                    WorkbenchSessionEvent(
+                        session_id=session.id,
+                        user_id=owner_id,
+                        sequence=sequence,
+                        source="backend",
+                        actor="cptr_runtime",
+                        event_type="command.completed",
+                        state=normalized_status,
+                        target_type="command",
+                        target_id=_clip(command_id, 200),
+                        workspace_id=_clip(workspace_id, 200),
+                        tool_name=None,
+                        summary=_clip(
+                            "Command finished; Workbench remains available for ChatGPT follow-up.",
+                            MAX_EVENT_SUMMARY_CHARS,
+                        ),
+                        details=_safe_json({"exit_code": exit_code}),
+                        metrics={},
+                        policy={},
+                        created_at=now,
+                    )
+                )
+                session.event_count = sequence
+                session.updated_at = now
+                session.last_event_at = now
+                session.active_target_type = None
+                session.active_target_id = None
+                session.active_workspace_id = None
+                session.status = "OPEN"
+            if sessions:
+                await db.commit()
+            return len(sessions)
+
     async def rename(self, *, owner_id: str, session_id: str, name: str) -> dict[str, Any] | None:
         now = _now_ms()
         async with await get_db() as db:

@@ -4,19 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from cptr.services.browser_command_results import browser_command_results
 from cptr.services.browser_evaluate_approvals import browser_evaluate_approvals
 from cptr.services.browser_device_connections import browser_device_connections
 from cptr.services.browser_devices import BrowserTabInUseError, browser_device_store
 from cptr.services.browser_visual_frames import BrowserVisualFrame, browser_visual_frames
-from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
+from cptr.services.browser_protocol import (
+    BROWSER_ACTIONS,
+    PROTOCOL_VERSION,
+    action_mutates_browser,
+    wire_browser_mode,
+)
+from cptr.services.control_auth import require_control_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/browser-device/v1", tags=["browser-device"])
 CONTROL_HEARTBEAT_SECONDS = 20.0
@@ -32,12 +41,10 @@ class PairingClaimBody(BaseModel):
 
 
 class PairingApproveBody(BaseModel):
+    # Authenticated approval is bound to the exact high-entropy pairing ID.
+    # The extension-held claim secret is the independent proof required to
+    # claim the device credential; no OTP-like code is part of this API.
     pairing_id: str = Field(min_length=1, max_length=120)
-    # Optional for authenticated MCP approval. Some hosts classify six-digit
-    # pairing challenges as OTP-like secrets and block the tool call before it
-    # reaches CPTR. The opaque pairing_id still selects the exact challenge,
-    # while claim_secret remains extension-only and is required to claim.
-    code: str | None = Field(default=None, pattern=r"^\d{6}$")
 
 
 class OpenSessionBody(BaseModel):
@@ -61,6 +68,19 @@ class SendCommandBody(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
     wait_seconds: float = Field(default=15.0, ge=0.1, le=60.0)
 
+    @field_validator("action")
+    @classmethod
+    def validate_action(cls, value: str) -> str:
+        if value not in BROWSER_ACTIONS:
+            raise ValueError("unsupported browser action")
+        return value
+
+    @model_validator(mode="after")
+    def require_mutation_epoch(self):
+        if action_mutates_browser(self.action) and self.expected_epoch is None:
+            raise ValueError("mutating browser action requires expected_epoch")
+        return self
+
 
 class EvaluateApprovalBody(BaseModel):
     expression: str = Field(min_length=1, max_length=20_000)
@@ -72,10 +92,39 @@ class ReturnToAgentBody(BaseModel):
 
 
 class StreamConfigureBody(BaseModel):
+    viewer_id: str = Field(
+        default="legacy", min_length=1, max_length=120, pattern=r"^[A-Za-z0-9_.:-]+$"
+    )
     visible: bool
     max_fps: int = Field(ge=0, le=12)
     max_width: int = Field(ge=320, le=3_840)
     quality: int = Field(ge=20, le=90)
+
+
+_browser_stream_viewers: dict[str, dict[str, StreamConfigureBody]] = {}
+
+
+def _effective_stream_config(session_id: str, body: StreamConfigureBody) -> dict[str, Any]:
+    viewers = _browser_stream_viewers.setdefault(session_id, {})
+    if body.visible:
+        viewers[body.viewer_id] = body
+    else:
+        viewers.pop(body.viewer_id, None)
+    if viewers:
+        active = list(viewers.values())
+        return {
+            "visible": True,
+            "max_fps": max(viewer.max_fps for viewer in active),
+            "max_width": max(viewer.max_width for viewer in active),
+            "quality": max(viewer.quality for viewer in active),
+        }
+    _browser_stream_viewers.pop(session_id, None)
+    return {
+        "visible": False,
+        "max_fps": 0,
+        "max_width": body.max_width,
+        "quality": body.quality,
+    }
 
 
 class HumanInputBody(BaseModel):
@@ -120,19 +169,26 @@ class HumanInputBody(BaseModel):
 
 
 async def _control_user(request: Request, scope: str) -> str:
-    try:
-        return await authenticate_control_request(request, scope)
-    except PermissionError as exc:
-        if isinstance(exc, ControlMemoryUnavailable):
-            raise HTTPException(
-                status_code=503,
-                detail={"code": "MEMORY_REQUIRED", "message": str(exc)},
-            ) from exc
-        message = str(exc)
+    return await require_control_user(request, scope)
+
+
+def _session_wire_mode(session: Any) -> str:
+    mode = wire_browser_mode(str(session.state))
+    if mode is None:
+        logger.warning(
+            "browser-device dispatch rejected for non-wire session state session_id=%s state=%s",
+            getattr(session, "id", "unknown"),
+            str(session.state),
+        )
         raise HTTPException(
-            status_code=403 if message.startswith("missing required scope") else 401,
-            detail="control-plane access denied",
-        ) from exc
+            status_code=409,
+            detail={
+                "code": "BROWSER_SESSION_NOT_READY",
+                "message": "browser session is not ready for device dispatch",
+                "retriable": True,
+            },
+        )
+    return mode
 
 
 @router.post("/pairing/request")
@@ -140,7 +196,6 @@ async def request_pairing(body: PairingRequestBody):
     pairing = await browser_device_store.request_pairing(device_name=body.device_name)
     return {
         "pairing_id": pairing.pairing_id,
-        "code": pairing.code,
         "claim_secret": pairing.claim_secret,
         "expires_at": pairing.expires_at,
     }
@@ -152,7 +207,6 @@ async def approve_pairing(request: Request, body: PairingApproveBody):
     approved = await browser_device_store.approve_pairing(
         user_id=user_id,
         pairing_id=body.pairing_id,
-        code=body.code,
     )
     if not approved:
         raise HTTPException(status_code=404, detail="pairing challenge is unavailable")
@@ -209,7 +263,7 @@ def _safe_discovered_tabs(result: dict[str, Any]) -> list[dict[str, Any]]:
         tabs.append(
             {
                 "id": tab_id,
-                "windowId": window_id,
+                "window_id": window_id,
                 "active": bool(value.get("active")),
                 "title": str(value.get("title") or "")[:512],
                 "url": str(value.get("url") or "")[:4096],
@@ -251,7 +305,7 @@ async def _discover_device_tabs(
     delivered = await browser_device_connections.send_control(
         device_id=device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.command",
             "device_id": device_id,
             "session_id": f"device_{device_id}",
@@ -337,6 +391,10 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
             new_owner="agent",
         )
     except (KeyError, PermissionError) as exc:
+        await browser_device_store.abort_session_bootstrap(
+            session_id=session.id,
+            expected_epoch=int(lease["epoch"]),
+        )
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     command_id = f"attach_{session.id}_{acquired['epoch']}"
@@ -354,7 +412,7 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.command",
             "device_id": session.device_id,
             "session_id": session.id,
@@ -440,21 +498,20 @@ async def configure_browser_stream(request: Request, session_id: str, body: Stre
     session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="browser session not found")
+    effective = _effective_stream_config(session_id, body)
     event = await browser_device_store.append_device_event(
         device_id=session.device_id,
         event_type="browser.stream.configure",
         payload={
             "session_id": session_id,
-            "visible": body.visible,
-            "max_fps": body.max_fps,
-            "max_width": body.max_width,
-            "quality": body.quality,
+            "viewer_id": body.viewer_id,
+            **effective,
         },
     )
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.stream.configure",
             "device_id": session.device_id,
             "session_id": session_id,
@@ -462,13 +519,18 @@ async def configure_browser_stream(request: Request, session_id: str, body: Stre
             "sequence": int(event.sequence),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "cptr",
-            "mode": session.state,
-            "payload": body.model_dump(),
+            "mode": _session_wire_mode(session),
+            "payload": effective,
         },
     )
     if not delivered:
         raise HTTPException(status_code=409, detail="browser device is offline")
-    return {"configured": True, "session_id": session_id, **body.model_dump()}
+    return {
+        "configured": True,
+        "session_id": session_id,
+        "viewer_id": body.viewer_id,
+        **effective,
+    }
 
 
 @router.post("/sessions/{session_id}/return-to-agent")
@@ -496,7 +558,7 @@ async def return_browser_to_agent(request: Request, session_id: str, body: Retur
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.handoff.prepare_return",
             "device_id": session.device_id,
             "session_id": session_id,
@@ -551,7 +613,7 @@ async def return_browser_to_agent(request: Request, session_id: str, body: Retur
     await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.handoff.returned",
             "device_id": session.device_id,
             "session_id": session_id,
@@ -599,7 +661,7 @@ async def send_browser_human_input(request: Request, session_id: str, body: Huma
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.human.input",
             "device_id": session.device_id,
             "session_id": session_id,
@@ -687,7 +749,7 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.command",
             "device_id": session.device_id,
             "session_id": session_id,
@@ -695,7 +757,7 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             "sequence": int(command_event.sequence),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "source": "cptr",
-            "mode": session.state,
+            "mode": _session_wire_mode(session),
             "command_id": body.command_id,
             "payload": {
                 "action": body.action,
@@ -745,7 +807,7 @@ async def _detach_agent_session(session_id: str, session: Any, expected_epoch: i
     delivered = await browser_device_connections.send_control(
         device_id=session.device_id,
         message={
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "browser.command",
             "device_id": session.device_id,
             "session_id": session_id,
@@ -817,7 +879,7 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
         await browser_device_connections.send_control(
             device_id=session.device_id,
             message={
-                "protocol_version": 1,
+                "protocol_version": PROTOCOL_VERSION,
                 "type": control_type,
                 "device_id": session.device_id,
                 "session_id": session_id,
@@ -834,6 +896,7 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
             },
         )
         if body.new_owner == "none":
+            _browser_stream_viewers.pop(session_id, None)
             await browser_visual_frames.clear(device_id=session.device_id, session_id=session_id)
         return result
     except KeyError as exc:
@@ -850,7 +913,7 @@ async def _receive_auth(websocket: WebSocket) -> tuple[str, str, int] | None:
         return None
     if not isinstance(message, dict) or message.get("type") != "device.authenticate":
         return None
-    if message.get("protocol_version") != 1:
+    if message.get("protocol_version") != PROTOCOL_VERSION:
         return None
     device_id = message.get("device_id")
     credential = message.get("device_credential")
@@ -869,7 +932,7 @@ async def _browser_device_control_heartbeat(device_id: str) -> None:
             delivered = await browser_device_connections.send_control(
                 device_id=device_id,
                 message={
-                    "protocol_version": 1,
+                    "protocol_version": PROTOCOL_VERSION,
                     "type": "device.ping",
                     "device_id": device_id,
                 },
@@ -896,7 +959,7 @@ async def browser_device_visual_socket(websocket: WebSocket):
         return
     await websocket.send_json(
         {
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "device.visual_authenticated",
             "device_id": device_id,
         }
@@ -907,7 +970,11 @@ async def browser_device_visual_socket(websocket: WebSocket):
             if not isinstance(message, dict):
                 await websocket.close(code=1008, reason="invalid visual message")
                 return
-            if message.get("protocol_version") != 1 or message.get("device_id") != device_id:
+            if (
+                message.get("protocol_version") != PROTOCOL_VERSION
+                or message.get("device_id") != device_id
+            ):
+                logger.warning("browser visual protocol violation device_id=%s", device_id)
                 await websocket.close(code=1008, reason="visual protocol violation")
                 return
             if message.get("type") != "browser.frame":
@@ -975,7 +1042,7 @@ async def browser_device_control_socket(websocket: WebSocket):
     await browser_device_connections.attach(device_id=device_id, websocket=websocket)
     await websocket.send_json(
         {
-            "protocol_version": 1,
+            "protocol_version": PROTOCOL_VERSION,
             "type": "device.authenticated",
             "device_id": device_id,
             "resume_from": resume_from,
@@ -997,7 +1064,11 @@ async def browser_device_control_socket(websocket: WebSocket):
             if not isinstance(message, dict):
                 await websocket.close(code=1008, reason="invalid device message")
                 return
-            if message.get("protocol_version") != 1 or message.get("device_id") != device_id:
+            if (
+                message.get("protocol_version") != PROTOCOL_VERSION
+                or message.get("device_id") != device_id
+            ):
+                logger.warning("browser control protocol violation device_id=%s", device_id)
                 await websocket.close(code=1008, reason="device protocol violation")
                 return
             event_type = message.get("type")

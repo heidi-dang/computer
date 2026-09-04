@@ -127,8 +127,11 @@ class RestartRecoveryTests(unittest.TestCase):
     def _query(data_dir, query):
         import sqlite3
 
-        with sqlite3.connect(os.path.join(data_dir, "app.db")) as connection:
+        connection = sqlite3.connect(os.path.join(data_dir, "app.db"))
+        try:
             return str(connection.execute(query).fetchone()[0])
+        finally:
+            connection.close()
 
     @staticmethod
     def _wait_until(predicate):

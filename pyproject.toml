@@ -17,7 +17,7 @@ dependencies = [
     "PyJWT>=2.8",
     "cryptography>=42.0,<49.0.0",
     "loguru>=0.7.3",
-    "python-socketio[asgi]>=5.11",
+    "python-socketio>=5.11",
     "python-dateutil>=2.8",
     "truststore>=0.10",
     "pywinpty>=2.0; sys_platform == 'win32'",
@@ -41,6 +41,7 @@ all = [
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.12,<3",
     "ruff>=0.14.8",
 ]
 
@@ -58,6 +59,10 @@ exclude = ["cptr/frontend"]
 [tool.hatch.build.targets.wheel.force-include]
 "CHANGELOG.md" = "cptr/CHANGELOG.md"
 "cptr/frontend/build" = "cptr/frontend/build"
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
 
 [tool.ruff]
 line-length = 100

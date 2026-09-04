@@ -118,7 +118,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await request_pairing(PairingRequestBody(device_name="Heidi Chrome"))
         self.assertEqual(result["pairing_id"], "pair_1")
-        self.assertEqual(result["code"], "123456")
+        self.assertNotIn("code", result)
         self.assertEqual(result["claim_secret"], "claim-secret-value")
 
     async def test_approval_requires_authenticated_owner(self):
@@ -134,12 +134,12 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await approve_pairing(
                 request,
-                PairingApproveBody(pairing_id="pair_1", code="123456"),
+                PairingApproveBody(pairing_id="pair_1"),
             )
         self.assertTrue(result["approved"])
-        approve.assert_awaited_once_with(user_id="user_1", pairing_id="pair_1", code="123456")
+        approve.assert_awaited_once_with(user_id="user_1", pairing_id="pair_1")
 
-    async def test_authenticated_approval_can_omit_host_blocked_six_digit_code(self):
+    async def test_authenticated_approval_uses_only_the_opaque_pairing_id(self):
         request = SimpleNamespace()
         with (
             patch(
@@ -155,7 +155,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                 PairingApproveBody(pairing_id="pair_1"),
             )
         self.assertTrue(result["approved"])
-        approve.assert_awaited_once_with(user_id="user_1", pairing_id="pair_1", code=None)
+        approve.assert_awaited_once_with(user_id="user_1", pairing_id="pair_1")
 
     async def test_claim_returns_raw_device_credential_once(self):
         device = SimpleNamespace(id="bdv_1", name="Heidi Chrome", credential_version=1)
@@ -736,6 +736,56 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["mode"], "HUMAN_CONTROL")
         self.assertFalse(message["payload"]["visible"])
         self.assertEqual(message["payload"]["max_fps"], 0)
+
+    async def test_stream_configuration_aggregates_independent_viewers(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(
+            device_id="bdv_multi", surface_id="surf_multi", state="AGENT_CONTROL"
+        )
+        with (
+            patch(
+                "cptr.routers.browser_device._control_user",
+                new=AsyncMock(return_value="user_multi"),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.get_session",
+                new=AsyncMock(return_value=session),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(
+                    side_effect=[SimpleNamespace(sequence=36), SimpleNamespace(sequence=37)]
+                ),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+        ):
+            await configure_browser_stream(
+                request,
+                "brs_multi",
+                StreamConfigureBody(
+                    viewer_id="desktop", visible=True, max_fps=10, max_width=1280, quality=68
+                ),
+            )
+            result = await configure_browser_stream(
+                request,
+                "brs_multi",
+                StreamConfigureBody(
+                    viewer_id="phone", visible=False, max_fps=0, max_width=960, quality=55
+                ),
+            )
+
+        self.assertTrue(result["configured"])
+        self.assertEqual(send.await_count, 2)
+        effective = send.await_args.kwargs["message"]["payload"]
+        self.assertTrue(
+            effective["visible"], "a hidden phone must not zero FPS for a visible desktop viewer"
+        )
+        self.assertEqual(effective["max_fps"], 10)
+        self.assertEqual(effective["max_width"], 1280)
+        self.assertEqual(effective["quality"], 68)
 
     async def test_return_to_agent_requires_fresh_snapshot_before_transfer(self):
         request = SimpleNamespace()

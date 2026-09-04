@@ -79,7 +79,9 @@
 			<img src="/favicon.png" alt="" class="size-9 rounded-xl" />
 			<div>
 				<h1 class="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">Computer</h1>
-				<p class="mt-0.5 text-[0.6875rem] text-gray-400 dark:text-gray-500">Private workspace control</p>
+				<p class="mt-0.5 text-[0.6875rem] text-gray-400 dark:text-gray-500">
+					Private workspace control
+				</p>
 			</div>
 		</div>
 
@@ -161,8 +163,16 @@
 <style>
 	.auth-shell {
 		background-image:
-			radial-gradient(circle at 20% 0%, color-mix(in oklab, var(--app-accent) 12%, transparent), transparent 34rem),
-			radial-gradient(circle at 100% 100%, color-mix(in oklab, var(--app-accent) 8%, transparent), transparent 30rem);
+			radial-gradient(
+				circle at 20% 0%,
+				color-mix(in oklab, var(--app-accent) 12%, transparent),
+				transparent 34rem
+			),
+			radial-gradient(
+				circle at 100% 100%,
+				color-mix(in oklab, var(--app-accent) 8%, transparent),
+				transparent 30rem
+			);
 	}
 
 	.auth-card {

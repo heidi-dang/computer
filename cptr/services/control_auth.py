@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any
+from typing import Any, NoReturn
+
+from fastapi import HTTPException
 
 from cptr.memory.gate import require_control_action_memory
 from cptr.memory.service import MemoryUnavailableError
@@ -13,6 +15,45 @@ from cptr.utils.config import AuthResult
 
 class ControlMemoryUnavailable(PermissionError):
     """Authenticated control action was blocked because required memory was unavailable."""
+
+
+def raise_control_auth_error(exc: PermissionError) -> NoReturn:
+    """Map every Control API authentication failure to one structured HTTP contract."""
+    message = str(exc)
+    if isinstance(exc, ControlMemoryUnavailable):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MEMORY_REQUIRED",
+                "message": message,
+                "retriable": True,
+            },
+        ) from exc
+    if message.startswith("missing required scope"):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "CONTROL_SCOPE_REQUIRED",
+                "message": message,
+                "retriable": False,
+            },
+        ) from exc
+    raise HTTPException(
+        status_code=401,
+        detail={
+            "code": "CONTROL_AUTH_FAILED",
+            "message": "control-plane authentication failed",
+            "retriable": False,
+        },
+    ) from exc
+
+
+async def require_control_user(request: Any, required_scope: str | None = None) -> str:
+    """Authenticate a control request and apply the shared HTTP error mapping."""
+    try:
+        return await authenticate_control_request(request, required_scope)
+    except PermissionError as exc:
+        raise_control_auth_error(exc)
 
 
 def _hash_key(raw: str) -> str:

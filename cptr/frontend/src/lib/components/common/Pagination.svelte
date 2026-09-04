@@ -138,5 +138,4 @@
 		user-select: none;
 		letter-spacing: 0.0625rem;
 	}
-
 </style>
