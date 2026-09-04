@@ -529,20 +529,112 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch("cptr.services.factory_production.time.time", return_value=1_000),
             patch(
-                "cptr.services.factory_production._worker_target",
-                new=AsyncMock(return_value=("rev-budget", "fp-budget")),
+                "cptr.services.factory_production._worker_mutation_target",
+                new=AsyncMock(
+                    return_value=(
+                        "rev",
+                        "fp-budget",
+                        [{"status": "modified", "path": "cptr/app.py"}],
+                    )
+                ),
             ) as worker_target,
         ):
             outcome = await handler.execute(context)
 
         self.assertIsNone(outcome.failure)
         self.assertEqual(outcome.next_state, FactoryState.TARGETED_VERIFYING)
-        self.assertEqual(outcome.target_revision, "rev-budget")
+        self.assertEqual(outcome.target_revision, "rev")
         self.assertEqual(outcome.target_fingerprint, "fp-budget")
         self.assertTrue(outcome.artifacts[0].payload["budget_exhausted"])
         self.assertIn("8-tool budget", outcome.artifacts[0].payload["budget_reason"])
+        self.assertEqual(outcome.artifacts[0].payload["changed_path_count"], 1)
         agent.cancel_task.assert_awaited_once_with("task-implementation", user_id="user-1")
         worker_target.assert_awaited_once_with(Path("/isolated"), "user-1")
+
+    async def test_implementation_budget_rejects_missing_or_worker_committed_mutation(self):
+        cases = (
+            ("rev", [], "FACTORY_IMPLEMENTATION_NO_CHANGES"),
+            (
+                "rev-worker-commit",
+                [{"status": "modified", "path": "cptr/app.py"}],
+                "FACTORY_IMPLEMENTATION_REVISION_CHANGED",
+            ),
+        )
+        for observed_revision, manifest, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                running = {
+                    "id": "task-invalid-mutation",
+                    "status": "RUNNING",
+                    "created_at": 999_000,
+                    "raw_output": [
+                        {"type": "function_call", "call_id": f"call-{index}"} for index in range(8)
+                    ],
+                }
+                cancelled = {**running, "status": "CANCELLED"}
+                agent = SimpleNamespace(
+                    get_task=AsyncMock(return_value=running),
+                    cancel_task=AsyncMock(return_value=cancelled),
+                )
+                handler = ImplementationPhaseHandler(
+                    workers=SimpleNamespace(),
+                    worker_store=SimpleNamespace(),
+                    agent=agent,
+                )
+                assignment = SimpleNamespace(
+                    worker_id="worker-1", base_revision="rev", branch="branch"
+                )
+                context = SimpleNamespace(
+                    run=SimpleNamespace(
+                        id="run-invalid-mutation",
+                        user_id="user-1",
+                        workspace_id="workspace-1",
+                        mission="fix one defect",
+                        acceptance_criteria=("fix is verified",),
+                        model_id="agent:model",
+                        policy={
+                            "implementation_required": True,
+                            "implementation_timeout_seconds": 600,
+                            "implementation_max_tool_calls": 8,
+                        },
+                    ),
+                    cycle=SimpleNamespace(
+                        id="cycle-invalid-mutation",
+                        attempt_count=0,
+                        mutation_worker_id="worker-1",
+                    ),
+                    evidence=(
+                        SimpleNamespace(
+                            kind="factory_implementation_task",
+                            payload={"attempt": 0, "task_id": "task-invalid-mutation"},
+                        ),
+                    ),
+                    gates=(),
+                )
+
+                with (
+                    patch.object(
+                        handler, "_ensure_assignment", new=AsyncMock(return_value=assignment)
+                    ),
+                    patch(
+                        "cptr.services.factory_production._factory_worker_workspace",
+                        new=AsyncMock(
+                            return_value=(Path("/isolated"), SimpleNamespace(id="workspace-worker"))
+                        ),
+                    ),
+                    patch("cptr.services.factory_production.time.time", return_value=1_000),
+                    patch(
+                        "cptr.services.factory_production._worker_mutation_target",
+                        new=AsyncMock(return_value=(observed_revision, "fp-observed", manifest)),
+                    ),
+                ):
+                    outcome = await handler.execute(context)
+
+                self.assertIsNotNone(outcome.failure)
+                self.assertEqual(outcome.failure.code, expected_code)
+                self.assertIsNone(outcome.next_state)
+                agent.cancel_task.assert_awaited_once_with(
+                    "task-invalid-mutation", user_id="user-1"
+                )
 
     async def test_transition_projection_next_action_stays_consistent(self):
         run = await self.store.create_run(

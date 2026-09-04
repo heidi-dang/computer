@@ -367,12 +367,17 @@ async def _reset_isolated_reproduction(root: Path) -> None:
         raise RuntimeError("isolated reproduction cleanup left a dirty worktree")
 
 
-async def _worker_target(root: Path, user_id: str) -> tuple[str, str]:
+async def _worker_mutation_target(
+    root: Path, user_id: str
+) -> tuple[str, str, list[dict[str, str]]]:
+    """Capture the worker HEAD, fingerprint, and uncommitted mutation manifest."""
+
     identity = await identity_for_user_id(user_id)
     adapter = CptrGitAdapter(identity=identity)
     revision = await adapter.current_revision(str(root))
     fingerprint = await adapter.workspace_fingerprint(str(root))
-    return revision, fingerprint
+    manifest = await git_utils.change_manifest(str(root), identity)
+    return revision, fingerprint, manifest
 
 
 class BaselinePhaseHandler:
@@ -1056,8 +1061,9 @@ class ImplementationPhaseHandler:
                 "evidence, make the smallest production-quality fix, and stop once the targeted fix is implemented. "
                 "Run only focused checks needed while editing; do not run the full suite or broad build because machine-owned "
                 "verification phases run them next. Before returning, inspect Git status once, remove transient reproduction/debug "
-                "scripts or logs, and leave only intentional production and regression-test changes. Then stop immediately. "
-                "Do not push, deploy, or claim Victory."
+                "scripts or logs, and leave only intentional production and regression-test changes. Do not stage, commit, reset, "
+                "restore, checkout, or otherwise consume/revert the intentional Git diff; COMMITTING is machine-owned and requires "
+                "the verified mutation to remain uncommitted. Then stop immediately. Do not push, deploy, or claim Victory."
             )
             task = await self._agent.start_task(
                 user_id=context.run.user_id,
@@ -1117,7 +1123,33 @@ class ImplementationPhaseHandler:
                     run_next_action="stop over-budget implementation task",
                 )
         if status == "CANCELLED" and budget_reason is not None:
-            revision, fingerprint = await _worker_target(root, context.run.user_id)
+            revision, fingerprint, manifest = await _worker_mutation_target(
+                root, context.run.user_id
+            )
+            if revision != str(assignment.base_revision):
+                return PhaseOutcome(
+                    reason="isolated implementation changed the machine-owned worker revision",
+                    failure=PhaseFailure(
+                        category=PhaseFailureCategory.IMPLEMENTATION,
+                        code="FACTORY_IMPLEMENTATION_REVISION_CHANGED",
+                        summary=(
+                            "implementation changed worker HEAD instead of leaving an uncommitted diff; "
+                            "machine-owned verification/commit authority was not preserved"
+                        ),
+                    ),
+                )
+            if not manifest:
+                return PhaseOutcome(
+                    reason="isolated implementation produced no durable mutation",
+                    failure=PhaseFailure(
+                        category=PhaseFailureCategory.IMPLEMENTATION,
+                        code="FACTORY_IMPLEMENTATION_NO_CHANGES",
+                        summary=(
+                            "implementation ended without an uncommitted Git mutation; "
+                            "skip expensive verification and diagnose/retry"
+                        ),
+                    ),
+                )
             summary = redact_external_text(str(task.get("output") or "")).strip()[:12_000]
             if not summary:
                 summary = (
@@ -1145,6 +1177,7 @@ class ImplementationPhaseHandler:
                             "budget_reason": budget_reason,
                             "elapsed_ms": elapsed_ms,
                             "tool_calls": tool_calls,
+                            "changed_path_count": len(manifest),
                         },
                     ),
                 ),
@@ -1163,7 +1196,31 @@ class ImplementationPhaseHandler:
                     summary=f"implementation task ended with {status}",
                 ),
             )
-        revision, fingerprint = await _worker_target(root, context.run.user_id)
+        revision, fingerprint, manifest = await _worker_mutation_target(root, context.run.user_id)
+        if revision != str(assignment.base_revision):
+            return PhaseOutcome(
+                reason="isolated implementation changed the machine-owned worker revision",
+                failure=PhaseFailure(
+                    category=PhaseFailureCategory.IMPLEMENTATION,
+                    code="FACTORY_IMPLEMENTATION_REVISION_CHANGED",
+                    summary=(
+                        "implementation changed worker HEAD instead of leaving an uncommitted diff; "
+                        "machine-owned verification/commit authority was not preserved"
+                    ),
+                ),
+            )
+        if not manifest:
+            return PhaseOutcome(
+                reason="isolated implementation produced no durable mutation",
+                failure=PhaseFailure(
+                    category=PhaseFailureCategory.IMPLEMENTATION,
+                    code="FACTORY_IMPLEMENTATION_NO_CHANGES",
+                    summary=(
+                        "implementation completed without an uncommitted Git mutation; "
+                        "machine verification cannot authorize Victory for an unchanged base"
+                    ),
+                ),
+            )
         output = await self._agent.get_output(task_id, user_id=context.run.user_id)
         return PhaseOutcome(
             next_state=FactoryState.TARGETED_VERIFYING,
@@ -1182,6 +1239,7 @@ class ImplementationPhaseHandler:
                     payload={
                         "task_id": task_id,
                         "summary": redact_external_text(str(output.get("content") or ""))[:12_000],
+                        "changed_path_count": len(manifest),
                     },
                 ),
             ),
