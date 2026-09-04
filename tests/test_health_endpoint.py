@@ -7,6 +7,7 @@ client = TestClient(app)
 def test_health_endpoint():
     response = client.get("/api/health")
     assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
     assert response.json() == {"status": "ok"}
 
     # Verify no leaked fields
@@ -18,6 +19,7 @@ def test_health_endpoint():
 def test_health_live_endpoint():
     response = client.get("/api/health/live")
     assert response.status_code == 200
+    assert response.headers["content-type"] == "application/json"
     assert response.json() == {"status": "ok"}
 
     # Verify no leaked fields
