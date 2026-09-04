@@ -821,9 +821,7 @@ class FdxIntelligenceService:
                 raw_assurance = data.get("assurance") or data.get("assurance_level")
                 if raw_assurance is not None:
                     assurance = str(raw_assurance)
-            degraded_evidence = bool(
-                assurance and assurance.upper() in {"DEGRADED", "UNVERIFIED"}
-            )
+            degraded_evidence = bool(assurance and assurance.upper() in {"DEGRADED", "UNVERIFIED"})
             if action == "semantic_references" and isinstance(data, dict):
                 semantic_text = data.get("text")
                 if isinstance(semantic_text, str) and "degraded=true" in semantic_text.lower():

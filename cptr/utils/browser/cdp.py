@@ -164,9 +164,7 @@ class CDPClient:
         await asyncio.sleep(0.5)
 
         # Get page title
-        title_result = await self._send(
-            "Runtime.evaluate", {"expression": "document.title"}
-        )
+        title_result = await self._send("Runtime.evaluate", {"expression": "document.title"})
         title = title_result.get("result", {}).get("value", "")
 
         return {"url": url, "title": title, "frame_id": result.get("frameId")}
@@ -188,9 +186,20 @@ class CDPClient:
 
         # Interactive roles that get ref IDs
         interactive_roles = {
-            "link", "button", "textbox", "searchbox", "combobox",
-            "checkbox", "radio", "tab", "menuitem", "option",
-            "switch", "slider", "spinbutton", "textfield",
+            "link",
+            "button",
+            "textbox",
+            "searchbox",
+            "combobox",
+            "checkbox",
+            "radio",
+            "tab",
+            "menuitem",
+            "option",
+            "switch",
+            "slider",
+            "spinbutton",
+            "textfield",
         }
 
         for node in nodes:
@@ -240,29 +249,25 @@ class CDPClient:
 
         backend_node_id = self._ref_map.get(ref)
         if not backend_node_id:
-            raise ValueError(f"Unknown ref '{ref}'. Run browser_snapshot() first to get valid ref IDs.")
+            raise ValueError(
+                f"Unknown ref '{ref}'. Run browser_snapshot() first to get valid ref IDs."
+            )
 
         # Resolve to a remote object
-        result = await self._send(
-            "DOM.resolveNode", {"backendNodeId": backend_node_id}
-        )
+        result = await self._send("DOM.resolveNode", {"backendNodeId": backend_node_id})
         object_id = result.get("object", {}).get("objectId")
         if not object_id:
             raise RuntimeError(f"Could not resolve element for ref {ref}")
 
         # Scroll into view
         try:
-            await self._send(
-                "DOM.scrollIntoViewIfNeeded", {"backendNodeId": backend_node_id}
-            )
+            await self._send("DOM.scrollIntoViewIfNeeded", {"backendNodeId": backend_node_id})
         except RuntimeError:
             pass
 
         # Get box model for click coordinates
         try:
-            box = await self._send(
-                "DOM.getBoxModel", {"backendNodeId": backend_node_id}
-            )
+            box = await self._send("DOM.getBoxModel", {"backendNodeId": backend_node_id})
             content = box.get("model", {}).get("content", [])
             if len(content) >= 4:
                 x = (content[0] + content[2]) / 2
@@ -364,9 +369,7 @@ class CDPClient:
                 },
             )
         try:
-            result = await self._send(
-                "Page.captureScreenshot", {"format": "png", "quality": 80}
-            )
+            result = await self._send("Page.captureScreenshot", {"format": "png", "quality": 80})
             return base64.b64decode(result["data"])
         finally:
             if width is not None and height is not None:

@@ -704,11 +704,7 @@ class AutonomousSupervisor:
 
         if steering_records:
             pending_steering = next(
-                (
-                    item
-                    for item in steering_records
-                    if item.get("status") != "CONSUMED"
-                ),
+                (item for item in steering_records if item.get("status") != "CONSUMED"),
                 None,
             )
             if pending_steering is not None:
@@ -1503,13 +1499,9 @@ class AutonomousSupervisor:
                 request["status"] = status
                 request["target_generation_id"] = getattr(message, "target_message_id", None)
                 if request.get("intended_generation_id") is None:
-                    request["intended_generation_id"] = getattr(
-                        message, "target_message_id", None
-                    )
+                    request["intended_generation_id"] = getattr(message, "target_message_id", None)
                 if getattr(message, "setup_readiness_status", None):
-                    request["setup_readiness_status"] = getattr(
-                        message, "setup_readiness_status"
-                    )
+                    request["setup_readiness_status"] = getattr(message, "setup_readiness_status")
                 request["control_intended_generation_id"] = getattr(
                     message, "intended_message_id", None
                 )

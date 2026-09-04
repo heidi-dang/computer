@@ -168,9 +168,7 @@ class Runtime:
         return await _file(await _request_identity(request), _read_text_file, path, max_bytes)
 
     @staticmethod
-    async def read_text_files(
-        request: Request, paths: list[str], max_bytes: int
-    ) -> dict[str, Any]:
+    async def read_text_files(request: Request, paths: list[str], max_bytes: int) -> dict[str, Any]:
         """Read a bounded batch through one identity/runtime crossing, preserving input order."""
         return await _file(await _request_identity(request), _read_text_files, paths, max_bytes)
 

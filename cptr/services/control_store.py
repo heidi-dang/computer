@@ -669,7 +669,11 @@ class ControlTaskStore:
                 .values(
                     status=status,
                     review_status=review_status,
-                    review_decision={"decision": decision_value, "note": note, "decided_at": decided_at},
+                    review_decision={
+                        "decision": decision_value,
+                        "note": note,
+                        "decided_at": decided_at,
+                    },
                     reviewed_at=decided_at,
                     updated_at=decided_at,
                 )
@@ -973,7 +977,9 @@ class ControlTaskStore:
         async with await get_db() as db:
             result = await db.execute(
                 update(ControlTask)
-                .where(ControlTask.id == task_id, ControlTask.status.not_in(("CANCELLED", "REJECTED")))
+                .where(
+                    ControlTask.id == task_id, ControlTask.status.not_in(("CANCELLED", "REJECTED"))
+                )
                 .values(message_id=message_id, status="RUNNING", updated_at=now)
             )
             await db.commit()

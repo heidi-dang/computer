@@ -79,7 +79,9 @@ async def _ensure_target_owner(
 ) -> None:
     if target_type == "command":
         if not workspace_id:
-            raise HTTPException(status_code=422, detail="workspace_id is required for a command target")
+            raise HTTPException(
+                status_code=422, detail="workspace_id is required for a command target"
+            )
         await _ensure_workspace_owner(user_id, workspace_id)
         command = get_command_session(None, target_id, context={"user_id": user_id})
         live_target = command.get("live_target") if command else None
@@ -200,7 +202,9 @@ async def append_workbench_session_event(
 ):
     user_id = await _user(request, "task:write")
     if bool(body.target_type) != bool(body.target_id):
-        raise HTTPException(status_code=422, detail="target_type and target_id must be supplied together")
+        raise HTTPException(
+            status_code=422, detail="target_type and target_id must be supplied together"
+        )
     if body.target_type and body.target_id:
         await _ensure_target_owner(user_id, body.target_type, body.target_id, body.workspace_id)
     elif body.workspace_id:
@@ -259,13 +263,13 @@ async def request_delete_workbench_session(request: Request, session_id: str):
 
 
 @router.post("/workbench-sessions/delete-confirm")
-async def confirm_delete_workbench_session(
-    request: Request, body: DeleteWorkbenchSessionRequest
-):
+async def confirm_delete_workbench_session(request: Request, body: DeleteWorkbenchSessionRequest):
     user_id = await _user(request, "task:write")
     result = await workbench_session_store.confirm_delete(
         owner_id=user_id, confirmation_id=body.confirmation_id
     )
     if result is None:
-        raise HTTPException(status_code=404, detail="workbench session confirmation not found or expired")
+        raise HTTPException(
+            status_code=404, detail="workbench session confirmation not found or expired"
+        )
     return result

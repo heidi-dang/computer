@@ -168,7 +168,9 @@ class FactoryTrustTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             artifact = QuarantineCache(Path(tmp) / "q").store(discovery, payload)
             with (
-                patch("asyncio.create_subprocess_exec", side_effect=AssertionError("must not execute")),
+                patch(
+                    "asyncio.create_subprocess_exec", side_effect=AssertionError("must not execute")
+                ),
                 patch("subprocess.run", side_effect=AssertionError("must not execute")),
             ):
                 evaluation = await evaluator.evaluate(
@@ -246,9 +248,7 @@ class FactoryTrustTests(unittest.IsolatedAsyncioTestCase):
     async def test_compressed_package_manifest_is_scanned_for_unpinned_dependencies(self):
         discovery = _discovery()
         evaluator = FactoryTrustEvaluator(capability_tester=_CapabilityTester())
-        payload = _tar_gz(
-            {"package/package.json": b'{"dependencies":{"dangerous":"^2.0.0"}}'}
-        )
+        payload = _tar_gz({"package/package.json": b'{"dependencies":{"dangerous":"^2.0.0"}}'})
         with tempfile.TemporaryDirectory() as tmp:
             artifact = QuarantineCache(Path(tmp) / "q").store(discovery, payload)
             evaluation = await evaluator.evaluate(
@@ -276,7 +276,9 @@ class FactoryTrustTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tester.calls, 1)
         self.assertEqual(evaluation.final_trust_state, CapabilityTrustStatus.APPROVED)
         self.assertEqual(evaluation.capability_test.evidence_id, "machine-capability-test")
-        self.assertEqual(evaluation.verification_status, CapabilityVerificationStatus.CAPABILITY_TESTED)
+        self.assertEqual(
+            evaluation.verification_status, CapabilityVerificationStatus.CAPABILITY_TESTED
+        )
 
     async def test_constrained_adapter_passes_candidate_as_read_only_data(self):
         captured: list[CapabilityTestRequest] = []
@@ -334,7 +336,9 @@ class FactoryTrustTests(unittest.IsolatedAsyncioTestCase):
         evaluator = FactoryTrustEvaluator(capability_tester=None)
         discovery = _discovery()
         with tempfile.TemporaryDirectory() as tmp:
-            artifact = QuarantineCache(Path(tmp) / "q").store(discovery, b"Read-only review instructions")
+            artifact = QuarantineCache(Path(tmp) / "q").store(
+                discovery, b"Read-only review instructions"
+            )
             evaluation = await evaluator.evaluate(
                 TrustCandidate(discovery, artifact, _manifest(discovery)),
                 _policy(),

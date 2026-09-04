@@ -135,12 +135,8 @@ class AssignmentScopeTests(unittest.IsolatedAsyncioTestCase):
         first = _assignment_scope_violation(
             "search_chats", {"query": "first", "workspace_scope": "all"}, context
         )
-        second = _assignment_scope_violation(
-            "web_search", {"query": "second"}, context
-        )
-        locked = _assignment_scope_violation(
-            "read_file", {"path": "fresh-target.txt"}, context
-        )
+        second = _assignment_scope_violation("web_search", {"query": "second"}, context)
+        locked = _assignment_scope_violation("read_file", {"path": "fresh-target.txt"}, context)
         self.assertIn("capability is not available", first)
         self.assertIn("worker authority is locked", second)
         self.assertTrue(context["assignment_scope_locked"])

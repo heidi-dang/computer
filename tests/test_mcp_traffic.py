@@ -218,7 +218,9 @@ class McpTrafficStoreTests(unittest.IsolatedAsyncioTestCase):
 
         snapshot = await store.snapshot()
         self.assertEqual(snapshot["sessions"][0]["client_id"], "chatgpt-session-session-1")
-        self.assertEqual([client["id"] for client in snapshot["clients"]], ["chatgpt-session-session-1"])
+        self.assertEqual(
+            [client["id"] for client in snapshot["clients"]], ["chatgpt-session-session-1"]
+        )
         self.assertEqual(snapshot["clients"][0]["model"], "GPT-5.6 Sol")
         self.assertEqual(snapshot["clients"][0]["workspace_name"], "Desktop")
 

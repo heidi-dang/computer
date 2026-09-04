@@ -157,11 +157,7 @@ class FactoryReasoningPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 StructuredReasoningResult(
                     run_id=self.run.id,
                     cycle_id=self.cycle.id,
-                    role=(
-                        ReasoningRole.ARCHITECT
-                        if index % 2 == 0
-                        else ReasoningRole.RESEARCH
-                    ),
+                    role=(ReasoningRole.ARCHITECT if index % 2 == 0 else ReasoningRole.RESEARCH),
                     schema_id="finding.v1",
                     data={"summary": f"result-{index}", "confidence": 80 + index},
                     provider="recording",

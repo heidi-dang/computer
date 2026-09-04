@@ -32,8 +32,6 @@ RECONNECT_BASE_DELAY = 2.0
 RECONNECT_MAX_DELAY = 60.0
 
 
-
-
 class TelegramAdapter(BaseAdapter):
     """Telegram bot via raw HTTP — getUpdates long-polling + rich streaming."""
 
@@ -221,7 +219,9 @@ class TelegramAdapter(BaseAdapter):
             except httpx.TimeoutException:
                 continue
             except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, OSError) as e:
-                logger.warning("Telegram poll network error (%s), retrying in %.0fs", type(e).__name__, delay)
+                logger.warning(
+                    "Telegram poll network error (%s), retrying in %.0fs", type(e).__name__, delay
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
             except Exception:
@@ -247,12 +247,14 @@ class TelegramAdapter(BaseAdapter):
             photo = message["photo"][-1]  # largest size
             file_data = await self._download_file(photo["file_id"])
             if file_data:
-                attachments.append(Attachment(
-                    type="image",
-                    filename="photo.jpg",
-                    data=file_data,
-                    mime_type="image/jpeg",
-                ))
+                attachments.append(
+                    Attachment(
+                        type="image",
+                        filename="photo.jpg",
+                        data=file_data,
+                        mime_type="image/jpeg",
+                    )
+                )
 
         # Documents (PDF, spreadsheets, etc.)
         if message.get("document"):
@@ -262,24 +264,28 @@ class TelegramAdapter(BaseAdapter):
                 fname = doc.get("file_name", "document")
                 mime = doc.get("mime_type", "application/octet-stream")
                 att_type = "image" if mime.startswith("image/") else "document"
-                attachments.append(Attachment(
-                    type=att_type,
-                    filename=fname,
-                    data=file_data,
-                    mime_type=mime,
-                ))
+                attachments.append(
+                    Attachment(
+                        type=att_type,
+                        filename=fname,
+                        data=file_data,
+                        mime_type=mime,
+                    )
+                )
 
         # Voice messages (OGG/Opus)
         if message.get("voice"):
             voice = message["voice"]
             file_data = await self._download_file(voice["file_id"])
             if file_data:
-                attachments.append(Attachment(
-                    type="audio",
-                    filename="voice.ogg",
-                    data=file_data,
-                    mime_type=voice.get("mime_type", "audio/ogg"),
-                ))
+                attachments.append(
+                    Attachment(
+                        type="audio",
+                        filename="voice.ogg",
+                        data=file_data,
+                        mime_type=voice.get("mime_type", "audio/ogg"),
+                    )
+                )
 
         # Audio files (music, audio messages sent as files)
         if message.get("audio"):
@@ -287,12 +293,14 @@ class TelegramAdapter(BaseAdapter):
             file_data = await self._download_file(audio["file_id"])
             if file_data:
                 fname = audio.get("file_name", "audio.mp3")
-                attachments.append(Attachment(
-                    type="audio",
-                    filename=fname,
-                    data=file_data,
-                    mime_type=audio.get("mime_type", "audio/mpeg"),
-                ))
+                attachments.append(
+                    Attachment(
+                        type="audio",
+                        filename=fname,
+                        data=file_data,
+                        mime_type=audio.get("mime_type", "audio/mpeg"),
+                    )
+                )
 
         # Skip if no text AND no attachments
         if not text.strip() and not attachments:
@@ -308,7 +316,8 @@ class TelegramAdapter(BaseAdapter):
             sender_name=(
                 sender.get("first_name", "")
                 + (" " + sender.get("last_name", "") if sender.get("last_name") else "")
-            ).strip() or "User",
+            ).strip()
+            or "User",
             text=text,
             attachments=attachments,
         )
@@ -333,7 +342,9 @@ class TelegramAdapter(BaseAdapter):
             logger.exception("[telegram] Failed to download file %s", file_id)
             return None
 
-    async def send_photo(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_photo(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a photo via multipart upload."""
         if not self._client:
             return None
@@ -351,7 +362,9 @@ class TelegramAdapter(BaseAdapter):
             logger.exception("[telegram] Failed to send photo")
         return None
 
-    async def send_document(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_document(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a document via multipart upload."""
         if not self._client:
             return None

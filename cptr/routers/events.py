@@ -245,8 +245,13 @@ async def _get_ppid(pid: int) -> int:
     try:
         if sys.platform == "win32":
             proc = await asyncio.create_subprocess_exec(
-                "wmic", "process", "where", f"ProcessId={pid}",
-                "get", "ParentProcessId", "/value",
+                "wmic",
+                "process",
+                "where",
+                f"ProcessId={pid}",
+                "get",
+                "ParentProcessId",
+                "/value",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -256,13 +261,19 @@ async def _get_ppid(pid: int) -> int:
                     return int(line.split("=", 1)[1])
             return 0
         elif sys.platform == "linux":
+
             def _read_ppid():
                 with open(f"/proc/{pid}/stat") as f:
                     return int(f.read().split()[3])
+
             return await asyncio.to_thread(_read_ppid)
         else:
             proc = await asyncio.create_subprocess_exec(
-                "ps", "-o", "ppid=", "-p", str(pid),
+                "ps",
+                "-o",
+                "ppid=",
+                "-p",
+                str(pid),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -298,7 +309,12 @@ async def _get_process_name(pid: int) -> str:
     try:
         if sys.platform == "win32":
             proc = await asyncio.create_subprocess_exec(
-                "tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH",
+                "tasklist",
+                "/FI",
+                f"PID eq {pid}",
+                "/FO",
+                "CSV",
+                "/NH",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -308,13 +324,19 @@ async def _get_process_name(pid: int) -> str:
                 return line.split('"')[1]
             return "unknown"
         elif sys.platform == "linux":
+
             def _read_comm():
                 with open(f"/proc/{pid}/comm") as f:
                     return f.read().strip()
+
             return await asyncio.to_thread(_read_comm)
         else:
             proc = await asyncio.create_subprocess_exec(
-                "ps", "-o", "comm=", "-p", str(pid),
+                "ps",
+                "-o",
+                "comm=",
+                "-p",
+                str(pid),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -330,7 +352,12 @@ async def _scan_ports_darwin() -> list[dict]:
     """Scan listening ports on macOS using lsof."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "lsof", "-iTCP", "-sTCP:LISTEN", "-nP", "-F", "pcn",
+            "lsof",
+            "-iTCP",
+            "-sTCP:LISTEN",
+            "-nP",
+            "-F",
+            "pcn",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -372,6 +399,7 @@ async def _scan_ports_linux() -> list[dict]:
     """Scan listening ports on Linux using /proc/net/tcp."""
     ports = []
     try:
+
         def _read_proc_net():
             with open("/proc/net/tcp") as f:
                 return f.readlines()[1:]  # skip header
@@ -394,6 +422,7 @@ async def _scan_ports_linux() -> list[dict]:
 
 async def _inode_to_pid(inode: int) -> Optional[int]:
     """Map a socket inode to a PID on Linux."""
+
     def _scan():
         try:
             for entry in os.listdir("/proc"):
@@ -413,6 +442,7 @@ async def _inode_to_pid(inode: int) -> Optional[int]:
         except Exception:
             pass
         return None
+
     return await asyncio.to_thread(_scan)
 
 
@@ -420,7 +450,10 @@ async def _scan_ports_windows() -> list[dict]:
     """Scan listening ports on Windows using netstat."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "netstat", "-ano", "-p", "TCP",
+            "netstat",
+            "-ano",
+            "-p",
+            "TCP",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

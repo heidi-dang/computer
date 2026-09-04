@@ -149,7 +149,9 @@ def _bounded_page(
     has_more = len(rows) > limit
     for row in candidates:
         item = serializer(row)
-        encoded = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        encoded = json.dumps(item, sort_keys=True, separators=(",", ":"), default=str).encode(
+            "utf-8"
+        )
         if used + len(encoded) > max_bytes:
             truncated_by_bytes = True
             break
@@ -274,9 +276,13 @@ class FactoryControlService:
         try:
             after_sequence = int(cursor) if cursor else 0
         except (TypeError, ValueError) as exc:
-            raise FactoryControlConflict("invalid factory event cursor", code="FACTORY_INVALID_CURSOR") from exc
+            raise FactoryControlConflict(
+                "invalid factory event cursor", code="FACTORY_INVALID_CURSOR"
+            ) from exc
         if after_sequence < 0:
-            raise FactoryControlConflict("invalid factory event cursor", code="FACTORY_INVALID_CURSOR")
+            raise FactoryControlConflict(
+                "invalid factory event cursor", code="FACTORY_INVALID_CURSOR"
+            )
         rows = await self._store.list_events(run_id, after_sequence=after_sequence, limit=limit + 1)
         items, next_cursor, used, byte_truncated = _bounded_page(
             rows,
@@ -306,7 +312,9 @@ class FactoryControlService:
         try:
             rows = await self._store.list_evidence_page(run_id, after_id=cursor, limit=limit + 1)
         except ValueError as exc:
-            raise FactoryControlConflict("invalid factory evidence cursor", code="FACTORY_INVALID_CURSOR") from exc
+            raise FactoryControlConflict(
+                "invalid factory evidence cursor", code="FACTORY_INVALID_CURSOR"
+            ) from exc
         items, next_cursor, used, byte_truncated = _bounded_page(
             rows,
             serializer=_evidence_dict,
@@ -361,7 +369,9 @@ class FactoryControlService:
                 code="FACTORY_APPROVAL_REQUIRED",
             )
         if is_terminal_factory_state(state):
-            raise FactoryControlConflict("terminal factory run cannot be paused", code="FACTORY_TERMINAL")
+            raise FactoryControlConflict(
+                "terminal factory run cannot be paused", code="FACTORY_TERMINAL"
+            )
         return await self._store.transition(
             run.id,
             to_state=FactoryState.PAUSED,
@@ -387,7 +397,9 @@ class FactoryControlService:
         if state is not FactoryState.PAUSED:
             raise FactoryControlConflict("factory run is not paused", code="FACTORY_NOT_PAUSED")
         if not run.resumable_state:
-            raise FactoryControlConflict("paused factory run has no resumable state", code="FACTORY_RESUME_STATE_MISSING")
+            raise FactoryControlConflict(
+                "paused factory run has no resumable state", code="FACTORY_RESUME_STATE_MISSING"
+            )
         return await self._store.transition(
             run.id,
             to_state=FactoryState(run.resumable_state),
@@ -420,14 +432,18 @@ class FactoryControlService:
                 if run is None or cycle is None or cycle.run_id != run_id:
                     raise FactoryControlNotFound("factory run not found")
                 pending = (
-                    await db.execute(
-                        select(FactoryApproval).where(
-                            FactoryApproval.cycle_id == cycle_id,
-                            FactoryApproval.kind == kind,
-                            FactoryApproval.status == "PENDING",
+                    (
+                        await db.execute(
+                            select(FactoryApproval).where(
+                                FactoryApproval.cycle_id == cycle_id,
+                                FactoryApproval.kind == kind,
+                                FactoryApproval.status == "PENDING",
+                            )
                         )
                     )
-                ).scalars().first()
+                    .scalars()
+                    .first()
+                )
                 if pending is not None and pending.operation_digest != operation_digest:
                     raise FactoryControlConflict(
                         "a different approval envelope is already pending for this cycle",
@@ -580,7 +596,9 @@ class FactoryControlService:
         if state is FactoryState.CANCELLED:
             return run
         if is_terminal_factory_state(state):
-            raise FactoryControlConflict("terminal factory run cannot be stopped", code="FACTORY_TERMINAL")
+            raise FactoryControlConflict(
+                "terminal factory run cannot be stopped", code="FACTORY_TERMINAL"
+            )
         result = await self._workers.cancel_run(run, timeout_ms=timeout_ms)
         if not result.quiescent:
             raise FactoryControlConflict(

@@ -98,10 +98,9 @@ def extract_xls(file_path: str) -> str:
     for sheet in wb.sheets():
         parts.append(f"--- {sheet.name} ---")
         for row_idx in range(sheet.nrows):
-            parts.append("\t".join(
-                str(sheet.cell_value(row_idx, col_idx))
-                for col_idx in range(sheet.ncols)
-            ))
+            parts.append(
+                "\t".join(str(sheet.cell_value(row_idx, col_idx)) for col_idx in range(sheet.ncols))
+            )
     return "\n".join(parts)
 
 
@@ -116,10 +115,7 @@ def extract_odt(file_path: str) -> str:
         with zf.open("content.xml") as f:
             tree = etree.parse(f)
     ns = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
-    return "\n".join(
-        "".join(p.itertext())
-        for p in tree.iter(f"{{{ns}}}p")
-    )
+    return "\n".join("".join(p.itertext()) for p in tree.iter(f"{{{ns}}}p"))
 
 
 def extract_ods(file_path: str) -> str:
@@ -141,10 +137,7 @@ def extract_ods(file_path: str) -> str:
         for row in table.iter(f"{{{ns_table}}}table-row"):
             cells = []
             for cell in row.iter(f"{{{ns_table}}}table-cell"):
-                cell_text = " ".join(
-                    "".join(p.itertext())
-                    for p in cell.iter(f"{{{ns_text}}}p")
-                )
+                cell_text = " ".join("".join(p.itertext()) for p in cell.iter(f"{{{ns_text}}}p"))
                 cells.append(cell_text)
             parts.append("\t".join(cells))
     return "\n".join(parts)
@@ -195,13 +188,9 @@ def extract_epub(file_path: str) -> str:
             opf_dir = opf_path.rsplit("/", 1)[0] + "/" if "/" in opf_path else ""
             with zf.open(opf_path) as opf_file:
                 opf = etree.parse(opf_file)
-            spine_ids = [
-                item.get("idref")
-                for item in opf.xpath("//*[local-name()='itemref']")
-            ]
+            spine_ids = [item.get("idref") for item in opf.xpath("//*[local-name()='itemref']")]
             manifest = {
-                item.get("id"): item.get("href")
-                for item in opf.xpath("//*[local-name()='item']")
+                item.get("id"): item.get("href") for item in opf.xpath("//*[local-name()='item']")
             }
             for idref in spine_ids:
                 href = manifest.get(idref, "")
@@ -249,6 +238,7 @@ def extract_eml(file_path: str) -> str:
         if body.get_content_type() == "text/html":
             try:
                 from lxml import etree
+
                 tree = etree.HTML(content)
                 content = "".join(tree.itertext()) if tree is not None else content
             except ImportError:
@@ -263,7 +253,11 @@ EXTRACTORS: list[tuple[str | None, str | None, callable]] = [
     ("application/pdf", None, extract_pdf),
     ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", None, extract_docx),
     ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", None, extract_xlsx),
-    ("application/vnd.openxmlformats-officedocument.presentationml.presentation", None, extract_pptx),
+    (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        None,
+        extract_pptx,
+    ),
     ("application/rtf", ".rtf", extract_rtf),
     ("application/vnd.ms-excel", ".xls", extract_xls),
     ("application/vnd.oasis.opendocument.text", ".odt", extract_odt),

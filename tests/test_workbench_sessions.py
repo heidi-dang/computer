@@ -34,7 +34,10 @@ class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
         current = {**initial, "event_count": 1}
         with (
             patch("cptr.routers.workbench._user", new=AsyncMock(return_value="user_1")),
-            patch("cptr.routers.workbench._ensure_workspace_owner", new=AsyncMock(return_value=object())),
+            patch(
+                "cptr.routers.workbench._ensure_workspace_owner",
+                new=AsyncMock(return_value=object()),
+            ),
             patch(
                 "cptr.routers.workbench.workbench_session_store.create",
                 new=AsyncMock(return_value=initial),
@@ -54,9 +57,7 @@ class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["event_count"], 1)
-        create.assert_awaited_once_with(
-            owner_id="user_1", name="Release work", workspace_id="ws_1"
-        )
+        create.assert_awaited_once_with(owner_id="user_1", name="Release work", workspace_id="ws_1")
         self.assertEqual(append.await_args.kwargs["event_type"], "workbench.opened")
 
     async def test_events_return_last_sequence_cursor_expected_by_plugin(self):
@@ -91,6 +92,4 @@ class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(result["name"], "New name")
-        rename.assert_awaited_once_with(
-            owner_id="user_1", session_id="wbs_1", name="New name"
-        )
+        rename.assert_awaited_once_with(owner_id="user_1", session_id="wbs_1", name="New name")

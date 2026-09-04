@@ -33,9 +33,15 @@ RECONNECT_MAX_DELAY = 60.0
 def _ext_for_mime(mime: str) -> str:
     """Map common MIME types to file extensions."""
     mapping = {
-        "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
-        "image/webp": ".webp", "audio/ogg": ".ogg", "audio/mpeg": ".mp3",
-        "audio/aac": ".aac", "video/mp4": ".mp4", "application/pdf": ".pdf",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "audio/ogg": ".ogg",
+        "audio/mpeg": ".mp3",
+        "audio/aac": ".aac",
+        "video/mp4": ".mp4",
+        "application/pdf": ".pdf",
     }
     return mapping.get(mime, "")
 
@@ -88,7 +94,8 @@ class SignalAdapter(BaseAdapter):
                 raise ValueError(f"Phone number {self._phone} not registered with signal-cli")
             logger.info(
                 "Signal adapter connected: %s (signal-cli %s)",
-                self._phone, _signal_cli_version(data),
+                self._phone,
+                _signal_cli_version(data),
             )
         except httpx.ConnectError:
             logger.error("Cannot connect to signal-cli REST API at %s", self._base_url)
@@ -188,7 +195,9 @@ class SignalAdapter(BaseAdapter):
             except asyncio.CancelledError:
                 return
             except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, OSError) as e:
-                logger.warning("Signal poll network error (%s), retrying in %.0fs", type(e).__name__, delay)
+                logger.warning(
+                    "Signal poll network error (%s), retrying in %.0fs", type(e).__name__, delay
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
             except Exception:
@@ -221,9 +230,14 @@ class SignalAdapter(BaseAdapter):
                 att_type = "audio"
             else:
                 att_type = "document"
-            attachments.append(Attachment(
-                type=att_type, filename=fname, data=file_data, mime_type=content_type,
-            ))
+            attachments.append(
+                Attachment(
+                    type=att_type,
+                    filename=fname,
+                    data=file_data,
+                    mime_type=content_type,
+                )
+            )
 
         if not text and not attachments:
             return
@@ -269,16 +283,24 @@ class SignalAdapter(BaseAdapter):
             logger.exception("[signal] Failed to download attachment %s", attachment_id)
         return None
 
-    async def send_photo(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_photo(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a photo as a base64 attachment."""
         return await self._send_with_attachment(chat_id, data, filename, caption)
 
-    async def send_document(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_document(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a document as a base64 attachment."""
         return await self._send_with_attachment(chat_id, data, filename, caption)
 
     async def _send_with_attachment(
-        self, chat_id: str, data: bytes, filename: str, caption: str = "",
+        self,
+        chat_id: str,
+        data: bytes,
+        filename: str,
+        caption: str = "",
     ) -> str | None:
         """Send a message with a base64-encoded attachment via signal-cli."""
         if not self._http:
@@ -290,9 +312,7 @@ class SignalAdapter(BaseAdapter):
                     "message": caption or "",
                     "number": self._phone,
                     "recipients": [chat_id],
-                    "base64_attachments": [
-                        base64.b64encode(data).decode("ascii")
-                    ],
+                    "base64_attachments": [base64.b64encode(data).decode("ascii")],
                 },
             )
             result = resp.json()
@@ -314,9 +334,7 @@ async def verify_token(token: str) -> dict:
             raise ValueError(f"Cannot connect to signal-cli at {base_url}")
 
         # Check phone number is registered
-        resp2 = await client.get(
-            f"{base_url}/v1/identities/{quote(phone, safe='')}"
-        )
+        resp2 = await client.get(f"{base_url}/v1/identities/{quote(phone, safe='')}")
         if resp2.status_code == 404:
             raise ValueError(f"Phone {phone} not registered with signal-cli")
 

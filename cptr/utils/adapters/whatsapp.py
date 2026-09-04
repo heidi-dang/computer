@@ -108,45 +108,53 @@ class WhatsAppAdapter(BaseAdapter):
                         text = image.get("caption", "").strip()
                         media_data = await self._download_media(image.get("id", ""))
                         if media_data:
-                            attachments.append(Attachment(
-                                type="image",
-                                filename="photo.jpg",
-                                data=media_data,
-                                mime_type=image.get("mime_type", "image/jpeg"),
-                            ))
+                            attachments.append(
+                                Attachment(
+                                    type="image",
+                                    filename="photo.jpg",
+                                    data=media_data,
+                                    mime_type=image.get("mime_type", "image/jpeg"),
+                                )
+                            )
                     elif msg_type == "audio":
                         audio = message.get("audio", {})
                         media_data = await self._download_media(audio.get("id", ""))
                         if media_data:
-                            attachments.append(Attachment(
-                                type="audio",
-                                filename="voice.ogg",
-                                data=media_data,
-                                mime_type=audio.get("mime_type", "audio/ogg"),
-                            ))
+                            attachments.append(
+                                Attachment(
+                                    type="audio",
+                                    filename="voice.ogg",
+                                    data=media_data,
+                                    mime_type=audio.get("mime_type", "audio/ogg"),
+                                )
+                            )
                     elif msg_type == "document":
                         doc = message.get("document", {})
                         text = doc.get("caption", "").strip()
                         media_data = await self._download_media(doc.get("id", ""))
                         if media_data:
                             fname = doc.get("filename", "document")
-                            attachments.append(Attachment(
-                                type="document",
-                                filename=fname,
-                                data=media_data,
-                                mime_type=doc.get("mime_type", "application/octet-stream"),
-                            ))
+                            attachments.append(
+                                Attachment(
+                                    type="document",
+                                    filename=fname,
+                                    data=media_data,
+                                    mime_type=doc.get("mime_type", "application/octet-stream"),
+                                )
+                            )
                     elif msg_type == "video":
                         video = message.get("video", {})
                         text = video.get("caption", "").strip()
                         media_data = await self._download_media(video.get("id", ""))
                         if media_data:
-                            attachments.append(Attachment(
-                                type="document",
-                                filename="video.mp4",
-                                data=media_data,
-                                mime_type=video.get("mime_type", "video/mp4"),
-                            ))
+                            attachments.append(
+                                Attachment(
+                                    type="document",
+                                    filename="video.mp4",
+                                    data=media_data,
+                                    mime_type=video.get("mime_type", "video/mp4"),
+                                )
+                            )
                     else:
                         continue
 
@@ -257,14 +265,18 @@ class WhatsAppAdapter(BaseAdapter):
             logger.exception("[whatsapp] Failed to download media %s", media_id)
         return None
 
-    async def send_photo(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_photo(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a photo via WhatsApp media upload."""
         media_id = await self._upload_media(data, filename, "image/jpeg")
         if not media_id:
             return await self.send(chat_id, caption) if caption else None
         return await self._send_media_message(chat_id, "image", media_id, caption)
 
-    async def send_document(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_document(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a document via WhatsApp media upload."""
         media_id = await self._upload_media(data, filename, "application/octet-stream")
         if not media_id:
@@ -288,7 +300,12 @@ class WhatsAppAdapter(BaseAdapter):
         return None
 
     async def _send_media_message(
-        self, chat_id: str, media_type: str, media_id: str, caption: str = "", filename: str = "",
+        self,
+        chat_id: str,
+        media_type: str,
+        media_id: str,
+        caption: str = "",
+        filename: str = "",
     ) -> str | None:
         """Send a media message using an uploaded media_id."""
         if not self._http:
@@ -314,7 +331,6 @@ class WhatsAppAdapter(BaseAdapter):
         except Exception:
             logger.exception("[whatsapp] Failed to send %s message", media_type)
         return None
-
 
 
 async def verify_token(token: str) -> dict:

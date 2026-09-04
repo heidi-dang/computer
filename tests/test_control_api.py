@@ -52,7 +52,10 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
                     ]
                 ),
             ),
-            patch("cptr.routers.control._default_model", new=AsyncMock(return_value="provider/model_1")),
+            patch(
+                "cptr.routers.control._default_model",
+                new=AsyncMock(return_value="provider/model_1"),
+            ),
         ):
             result = await list_models(request)
 
@@ -161,7 +164,10 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
                 )
                 with (
                     patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
-                    patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+                    patch(
+                        "cptr.routers.control._ensure_workspace",
+                        new=AsyncMock(return_value=object()),
+                    ),
                     patch("cptr.routers.control._default_model", new=AsyncMock(return_value=None)),
                     patch("cptr.routers.control._services") as service_factory,
                     self.assertRaises(HTTPException) as rejected,
@@ -173,7 +179,9 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
     async def test_task_creation_accepts_explicit_agent_profile_model(self):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
         agent = SimpleNamespace(
-            start_task=AsyncMock(return_value={"id": "task_agent", "workspace_id": "ws_1", "status": "RUNNING"})
+            start_task=AsyncMock(
+                return_value={"id": "task_agent", "workspace_id": "ws_1", "status": "RUNNING"}
+            )
         )
         body = TaskCreateRequest(
             workspace_id="ws_1",
@@ -187,7 +195,9 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         ):
             await create_task(request, body)
 
-        self.assertEqual(agent.start_task.await_args.kwargs["model_id"], "agent:codex/gpt-5.1-codex")
+        self.assertEqual(
+            agent.start_task.await_args.kwargs["model_id"], "agent:codex/gpt-5.1-codex"
+        )
 
     async def test_task_creation_forwards_server_enforced_execution_policy(self):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))

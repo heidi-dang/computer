@@ -58,6 +58,7 @@ async def web_search(request: Request, body: WebSearchRequest):
         raise HTTPException(400, "query is required")
     try:
         from cptr.utils.web.search import web_search_handler
+
         result_text = await web_search_handler(body.query)
         return {"query": body.query, "result": result_text}
     except Exception as exc:
@@ -75,6 +76,7 @@ async def fetch_url(request: Request, body: FetchRequest):
         raise HTTPException(400, "url is required")
     try:
         from cptr.utils.web.reader import read_url_handler
+
         result = await read_url_handler(body.url)
         return {"url": body.url, "content": result}
     except Exception as exc:
@@ -93,11 +95,17 @@ async def crawl_url(request: Request, body: CrawlRequest):
     try:
         import os
         from cptr.models import Config
-        api_key = os.environ.get("FIRECRAWL_API_KEY") or str(await Config.get("web.firecrawl_api_key") or "")
+
+        api_key = os.environ.get("FIRECRAWL_API_KEY") or str(
+            await Config.get("web.firecrawl_api_key") or ""
+        )
         if not api_key:
             raise HTTPException(501, "Firecrawl API key is not configured on this server")
         from cptr.utils.web.firecrawl import search as _firecrawl_search
-        result = await _firecrawl_search(body.url, api_key=api_key, count=min(body.max_pages or 5, 20))
+
+        result = await _firecrawl_search(
+            body.url, api_key=api_key, count=min(body.max_pages or 5, 20)
+        )
         return {"url": body.url, "result": result}
     except HTTPException:
         raise

@@ -37,6 +37,7 @@ async def health_check(request: Request):
     # ── Model connections (cached) ────────────────────────────────────────────
     try:
         from cptr.models import Config
+
         default_model = await Config.get("chat.default_model")
         checks["default_model"] = {"value": str(default_model) if default_model else None}
     except Exception as exc:
@@ -45,11 +46,13 @@ async def health_check(request: Request):
     # ── MCP servers ───────────────────────────────────────────────────────────
     try:
         from cptr.models import Config as ConfigModel
+
         tool_servers_raw = await ConfigModel.get("tool_servers")
         tool_servers = list(tool_servers_raw) if isinstance(tool_servers_raw, list) else []
         mcp_servers = [s for s in tool_servers if s.get("type") in ("mcp", "mcp_stdio")]
 
         from cptr.utils.mcp.stdio_manager import stdio_manager
+
         mcp_status = []
         for s in mcp_servers:
             sid = s.get("id", "")
@@ -57,7 +60,9 @@ async def health_check(request: Request):
             if stype == "mcp_stdio":
                 client = stdio_manager._instances.get(sid)
                 alive = client is not None and client.session is not None
-                mcp_status.append({"id": sid, "type": stype, "status": "connected" if alive else "disconnected"})
+                mcp_status.append(
+                    {"id": sid, "type": stype, "status": "connected" if alive else "disconnected"}
+                )
             else:
                 mcp_status.append({"id": sid, "type": stype, "status": "http"})
         checks["mcp_servers"] = {"servers": mcp_status, "count": len(mcp_servers)}
@@ -89,6 +94,7 @@ async def runtime_metrics_endpoint(request: Request):
     # Active terminal sessions
     try:
         from cptr.utils.terminal import manager as terminal_manager
+
         snapshot["terminal_sessions"] = len(terminal_manager._sessions)
     except Exception:
         snapshot["terminal_sessions"] = None
@@ -96,6 +102,7 @@ async def runtime_metrics_endpoint(request: Request):
     # Active browser sessions
     try:
         from cptr.utils.browser.proxy import manager as browser_manager
+
         snapshot["browser_sessions"] = browser_manager.count()
     except Exception:
         snapshot["browser_sessions"] = None
@@ -103,6 +110,7 @@ async def runtime_metrics_endpoint(request: Request):
     # Stdio MCP server count
     try:
         from cptr.utils.mcp.stdio_manager import stdio_manager
+
         snapshot["mcp_stdio_sessions"] = len(stdio_manager._instances)
     except Exception:
         snapshot["mcp_stdio_sessions"] = None

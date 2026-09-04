@@ -47,16 +47,28 @@ _MUTABLE_PINS = {
 }
 _INJECTION_PATTERNS = (
     re.compile(r"\bignore\s+(?:all\s+)?previous\s+instructions?\b", re.IGNORECASE),
-    re.compile(r"\boverride\s+(?:the\s+)?(?:system|factory|security)\s+(?:prompt|policy|rules?)\b", re.IGNORECASE),
-    re.compile(r"\breveal\s+(?:the\s+)?(?:system\s+prompt|secrets?|credentials?|tokens?)\b", re.IGNORECASE),
-    re.compile(r"\bdisable\s+(?:the\s+)?(?:security|safety|approval|verification)\b", re.IGNORECASE),
+    re.compile(
+        r"\boverride\s+(?:the\s+)?(?:system|factory|security)\s+(?:prompt|policy|rules?)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\breveal\s+(?:the\s+)?(?:system\s+prompt|secrets?|credentials?|tokens?)\b", re.IGNORECASE
+    ),
+    re.compile(
+        r"\bdisable\s+(?:the\s+)?(?:security|safety|approval|verification)\b", re.IGNORECASE
+    ),
     re.compile(r"\bdo\s+not\s+obey\s+(?:the\s+)?(?:system|developer|user|policy)\b", re.IGNORECASE),
 )
 _UNSAFE_INSTALL_PATTERNS = (
     re.compile(r"\b(?:curl|wget)\b[^\n|]{0,500}\|\s*(?:sh|bash|zsh)\b", re.IGNORECASE),
-    re.compile(r"\bpip(?:3)?\s+install\b[^\n]*\bgit\+https?://[^\s]+@(?:main|master|head|latest)\b", re.IGNORECASE),
+    re.compile(
+        r"\bpip(?:3)?\s+install\b[^\n]*\bgit\+https?://[^\s]+@(?:main|master|head|latest)\b",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bnpm\s+(?:install|i)\b[^\n]*\b(?:https?://|git\+|github:)", re.IGNORECASE),
-    re.compile(r"\b(?:npm|pnpm|yarn)\b[^\n]*\b(?:--ignore-scripts=false|--unsafe-perm)\b", re.IGNORECASE),
+    re.compile(
+        r"\b(?:npm|pnpm|yarn)\b[^\n]*\b(?:--ignore-scripts=false|--unsafe-perm)\b", re.IGNORECASE
+    ),
 )
 _DANGEROUS_STATIC_PATTERNS = (
     re.compile(r"\brm\s+-rf\s+/(?:\s|$)", re.IGNORECASE),
@@ -170,7 +182,9 @@ class TrustPolicy:
     capability_test_timeout_ms: int = 30_000
 
     def __post_init__(self) -> None:
-        normalized = tuple(sorted({item.strip().lower() for item in self.allowed_permissions if item.strip()}))
+        normalized = tuple(
+            sorted({item.strip().lower() for item in self.allowed_permissions if item.strip()})
+        )
         object.__setattr__(self, "allowed_permissions", normalized)
         for name in ("cache_ttl_ms", "max_artifact_bytes", "capability_test_timeout_ms"):
             if int(getattr(self, name)) <= 0:
@@ -437,7 +451,11 @@ def _inspect_archive_content(
     except (tarfile.ReadError, OSError):
         if content.startswith(b"\x1f\x8b"):
             findings.append(
-                _finding("archive", "invalid_archive", "compressed tar archive could not be safely inspected")
+                _finding(
+                    "archive",
+                    "invalid_archive",
+                    "compressed tar archive could not be safely inspected",
+                )
             )
             return tuple(texts), tuple(findings)
         return (content.decode("utf-8", errors="replace"),), ()
@@ -636,17 +654,32 @@ class FactoryTrustEvaluator:
         artifact = candidate.artifact
         manifest = candidate.manifest
 
-        if artifact.stable_id != discovery.stable_id or artifact.candidate_identity != discovery.identity:
+        if (
+            artifact.stable_id != discovery.stable_id
+            or artifact.candidate_identity != discovery.identity
+        ):
             static_findings.append(
-                _finding("integrity", "candidate_identity_mismatch", "quarantine artifact identity does not match discovery record")
+                _finding(
+                    "integrity",
+                    "candidate_identity_mismatch",
+                    "quarantine artifact identity does not match discovery record",
+                )
             )
         if manifest.stable_id != discovery.stable_id:
             static_findings.append(
-                _finding("integrity", "manifest_identity_mismatch", "capability manifest identity does not match discovery record")
+                _finding(
+                    "integrity",
+                    "manifest_identity_mismatch",
+                    "capability manifest identity does not match discovery record",
+                )
             )
 
         requires_pin = discovery.candidate_type not in {"documentation", "research_source"}
-        if policy.require_pinned_external and requires_pin and _mutable_or_unpinned(discovery.pinned_version_or_commit):
+        if (
+            policy.require_pinned_external
+            and requires_pin
+            and _mutable_or_unpinned(discovery.pinned_version_or_commit)
+        ):
             static_findings.append(
                 _finding(
                     "provenance",
@@ -658,7 +691,9 @@ class FactoryTrustEvaluator:
         origin = urlsplit(discovery.origin_uri)
         if origin.scheme != "https":
             static_findings.append(
-                _finding("provenance", "insecure_origin", "external capability origin must use HTTPS")
+                _finding(
+                    "provenance", "insecure_origin", "external capability origin must use HTTPS"
+                )
             )
 
         content: bytes | None = None
@@ -666,16 +701,26 @@ class FactoryTrustEvaluator:
             content = artifact.read_bytes(max_bytes=policy.max_artifact_bytes)
         except (OSError, ValueError):
             static_findings.append(
-                _finding("integrity", "artifact_integrity_failure", "quarantine artifact failed bounded digest revalidation")
+                _finding(
+                    "integrity",
+                    "artifact_integrity_failure",
+                    "quarantine artifact failed bounded digest revalidation",
+                )
             )
 
         if discovery.expected_digest and artifact.digest != discovery.expected_digest:
             static_findings.append(
-                _finding("integrity", "digest_mismatch", "quarantine digest does not match provider-published SHA-256")
+                _finding(
+                    "integrity",
+                    "digest_mismatch",
+                    "quarantine digest does not match provider-published SHA-256",
+                )
             )
 
         discovered_permissions = set(discovery.permissions)
-        manifest_permissions = {item.strip().lower() for item in manifest.permissions if item.strip()}
+        manifest_permissions = {
+            item.strip().lower() for item in manifest.permissions if item.strip()
+        }
         if discovered_permissions and not manifest_permissions.issubset(discovered_permissions):
             static_findings.append(
                 _finding(
@@ -736,7 +781,11 @@ class FactoryTrustEvaluator:
                     )
                 except TimeoutError:
                     static_findings.append(
-                        _finding("capability_test", "capability_test_timeout", "constrained capability test timed out")
+                        _finding(
+                            "capability_test",
+                            "capability_test_timeout",
+                            "constrained capability test timed out",
+                        )
                     )
                     final_state = CapabilityTrustStatus.REJECTED
                     verification_status = CapabilityVerificationStatus.STATIC_VERIFIED
@@ -753,7 +802,11 @@ class FactoryTrustEvaluator:
                 else:
                     if not isinstance(capability_test, CapabilityTestResult):
                         static_findings.append(
-                            _finding("capability_test", "capability_test_invalid", "capability tester returned an invalid result")
+                            _finding(
+                                "capability_test",
+                                "capability_test_invalid",
+                                "capability tester returned an invalid result",
+                            )
                         )
                         capability_test = None
                         final_state = CapabilityTrustStatus.REJECTED
@@ -763,7 +816,11 @@ class FactoryTrustEvaluator:
                         verification_status = CapabilityVerificationStatus.CAPABILITY_TESTED
                     else:
                         static_findings.append(
-                            _finding("capability_test", "capability_test_failed", "constrained capability test did not verify the capability")
+                            _finding(
+                                "capability_test",
+                                "capability_test_failed",
+                                "constrained capability test did not verify the capability",
+                            )
                         )
                         final_state = CapabilityTrustStatus.REJECTED
                         verification_status = CapabilityVerificationStatus.STATIC_VERIFIED
@@ -826,7 +883,9 @@ class ApprovedTrustCache:
             policy_fingerprint=evaluation.policy_fingerprint,
         )
         path = self.root / f"{key}.json"
-        raw = json.dumps(evaluation.to_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        raw = json.dumps(evaluation.to_dict(), sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
         temp = self.root / f".{key}.{uuid.uuid4().hex}.tmp"
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:

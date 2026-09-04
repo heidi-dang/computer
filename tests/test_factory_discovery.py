@@ -43,7 +43,9 @@ class _FakeFetcher:
         self.content = content
         self.calls = 0
 
-    async def fetch(self, candidate: DiscoveryCandidate, *, max_bytes: int, timeout_ms: int) -> bytes:
+    async def fetch(
+        self, candidate: DiscoveryCandidate, *, max_bytes: int, timeout_ms: int
+    ) -> bytes:
         self.calls += 1
         if len(self.content) > max_bytes:
             raise DiscoveryBudgetExceeded("artifact exceeds byte budget")
@@ -93,7 +95,9 @@ class FactoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
         first = _FakeProvider("first", [_candidate("a"), _candidate("b"), _candidate("c")])
         second = _FakeProvider("second", [_candidate("d")])
         discovery = FactoryDiscovery(providers=[first, second])
-        budget = DiscoveryBudget(max_providers=1, max_results=2, max_bytes=100_000, max_runtime_ms=1000)
+        budget = DiscoveryBudget(
+            max_providers=1, max_results=2, max_bytes=100_000, max_runtime_ms=1000
+        )
 
         batch = await discovery.discover(
             "repo analysis skill",
@@ -153,7 +157,9 @@ class FactoryDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             )
 
             with (
-                patch("asyncio.create_subprocess_exec", side_effect=AssertionError("must not execute")),
+                patch(
+                    "asyncio.create_subprocess_exec", side_effect=AssertionError("must not execute")
+                ),
                 patch("subprocess.run", side_effect=AssertionError("must not execute")),
             ):
                 artifact = await discovery.fetch_into_quarantine(

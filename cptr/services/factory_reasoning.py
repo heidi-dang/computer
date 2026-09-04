@@ -115,9 +115,13 @@ class ReasoningSchema:
                 raise StructuredReasoningError(f"structured reasoning output missing {name}")
             value = payload[name]
             if expected_type is int and isinstance(value, bool):
-                raise StructuredReasoningError(f"structured reasoning field {name} has invalid type")
+                raise StructuredReasoningError(
+                    f"structured reasoning field {name} has invalid type"
+                )
             if not isinstance(value, expected_type):
-                raise StructuredReasoningError(f"structured reasoning field {name} has invalid type")
+                raise StructuredReasoningError(
+                    f"structured reasoning field {name} has invalid type"
+                )
         if not self.allow_extra:
             extras = sorted(set(payload) - set(self.required_fields))
             if extras:
@@ -407,9 +411,7 @@ class OpenAIResponsesReasoningProvider:
             raise ReasoningProviderError("reasoning Responses payload must be an object")
         status = str(payload.get("status") or "completed").lower()
         if status in {"failed", "cancelled", "incomplete"}:
-            raise ReasoningProviderError(
-                f"reasoning Responses request ended with status {status}"
-            )
+            raise ReasoningProviderError(f"reasoning Responses request ended with status {status}")
         usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
         return ProviderReasoningResponse(
             output_text=_extract_output_text(payload),

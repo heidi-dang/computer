@@ -255,13 +255,17 @@ class EmbeddedMemoryService:
                     "payload": {
                         "context_id": context_id,
                         "memory_version": memory_version,
-                        "task_key_hash": hashlib.sha256(value.task_key.encode("utf-8")).hexdigest()[:16]
+                        "task_key_hash": hashlib.sha256(value.task_key.encode("utf-8")).hexdigest()[
+                            :16
+                        ]
                         if value.task_key
                         else None,
                         "candidate_count": len(canonical_results),
                         "injected_count": len(items),
                         "compiled_chars": len(rendered),
-                        "recovered_checkpoint_id": recovered["checkpoint_id"] if recovered else None,
+                        "recovered_checkpoint_id": recovered["checkpoint_id"]
+                        if recovered
+                        else None,
                     },
                 }
             )

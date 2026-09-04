@@ -284,7 +284,9 @@ async def warm_model_cache(app_state) -> None:
     if failures:
         # Startup discovery is best-effort. A stale encrypted provider key must
         # be repaired by its owner, but must not make the service unavailable.
-        log.warning("Skipped %d model-cache warmup task(s) after provider discovery errors", failures)
+        log.warning(
+            "Skipped %d model-cache warmup task(s) after provider discovery errors", failures
+        )
 
 
 def invalidate_model_cache(app_state):

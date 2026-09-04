@@ -95,7 +95,6 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("C:\\Users\\heidi\\secret.txt", snapshot)
             self.assertIn("<workspace-path>", snapshot)
 
-
     async def test_task_recovery_snapshot_returns_authorized_replay(self):
         hub = LiveEventHub(store=LiveEventStore())
         await hub.publish(
@@ -106,7 +105,9 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
             payload={"text": "safe output", "stream": "stdout"},
         )
         request = SimpleNamespace(headers={}, query_params={"after": "0"})
-        agent = SimpleNamespace(get_task=AsyncMock(return_value={"id": "task-1", "status": "RUNNING"}))
+        agent = SimpleNamespace(
+            get_task=AsyncMock(return_value={"id": "task-1", "status": "RUNNING"})
+        )
         with (
             patch.object(control_stream, "live_event_hub", hub),
             patch.object(control_stream, "_user", new=AsyncMock(return_value="user-1")),
@@ -117,7 +118,6 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["snapshot"]["status"], "RUNNING")
         self.assertEqual(snapshot["replay"]["last_sequence"], 1)
         self.assertEqual(snapshot["replay"]["events"][0]["type"], "terminal.chunk")
-
 
     async def test_command_recovery_snapshot_is_workspace_owned_redacted_and_replayable(self):
         hub = LiveEventHub(store=LiveEventStore())
@@ -131,13 +131,15 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace(headers={}, query_params={"after": "0"})
         user = AsyncMock(return_value="user-1")
         workspace_lookup = AsyncMock(return_value=SimpleNamespace(path="/tmp/workspace"))
-        command_snapshot = AsyncMock(return_value={
-            "command_id": "cmd-1",
-            "status": "RUNNING",
-            "exit_code": None,
-            "output": "raw output must not bypass live redaction",
-            "next_offset": 37,
-        })
+        command_snapshot = AsyncMock(
+            return_value={
+                "command_id": "cmd-1",
+                "status": "RUNNING",
+                "exit_code": None,
+                "output": "raw output must not bypass live redaction",
+                "next_offset": 37,
+            }
+        )
         with (
             patch.object(control_stream, "live_event_hub", hub),
             patch.object(control_stream, "_user", new=user),
@@ -163,13 +165,15 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
             is_disconnected=AsyncMock(return_value=False),
         )
         workspace_lookup = AsyncMock(return_value=SimpleNamespace(path="/tmp/workspace-one"))
-        command_snapshot = AsyncMock(return_value={
-            "command_id": "cmd-1",
-            "status": "RUNNING",
-            "exit_code": None,
-            "output": "must stay out of snapshot",
-            "next_offset": 0,
-        })
+        command_snapshot = AsyncMock(
+            return_value={
+                "command_id": "cmd-1",
+                "status": "RUNNING",
+                "exit_code": None,
+                "output": "must stay out of snapshot",
+                "next_offset": 0,
+            }
+        )
         with (
             patch.object(control_stream, "live_event_hub", hub),
             patch.object(control_stream, "_user", new=AsyncMock(return_value="user-1")),

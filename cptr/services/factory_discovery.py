@@ -192,7 +192,9 @@ class DiscoveryCandidate:
         if not normalized_provider or not normalized_type or not normalized_name:
             raise ValueError("provider, candidate_type, and name must not be blank")
         digest = expected_digest.strip().lower() if expected_digest else None
-        if digest is not None and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+        if digest is not None and (
+            len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)
+        ):
             raise ValueError("expected_digest must be a SHA-256 hex digest")
         logical = f"{normalized_provider}\0{normalized_type}\0{normalized_name.lower()}"
         stable_digest = hashlib.sha256(logical.encode("utf-8")).hexdigest()[:24]
@@ -281,13 +283,7 @@ class SafeHttpArtifactFetcher:
             raise ValueError("timeout_seconds must be positive")
         configured_hosts = tuple(allowed_hosts) or _DEFAULT_ARTIFACT_HOSTS
         self._allowed_hosts = tuple(
-            sorted(
-                {
-                    host.strip().lower().rstrip(".")
-                    for host in configured_hosts
-                    if host.strip()
-                }
-            )
+            sorted({host.strip().lower().rstrip(".") for host in configured_hosts if host.strip()})
         )
         self._timeout_seconds = float(timeout_seconds)
         self._transport = transport
@@ -305,7 +301,9 @@ class SafeHttpArtifactFetcher:
         )
 
     def _host_allowed(self, host: str) -> bool:
-        return any(host == allowed or host.endswith(f".{allowed}") for allowed in self._allowed_hosts)
+        return any(
+            host == allowed or host.endswith(f".{allowed}") for allowed in self._allowed_hosts
+        )
 
     async def _validate_source(self, raw_url: str) -> str:
         parsed = urlsplit(raw_url)
@@ -565,9 +563,9 @@ class FactoryDiscovery:
                 if not isinstance(candidate, DiscoveryCandidate):
                     provider_errors.append(f"{provider_name}:invalid_candidate")
                     continue
-                raw = json.dumps(
-                    candidate.to_dict(), sort_keys=True, separators=(",", ":")
-                ).encode("utf-8")
+                raw = json.dumps(candidate.to_dict(), sort_keys=True, separators=(",", ":")).encode(
+                    "utf-8"
+                )
                 if bytes_used + len(raw) > budget.max_bytes:
                     raise DiscoveryBudgetExceeded("metadata byte budget exceeded")
                 bytes_used += len(raw)

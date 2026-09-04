@@ -15,9 +15,8 @@ def _is_tool_failure_value(value: Any) -> bool:
         lowered = stripped.lower()
         if lowered == "error" or lowered.startswith("error:"):
             return True
-        if (
-            (stripped.startswith("{") and stripped.endswith("}"))
-            or (stripped.startswith("[") and stripped.endswith("]"))
+        if (stripped.startswith("{") and stripped.endswith("}")) or (
+            stripped.startswith("[") and stripped.endswith("]")
         ):
             try:
                 return _is_tool_failure_value(json.loads(stripped))

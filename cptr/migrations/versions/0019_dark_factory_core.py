@@ -49,9 +49,7 @@ def upgrade() -> None:
         "factory_runs",
         ["user_id", "state", "updated_at"],
     )
-    op.create_index(
-        "ix_factory_run_workspace_state", "factory_runs", ["workspace_id", "state"]
-    )
+    op.create_index("ix_factory_run_workspace_state", "factory_runs", ["workspace_id", "state"])
 
     op.create_table(
         "factory_cycles",
@@ -80,9 +78,7 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.BigInteger(), nullable=False),
         sa.Column("completed_at", sa.BigInteger(), nullable=True),
         sa.UniqueConstraint("run_id", "ordinal", name="uq_factory_cycle_run_ordinal"),
-        sa.UniqueConstraint(
-            "run_id", "idempotency_key", name="uq_factory_cycle_run_idempotency"
-        ),
+        sa.UniqueConstraint("run_id", "idempotency_key", name="uq_factory_cycle_run_idempotency"),
     )
     op.create_index("ix_factory_cycle_run_state", "factory_cycles", ["run_id", "state"])
 
@@ -111,9 +107,7 @@ def upgrade() -> None:
         sa.Column("payload", sa.JSON(), nullable=False, server_default="{}"),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
         sa.UniqueConstraint("run_id", "sequence", name="uq_factory_event_run_sequence"),
-        sa.UniqueConstraint(
-            "run_id", "idempotency_key", name="uq_factory_event_run_idempotency"
-        ),
+        sa.UniqueConstraint("run_id", "idempotency_key", name="uq_factory_event_run_idempotency"),
     )
     op.create_index("ix_factory_event_run_created", "factory_events", ["run_id", "created_at"])
 
@@ -142,12 +136,8 @@ def upgrade() -> None:
         sa.Column("payload", sa.JSON(), nullable=False, server_default="{}"),
         sa.Column("created_at", sa.BigInteger(), nullable=False),
     )
-    op.create_index(
-        "ix_factory_evidence_run_created", "factory_evidence", ["run_id", "created_at"]
-    )
-    op.create_index(
-        "ix_factory_evidence_cycle_gate", "factory_evidence", ["cycle_id", "gate_id"]
-    )
+    op.create_index("ix_factory_evidence_run_created", "factory_evidence", ["run_id", "created_at"])
+    op.create_index("ix_factory_evidence_cycle_gate", "factory_evidence", ["cycle_id", "gate_id"])
 
     op.create_table(
         "factory_gate_results",
@@ -183,12 +173,8 @@ def upgrade() -> None:
             name="uq_factory_gate_cycle_gate_attempt",
         ),
     )
-    op.create_index(
-        "ix_factory_gate_run_cycle", "factory_gate_results", ["run_id", "cycle_id"]
-    )
-    op.create_index(
-        "ix_factory_gate_cycle_gate", "factory_gate_results", ["cycle_id", "gate_id"]
-    )
+    op.create_index("ix_factory_gate_run_cycle", "factory_gate_results", ["run_id", "cycle_id"])
+    op.create_index("ix_factory_gate_cycle_gate", "factory_gate_results", ["cycle_id", "gate_id"])
 
 
 def downgrade() -> None:

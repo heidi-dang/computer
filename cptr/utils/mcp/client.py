@@ -92,9 +92,7 @@ class MCPClient:
         )
         async with AsyncExitStack() as exit_stack:
             try:
-                transport = await exit_stack.enter_async_context(
-                    stdio_client(params)
-                )
+                transport = await exit_stack.enter_async_context(stdio_client(params))
                 read, write = transport
 
                 self.session = await exit_stack.enter_async_context(
@@ -105,7 +103,9 @@ class MCPClient:
                     await self.session.initialize()
 
                 self._exit_stack = exit_stack.pop_all()
-                logger.info("[mcp] Connected to stdio process: %s %s", command, " ".join(args or []))
+                logger.info(
+                    "[mcp] Connected to stdio process: %s %s", command, " ".join(args or [])
+                )
             except Exception:
                 await asyncio.shield(self.disconnect())
                 raise
@@ -161,9 +161,7 @@ class MCPClient:
         if not self.session:
             raise RuntimeError("MCPClient is not connected")
 
-        result: CallToolResult = await self.session.call_tool(
-            name, arguments=function_args or {}
-        )
+        result: CallToolResult = await self.session.call_tool(name, arguments=function_args or {})
 
         content = [item.model_dump() for item in result.content]
 

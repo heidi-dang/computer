@@ -65,9 +65,7 @@ async def fetch_openapi_spec(
 # ── Schema conversion ──────────────────────────────────────
 
 
-def _resolve_schema(
-    schema: dict, components: dict, resolved: set | None = None
-) -> dict:
+def _resolve_schema(schema: dict, components: dict, resolved: set | None = None) -> dict:
     """Recursively resolve $ref references in a JSON schema."""
     if not schema:
         return {}
@@ -167,7 +165,7 @@ def convert_openapi_to_tool_specs(openapi_spec: dict) -> list[dict]:
                 pschema = param.get("schema", {})
                 desc = pschema.get("description", "") or param.get("description", "")
                 if pschema.get("enum") and isinstance(pschema["enum"], list):
-                    desc += f'. Possible values: {", ".join(str(v) for v in pschema["enum"])}'
+                    desc += f". Possible values: {', '.join(str(v) for v in pschema['enum'])}"
 
                 prop = {
                     "type": pschema.get("type") or "string",

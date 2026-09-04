@@ -118,7 +118,9 @@ class FactoryVictoryTests(unittest.TestCase):
         self.assertIn("authoritative machine evidence", " ".join(decision.failures))
 
     def test_stale_revision_evidence_prevents_victory(self):
-        stale = self._machine_evidence("ev-lint-stale", "command", revision="rev-old", fingerprint="fp-old")
+        stale = self._machine_evidence(
+            "ev-lint-stale", "command", revision="rev-old", fingerprint="fp-old"
+        )
         results = {
             **self.results,
             "lint": GateResult(
@@ -142,7 +144,9 @@ class FactoryVictoryTests(unittest.TestCase):
 
     def test_unresolved_security_or_adversarial_blocker_prevents_victory(self):
         decision = self._evaluate(
-            unresolved_security_findings=("SEC-7: untrusted capability requested credential access",)
+            unresolved_security_findings=(
+                "SEC-7: untrusted capability requested credential access",
+            )
         )
         self.assertFalse(decision.passed)
         self.assertIn("SEC-7", " ".join(decision.failures))

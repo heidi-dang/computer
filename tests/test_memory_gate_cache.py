@@ -42,7 +42,9 @@ class MemoryGateCacheTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(gate, "_workspace_path_for_request", new=AsyncMock(return_value="/repo")),
             patch.object(gate, "get_memory_service", return_value=service),
-            patch("cptr.utils.memory.get_memory_settings", new=AsyncMock(return_value=self.settings())),
+            patch(
+                "cptr.utils.memory.get_memory_settings", new=AsyncMock(return_value=self.settings())
+            ),
         ):
             first = await gate.require_control_action_memory(
                 request, user_id="user-1", required_scope="coding:write"
@@ -71,7 +73,9 @@ class MemoryGateCacheTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(gate, "_workspace_path_for_request", new=AsyncMock(return_value="/repo")),
             patch.object(gate, "get_memory_service", return_value=service),
-            patch("cptr.utils.memory.get_memory_settings", new=AsyncMock(return_value=self.settings())),
+            patch(
+                "cptr.utils.memory.get_memory_settings", new=AsyncMock(return_value=self.settings())
+            ),
         ):
             await gate.require_control_action_memory(
                 self.request(), user_id="user-1", required_scope="command:execute"
@@ -84,13 +88,17 @@ class MemoryGateCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.prepare_context.await_count, 2)
 
     async def test_fast_gate_remains_fail_closed_when_version_revalidation_fails(self):
-        store = SimpleNamespace(namespace_version=AsyncMock(side_effect=RuntimeError("db unavailable")))
+        store = SimpleNamespace(
+            namespace_version=AsyncMock(side_effect=RuntimeError("db unavailable"))
+        )
         service = SimpleNamespace(store=store, prepare_context=AsyncMock())
 
         with (
             patch.object(gate, "_workspace_path_for_request", new=AsyncMock(return_value="/repo")),
             patch.object(gate, "get_memory_service", return_value=service),
-            patch("cptr.utils.memory.get_memory_settings", new=AsyncMock(return_value=self.settings())),
+            patch(
+                "cptr.utils.memory.get_memory_settings", new=AsyncMock(return_value=self.settings())
+            ),
         ):
             with self.assertRaises(RuntimeError):
                 await gate.require_control_action_memory(

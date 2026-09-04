@@ -16,7 +16,9 @@ depends_on = None
 def upgrade() -> None:
     op.add_column("control_messages", sa.Column("effect_status", sa.Text(), nullable=True))
     op.add_column("control_messages", sa.Column("effect_evidence", sa.JSON(), nullable=True))
-    op.add_column("control_messages", sa.Column("effect_observed_at", sa.BigInteger(), nullable=True))
+    op.add_column(
+        "control_messages", sa.Column("effect_observed_at", sa.BigInteger(), nullable=True)
+    )
     # Historical rows lack target-bound effect evidence. Preserve transport state
     # but never retroactively label a consumed instruction as successful.
     op.execute(

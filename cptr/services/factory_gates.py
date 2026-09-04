@@ -84,9 +84,7 @@ class FactoryGatePlan:
         referenced = {criterion for spec in self.specs for criterion in spec.acceptance_ids}
         unknown = referenced - known_acceptance
         if unknown:
-            raise ValueError(
-                "unknown acceptance criterion coverage: " + ", ".join(sorted(unknown))
-            )
+            raise ValueError("unknown acceptance criterion coverage: " + ", ".join(sorted(unknown)))
 
     @property
     def by_id(self) -> Mapping[str, FactoryGateSpec]:
@@ -132,9 +130,7 @@ def validate_gate_evidence(
 
     failures: list[str] = []
     if result.gate_id != spec.gate_id:
-        failures.append(
-            f"gate result id {result.gate_id!r} does not match spec {spec.gate_id!r}"
-        )
+        failures.append(f"gate result id {result.gate_id!r} does not match spec {spec.gate_id!r}")
         return failures
 
     referenced: list[GateEvidence] = []

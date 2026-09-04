@@ -38,9 +38,7 @@ def upgrade() -> None:
         sa.Column("consumed_at", sa.BigInteger(), nullable=True),
         sa.UniqueConstraint("user_id", "task_id", "dedupe_key", name="uq_control_message_dedupe"),
     )
-    op.create_index(
-        "ix_control_message_chat_status", "control_messages", ["chat_id", "status"]
-    )
+    op.create_index("ix_control_message_chat_status", "control_messages", ["chat_id", "status"])
 
 
 def downgrade() -> None:

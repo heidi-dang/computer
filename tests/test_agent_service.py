@@ -685,7 +685,6 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         diff.assert_not_awaited()
 
-
     async def test_review_acceptance_records_durable_decision_and_event(self):
         service = AgentService()
         task = SimpleNamespace(
@@ -701,7 +700,9 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
         }
         with (
             patch.object(service.store, "get", new=AsyncMock(return_value=task)),
-            patch.object(service.store, "decide_review", new=AsyncMock(return_value=True)) as decide,
+            patch.object(
+                service.store, "decide_review", new=AsyncMock(return_value=True)
+            ) as decide,
             patch.object(service, "get_task", new=AsyncMock(return_value=accepted)),
             patch("cptr.services.live_events.safe_publish_task_event", new=AsyncMock()) as publish,
         ):
@@ -735,7 +736,9 @@ class AgentServiceTests(unittest.IsolatedAsyncioTestCase):
                 "send_message",
                 new=AsyncMock(return_value={"control_message_id": "control-1"}),
             ) as send_message,
-            patch.object(service.store, "record_changes_requested", new=AsyncMock(return_value=True)) as record,
+            patch.object(
+                service.store, "record_changes_requested", new=AsyncMock(return_value=True)
+            ) as record,
             patch.object(service, "get_task", new=AsyncMock(return_value=continued)),
             patch("cptr.services.live_events.safe_publish_task_event", new=AsyncMock()) as publish,
         ):

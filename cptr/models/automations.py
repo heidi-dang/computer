@@ -79,9 +79,7 @@ class Automation(Base):
                 stmt = stmt.where(Automation.name.ilike(search))
 
             # Count
-            count_result = await db.execute(
-                select(func.count()).select_from(stmt.subquery())
-            )
+            count_result = await db.execute(select(func.count()).select_from(stmt.subquery()))
             total = count_result.scalar() or 0
 
             # Page
@@ -134,7 +132,9 @@ class Automation(Base):
             return result.rowcount > 0
 
     @staticmethod
-    async def toggle(automation_id: str, next_run_at: int | None, updated_at: int = 0) -> Automation | None:
+    async def toggle(
+        automation_id: str, next_run_at: int | None, updated_at: int = 0
+    ) -> Automation | None:
         async with await get_db() as db:
             result = await db.execute(select(Automation).where(Automation.id == automation_id))
             row = result.scalar_one_or_none()
@@ -151,7 +151,9 @@ class Automation(Base):
     async def delete(automation_id: str) -> bool:
         async with await get_db() as db:
             # Delete runs first
-            await db.execute(delete(AutomationRun).where(AutomationRun.automation_id == automation_id))
+            await db.execute(
+                delete(AutomationRun).where(AutomationRun.automation_id == automation_id)
+            )
             result = await db.execute(delete(Automation).where(Automation.id == automation_id))
             await db.commit()
             return result.rowcount > 0
@@ -205,9 +207,7 @@ class AutomationRun(Base):
     error = Column(Text, nullable=True)
     created_at = Column(BigInteger, nullable=False)
 
-    __table_args__ = (
-        Index("ix_automation_run_aid_created", "automation_id", "created_at"),
-    )
+    __table_args__ = (Index("ix_automation_run_aid_created", "automation_id", "created_at"),)
 
     # ── Class methods ────────────────────────────────────────
 

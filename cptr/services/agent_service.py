@@ -394,7 +394,9 @@ class AgentService:
                 provenance={"review_task_id": task_id},
             )
             record = getattr(self.store, "record_changes_requested", None)
-            recorded = await record(task_id, note=safe_note, decided_at=now) if callable(record) else False
+            recorded = (
+                await record(task_id, note=safe_note, decided_at=now) if callable(record) else False
+            )
             if not recorded:
                 raise ValueError("review decision could not be recorded")
             result = await self.get_task(task_id, user_id=user_id)
@@ -407,20 +409,29 @@ class AgentService:
             return {**result, "review_message": message}
 
         decide = getattr(self.store, "decide_review", None)
-        accepted = await decide(
-            task_id,
-            decision=decision_value,
-            note=safe_note or None,
-            decided_at=now,
-        ) if callable(decide) else False
+        accepted = (
+            await decide(
+                task_id,
+                decision=decision_value,
+                note=safe_note or None,
+                decided_at=now,
+            )
+            if callable(decide)
+            else False
+        )
         if not accepted:
             raise ValueError("review decision could not be applied")
         result = await self.get_task(task_id, user_id=user_id)
         await safe_publish_task_event(
             user_id=user_id,
             task_id=task_id,
-            event_type="task.review_accepted" if decision_value == "ACCEPT" else "task.review_rejected",
-            payload={"status": result["status"], "review_status": result.get("review", {}).get("status")},
+            event_type="task.review_accepted"
+            if decision_value == "ACCEPT"
+            else "task.review_rejected",
+            payload={
+                "status": result["status"],
+                "review_status": result.get("review", {}).get("status"),
+            },
         )
         return result
 

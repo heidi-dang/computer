@@ -71,10 +71,7 @@ class StdioMCPManager:
 
     def list_active(self) -> list[str]:
         """Return IDs of servers with active connections."""
-        return [
-            sid for sid, client in self._instances.items()
-            if client.session is not None
-        ]
+        return [sid for sid, client in self._instances.items() if client.session is not None]
 
     async def _safe_disconnect(self, client: MCPClient) -> None:
         """Disconnect a client, swallowing errors."""

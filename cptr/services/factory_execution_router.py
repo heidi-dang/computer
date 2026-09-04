@@ -125,7 +125,9 @@ class ExecutionPolicy:
 
     def __post_init__(self) -> None:
         permissions = frozenset(_normalized_permissions(self.allowed_permissions))
-        aliases = frozenset(str(item).strip() for item in self.allowed_ssh_aliases if str(item).strip())
+        aliases = frozenset(
+            str(item).strip() for item in self.allowed_ssh_aliases if str(item).strip()
+        )
         object.__setattr__(self, "allowed_permissions", permissions)
         object.__setattr__(self, "allowed_ssh_aliases", aliases)
         if self.max_output_bytes <= 0 or self.max_runtime_ms <= 0:
@@ -297,7 +299,13 @@ class FactoryExecutionRouter:
                 )
 
         requirements = tuple(
-            sorted({str(item).strip().lower() for item in manifest.execution_requirements if str(item).strip()})
+            sorted(
+                {
+                    str(item).strip().lower()
+                    for item in manifest.execution_requirements
+                    if str(item).strip()
+                }
+            )
         )
         if not requirements:
             raise FactoryExecutionError(

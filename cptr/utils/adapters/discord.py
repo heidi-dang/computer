@@ -151,7 +151,9 @@ class DiscordAdapter(BaseAdapter):
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.warning("Discord gateway error (%s), reconnecting in %.0fs", type(e).__name__, delay)
+                logger.warning(
+                    "Discord gateway error (%s), reconnecting in %.0fs", type(e).__name__, delay
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
@@ -159,7 +161,9 @@ class DiscordAdapter(BaseAdapter):
         try:
             import websockets
         except ImportError:
-            logger.error("Discord adapter requires 'websockets' package. Install: pip install websockets")
+            logger.error(
+                "Discord adapter requires 'websockets' package. Install: pip install websockets"
+            )
             self._running = False
             return
 
@@ -175,19 +179,35 @@ class DiscordAdapter(BaseAdapter):
             self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws, heartbeat_interval))
 
             if self._session_id and self._seq is not None:
-                await ws.send(json.dumps({
-                    "op": OP_RESUME,
-                    "d": {"token": self._token, "session_id": self._session_id, "seq": self._seq},
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "op": OP_RESUME,
+                            "d": {
+                                "token": self._token,
+                                "session_id": self._session_id,
+                                "seq": self._seq,
+                            },
+                        }
+                    )
+                )
             else:
-                await ws.send(json.dumps({
-                    "op": OP_IDENTIFY,
-                    "d": {
-                        "token": self._token,
-                        "intents": INTENTS,
-                        "properties": {"os": sys.platform, "browser": "cptr", "device": "cptr"},
-                    },
-                }))
+                await ws.send(
+                    json.dumps(
+                        {
+                            "op": OP_IDENTIFY,
+                            "d": {
+                                "token": self._token,
+                                "intents": INTENTS,
+                                "properties": {
+                                    "os": sys.platform,
+                                    "browser": "cptr",
+                                    "device": "cptr",
+                                },
+                            },
+                        }
+                    )
+                )
 
             async for raw in ws:
                 if not self._running:
@@ -250,9 +270,14 @@ class DiscordAdapter(BaseAdapter):
                 att_type = "audio"
             else:
                 att_type = "document"
-            attachments.append(Attachment(
-                type=att_type, filename=fname, data=file_data, mime_type=ctype,
-            ))
+            attachments.append(
+                Attachment(
+                    type=att_type,
+                    filename=fname,
+                    data=file_data,
+                    mime_type=ctype,
+                )
+            )
 
         if not content and not attachments:
             return
@@ -282,15 +307,21 @@ class DiscordAdapter(BaseAdapter):
             logger.exception("[discord] Failed to download %s", url)
         return None
 
-    async def send_photo(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_photo(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a photo as a file attachment."""
         return await self._send_file(chat_id, data, filename, caption)
 
-    async def send_document(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_document(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a document as a file attachment."""
         return await self._send_file(chat_id, data, filename, caption)
 
-    async def _send_file(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def _send_file(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a file via Discord multipart upload."""
         if not self._http:
             return None

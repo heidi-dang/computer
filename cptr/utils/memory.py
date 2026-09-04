@@ -1044,13 +1044,21 @@ async def get_memory_settings(*, force_refresh: bool = False) -> dict[str, Any]:
     global _memory_settings_cache
     now = time.monotonic()
     cached = _memory_settings_cache
-    if not force_refresh and cached is not None and now - cached[0] < _MEMORY_SETTINGS_CACHE_TTL_SECONDS:
+    if (
+        not force_refresh
+        and cached is not None
+        and now - cached[0] < _MEMORY_SETTINGS_CACHE_TTL_SECONDS
+    ):
         return dict(cached[1])
 
     async with _memory_settings_lock:
         now = time.monotonic()
         cached = _memory_settings_cache
-        if not force_refresh and cached is not None and now - cached[0] < _MEMORY_SETTINGS_CACHE_TTL_SECONDS:
+        if (
+            not force_refresh
+            and cached is not None
+            and now - cached[0] < _MEMORY_SETTINGS_CACHE_TTL_SECONDS
+        ):
             return dict(cached[1])
         values = await Config.get_namespace("memory")
         settings = _normalize_memory_settings(values)

@@ -31,9 +31,7 @@ def _bounded_safe_payload(payload: Any) -> Any:
         default=str,
     ).encode("utf-8")
     if len(encoded) > _MAX_REASONING_PAYLOAD_BYTES:
-        raise ValueError(
-            f"factory reasoning payload exceeds {_MAX_REASONING_PAYLOAD_BYTES} bytes"
-        )
+        raise ValueError(f"factory reasoning payload exceeds {_MAX_REASONING_PAYLOAD_BYTES} bytes")
     return safe
 
 

@@ -64,7 +64,9 @@ class SlackAdapter(BaseAdapter):
             if not data.get("ok"):
                 raise ValueError(data.get("error", "auth.test failed"))
             self._bot_id = data.get("user_id", "")
-            logger.info("Slack bot connected: %s (team: %s)", data.get("user", "?"), data.get("team", "?"))
+            logger.info(
+                "Slack bot connected: %s (team: %s)", data.get("user", "?"), data.get("team", "?")
+            )
         except Exception:
             logger.exception("Slack auth.test failed")
             await self._http.aclose()
@@ -136,7 +138,9 @@ class SlackAdapter(BaseAdapter):
             except asyncio.CancelledError:
                 return
             except Exception as e:
-                logger.warning("Slack Socket Mode error (%s), reconnecting in %.0fs", type(e).__name__, delay)
+                logger.warning(
+                    "Slack Socket Mode error (%s), reconnecting in %.0fs", type(e).__name__, delay
+                )
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
@@ -144,7 +148,9 @@ class SlackAdapter(BaseAdapter):
         try:
             import websockets
         except ImportError:
-            logger.error("Slack adapter requires 'websockets' package. Install: pip install websockets")
+            logger.error(
+                "Slack adapter requires 'websockets' package. Install: pip install websockets"
+            )
             self._running = False
             return
 
@@ -210,9 +216,14 @@ class SlackAdapter(BaseAdapter):
                 att_type = "audio"
             else:
                 att_type = "document"
-            attachments.append(Attachment(
-                type=att_type, filename=fname, data=file_data, mime_type=mime,
-            ))
+            attachments.append(
+                Attachment(
+                    type=att_type,
+                    filename=fname,
+                    data=file_data,
+                    mime_type=mime,
+                )
+            )
 
         if not text and not attachments:
             return
@@ -259,15 +270,21 @@ class SlackAdapter(BaseAdapter):
             logger.exception("[slack] Failed to download %s", url)
         return None
 
-    async def send_photo(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_photo(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a photo via Slack file upload."""
         return await self._upload_file(chat_id, data, filename, caption)
 
-    async def send_document(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def send_document(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Send a document via Slack file upload."""
         return await self._upload_file(chat_id, data, filename, caption)
 
-    async def _upload_file(self, chat_id: str, data: bytes, filename: str, caption: str = "") -> str | None:
+    async def _upload_file(
+        self, chat_id: str, data: bytes, filename: str, caption: str = ""
+    ) -> str | None:
         """Upload a file to Slack via files.uploadV2."""
         if not self._http:
             return None
@@ -279,7 +296,9 @@ class SlackAdapter(BaseAdapter):
             )
             url_data = resp.json()
             if not url_data.get("ok"):
-                logger.warning("[slack] files.getUploadURLExternal failed: %s", url_data.get("error"))
+                logger.warning(
+                    "[slack] files.getUploadURLExternal failed: %s", url_data.get("error")
+                )
                 return None
 
             # Step 2: Upload to the provided URL
@@ -300,7 +319,6 @@ class SlackAdapter(BaseAdapter):
         except Exception:
             logger.exception("[slack] Failed to upload file")
         return None
-
 
 
 async def verify_token(token: str) -> dict:

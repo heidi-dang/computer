@@ -102,8 +102,7 @@ class FactoryRuntime:
             actor=FactoryActor.SYSTEM,
             reason="server restart requires execution reconciliation before continuation",
             idempotency_key=(
-                idempotency_key
-                or f"restart-recovery:{run.id}:{run.state}:{run.updated_at}"
+                idempotency_key or f"restart-recovery:{run.id}:{run.state}:{run.updated_at}"
             ),
             resumable_state=resumable_state,
         )

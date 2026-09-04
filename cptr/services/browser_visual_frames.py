@@ -77,7 +77,9 @@ class BrowserVisualFrameStore:
             condition = self._conditions.setdefault(key, asyncio.Condition())
         try:
             async with condition:
-                await asyncio.wait_for(condition.wait(), timeout=max(0.1, min(timeout_seconds, 30.0)))
+                await asyncio.wait_for(
+                    condition.wait(), timeout=max(0.1, min(timeout_seconds, 30.0))
+                )
         except TimeoutError:
             return None
         current = await self.latest(device_id=device_id, session_id=session_id)

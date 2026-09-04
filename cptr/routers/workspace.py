@@ -114,7 +114,9 @@ async def send_file(request: Request, path: str, *, download: bool = False):
         return FileResponse(
             str(target),
             filename=target.name if download else None,
-            media_type="application/octet-stream" if download else media_type or "application/octet-stream",
+            media_type="application/octet-stream"
+            if download
+            else media_type or "application/octet-stream",
         )
 
     try:
@@ -126,7 +128,9 @@ async def send_file(request: Request, path: str, *, download: bool = False):
         headers["Content-Disposition"] = f'attachment; filename="{result["name"]}"'
     return StreamingResponse(
         result["body"],
-        media_type="application/octet-stream" if download else result.get("media_type") or "application/octet-stream",
+        media_type="application/octet-stream"
+        if download
+        else result.get("media_type") or "application/octet-stream",
         headers=headers,
     )
 

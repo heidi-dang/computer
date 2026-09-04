@@ -216,7 +216,9 @@ class FactoryGitService:
         manifest = await self._git.change_manifest(repo_root)
         paths = _changed_paths(manifest)
         if not paths:
-            raise FactoryGitError("FACTORY_GIT_EMPTY_DIFF", "verified factory cycle has no Git changes")
+            raise FactoryGitError(
+                "FACTORY_GIT_EMPTY_DIFF", "verified factory cycle has no Git changes"
+            )
         diff_payload = await self._git.diff(repo_root)
         digest = _diff_digest(manifest, diff_payload)
         commit_message = f"{message} [factory:{cycle.id}:{digest[:12]}]"

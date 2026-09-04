@@ -57,7 +57,9 @@ class PyPIRegistryDiscoveryProvider:
             return []
         project_url = str(info.get("project_url") or "").strip()
         if not project_url.startswith(("https://", "http://")):
-            project_url = f"https://pypi.org/project/{quote(name, safe='')}/{quote(version, safe='')}/"
+            project_url = (
+                f"https://pypi.org/project/{quote(name, safe='')}/{quote(version, safe='')}/"
+            )
 
         return [
             DiscoveryCandidate.create(

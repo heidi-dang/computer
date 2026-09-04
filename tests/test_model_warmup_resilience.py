@@ -10,7 +10,10 @@ def test_warm_model_cache_survives_provider_discovery_failure() -> None:
 
     async def exercise() -> None:
         with (
-            patch("cptr.routers.chat._get_connections", new=AsyncMock(return_value=[{"id": "bad-key"}])),
+            patch(
+                "cptr.routers.chat._get_connections",
+                new=AsyncMock(return_value=[{"id": "bad-key"}]),
+            ),
             patch(
                 "cptr.routers.chat._get_connection_models",
                 new=AsyncMock(side_effect=ValueError("Failed to decrypt API key")),

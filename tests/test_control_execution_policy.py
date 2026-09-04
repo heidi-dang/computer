@@ -81,9 +81,7 @@ class ControlExecutionPolicyTests(unittest.IsolatedAsyncioTestCase):
                 "allow_package_install": False,
             },
         }
-        install = await execute_tool(
-            "run_command", {"command": "pip install -e ."}, context
-        )
+        install = await execute_tool("run_command", {"command": "pip install -e ."}, context)
         self.assertIn("denies package installation", install)
         write = await execute_tool(
             "write_file", {"path": "blocked.txt", "content": "blocked"}, context

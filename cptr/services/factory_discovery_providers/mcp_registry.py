@@ -64,7 +64,9 @@ class McpRegistryDiscoveryProvider:
                 origin_uri = repository_url or fallback_origin
                 packages = raw.get("packages")
                 if not isinstance(packages, list):
-                    packages = entry.get("packages") if isinstance(entry.get("packages"), list) else []
+                    packages = (
+                        entry.get("packages") if isinstance(entry.get("packages"), list) else []
+                    )
                 package_source, expected_digest = self._artifact_source(packages)
                 source_uri = package_source or origin_uri
                 candidates.append(

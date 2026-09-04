@@ -159,8 +159,7 @@ async def ensure_browser(port: int = 9222) -> str:
             return base_url
 
     raise RuntimeError(
-        f"Chrome launched but CDP not responding on port {port} after 10s. "
-        f"Binary: {chrome_path}"
+        f"Chrome launched but CDP not responding on port {port} after 10s. Binary: {chrome_path}"
     )
 
 
@@ -249,7 +248,12 @@ async def ensure_managed_browser() -> str:
 
 async def shutdown_browser() -> None:
     """Kill Chrome processes launched by CPTR. Called on app shutdown."""
-    global _launched_process, _user_data_dir, _managed_process, _managed_user_data_dir, _managed_base_url
+    global \
+        _launched_process, \
+        _user_data_dir, \
+        _managed_process, \
+        _managed_user_data_dir, \
+        _managed_base_url
 
     if _launched_process and _launched_process.returncode is None:
         logger.info("Shutting down launched Chrome (pid %d)", _launched_process.pid)

@@ -45,7 +45,9 @@ def _manifest(
 class _Recorder:
     def __init__(self, result=None, delay=0.0):
         self.calls = []
-        self.result = result or ProviderExecutionResult(output={"ok": True}, metadata={"source": "fake"})
+        self.result = result or ProviderExecutionResult(
+            output={"ok": True}, metadata={"source": "fake"}
+        )
         self.delay = delay
 
     async def __call__(self, request):
@@ -188,7 +190,9 @@ class FactoryExecutionRouterTests(unittest.IsolatedAsyncioTestCase):
                     network = True
                     network_requirements = ("external-http",)
                 elif provider == "mcp":
-                    permissions = ("network:http",) if requirement == "mcp-client" else ("process:execute",)
+                    permissions = (
+                        ("network:http",) if requirement == "mcp-client" else ("process:execute",)
+                    )
                     required = permissions
                     network = requirement == "mcp-client"
                     network_requirements = ("external-http",) if network else ()

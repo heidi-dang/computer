@@ -191,7 +191,9 @@ class FactoryApiTests(unittest.IsolatedAsyncioTestCase):
         current = await self.store.get_run(run.id)
         self.assertEqual(current.state, FactoryState.APPROVAL_REQUIRED.value)
 
-    async def test_approval_is_exact_run_bound_replay_safe_and_releases_only_approved_envelope(self):
+    async def test_approval_is_exact_run_bound_replay_safe_and_releases_only_approved_envelope(
+        self,
+    ):
         run = await self._start()
         cycle = await self.store.create_cycle(
             run.id,
@@ -442,7 +444,9 @@ class FactoryApiTests(unittest.IsolatedAsyncioTestCase):
         )
         with (
             patch("cptr.routers.factory._user", new=AsyncMock(return_value="user-1")) as auth,
-            patch("cptr.routers.factory._ensure_workspace", new=AsyncMock(return_value=object())) as ensure,
+            patch(
+                "cptr.routers.factory._ensure_workspace", new=AsyncMock(return_value=object())
+            ) as ensure,
             patch("cptr.routers.factory._service", return_value=service),
         ):
             result = await start_factory_run(request, body)

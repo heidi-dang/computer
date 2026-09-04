@@ -85,11 +85,7 @@ class BrowserSessionManager:
             await asyncio.sleep(60)  # Check every minute
             now = time.monotonic()
             timeout_seconds = self._timeout_minutes * 60
-            expired = [
-                cid
-                for cid, last in self._last_used.items()
-                if now - last > timeout_seconds
-            ]
+            expired = [cid for cid, last in self._last_used.items() if now - last > timeout_seconds]
             for chat_id in expired:
                 logger.info("Browser session timed out for chat %s", chat_id[:8])
                 await self.close(chat_id)

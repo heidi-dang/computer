@@ -196,9 +196,15 @@ class McpUsageStore:
                 group["coding_mutations"] = int(group["coding_mutations"]) + mutation
                 group["verification_calls"] = int(group["verification_calls"]) + verification
                 group["read_calls"] = int(group["read_calls"]) + read
-                group["input_tokens_estimated"] = int(group["input_tokens_estimated"]) + int(event.input_tokens_estimated)
-                group["output_tokens_estimated"] = int(group["output_tokens_estimated"]) + int(event.output_tokens_estimated)
-                group["simulated_cost_pico_usd"] = int(group["simulated_cost_pico_usd"]) + int(values["simulated_cost_pico_usd"])
+                group["input_tokens_estimated"] = int(group["input_tokens_estimated"]) + int(
+                    event.input_tokens_estimated
+                )
+                group["output_tokens_estimated"] = int(group["output_tokens_estimated"]) + int(
+                    event.output_tokens_estimated
+                )
+                group["simulated_cost_pico_usd"] = int(group["simulated_cost_pico_usd"]) + int(
+                    values["simulated_cost_pico_usd"]
+                )
 
             for group in grouped.values():
                 await self._accumulate_engineering_group(db, owner_id, group)
@@ -245,14 +251,22 @@ class McpUsageStore:
         row.first_seen_ms = min(int(row.first_seen_ms), int(group["first_seen_ms"]))
         row.last_seen_ms = max(int(row.last_seen_ms), int(group["last_seen_ms"]))
         row.tool_calls = int(row.tool_calls or 0) + int(group["tool_calls"])
-        row.successful_tool_calls = int(row.successful_tool_calls or 0) + int(group["successful_tool_calls"])
+        row.successful_tool_calls = int(row.successful_tool_calls or 0) + int(
+            group["successful_tool_calls"]
+        )
         row.failed_tool_calls = int(row.failed_tool_calls or 0) + int(group["failed_tool_calls"])
         row.coding_mutations = int(row.coding_mutations or 0) + int(group["coding_mutations"])
         row.verification_calls = int(row.verification_calls or 0) + int(group["verification_calls"])
         row.read_calls = int(row.read_calls or 0) + int(group["read_calls"])
-        row.input_tokens_estimated = int(row.input_tokens_estimated or 0) + int(group["input_tokens_estimated"])
-        row.output_tokens_estimated = int(row.output_tokens_estimated or 0) + int(group["output_tokens_estimated"])
-        row.simulated_cost_pico_usd = int(row.simulated_cost_pico_usd or 0) + int(group["simulated_cost_pico_usd"])
+        row.input_tokens_estimated = int(row.input_tokens_estimated or 0) + int(
+            group["input_tokens_estimated"]
+        )
+        row.output_tokens_estimated = int(row.output_tokens_estimated or 0) + int(
+            group["output_tokens_estimated"]
+        )
+        row.simulated_cost_pico_usd = int(row.simulated_cost_pico_usd or 0) + int(
+            group["simulated_cost_pico_usd"]
+        )
 
     async def summary(self, owner_id: str, *, now_ms: int | None = None) -> dict[str, object]:
         now = datetime.fromtimestamp(

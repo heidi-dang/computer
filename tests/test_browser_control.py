@@ -99,7 +99,9 @@ class BrowserControlValidationTests(unittest.TestCase):
 
 class BrowserSnapshotSettlingTests(unittest.IsolatedAsyncioTestCase):
     async def test_settled_snapshot_retries_transient_empty_page(self):
-        client = SimpleNamespace(snapshot=AsyncMock(side_effect=["[empty page]", "[button @e1] Ready"]))
+        client = SimpleNamespace(
+            snapshot=AsyncMock(side_effect=["[empty page]", "[button @e1] Ready"])
+        )
         result = await _settled_browser_snapshot(client, settle_seconds=0.5)
         self.assertEqual(result, "[button @e1] Ready")
         self.assertEqual(client.snapshot.await_count, 2)

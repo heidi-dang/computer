@@ -78,7 +78,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_workbench_session_event_user_session_sequence", table_name="workbench_session_events")
+    op.drop_index(
+        "ix_workbench_session_event_user_session_sequence", table_name="workbench_session_events"
+    )
     op.drop_table("workbench_session_events")
     op.drop_index("ix_workbench_session_user_last_event", table_name="workbench_sessions")
     op.drop_index("ix_workbench_session_user_status_updated", table_name="workbench_sessions")

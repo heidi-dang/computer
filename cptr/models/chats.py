@@ -589,7 +589,9 @@ class ChatMessage(Base):
         created_at: int = 0,
     ) -> ChatMessage:
         if isinstance(model, (list, tuple)):
-            model = next((item.strip() for item in model if isinstance(item, str) and item.strip()), None)
+            model = next(
+                (item.strip() for item in model if isinstance(item, str) and item.strip()), None
+            )
         elif model is not None and not isinstance(model, str):
             model = str(model)
 

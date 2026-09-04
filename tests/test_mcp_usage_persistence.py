@@ -149,7 +149,9 @@ class McpUsagePersistenceTests(unittest.IsolatedAsyncioTestCase):
             ]
             accepted = await self.store.ingest("user-1", events)
         finally:
-            sqlalchemy_event.remove(self.engine.sync_engine, "before_cursor_execute", record_statement)
+            sqlalchemy_event.remove(
+                self.engine.sync_engine, "before_cursor_execute", record_statement
+            )
 
         self.assertEqual(len(accepted), 20)
         # One batched usage INSERT, one engineering-session SELECT, and one

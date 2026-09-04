@@ -22,7 +22,9 @@ class OfficialDocsDiscoveryProvider:
         allowed_domains: tuple[str, ...] = (),
     ) -> None:
         self._searcher = searcher
-        self._allowed_domains = tuple(domain.strip().lower() for domain in allowed_domains if domain.strip())
+        self._allowed_domains = tuple(
+            domain.strip().lower() for domain in allowed_domains if domain.strip()
+        )
 
     async def discover(self, query: str, *, limit: int) -> list[DiscoveryCandidate]:
         raw = await self._searcher(query)
@@ -58,7 +60,10 @@ class OfficialDocsDiscoveryProvider:
         if not self._allowed_domains:
             return True
         hostname = (urlsplit(url).hostname or "").lower()
-        return any(hostname == domain or hostname.endswith(f".{domain}") for domain in self._allowed_domains)
+        return any(
+            hostname == domain or hostname.endswith(f".{domain}")
+            for domain in self._allowed_domains
+        )
 
     @staticmethod
     def _display_name(url: str) -> str:

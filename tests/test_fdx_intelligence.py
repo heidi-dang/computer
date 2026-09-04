@@ -358,7 +358,7 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_sanitizer_preserves_javascript_regex_literals(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            source = r'assert.match(description, /DEGRADED\/UNVERIFIED/);'
+            source = r"assert.match(description, /DEGRADED\/UNVERIFIED/);"
             sanitized = FdxIntelligenceService._sanitize_string(source, root)
         self.assertEqual(sanitized, source)
 

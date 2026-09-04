@@ -118,7 +118,9 @@ async def list_targets(user_id: str) -> list[dict]:
     for target in _targets(data):
         if target.get("type") == "bot":
             try:
-                await _ensure_user_bot(user_id, str((target.get("config") or {}).get("bot_id") or ""))
+                await _ensure_user_bot(
+                    user_id, str((target.get("config") or {}).get("bot_id") or "")
+                )
             except NotificationError:
                 continue
         public = _public_target(target)
@@ -349,7 +351,11 @@ async def _send_bot(target: dict, title: str, message: str, context: dict) -> No
     manager = get_current_bot_manager()
     if not manager:
         raise NotificationError("bot manager is not running")
-    workspace = (context.get("workspace") or {}).get("name") if isinstance(context.get("workspace"), dict) else ""
+    workspace = (
+        (context.get("workspace") or {}).get("name")
+        if isinstance(context.get("workspace"), dict)
+        else ""
+    )
     header = f"[{title}] {workspace}".strip() if title else workspace
     text = f"{header}\n\n{message}".strip() if header else message
     config = target.get("config") or {}

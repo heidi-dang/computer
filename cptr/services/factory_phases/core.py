@@ -212,7 +212,9 @@ class CycleCompletePhaseHandler:
     """Close a bounded run or start another audit cycle according to run policy."""
 
     async def execute(self, context: PhaseContext) -> PhaseOutcome:
-        configured = context.run.policy.get("max_cycles") if isinstance(context.run.policy, dict) else None
+        configured = (
+            context.run.policy.get("max_cycles") if isinstance(context.run.policy, dict) else None
+        )
         try:
             max_cycles = int(configured) if configured is not None else 1
         except (TypeError, ValueError):
