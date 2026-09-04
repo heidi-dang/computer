@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import event as sqlalchemy_event
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models.base import Base
@@ -117,6 +118,47 @@ class McpUsagePersistenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["all_time"]["total_tokens_estimated"], 732)
         self.assertGreater(float(summary["week"]["simulated_cost_usd"]), 0)
         self.assertEqual(summary["timezone"], "UTC")
+
+    async def test_same_batch_duplicate_usage_is_counted_once(self):
+        event = usage(
+            "usage-same-batch-duplicate",
+            timestamp_ms=ts("2026-09-02T09:00:00"),
+            tool_name="cptr_code_read_file",
+        )
+        accepted = await self.store.ingest("user-1", [event, event])
+        self.assertEqual(accepted, {event.event_id})
+        result = await self.store.engineering_sessions("user-1", limit=10)
+        self.assertEqual(len(result["sessions"]), 1)
+        self.assertEqual(result["sessions"][0]["tool_calls"], 1)
+
+    async def test_batched_usage_ingest_bounds_sqlite_statement_pressure(self):
+        statements: list[str] = []
+
+        def record_statement(_conn, _cursor, statement, _parameters, _context, _executemany):
+            statements.append(str(statement).lstrip().split(None, 1)[0].upper())
+
+        sqlalchemy_event.listen(self.engine.sync_engine, "before_cursor_execute", record_statement)
+        try:
+            events = [
+                usage(
+                    f"usage-batch-{index:03}",
+                    timestamp_ms=ts("2026-09-02T10:00:00") + index,
+                    tool_name="cptr_code_read_file",
+                )
+                for index in range(20)
+            ]
+            accepted = await self.store.ingest("user-1", events)
+        finally:
+            sqlalchemy_event.remove(self.engine.sync_engine, "before_cursor_execute", record_statement)
+
+        self.assertEqual(len(accepted), 20)
+        # One batched usage INSERT, one engineering-session SELECT, and one
+        # engineering-session INSERT/flush are sufficient for a same-session batch.
+        # Keep a small allowance for SQLite/SQLAlchemy bookkeeping without
+        # regressing to O(events) write/query amplification.
+        self.assertLessEqual(len(statements), 5, statements)
+        self.assertLessEqual(statements.count("SELECT"), 1, statements)
+        self.assertLessEqual(statements.count("INSERT"), 2, statements)
 
     async def test_real_work_session_metrics_are_observable_and_not_comparable(self):
         events = [

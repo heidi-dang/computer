@@ -25,6 +25,7 @@ LatencyMetric = Literal[
     "backend_api_rtt",
 ]
 LatencyOperationClass = Literal["immediate", "bounded_wait", "long_operation"]
+LatencySetupKind = Literal["request_adapter", "stateful_setup", "stateless_setup"]
 FailureStage = Literal[
     "client_transport",
     "mcp_connector",
@@ -52,6 +53,8 @@ class McpLatencySample(BaseModel):
     operation_class: LatencyOperationClass = "immediate"
     requested_wait_ms: int | None = Field(default=None, ge=0, le=86_400_000)
     health_eligible: bool = True
+    setup_kind: LatencySetupKind | None = None
+    setup_cached: bool | None = None
 
 
 class McpUsageDiagnostic(BaseModel):
@@ -394,6 +397,32 @@ class McpDiagnosticsStore:
                 else "healthy"
             )
         )
+        setup_breakdown: dict[str, dict[str, object]] = {}
+        setup_kinds = sorted(
+            {
+                str(sample["setup_kind"])
+                for sample in samples
+                if sample.get("setup_kind") is not None
+            }
+        )
+        for setup_kind in setup_kinds:
+            setup_values = [
+                int(sample["duration_ms"])
+                for sample in samples
+                if sample.get("setup_kind") == setup_kind
+            ]
+            cached_count = sum(
+                1
+                for sample in samples
+                if sample.get("setup_kind") == setup_kind and sample.get("setup_cached") is True
+            )
+            setup_breakdown[setup_kind] = {
+                "sample_count": len(setup_values),
+                "p50_ms": _nearest_rank(setup_values, 0.50),
+                "p95_ms": _nearest_rank(setup_values, 0.95),
+                "max_ms": max(setup_values),
+                "cached_count": cached_count,
+            }
         return {
             "metric_type": metric_type,
             "latest_ms": values[-1],
@@ -404,6 +433,7 @@ class McpDiagnosticsStore:
             "sample_count": len(values),
             "health_p95_ms": health_p95,
             "health_sample_count": len(health_values),
+            "setup_breakdown": setup_breakdown,
             "last_updated_ms": int(latest["timestamp_ms"]),
             "latest_status": latest_status,
             "health": health,

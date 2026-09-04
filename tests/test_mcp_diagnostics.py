@@ -143,6 +143,54 @@ class McpDiagnosticsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(aggregate["health_sample_count"], 1)
         self.assertEqual(aggregate["health"], "healthy")
 
+    async def test_adapter_setup_breakdown_tracks_stateless_pool_hits(self):
+        store = McpDiagnosticsStore(handoff_degraded_ms=100)
+        await store.ingest(
+            [
+                McpLatencySample(
+                    event_id="setup-request-001",
+                    timestamp_ms=BASE_TS,
+                    edge_id="mcp-connector-cptr-mcp",
+                    metric_type="adapter_handoff",
+                    duration_ms=1,
+                    setup_kind="request_adapter",
+                ),
+                McpLatencySample(
+                    event_id="setup-stateless-001",
+                    timestamp_ms=BASE_TS + 1,
+                    edge_id="mcp-connector-cptr-mcp",
+                    metric_type="adapter_handoff",
+                    duration_ms=4,
+                    setup_kind="stateless_setup",
+                    setup_cached=True,
+                ),
+                McpLatencySample(
+                    event_id="setup-stateless-002",
+                    timestamp_ms=BASE_TS + 2,
+                    edge_id="mcp-connector-cptr-mcp",
+                    metric_type="adapter_handoff",
+                    duration_ms=18,
+                    setup_kind="stateless_setup",
+                    setup_cached=False,
+                ),
+                McpLatencySample(
+                    event_id="setup-stateful-001",
+                    timestamp_ms=BASE_TS + 3,
+                    edge_id="mcp-connector-cptr-mcp",
+                    metric_type="adapter_handoff",
+                    duration_ms=12,
+                    setup_kind="stateful_setup",
+                    setup_cached=False,
+                ),
+            ]
+        )
+        breakdown = (await store.snapshot())["latency"]["mcp-connector-cptr-mcp"]["setup_breakdown"]
+        self.assertEqual(breakdown["request_adapter"]["sample_count"], 1)
+        self.assertEqual(breakdown["stateless_setup"]["sample_count"], 2)
+        self.assertEqual(breakdown["stateless_setup"]["p95_ms"], 18)
+        self.assertEqual(breakdown["stateless_setup"]["cached_count"], 1)
+        self.assertEqual(breakdown["stateful_setup"]["max_ms"], 12)
+
     async def test_dedupe_latency_failure_and_system_rings_are_bounded(self):
         store = McpDiagnosticsStore(
             max_latency_samples_per_edge=2,

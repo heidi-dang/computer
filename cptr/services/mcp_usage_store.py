@@ -111,108 +111,148 @@ class McpUsageStore:
     async def ingest(
         self, owner_id: str, events: Iterable[McpUsageDiagnostic | object]
     ) -> set[str]:
-        accepted: set[str] = set()
+        candidate_by_id: dict[
+            str, tuple[McpUsageDiagnostic, dict[str, object], dict[str, object]]
+        ] = {}
+        for event in events:
+            if not isinstance(event, McpUsageDiagnostic) or event.event_id in candidate_by_id:
+                continue
+            projected = project_usage_cost(event)
+            values = {
+                "id": event.event_id,
+                "user_id": owner_id,
+                "timestamp_ms": event.timestamp_ms,
+                "request_id": event.request_id,
+                "correlation_id": event.correlation_id,
+                "session_id": event.session_id,
+                "client_id": event.client_id,
+                "model_reported": projected.get("model_reported"),
+                "model_canonical": projected.get("model_canonical"),
+                "model_source": event.model_source,
+                "tool_name": event.tool_name,
+                "input_tokens_estimated": event.input_tokens_estimated,
+                "output_tokens_estimated": event.output_tokens_estimated,
+                "estimator_method": event.estimator_method,
+                "estimator_exact_for_model": 1 if event.estimator_exact_for_model else 0,
+                "status": event.status,
+                "pricing_status": projected.get("pricing_status") or "unknown_model",
+                "pricing_version": projected.get("pricing_version") or "unknown",
+                "input_usd_per_million": projected.get("input_usd_per_million"),
+                "cached_input_usd_per_million": projected.get("cached_input_usd_per_million"),
+                "output_usd_per_million": projected.get("output_usd_per_million"),
+                "input_cost_pico_usd": _cost_pico(projected.get("input_cost_usd")),
+                "output_cost_pico_usd": _cost_pico(projected.get("output_cost_usd")),
+                "simulated_cost_pico_usd": _cost_pico(projected.get("simulated_cost_usd")),
+            }
+            candidate_by_id[event.event_id] = (event, projected, values)
+        candidates = list(candidate_by_id.values())
+        if not candidates:
+            return set()
+
         async with self._session() as db:
-            for event in events:
-                if not isinstance(event, McpUsageDiagnostic):
+            result = await db.execute(
+                sqlite_insert(McpUsageEvent)
+                .values([values for _, _, values in candidates])
+                .on_conflict_do_nothing(index_elements=["id"])
+                .returning(McpUsageEvent.id)
+            )
+            accepted = {str(event_id) for event_id in result.scalars().all()}
+
+            grouped: dict[tuple[str, str], dict[str, object]] = {}
+            for event, projected, values in candidates:
+                if event.event_id not in accepted:
                     continue
-                projected = project_usage_cost(event)
-                values = {
-                    "id": event.event_id,
-                    "user_id": owner_id,
-                    "timestamp_ms": event.timestamp_ms,
-                    "request_id": event.request_id,
-                    "correlation_id": event.correlation_id,
-                    "session_id": event.session_id,
-                    "client_id": event.client_id,
-                    "model_reported": projected.get("model_reported"),
-                    "model_canonical": projected.get("model_canonical"),
-                    "model_source": event.model_source,
-                    "tool_name": event.tool_name,
-                    "input_tokens_estimated": event.input_tokens_estimated,
-                    "output_tokens_estimated": event.output_tokens_estimated,
-                    "estimator_method": event.estimator_method,
-                    "estimator_exact_for_model": 1 if event.estimator_exact_for_model else 0,
-                    "status": event.status,
-                    "pricing_status": projected.get("pricing_status") or "unknown_model",
-                    "pricing_version": projected.get("pricing_version") or "unknown",
-                    "input_usd_per_million": projected.get("input_usd_per_million"),
-                    "cached_input_usd_per_million": projected.get("cached_input_usd_per_million"),
-                    "output_usd_per_million": projected.get("output_usd_per_million"),
-                    "input_cost_pico_usd": _cost_pico(projected.get("input_cost_usd")),
-                    "output_cost_pico_usd": _cost_pico(projected.get("output_cost_usd")),
-                    "simulated_cost_pico_usd": _cost_pico(projected.get("simulated_cost_usd")),
-                }
-                result = await db.execute(
-                    sqlite_insert(McpUsageEvent)
-                    .values(**values)
-                    .on_conflict_do_nothing(index_elements=["id"])
-                )
-                if int(result.rowcount or 0) != 1:
-                    continue
-                accepted.add(event.event_id)
-                await self._accumulate_engineering(db, owner_id, event, projected, values)
+                key = (_session_key(event), _model_key(projected))
+                mutation, verification, read = _category_counts(event.tool_name)
+                group = grouped.get(key)
+                if group is None:
+                    group = {
+                        "session_key": key[0],
+                        "model_key": key[1],
+                        "session_id": event.session_id,
+                        "client_id": event.client_id,
+                        "model_reported": projected.get("model_reported"),
+                        "model_canonical": projected.get("model_canonical"),
+                        "first_seen_ms": event.timestamp_ms,
+                        "last_seen_ms": event.timestamp_ms,
+                        "tool_calls": 0,
+                        "successful_tool_calls": 0,
+                        "failed_tool_calls": 0,
+                        "coding_mutations": 0,
+                        "verification_calls": 0,
+                        "read_calls": 0,
+                        "input_tokens_estimated": 0,
+                        "output_tokens_estimated": 0,
+                        "simulated_cost_pico_usd": 0,
+                    }
+                    grouped[key] = group
+                group["first_seen_ms"] = min(int(group["first_seen_ms"]), event.timestamp_ms)
+                group["last_seen_ms"] = max(int(group["last_seen_ms"]), event.timestamp_ms)
+                group["tool_calls"] = int(group["tool_calls"]) + 1
+                if event.status == "complete":
+                    group["successful_tool_calls"] = int(group["successful_tool_calls"]) + 1
+                else:
+                    group["failed_tool_calls"] = int(group["failed_tool_calls"]) + 1
+                group["coding_mutations"] = int(group["coding_mutations"]) + mutation
+                group["verification_calls"] = int(group["verification_calls"]) + verification
+                group["read_calls"] = int(group["read_calls"]) + read
+                group["input_tokens_estimated"] = int(group["input_tokens_estimated"]) + int(event.input_tokens_estimated)
+                group["output_tokens_estimated"] = int(group["output_tokens_estimated"]) + int(event.output_tokens_estimated)
+                group["simulated_cost_pico_usd"] = int(group["simulated_cost_pico_usd"]) + int(values["simulated_cost_pico_usd"])
+
+            for group in grouped.values():
+                await self._accumulate_engineering_group(db, owner_id, group)
             await db.commit()
         return accepted
 
-    async def _accumulate_engineering(
+    async def _accumulate_engineering_group(
         self,
         db,
         owner_id: str,
-        event: McpUsageDiagnostic,
-        projected: dict[str, object],
-        values: dict[str, object],
+        group: dict[str, object],
     ) -> None:
-        session_key = _session_key(event)
-        model_key = _model_key(projected)
         row = await db.scalar(
             select(McpEngineeringSession).where(
                 McpEngineeringSession.user_id == owner_id,
-                McpEngineeringSession.session_key == session_key,
-                McpEngineeringSession.model_key == model_key,
+                McpEngineeringSession.session_key == group["session_key"],
+                McpEngineeringSession.model_key == group["model_key"],
             )
         )
-        mutation, verification, read = _category_counts(event.tool_name)
-        input_tokens = int(event.input_tokens_estimated)
-        output_tokens = int(event.output_tokens_estimated)
-        cost_pico = int(values["simulated_cost_pico_usd"])
-        success = 1 if event.status == "complete" else 0
-        failure = 1 - success
         if row is None:
             db.add(
                 McpEngineeringSession(
                     user_id=owner_id,
-                    session_key=session_key,
-                    session_id=event.session_id,
-                    client_id=event.client_id,
-                    model_key=model_key,
-                    model_reported=projected.get("model_reported"),
-                    model_canonical=projected.get("model_canonical"),
-                    first_seen_ms=event.timestamp_ms,
-                    last_seen_ms=event.timestamp_ms,
-                    tool_calls=1,
-                    successful_tool_calls=success,
-                    failed_tool_calls=failure,
-                    coding_mutations=mutation,
-                    verification_calls=verification,
-                    read_calls=read,
-                    input_tokens_estimated=input_tokens,
-                    output_tokens_estimated=output_tokens,
-                    simulated_cost_pico_usd=cost_pico,
+                    session_key=group["session_key"],
+                    session_id=group["session_id"],
+                    client_id=group["client_id"],
+                    model_key=group["model_key"],
+                    model_reported=group["model_reported"],
+                    model_canonical=group["model_canonical"],
+                    first_seen_ms=group["first_seen_ms"],
+                    last_seen_ms=group["last_seen_ms"],
+                    tool_calls=group["tool_calls"],
+                    successful_tool_calls=group["successful_tool_calls"],
+                    failed_tool_calls=group["failed_tool_calls"],
+                    coding_mutations=group["coding_mutations"],
+                    verification_calls=group["verification_calls"],
+                    read_calls=group["read_calls"],
+                    input_tokens_estimated=group["input_tokens_estimated"],
+                    output_tokens_estimated=group["output_tokens_estimated"],
+                    simulated_cost_pico_usd=group["simulated_cost_pico_usd"],
                 )
             )
             return
-        row.first_seen_ms = min(int(row.first_seen_ms), event.timestamp_ms)
-        row.last_seen_ms = max(int(row.last_seen_ms), event.timestamp_ms)
-        row.tool_calls = int(row.tool_calls or 0) + 1
-        row.successful_tool_calls = int(row.successful_tool_calls or 0) + success
-        row.failed_tool_calls = int(row.failed_tool_calls or 0) + failure
-        row.coding_mutations = int(row.coding_mutations or 0) + mutation
-        row.verification_calls = int(row.verification_calls or 0) + verification
-        row.read_calls = int(row.read_calls or 0) + read
-        row.input_tokens_estimated = int(row.input_tokens_estimated or 0) + input_tokens
-        row.output_tokens_estimated = int(row.output_tokens_estimated or 0) + output_tokens
-        row.simulated_cost_pico_usd = int(row.simulated_cost_pico_usd or 0) + cost_pico
+        row.first_seen_ms = min(int(row.first_seen_ms), int(group["first_seen_ms"]))
+        row.last_seen_ms = max(int(row.last_seen_ms), int(group["last_seen_ms"]))
+        row.tool_calls = int(row.tool_calls or 0) + int(group["tool_calls"])
+        row.successful_tool_calls = int(row.successful_tool_calls or 0) + int(group["successful_tool_calls"])
+        row.failed_tool_calls = int(row.failed_tool_calls or 0) + int(group["failed_tool_calls"])
+        row.coding_mutations = int(row.coding_mutations or 0) + int(group["coding_mutations"])
+        row.verification_calls = int(row.verification_calls or 0) + int(group["verification_calls"])
+        row.read_calls = int(row.read_calls or 0) + int(group["read_calls"])
+        row.input_tokens_estimated = int(row.input_tokens_estimated or 0) + int(group["input_tokens_estimated"])
+        row.output_tokens_estimated = int(row.output_tokens_estimated or 0) + int(group["output_tokens_estimated"])
+        row.simulated_cost_pico_usd = int(row.simulated_cost_pico_usd or 0) + int(group["simulated_cost_pico_usd"])
 
     async def summary(self, owner_id: str, *, now_ms: int | None = None) -> dict[str, object]:
         now = datetime.fromtimestamp(
