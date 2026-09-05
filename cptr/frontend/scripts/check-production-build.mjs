@@ -26,6 +26,9 @@ const clientRoot = path.join(cwd, '.svelte-kit', 'output', 'client');
 const manifestPath = path.join(clientRoot, '.vite', 'manifest.json');
 const maxEntryBytes = 900 * 1024;
 const maxClientChunkBytes = 1400 * 1024;
+const maxRootLayoutStaticBytes = 1000 * 1024;
+const maxMcpInitialStaticBytes = 900 * 1024;
+const maxHomeInitialStaticBytes = 1200 * 1024;
 const bundleViolations = [];
 
 try {
@@ -43,6 +46,53 @@ try {
 		if (bytes > limit) {
 			bundleViolations.push(
 				`${source}: ${(bytes / 1024).toFixed(1)} kB exceeds ${isEntry ? 'entry' : 'client chunk'} limit ${(limit / 1024).toFixed(0)} kB`
+			);
+		}
+	}
+
+	function findRouteEntry(routeSource) {
+		return Object.entries(manifest).find(([source]) => {
+			if (!source.startsWith('.svelte-kit/generated/client-optimized/nodes/')) return false;
+			try {
+				return readFileSync(path.join(cwd, source), 'utf8').includes(routeSource);
+			} catch {
+				return false;
+			}
+		});
+	}
+
+	function staticEntryClosureBytes(entryKey) {
+		const pending = [entryKey];
+		const visited = new Set();
+		let bytes = 0;
+		while (pending.length) {
+			const key = pending.pop();
+			if (!key || visited.has(key)) continue;
+			visited.add(key);
+			const record = manifest[key];
+			if (!record || typeof record !== 'object') continue;
+			if (typeof record.file === 'string' && record.file.endsWith('.js')) {
+				bytes += statSync(path.join(clientRoot, record.file)).size;
+			}
+			if (Array.isArray(record.imports)) pending.push(...record.imports);
+		}
+		return bytes;
+	}
+
+	for (const [label, routeSource, limit] of [
+		['Root layout', 'src/routes/+layout.svelte', maxRootLayoutStaticBytes],
+		['MCP', 'src/routes/mcp/+page.svelte', maxMcpInitialStaticBytes],
+		['Home', 'src/routes/+page.svelte', maxHomeInitialStaticBytes]
+	]) {
+		const routeEntry = findRouteEntry(routeSource);
+		if (!routeEntry) {
+			bundleViolations.push(`Unable to identify the ${label} route entry for bundle verification`);
+			continue;
+		}
+		const initialStaticBytes = staticEntryClosureBytes(routeEntry[0]);
+		if (initialStaticBytes > limit) {
+			bundleViolations.push(
+				`${label} entry static JavaScript ${(initialStaticBytes / 1024).toFixed(1)} kB exceeds ${(limit / 1024).toFixed(0)} kB budget`
 			);
 		}
 	}

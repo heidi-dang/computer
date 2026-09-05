@@ -9,15 +9,6 @@ import i18next, { type TFunction } from 'i18next';
 import LanguageDetector from 'i18next-browser-languagedetector';
 import { writable, derived, type Readable } from 'svelte/store';
 import en from './locales/en.json';
-import de from './locales/de.json';
-import es from './locales/es.json';
-import fr from './locales/fr.json';
-import ja from './locales/ja.json';
-import ko from './locales/ko.json';
-import ptBR from './locales/pt-BR.json';
-import ru from './locales/ru.json';
-import zhCN from './locales/zh-CN.json';
-import zhTW from './locales/zh-TW.json';
 
 export const supportedLocales = [
 	{ code: 'en', label: 'English' },
@@ -34,21 +25,54 @@ export const supportedLocales = [
 ] as const;
 
 const resources: Record<string, { translation: Record<string, string> }> = {
-	en: { translation: en },
-	de: { translation: de },
-	es: { translation: es },
-	fr: { translation: fr },
-	ja: { translation: ja },
-	ko: { translation: ko },
-	'pt-BR': { translation: ptBR },
-	ru: { translation: ru },
-	'zh-CN': { translation: zhCN },
-	'zh-TW': { translation: zhTW }
+	en: { translation: en }
 };
 
-i18next.use(LanguageDetector).init({
+type LocaleModule = { default: Record<string, string> };
+const localeLoaders: Record<string, () => Promise<LocaleModule>> = {
+	de: () => import('./locales/de.json'),
+	es: () => import('./locales/es.json'),
+	fr: () => import('./locales/fr.json'),
+	ja: () => import('./locales/ja.json'),
+	ko: () => import('./locales/ko.json'),
+	'pt-BR': () => import('./locales/pt-BR.json'),
+	ru: () => import('./locales/ru.json'),
+	'zh-CN': () => import('./locales/zh-CN.json'),
+	'zh-TW': () => import('./locales/zh-TW.json')
+};
+const localeLoads = new Map<string, Promise<void>>();
+
+function resolveSupportedLocale(lng: string): string {
+	if (lng === 'en' || localeLoaders[lng]) return lng;
+	const base = lng.split('-')[0];
+	return localeLoaders[base] ? base : 'en';
+}
+
+function ensureLocale(lng: string): Promise<void> {
+	const localeCode = resolveSupportedLocale(lng);
+	if (localeCode === 'en' || i18next.hasResourceBundle(localeCode, 'translation')) {
+		return Promise.resolve();
+	}
+	let load = localeLoads.get(localeCode);
+	if (!load) {
+		const loader = localeLoaders[localeCode];
+		if (!loader) return Promise.resolve();
+		load = loader()
+			.then(({ default: translations }) => {
+				i18next.addResourceBundle(localeCode, 'translation', translations, true, true);
+			})
+			.finally(() => {
+				localeLoads.delete(localeCode);
+			});
+		localeLoads.set(localeCode, load);
+	}
+	return load;
+}
+
+const initialization = i18next.use(LanguageDetector).init({
 	resources,
 	fallbackLng: 'en',
+	supportedLngs: supportedLocales.map(({ code }) => code),
 	interpolation: {
 		escapeValue: false // Svelte handles escaping
 	},
@@ -75,15 +99,32 @@ i18next.on('languageChanged', (lng: string) => {
 	_tick.update((n) => n + 1);
 });
 
+async function loadAndChangeLocale(lng: string): Promise<void> {
+	const localeCode = resolveSupportedLocale(lng);
+	try {
+		await ensureLocale(localeCode);
+		await i18next.changeLanguage(localeCode);
+	} catch (error) {
+		console.error(`Failed to load locale ${localeCode}:`, error);
+	}
+}
+
+void initialization.then(() => {
+	const detectedLocale = resolveSupportedLocale(i18next.language ?? 'en');
+	if (detectedLocale !== 'en' && !i18next.hasResourceBundle(detectedLocale, 'translation')) {
+		void loadAndChangeLocale(detectedLocale);
+	}
+});
+
 /** Reactive translation function: use as `$t('key')` or `$t('key', { count: 3 })` in templates. */
 export const t: Readable<TFunction> = derived<typeof _tick, TFunction>(
 	_tick,
 	() => i18next.t.bind(i18next) as TFunction
 );
 
-/** Change the active locale. */
+/** Change the active locale. Non-English resource bundles are loaded only when selected. */
 export function changeLocale(lng: string): void {
-	i18next.changeLanguage(lng);
+	void loadAndChangeLocale(lng);
 }
 
 /**

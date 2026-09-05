@@ -39,10 +39,6 @@
 	import { getChat, getChats, type ChatInfo } from '$lib/apis/chat';
 	import { deleteSharePayload, getSharePayload } from '$lib/intents/payloadStore';
 	import type { LaunchIntent, ShareBehavior, SharePayload } from '$lib/intents/types';
-	import FileBrowser from '$lib/components/FileBrowser.svelte';
-	import GitView from '$lib/components/GitView.svelte';
-	import BrowserPreview from '$lib/components/BrowserPreview.svelte';
-	import ChatPanel from '$lib/components/chat/ChatPanel.svelte';
 	import DirectoryPicker from '$lib/components/DirectoryPicker.svelte';
 	import GroupTabBar from '$lib/components/GroupTabBar.svelte';
 	import Icon from '$lib/components/Icon.svelte';
@@ -51,6 +47,10 @@
 	import { TAB_DRAG_MIME } from '$lib/constants';
 	import { isSupportedWorkspacePath } from '$lib/utils/paths';
 
+	type FileBrowserComponent = typeof import('$lib/components/FileBrowser.svelte').default;
+	type GitViewComponent = typeof import('$lib/components/GitView.svelte').default;
+	type BrowserPreviewComponent = typeof import('$lib/components/BrowserPreview.svelte').default;
+	type ChatPanelComponent = typeof import('$lib/components/chat/ChatPanel.svelte').default;
 	type FileEditorComponent = typeof import('$lib/components/FileEditor.svelte').default;
 	type TerminalComponent = typeof import('$lib/components/Terminal.svelte').default;
 
@@ -58,10 +58,52 @@
 	let pendingIntent = $state<LaunchIntent | null>(null);
 	let folderPickerIntent = $state<LaunchIntent | null>(null);
 	let folderPickerWorkspace = $state<string | null>(null);
+	let LazyFileBrowser = $state<FileBrowserComponent | null>(null);
+	let LazyGitView = $state<GitViewComponent | null>(null);
+	let LazyBrowserPreview = $state<BrowserPreviewComponent | null>(null);
+	let LazyChatPanel = $state<ChatPanelComponent | null>(null);
 	let LazyFileEditor = $state<FileEditorComponent | null>(null);
 	let LazyTerminal = $state<TerminalComponent | null>(null);
+	let fileBrowserLoad: Promise<FileBrowserComponent> | null = null;
+	let gitViewLoad: Promise<GitViewComponent> | null = null;
+	let browserPreviewLoad: Promise<BrowserPreviewComponent> | null = null;
+	let chatPanelLoad: Promise<ChatPanelComponent> | null = null;
 	let fileEditorLoad: Promise<FileEditorComponent> | null = null;
 	let terminalLoad: Promise<TerminalComponent> | null = null;
+
+	function ensureFileBrowser(): Promise<FileBrowserComponent> {
+		fileBrowserLoad ??= import('$lib/components/FileBrowser.svelte').then(({ default: component }) => {
+			LazyFileBrowser = component;
+			return component;
+		});
+		return fileBrowserLoad;
+	}
+
+	function ensureGitView(): Promise<GitViewComponent> {
+		gitViewLoad ??= import('$lib/components/GitView.svelte').then(({ default: component }) => {
+			LazyGitView = component;
+			return component;
+		});
+		return gitViewLoad;
+	}
+
+	function ensureBrowserPreview(): Promise<BrowserPreviewComponent> {
+		browserPreviewLoad ??= import('$lib/components/BrowserPreview.svelte').then(
+			({ default: component }) => {
+				LazyBrowserPreview = component;
+				return component;
+			}
+		);
+		return browserPreviewLoad;
+	}
+
+	function ensureChatPanel(): Promise<ChatPanelComponent> {
+		chatPanelLoad ??= import('$lib/components/chat/ChatPanel.svelte').then(({ default: component }) => {
+			LazyChatPanel = component;
+			return component;
+		});
+		return chatPanelLoad;
+	}
 
 	function ensureFileEditor(): Promise<FileEditorComponent> {
 		fileEditorLoad ??= import('$lib/components/FileEditor.svelte').then(
@@ -83,6 +125,17 @@
 
 	$effect(() => {
 		const groups = [...$homeState.groups, ...($currentWorkspace?.groups ?? [])];
+		if ($currentWorkspace && !LazyFileBrowser) void ensureFileBrowser();
+		if (!LazyGitView && $gitReviewOpen) void ensureGitView();
+		if (!LazyChatPanel && groups.some((group) => group.tabs.some((tab) => tab.type === 'chat'))) {
+			void ensureChatPanel();
+		}
+		if (
+			!LazyBrowserPreview &&
+			groups.some((group) => group.tabs.some((tab) => tab.type === 'browser'))
+		) {
+			void ensureBrowserPreview();
+		}
 		if (!LazyFileEditor && groups.some((group) => group.tabs.some((tab) => tab.type === 'file'))) {
 			void ensureFileEditor();
 		}
@@ -1073,16 +1126,20 @@
 			<div class="pane-content">
 				{#each homePane.tabs.filter((tab) => tab.type === 'chat') as tab (tab.id)}
 					<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== homePane.activeTabId}>
-						<ChatPanel
-							chatId={tab.path?.startsWith('new-') || tab.path?.startsWith('pending-')
-								? undefined
-								: tab.path}
-							tabId={tab.id}
-							active={tab.id === homePane.activeTabId}
-							ontabupdate={(tabId, chatId, label) =>
-								updateHomeChatTab(tabId, chatId, label, homePane.id)}
-							onopenchat={(chatId) => openHomeChat(chatId, homePane.id)}
-						/>
+						{#if LazyChatPanel}
+							<LazyChatPanel
+								chatId={tab.path?.startsWith('new-') || tab.path?.startsWith('pending-')
+									? undefined
+									: tab.path}
+								tabId={tab.id}
+								active={tab.id === homePane.activeTabId}
+								ontabupdate={(tabId, chatId, label) =>
+									updateHomeChatTab(tabId, chatId, label, homePane.id)}
+								onopenchat={(chatId) => openHomeChat(chatId, homePane.id)}
+							/>
+						{:else}
+							<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+						{/if}
 					</div>
 				{/each}
 				{#each homePane.tabs.filter((tab) => tab.type === 'file' && tab.filePath) as tab (tab.id)}
@@ -1110,15 +1167,19 @@
 				{/each}
 				{#each homePane.tabs.filter((tab) => tab.type === 'browser' && tab.browserSessionId) as tab (tab.id)}
 					<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== homePane.activeTabId}>
-						<BrowserPreview
-							sessionId={tab.browserSessionId!}
-							groupId={homePane.id}
-							tabId={tab.id}
-							initialUrl={tab.path}
-							active={tab.id === homePane.activeTabId && homePane.id === $homeState.activeGroupId}
-							onTabUpdate={(label) => updateHomeBrowserTab(tab.id, label, homePane.id)}
-							onOpenBrowser={(url) => openHomeBrowser(url, homePane.id)}
-						/>
+						{#if LazyBrowserPreview}
+							<LazyBrowserPreview
+								sessionId={tab.browserSessionId!}
+								groupId={homePane.id}
+								tabId={tab.id}
+								initialUrl={tab.path}
+								active={tab.id === homePane.activeTabId && homePane.id === $homeState.activeGroupId}
+								onTabUpdate={(label) => updateHomeBrowserTab(tab.id, label, homePane.id)}
+								onOpenBrowser={(url) => openHomeBrowser(url, homePane.id)}
+							/>
+						{:else}
+							<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+						{/if}
 					</div>
 				{/each}
 				{#if homeTab?.type === 'home'}
@@ -1456,7 +1517,11 @@
 		<div class="pane-content">
 			{#each group.tabs.filter((tab) => tab.type === 'files') as tab (tab.id)}
 				<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== group.activeTabId}>
-					<FileBrowser />
+					{#if LazyFileBrowser}
+						<LazyFileBrowser />
+					{:else}
+						<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+					{/if}
 				</div>
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'file' && tab.filePath) as tab (tab.id)}
@@ -1475,15 +1540,19 @@
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'chat') as tab (tab.id)}
 				<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== group.activeTabId}>
-					<ChatPanel
-						workspace={$currentWorkspace!.path}
-						chatId={tab.path?.startsWith('new-') || tab.path?.startsWith('pending-')
-							? undefined
-							: tab.path}
-						tabId={tab.id}
-						active={tab.id === group.activeTabId}
-						onopenchat={(chatId) => openChatTab(chatId, group.id)}
-					/>
+					{#if LazyChatPanel}
+						<LazyChatPanel
+							workspace={$currentWorkspace!.path}
+							chatId={tab.path?.startsWith('new-') || tab.path?.startsWith('pending-')
+								? undefined
+								: tab.path}
+							tabId={tab.id}
+							active={tab.id === group.activeTabId}
+							onopenchat={(chatId) => openChatTab(chatId, group.id)}
+						/>
+					{:else}
+						<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+					{/if}
 				</div>
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'terminal' && tab.sessionId) as tab (tab.id)}
@@ -1497,17 +1566,25 @@
 			{/each}
 			{#each group.tabs.filter((tab) => tab.type === 'browser' && tab.browserSessionId) as tab (tab.id)}
 				<div class="persisted-tab" class:persisted-tab-hidden={tab.id !== group.activeTabId}>
-					<BrowserPreview
-						sessionId={tab.browserSessionId!}
-						groupId={group.id}
-						tabId={tab.id}
-						initialUrl={tab.path}
-						active={tab.id === group.activeTabId && group.id === activeGroup?.id}
-					/>
+					{#if LazyBrowserPreview}
+						<LazyBrowserPreview
+							sessionId={tab.browserSessionId!}
+							groupId={group.id}
+							tabId={tab.id}
+							initialUrl={tab.path}
+							active={tab.id === group.activeTabId && group.id === activeGroup?.id}
+						/>
+					{:else}
+						<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+					{/if}
 				</div>
 			{/each}
 			{#if !groupTab}
-				<FileBrowser />
+				{#if LazyFileBrowser}
+					<LazyFileBrowser />
+				{:else}
+					<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+				{/if}
 			{:else if groupTab.type === 'terminal' && !groupTab.sessionId}
 				<div class="flex items-center justify-center h-full"><Spinner size={20} /></div>
 			{:else if groupTab.type === 'browser' && !groupTab.browserSessionId}
@@ -1520,7 +1597,11 @@
 			{/if}
 			{#if $gitReviewOpen && group.id === allGroups[0]?.id}
 				<div class="persisted-tab git-review-panel">
-					<GitView />
+					{#if LazyGitView}
+						<LazyGitView />
+					{:else}
+						<div class="flex h-full items-center justify-center"><Spinner size={16} /></div>
+					{/if}
 				</div>
 			{/if}
 		</div>
