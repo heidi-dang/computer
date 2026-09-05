@@ -445,6 +445,59 @@ class MemoryAdvancedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["memory_id"], memory.memory_id)
         self.assertNotIn("source_event_ids", result)
 
+    async def test_causal_pruning_modifies_graph_confidence(self):
+        direct = await self._memory("Payments platform overview.")
+        related = await self._memory(
+            "Deploy [[Payments]] from heidi/repo only after verification.", kind="procedure"
+        )
+
+        await self.service.project_graph(
+            user_id="user-1",
+            workspace="/repo",
+            memory_id=direct.memory_id,
+            heading="Payments",
+        )
+        await self.service.project_graph(
+            user_id="user-1",
+            workspace="/repo",
+            memory_id=related.memory_id,
+            heading="Payments",
+        )
+
+        # Verify initial edge
+        snapshot_initial = await self.service.graph_store.snapshot(user_id="user-1", workspace="/repo")
+        self.assertGreater(len(snapshot_initial["relationships"]), 0)
+        initial_confidence = snapshot_initial["relationships"][0]["confidence"]
+        self.assertEqual(initial_confidence, 0.85)
+
+        # Project the memory to create the profile first
+        memory_row = await self.store.get_memory(related.memory_id)
+        await self.intelligence.project(memory_row)
+
+        # Emit a success signal
+        success_signal = await self.intelligence.record_outcome(related.memory_id, outcome="success")
+        self.assertEqual(success_signal["delta_ppm"], 10000)
+
+        # Apply the signal to the graph
+        await self.service.graph_store.apply_causal_interference(
+            user_id="user-1", workspace="/repo", causal_signals=[success_signal]
+        )
+
+        # Verify confidence went up
+        snapshot_success = await self.service.graph_store.snapshot(user_id="user-1", workspace="/repo")
+        self.assertEqual(snapshot_success["relationships"][0]["confidence"], 0.86)
+
+        # Emit massive failure to prune edge
+        failure_signals = [{"memory_id": related.memory_id, "delta_ppm": -800000}]
+        result = await self.service.graph_store.apply_causal_interference(
+            user_id="user-1", workspace="/repo", causal_signals=failure_signals
+        )
+
+        # Verify edge dropped below threshold and archived
+        self.assertEqual(result["archived"], 1)
+        snapshot_pruned = await self.service.graph_store.snapshot(user_id="user-1", workspace="/repo")
+        self.assertEqual(len(snapshot_pruned["relationships"]), 0)
+
     async def test_pgvector_adapter_is_optional_configured_and_uses_no_secret_persistence(self):
         with patch.dict(
             os.environ,

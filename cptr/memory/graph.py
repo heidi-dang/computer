@@ -234,6 +234,57 @@ class MemoryGraphStore:
                 )
         return {"entity_ids": entity_ids, "relationship_ids": relationship_ids}
 
+    async def apply_causal_interference(
+        self, *, user_id: str, workspace: str, causal_signals: list[dict[str, Any]]
+    ) -> dict[str, int]:
+        workspace = str(workspace or "")
+        now = _now_ms()
+        updated_count = 0
+        archived_count = 0
+
+        signal_map: dict[str, int] = {}
+        for signal in causal_signals:
+            mem_id = signal.get("memory_id")
+            delta = signal.get("delta_ppm", 0)
+            if mem_id and delta:
+                signal_map[str(mem_id)] = signal_map.get(str(mem_id), 0) + int(delta)
+
+        if not signal_map:
+            return {"updated": 0, "archived": 0}
+
+        async with self._session() as db:
+            async with db.begin():
+                relationships = list(
+                    (
+                        await db.scalars(
+                            select(MemoryRelationship).where(
+                                MemoryRelationship.user_id == user_id,
+                                MemoryRelationship.workspace == workspace,
+                                MemoryRelationship.status == "active",
+                            )
+                        )
+                    ).all()
+                )
+
+                for row in relationships:
+                    sources = list(row.source_memory_ids or [])
+                    edge_delta = sum(signal_map.get(str(src), 0) for src in sources)
+
+                    if edge_delta != 0:
+                        current_ppm = int(row.confidence_ppm or 850_000)
+                        new_ppm = max(0, min(1_000_000, current_ppm + edge_delta))
+
+                        if new_ppm < 100_000:
+                            row.status = "archived"
+                            row.updated_at_ms = now
+                            archived_count += 1
+                        elif new_ppm != current_ppm:
+                            row.confidence_ppm = new_ppm
+                            row.updated_at_ms = now
+                            updated_count += 1
+
+        return {"updated": updated_count, "archived": archived_count}
+
     async def clear_scope(self, *, user_id: str, workspace: str) -> None:
         workspace = str(workspace or "")
         async with self._session() as db:

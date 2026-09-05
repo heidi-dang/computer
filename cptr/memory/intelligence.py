@@ -204,23 +204,27 @@ class MemoryIntelligenceStore:
                     profile.last_seen_at_ms = now
                     profile.updated_at_ms = now
 
-    async def record_outcome(self, memory_id: str, *, outcome: str) -> None:
+    async def record_outcome(self, memory_id: str, *, outcome: str) -> dict[str, Any] | None:
         normalized = str(outcome or "").strip().lower()
         now = _now_ms()
+        causal_signal = None
         async with self._session() as db:
             async with db.begin():
                 procedure = await db.get(MemoryProcedureProfile, memory_id)
                 if procedure is not None:
                     if normalized in {"success", "helpful", "passed", "complete"}:
                         procedure.success_count = int(procedure.success_count or 0) + 1
+                        causal_signal = {"memory_id": memory_id, "delta_ppm": 10000}
                     elif normalized in {"failure", "failed", "unhelpful", "error"}:
                         procedure.failure_count = int(procedure.failure_count or 0) + 1
+                        causal_signal = {"memory_id": memory_id, "delta_ppm": -5000}
                     procedure.last_outcome_at_ms = now
                     procedure.updated_at_ms = now
                 failure = await db.get(MemoryFailureProfile, memory_id)
                 if failure is not None:
                     failure.last_seen_at_ms = now
                     failure.updated_at_ms = now
+        return causal_signal
 
     async def get_procedure(self, memory_id: str) -> dict[str, Any]:
         async with self._session() as db:

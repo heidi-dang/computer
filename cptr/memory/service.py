@@ -699,10 +699,16 @@ class EmbeddedMemoryService:
                 positive=positive and not negative,
             )
         if normalized_outcome:
-            await self.intelligence_store.record_outcome(
+            causal_signal = await self.intelligence_store.record_outcome(
                 value.memory_id,
                 outcome=normalized_outcome,
             )
+            if causal_signal:
+                await self.graph_store.apply_causal_interference(
+                    user_id=value.user_id,
+                    workspace=value.workspace,
+                    causal_signals=[causal_signal],
+                )
 
     async def inspect(self, memory_id: str, *, user_id: str, workspace: str) -> dict[str, Any]:
         row = await self.store.get_memory(memory_id)
