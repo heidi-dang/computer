@@ -9,7 +9,8 @@ execution service without prematurely enabling unsafe multi-worker serving.
 from __future__ import annotations
 
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from cptr.env import COMMAND_SESSION_MAX_RETAINED, COMMAND_SESSION_TTL_SECONDS
@@ -18,10 +19,25 @@ from cptr.env import COMMAND_SESSION_MAX_RETAINED, COMMAND_SESSION_TTL_SECONDS
 class CommandSessionRegistry:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
+        self._launch_reservations: dict[object, str | None] = {}
         self.total_created = 0
         self.total_reaped = 0
 
-    def register(self, session_id: str, session: dict[str, Any]) -> None:
+    def register(
+        self,
+        session_id: str,
+        session: dict[str, Any],
+        *,
+        reservation_token: object | None = None,
+    ) -> None:
+        if reservation_token is not None:
+            missing = object()
+            reserved_user = self._launch_reservations.get(reservation_token, missing)
+            if reserved_user is missing:
+                raise RuntimeError("command launch reservation is not active")
+            if reserved_user != session.get("user_id"):
+                raise RuntimeError("command launch reservation owner mismatch")
+            del self._launch_reservations[reservation_token]
         self.sessions[session_id] = session
         self.total_created += 1
 
@@ -44,6 +60,22 @@ class CommandSessionRegistry:
     @staticmethod
     def _process_exit_state(session: dict[str, Any]) -> tuple[bool, int | None]:
         """Return whether the owned child has exited without trusting cached `done`."""
+        wait_task = session.get("process_wait_task")
+        task_done = getattr(wait_task, "done", None)
+        task_result = getattr(wait_task, "result", None)
+        if callable(task_done) and callable(task_result):
+            try:
+                if task_done():
+                    result = task_result()
+                    try:
+                        return True, int(result) if result is not None else None
+                    except (TypeError, ValueError):
+                        return True, None
+            except BaseException:
+                # A cancelled/failed watcher is not proof of process exit; fall
+                # back to the concrete process handle below.
+                pass
+
         proc = session.get("proc")
         if proc is None:
             return False, None
@@ -114,6 +146,53 @@ class CommandSessionRegistry:
             if self.is_active(session) and (user_id is None or session.get("user_id") == user_id)
         )
 
+    def launch_reservation_count(self, user_id: str | None = None) -> int:
+        return sum(
+            1
+            for reserved_user in self._launch_reservations.values()
+            if user_id is None or reserved_user == user_id
+        )
+
+    def capacity_count(self, user_id: str | None = None) -> int:
+        return self.active_count(user_id) + self.launch_reservation_count(user_id)
+
+    def try_reserve_launch(self, user_id: str | None, limit: int) -> object | None:
+        """Atomically reserve one launch slot before the first spawn await."""
+        if limit <= 0:
+            return None
+        self.reconcile()
+        active = sum(
+            1
+            for session in self.sessions.values()
+            if self.is_active(session) and (user_id is None or session.get("user_id") == user_id)
+        )
+        if active + self.launch_reservation_count(user_id) >= limit:
+            return None
+        token = object()
+        self._launch_reservations[token] = user_id
+        return token
+
+    def release_launch_reservation(self, reservation_token: object | None) -> bool:
+        if reservation_token is None or reservation_token not in self._launch_reservations:
+            return False
+        del self._launch_reservations[reservation_token]
+        return True
+
+    @contextmanager
+    def reserve_launch(self, user_id: str | None, limit: int) -> Iterator[object | None]:
+        """Reserve capacity for one launch and always release an unconsumed slot."""
+        reservation_token = self.try_reserve_launch(user_id, limit)
+        try:
+            yield reservation_token
+        finally:
+            self.release_launch_reservation(reservation_token)
+
+    def clear_launch_reservations(self) -> int:
+        """Discard pre-registration slots that cannot survive an application lifespan."""
+        cleared = len(self._launch_reservations)
+        self._launch_reservations.clear()
+        return cleared
+
     def reap(self, *, now: float | None = None) -> list[str]:
         """Reconcile completion, evict expired sessions, and enforce the retained cap."""
         current = time.time() if now is None else now
@@ -152,8 +231,11 @@ class CommandSessionRegistry:
         retained_output_bytes = sum(
             len(session.get("output") or b"") for session in self.sessions.values()
         )
+        launching = len(self._launch_reservations)
         return {
             "active": active,
+            "launching": launching,
+            "capacity_used": active + launching,
             "completed_retained": completed,
             "total_retained": len(self.sessions),
             "retained_output_bytes": retained_output_bytes,

@@ -1,4 +1,5 @@
 import asyncio
+import sys
 import tempfile
 import time
 import unittest
@@ -15,10 +16,17 @@ from cptr.routers.coding import (
     read_workspace_file,
     search_workspace_files,
 )
-from cptr.services.execution_manager import CommandSessionRegistry
+from cptr.services.execution_manager import CommandSessionRegistry, command_session_registry
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
 from cptr.utils.runtime import _list_tree_entries, _read_text_file, _read_text_files
-from cptr.utils.tools import _STOP_SESSION_WRITER, _command_event_writer, command_sessions
+from cptr.utils.tools import (
+    _STOP_SESSION_WRITER,
+    _command_event_writer,
+    cancel_owned_command_sessions,
+    command_sessions,
+    run_command,
+    start_command_session_manager,
+)
 
 
 class FilesystemPerformanceContractTests(unittest.TestCase):
@@ -209,7 +217,265 @@ class TerminalCoalescingPerformanceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class CommandSessionAdmissionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_spawn_releases_reserved_capacity(self):
+        identity = SimpleNamespace(is_pam=False, app_user_id="pool-failed-spawn")
+        request = SimpleNamespace()
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context",
+                    new=AsyncMock(return_value=identity),
+                ),
+                patch(
+                    "cptr.utils.tools.asyncio.create_subprocess_shell",
+                    new=AsyncMock(side_effect=RuntimeError("spawn failed")),
+                ),
+            ):
+                result = await run_command(
+                    "ignored",
+                    ".",
+                    0,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws-pool",
+                        "request": request,
+                        "user_id": "pool-failed-spawn",
+                    },
+                    __use_pty=False,
+                )
+
+        self.assertEqual(result, "Error: spawn failed")
+        self.assertEqual(command_session_registry.launch_reservation_count("pool-failed-spawn"), 0)
+
+    async def test_cancelled_spawn_releases_reserved_capacity(self):
+        identity = SimpleNamespace(is_pam=False, app_user_id="pool-cancelled-spawn")
+        request = SimpleNamespace()
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context",
+                    new=AsyncMock(return_value=identity),
+                ),
+                patch(
+                    "cptr.utils.tools.asyncio.create_subprocess_shell",
+                    new=AsyncMock(side_effect=asyncio.CancelledError()),
+                ),
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await run_command(
+                        "ignored",
+                        ".",
+                        0,
+                        __context__={
+                            "workspace": workspace_root,
+                            "workspace_id": "ws-pool",
+                            "request": request,
+                            "user_id": "pool-cancelled-spawn",
+                        },
+                        __use_pty=False,
+                    )
+
+        self.assertEqual(
+            command_session_registry.launch_reservation_count("pool-cancelled-spawn"), 0
+        )
+
+    async def test_unexpected_setup_failure_releases_reservation_and_kills_spawned_process(self):
+        identity = SimpleNamespace(is_pam=False, app_user_id="pool-setup-failure")
+        request = SimpleNamespace()
+        fake_proc = SimpleNamespace(pid=12345, returncode=None)
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context",
+                    new=AsyncMock(return_value=identity),
+                ),
+                patch(
+                    "cptr.utils.tools.asyncio.create_subprocess_shell",
+                    new=AsyncMock(return_value=fake_proc),
+                ),
+                patch(
+                    "cptr.utils.tools.Runtime.write_file",
+                    new=AsyncMock(side_effect=RuntimeError("unexpected setup failure")),
+                ),
+                patch("cptr.utils.tools._kill_process_group") as kill,
+            ):
+                result = await run_command(
+                    "ignored",
+                    ".",
+                    0,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws-pool",
+                        "request": request,
+                        "user_id": "pool-setup-failure",
+                    },
+                    __use_pty=False,
+                )
+
+        self.assertEqual(result, "Error: unexpected setup failure")
+        self.assertEqual(command_session_registry.launch_reservation_count("pool-setup-failure"), 0)
+        kill.assert_called_once_with(12345, force=True)
+
+    async def test_cancelled_post_registration_setup_stops_unreturned_process(self):
+        identity = SimpleNamespace(is_pam=False, app_user_id="pool-post-register-cancel")
+        request = SimpleNamespace()
+        fake_stdin = SimpleNamespace(write=lambda _data: None, drain=lambda: None)
+        fake_proc = SimpleNamespace(
+            pid=12345,
+            stdin=fake_stdin,
+            stdout=None,
+            stderr=None,
+            returncode=None,
+        )
+        blocker = asyncio.Event()
+        process_stopped = asyncio.Event()
+
+        async def blocked_wait(*_args, **_kwargs):
+            await process_stopped.wait()
+            fake_proc.returncode = -9
+            return -9
+
+        async def blocked_capture(*_args, **_kwargs):
+            await blocker.wait()
+
+        def kill_process(pid: int, force: bool = False):
+            self.assertEqual(pid, 12345)
+            if force:
+                process_stopped.set()
+
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context",
+                    new=AsyncMock(return_value=identity),
+                ),
+                patch(
+                    "cptr.utils.tools.asyncio.create_subprocess_shell",
+                    new=AsyncMock(return_value=fake_proc),
+                ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.utils.tools._wait_for_command_process", side_effect=blocked_wait),
+                patch(
+                    "cptr.utils.tools.stream_command_session_output", side_effect=blocked_capture
+                ),
+                patch("cptr.utils.tools._command_log_writer", side_effect=blocked_capture),
+                patch(
+                    "cptr.utils.tools.drain_command_session_input",
+                    new=AsyncMock(side_effect=asyncio.CancelledError()),
+                ),
+                patch("cptr.utils.tools._kill_process_group", side_effect=kill_process) as kill,
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await run_command(
+                        "ignored",
+                        ".",
+                        0,
+                        __context__={
+                            "workspace": workspace_root,
+                            "request": request,
+                            "user_id": "pool-post-register-cancel",
+                        },
+                        __use_pty=False,
+                        __stdin="x",
+                    )
+
+                owned = [
+                    (command_id, session)
+                    for command_id, session in command_sessions.items()
+                    if session.get("user_id") == "pool-post-register-cancel"
+                ]
+                self.assertEqual(len(owned), 1)
+                command_id, session = owned[0]
+                self.assertIsInstance(session.get("process_wait_task"), asyncio.Task)
+                self.assertIsInstance(session.get("log_task"), asyncio.Task)
+                self.assertIsInstance(session.get("log_writer_task"), asyncio.Task)
+                kill.assert_called_once_with(12345, force=True)
+                self.assertEqual(
+                    command_session_registry.active_count("pool-post-register-cancel"), 0
+                )
+                tasks = [
+                    task
+                    for task in (
+                        session.get("process_wait_task"),
+                        session.get("log_task"),
+                        session.get("log_writer_task"),
+                    )
+                    if isinstance(task, asyncio.Task)
+                ]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                command_sessions.pop(command_id, None)
+
+    async def test_concurrent_launches_never_oversubscribe_five_slot_pool(self):
+        identity = SimpleNamespace(is_pam=False, app_user_id="pool-user")
+        request = SimpleNamespace()
+        message_id = "pool-admission-race"
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context",
+                    new=AsyncMock(return_value=identity),
+                ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+            ):
+                command = f'{sys.executable} -c "import time; time.sleep(30)"'
+                try:
+                    results = await asyncio.gather(
+                        *[
+                            run_command(
+                                command,
+                                ".",
+                                0,
+                                __context__={
+                                    "workspace": workspace_root,
+                                    "workspace_id": "ws-pool",
+                                    "request": request,
+                                    "user_id": "pool-user",
+                                    "message_id": message_id,
+                                },
+                                __use_pty=False,
+                            )
+                            for _ in range(6)
+                        ]
+                    )
+                    accepted = [result for result in results if result.startswith("Task ")]
+                    rejected = [result for result in results if result.startswith("Error:")]
+                    self.assertEqual(len(accepted), 5)
+                    self.assertEqual(len(rejected), 1)
+                    self.assertIn("too many running command sessions (5/5)", rejected[0])
+                finally:
+                    await cancel_owned_command_sessions(message_id, timeout=2.0)
+                    for command_id, session in list(command_sessions.items()):
+                        if session.get("message_id") == message_id:
+                            command_sessions.pop(command_id, None)
+
+
 class CommandSessionRetentionTests(unittest.TestCase):
+    def test_launch_reservation_context_releases_capacity_on_arbitrary_exception(self):
+        registry = CommandSessionRegistry()
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            with registry.reserve_launch("user-1", 5) as token:
+                self.assertIsNotNone(token)
+                self.assertEqual(registry.launch_reservation_count("user-1"), 1)
+                raise RuntimeError("boom")
+
+        self.assertEqual(registry.launch_reservation_count("user-1"), 0)
+
+    def test_new_lifespan_clears_stale_launch_reservations(self):
+        token = command_session_registry.try_reserve_launch("stale-lifespan-user", 5)
+        self.assertIsNotNone(token)
+        self.assertEqual(
+            command_session_registry.launch_reservation_count("stale-lifespan-user"), 1
+        )
+
+        start_command_session_manager()
+
+        self.assertEqual(
+            command_session_registry.launch_reservation_count("stale-lifespan-user"), 0
+        )
+
     def test_registry_reaps_expired_completed_sessions(self):
         registry = CommandSessionRegistry()
         registry.register(
@@ -226,6 +492,24 @@ class CommandSessionRetentionTests(unittest.TestCase):
         self.assertEqual(removed, ["expired"])
         self.assertIn("active", registry.sessions)
         self.assertEqual(registry.stats()["total_reaped"], 1)
+
+    def test_registry_uses_completed_process_watcher_when_process_handle_is_stale(self):
+        registry = CommandSessionRegistry()
+        registry.register(
+            "watched",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "created_at": 1.0,
+                "proc": SimpleNamespace(returncode=None, poll=lambda: None),
+                "process_wait_task": SimpleNamespace(done=lambda: True, result=lambda: 0),
+                "output": bytearray(),
+            },
+        )
+
+        self.assertEqual(registry.active_count("user-1"), 0)
+        self.assertTrue(registry.sessions["watched"]["done"])
+        self.assertEqual(registry.sessions["watched"]["exit_code"], 0)
 
     def test_registry_reconciles_exited_process_before_counting_active_slots(self):
         registry = CommandSessionRegistry()

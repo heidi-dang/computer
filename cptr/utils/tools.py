@@ -478,6 +478,19 @@ def _queue_command_terminal_bytes(
         session["terminal_event_overflow_bytes"] = overflow_bytes
 
 
+async def _wait_for_command_process(proc, *, pty_mode: bool) -> int | None:
+    """Own process termination independently from output-capture lifecycle."""
+    if pty_mode:
+        result = await asyncio.get_running_loop().run_in_executor(None, proc.wait)
+    else:
+        await proc.wait()
+        result = getattr(proc, "returncode", None)
+    try:
+        return int(result) if result is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 async def stream_command_session_output(command_session_id: str):
     """Capture process output without making PTY reads wait on disk or SQLite."""
     session = command_sessions.get(command_session_id)
@@ -574,15 +587,26 @@ async def stream_command_session_output(command_session_id: str):
         pass
     finally:
         session = command_sessions.get(command_session_id)
-        if master_fd is not None:
+        wait_task = session.get("process_wait_task") if session else None
+        if isinstance(wait_task, asyncio.Task):
+            try:
+                exit_code = await asyncio.shield(wait_task)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                exit_code = None
+        elif master_fd is not None:
             exit_code = await loop.run_in_executor(None, proc.wait)
+        else:
+            await proc.wait()
+            exit_code = proc.returncode
+        if exit_code is None:
+            exit_code = getattr(proc, "returncode", None)
+        if master_fd is not None:
             try:
                 os.close(master_fd)
             except OSError:
                 pass
-        else:
-            await proc.wait()
-            exit_code = proc.returncode
 
         if session:
             session["done"] = True
@@ -905,6 +929,7 @@ def start_command_session_manager() -> None:
     """Allow new command sessions after a fresh application lifespan starts."""
     global _accept_new_command_sessions
     _accept_new_command_sessions = True
+    command_session_registry.clear_launch_reservations()
     command_session_registry.reap()
 
 
@@ -1890,6 +1915,42 @@ async def multi_edit_file(
     return f"Applied {applied} edits to {path}"
 
 
+def _abort_unregistered_command(proc, master_fd: int | None) -> None:
+    """Fail closed if launch setup aborts before registry ownership is established."""
+    if proc is not None:
+        try:
+            _kill_process_group(proc.pid, force=True)
+        except Exception:
+            pass
+    if master_fd is not None:
+        try:
+            os.close(master_fd)
+        except OSError:
+            pass
+
+
+async def _abort_unreturned_command_session(command_session_id: str) -> None:
+    """Stop a registered child whose initiating request was cancelled before returning its ID."""
+    session = command_sessions.get(command_session_id)
+    if session is None:
+        return
+    proc = session.get("proc")
+    if proc is not None:
+        try:
+            _kill_process_group(proc.pid, force=True)
+        except Exception:
+            pass
+    wait_task = session.get("process_wait_task")
+    if isinstance(wait_task, asyncio.Task) and not wait_task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(wait_task), timeout=1.0)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+    command_session_registry.reconcile()
+
+
 async def run_command(
     command: str,
     cwd: str = ".",
@@ -1922,10 +1983,6 @@ async def run_command(
     if not work_dir.is_dir():
         return f"Error: not a directory: {cwd}"
 
-    active = command_session_registry.active_count(user_id)
-    if active >= MAX_COMMAND_SESSIONS:
-        return f"Error: too many running command sessions ({active}/{MAX_COMMAND_SESSIONS}). Stop one first."
-
     if identity.is_pam:
         env = env_for(identity, work_dir, {"PAGER": "cat", "GIT_PAGER": "cat"})
         preexec = preexec_for(identity)
@@ -1933,115 +1990,150 @@ async def run_command(
         env = {**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"}
         preexec = None
     master_fd = None
+    proc = None
+    with command_session_registry.reserve_launch(
+        user_id, MAX_COMMAND_SESSIONS
+    ) as launch_reservation:
+        if launch_reservation is None:
+            used = command_session_registry.capacity_count(user_id)
+            return f"Error: too many running command sessions ({used}/{MAX_COMMAND_SESSIONS}). Stop one first."
 
-    try:
-        if _PTY_AVAILABLE and __use_pty:
-            if __argv is None:
-                proc, master_fd = _spawn_pty(
-                    command, str(work_dir), env, preexec, rows=__rows, cols=__cols
-                )
-            else:
-                proc, master_fd = _spawn_pty_argv(
-                    __argv, str(work_dir), env, preexec, rows=__rows, cols=__cols
-                )
-        else:
-            # Keep the fallback subprocess in its own process group so task
-            # cancellation cannot signal the CPTR parent or another task.
-            if os.name == "nt":
-                kwargs = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-            else:
-                kwargs = {"start_new_session": True}
-                if preexec is not None:
-                    kwargs["preexec_fn"] = preexec
-            if __argv is None:
-                proc = await asyncio.create_subprocess_shell(
-                    command,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    stdin=asyncio.subprocess.PIPE,
-                    cwd=str(work_dir),
-                    env=env,
-                    **kwargs,
-                )
-            else:
-                proc = await asyncio.create_subprocess_exec(
-                    *__argv,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    stdin=asyncio.subprocess.PIPE,
-                    cwd=str(work_dir),
-                    env=env,
-                    **kwargs,
-                )
-    except Exception as e:
-        return f"Error: {e}"
-
-    command_session_id = uuid.uuid4().hex[:8]
-    log_path = Path(workspace) / ".cptr" / "task_logs" / f"{command_session_id}.jsonl"
-    try:
-        if request is None:
-            _kill_process_group(proc.pid)
-            return "Error: request context unavailable"
-        await Runtime.write_file(request, str(log_path), "")
-    except FileError as e:
         try:
-            _kill_process_group(proc.pid)
-        except Exception:
-            pass
-        return f"Error: {e}"
+            if _PTY_AVAILABLE and __use_pty:
+                if __argv is None:
+                    proc, master_fd = _spawn_pty(
+                        command, str(work_dir), env, preexec, rows=__rows, cols=__cols
+                    )
+                else:
+                    proc, master_fd = _spawn_pty_argv(
+                        __argv, str(work_dir), env, preexec, rows=__rows, cols=__cols
+                    )
+            else:
+                # Keep the fallback subprocess in its own process group so task
+                # cancellation cannot signal the CPTR parent or another task.
+                if os.name == "nt":
+                    kwargs = {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+                else:
+                    kwargs = {"start_new_session": True}
+                    if preexec is not None:
+                        kwargs["preexec_fn"] = preexec
+                if __argv is None:
+                    proc = await asyncio.create_subprocess_shell(
+                        command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        stdin=asyncio.subprocess.PIPE,
+                        cwd=str(work_dir),
+                        env=env,
+                        **kwargs,
+                    )
+                else:
+                    proc = await asyncio.create_subprocess_exec(
+                        *__argv,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        stdin=asyncio.subprocess.PIPE,
+                        cwd=str(work_dir),
+                        env=env,
+                        **kwargs,
+                    )
 
-    live_target: dict[str, str] | None = None
-    control_task_id = __context__.get("control_task_id")
-    workspace_id = __context__.get("workspace_id")
-    if control_task_id:
-        live_target = {
-            "target_type": "task",
-            "target_id": str(control_task_id),
-        }
-    elif workspace_id:
-        live_target = {
-            "target_type": "command",
-            "target_id": command_session_id,
-            "workspace_id": str(workspace_id),
-        }
+            command_session_id = uuid.uuid4().hex[:8]
+            log_path = Path(workspace) / ".cptr" / "task_logs" / f"{command_session_id}.jsonl"
+            if request is None:
+                _abort_unregistered_command(proc, master_fd)
+                return "Error: request context unavailable"
+            await Runtime.write_file(request, str(log_path), "")
 
-    session = {
-        "command_session_id": command_session_id,
-        "master_fd": master_fd,
-        "proc": proc,
-        "output": bytearray(),
-        "total_bytes": 0,
-        "command": command,
-        "workspace": workspace,
-        "user_id": user_id,
-        "identity": identity,
-        "chat_id": __context__.get("chat_id"),
-        "message_id": __context__.get("message_id"),
-        "call_id": __context__.get("call_id"),
-        "live_target": live_target,
-        "created_at": time.time(),
-        "completed_at": None,
-        "done": False,
-        "exit_code": None,
-        "log_path": str(log_path),
-        "log_task": None,
-        "condition": asyncio.Condition(),
-        "log_queue": asyncio.Queue(maxsize=COMMAND_LOG_QUEUE_SIZE),
-        "event_queue": (
-            asyncio.Queue(maxsize=COMMAND_EVENT_QUEUE_SIZE) if live_target is not None else None
-        ),
-        "log_writer_task": None,
-        "event_writer_task": None,
-        "terminal_events_published": 0,
-        "terminal_event_dropped_bytes": 0,
-        "terminal_event_overflow": [],
-        "terminal_event_overflow_bytes": 0,
-        "terminal_event_queue_high_water": 0,
-        "pty": bool(master_fd is not None),
-        "rows": __rows,
-        "cols": __cols,
-    }
-    command_session_registry.register(command_session_id, session)
+            live_target: dict[str, str] | None = None
+            control_task_id = __context__.get("control_task_id")
+            workspace_id = __context__.get("workspace_id")
+            if control_task_id:
+                live_target = {
+                    "target_type": "task",
+                    "target_id": str(control_task_id),
+                }
+            elif workspace_id:
+                live_target = {
+                    "target_type": "command",
+                    "target_id": command_session_id,
+                    "workspace_id": str(workspace_id),
+                }
+
+            session = {
+                "command_session_id": command_session_id,
+                "master_fd": master_fd,
+                "proc": proc,
+                "output": bytearray(),
+                "total_bytes": 0,
+                "command": command,
+                "workspace": workspace,
+                "user_id": user_id,
+                "identity": identity,
+                "chat_id": __context__.get("chat_id"),
+                "message_id": __context__.get("message_id"),
+                "call_id": __context__.get("call_id"),
+                "live_target": live_target,
+                "created_at": time.time(),
+                "completed_at": None,
+                "done": False,
+                "exit_code": None,
+                "log_path": str(log_path),
+                "log_task": None,
+                "condition": asyncio.Condition(),
+                "log_queue": asyncio.Queue(maxsize=COMMAND_LOG_QUEUE_SIZE),
+                "event_queue": (
+                    asyncio.Queue(maxsize=COMMAND_EVENT_QUEUE_SIZE)
+                    if live_target is not None
+                    else None
+                ),
+                "log_writer_task": None,
+                "event_writer_task": None,
+                "terminal_events_published": 0,
+                "terminal_event_dropped_bytes": 0,
+                "terminal_event_overflow": [],
+                "terminal_event_overflow_bytes": 0,
+                "terminal_event_queue_high_water": 0,
+                "pty": bool(master_fd is not None),
+                "rows": __rows,
+                "cols": __cols,
+            }
+            command_session_registry.register(
+                command_session_id,
+                session,
+                reservation_token=launch_reservation,
+            )
+        except asyncio.CancelledError:
+            _abort_unregistered_command(proc, master_fd)
+            raise
+        except FileError as e:
+            _abort_unregistered_command(proc, master_fd)
+            return f"Error: {e}"
+        except Exception as e:
+            _abort_unregistered_command(proc, master_fd)
+            return f"Error: {e}"
+
+    # Establish process ownership and output draining before the first await
+    # after registration. A cancelled request must never strand a child process
+    # in the five-slot pool without an independent waiter/capture owner.
+    session["process_wait_task"] = asyncio.create_task(
+        _wait_for_command_process(proc, pty_mode=bool(master_fd is not None)),
+        name=f"cptr-command-wait-{command_session_id}",
+    )
+    session["log_writer_task"] = asyncio.create_task(
+        _command_log_writer(command_session_id), name=f"cptr-command-log-{command_session_id}"
+    )
+    if live_target is not None:
+        session["event_writer_task"] = asyncio.create_task(
+            _command_event_writer(command_session_id),
+            name=f"cptr-command-events-{command_session_id}",
+        )
+    log_task = asyncio.create_task(
+        stream_command_session_output(command_session_id),
+        name=f"cptr-command-capture-{command_session_id}",
+    )
+    session["log_task"] = log_task
+
     if __stdin:
         input_error = send_command_session_input(
             request,
@@ -2051,31 +2143,26 @@ async def run_command(
         )
         if input_error:
             stop_command_session(request, command_session_id, force=True, context=__context__)
-            command_session_registry.remove(command_session_id)
             return f"Error: {input_error}"
-        await drain_command_session_input(request, command_session_id, context=__context__)
-    session["log_writer_task"] = asyncio.create_task(
-        _command_log_writer(command_session_id), name=f"cptr-command-log-{command_session_id}"
-    )
+        try:
+            await drain_command_session_input(request, command_session_id, context=__context__)
+        except asyncio.CancelledError:
+            await _abort_unreturned_command_session(command_session_id)
+            raise
     if live_target is not None:
-        session["event_writer_task"] = asyncio.create_task(
-            _command_event_writer(command_session_id),
-            name=f"cptr-command-events-{command_session_id}",
-        )
-        await _queue_command_session_event(
-            session,
-            "command.started",
-            {
-                "command_id": command_session_id,
-                "summary": command,
-                "status": "RUNNING",
-            },
-        )
-    log_task = asyncio.create_task(
-        stream_command_session_output(command_session_id),
-        name=f"cptr-command-capture-{command_session_id}",
-    )
-    session["log_task"] = log_task
+        try:
+            await _queue_command_session_event(
+                session,
+                "command.started",
+                {
+                    "command_id": command_session_id,
+                    "summary": command,
+                    "status": "RUNNING",
+                },
+            )
+        except asyncio.CancelledError:
+            await _abort_unreturned_command_session(command_session_id)
+            raise
 
     # Wait for the command to finish inline (matches open-terminal behaviour)
     if wait is None and EXECUTE_TIMEOUT:
@@ -2087,6 +2174,9 @@ async def run_command(
             )
         except asyncio.TimeoutError:
             pass
+        except asyncio.CancelledError:
+            await _abort_unreturned_command_session(command_session_id)
+            raise
 
     task = command_sessions.get(command_session_id)
     output = task["output"].decode(errors="replace") if task else ""
