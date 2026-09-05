@@ -1134,7 +1134,10 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=SimpleNamespace(id="bdv_1")),
             ),
             patch("cptr.routers.browser_device.browser_device_connections.attach", new=AsyncMock()),
-            patch("cptr.routers.browser_device.browser_device_connections.detach", new=AsyncMock()),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.detach",
+                new=AsyncMock(return_value=False),
+            ),
             patch(
                 "cptr.routers.browser_device.browser_device_store.replay_device_events",
                 new=AsyncMock(return_value=[]),
@@ -1151,6 +1154,37 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             await browser_device_control_socket(socket)
         complete.assert_awaited_once()
         self.assertEqual(complete.await_args.args[0], "cmd_1")
+
+    async def test_control_socket_disconnect_releases_durable_device_sessions(self):
+        socket = FakeWebSocket(
+            [
+                {
+                    "protocol_version": 1,
+                    "type": "device.authenticate",
+                    "device_id": "bdv_1",
+                    "device_credential": "secret",
+                    "resume_from": 0,
+                }
+            ]
+        )
+        with (
+            patch(
+                "cptr.routers.browser_device.browser_device_store.authenticate_device",
+                new=AsyncMock(return_value=SimpleNamespace(id="bdv_1")),
+            ),
+            patch("cptr.routers.browser_device.browser_device_connections.attach", new=AsyncMock()),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.detach",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.disconnect_device_sessions",
+                new=AsyncMock(return_value=2),
+            ) as disconnect,
+        ):
+            await browser_device_control_socket(socket)
+
+        disconnect.assert_awaited_once_with(device_id="bdv_1")
 
     async def test_visual_websocket_authenticates_and_stores_latest_frame(self):
         socket = FakeWebSocket(
@@ -1249,7 +1283,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "cptr.routers.browser_device.browser_device_connections.detach",
-                new=AsyncMock(),
+                new=AsyncMock(return_value=False),
             ),
             patch(
                 "cptr.routers.browser_device.browser_device_store.replay_device_events",
@@ -1294,7 +1328,7 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "cptr.routers.browser_device.browser_device_connections.detach",
-                new=AsyncMock(),
+                new=AsyncMock(return_value=False),
             ),
             patch(
                 "cptr.routers.browser_device.browser_device_store.replay_device_events",

@@ -7,6 +7,7 @@ command, and autonomous execution state.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import secrets
 import time
@@ -151,6 +152,40 @@ class WorkbenchSessionStore:
                 query.order_by(WorkbenchSession.updated_at.desc()).limit(safe_limit)
             )
             return [_session_dict(row) for row in rows.all()]
+
+    async def archive_stale(
+        self,
+        *,
+        idle_seconds: int,
+        now_ms: int | None = None,
+    ) -> int:
+        """Archive idle Workbench UI records without touching linked execution.
+
+        Workbench sessions are durable observability projections. Archiving a
+        stale OPEN/RUNNING record only removes it from the active-session list;
+        it never cancels a task, command, monitor, or workspace.
+        """
+        current = _now_ms() if now_ms is None else int(now_ms)
+        cutoff = current - max(1, int(idle_seconds)) * 1000
+        async with await get_db() as db:
+            rows = await db.scalars(
+                select(WorkbenchSession).where(
+                    WorkbenchSession.deleted_at.is_(None),
+                    WorkbenchSession.archived_at.is_(None),
+                    WorkbenchSession.updated_at < cutoff,
+                )
+            )
+            sessions = list(rows.all())
+            for session in sessions:
+                session.status = "ARCHIVED"
+                session.archived_at = current
+                session.updated_at = current
+                session.active_target_type = None
+                session.active_target_id = None
+                session.active_workspace_id = None
+            if sessions:
+                await db.commit()
+            return len(sessions)
 
     async def append_event(
         self,
@@ -434,3 +469,17 @@ class WorkbenchSessionStore:
 
 
 workbench_session_store = WorkbenchSessionStore()
+
+
+async def workbench_session_reaper_loop() -> None:
+    """Periodically archive stale Workbench observability records."""
+    from cptr.env import (
+        WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS,
+        WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS,
+    )
+
+    while True:
+        await workbench_session_store.archive_stale(
+            idle_seconds=WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
+        )
+        await asyncio.sleep(WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS)

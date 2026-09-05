@@ -162,6 +162,17 @@ COMMAND_EVENT_QUEUE_SIZE = max(8, _env_int("CPTR_COMMAND_EVENT_QUEUE_SIZE", 64))
 TERMINAL_EVENT_COALESCE_BYTES = max(1_024, _env_int("CPTR_TERMINAL_EVENT_COALESCE_BYTES", 8 * 1024))
 TERMINAL_EVENT_FLUSH_INTERVAL_MS = max(10, _env_int("CPTR_TERMINAL_EVENT_FLUSH_INTERVAL_MS", 100))
 
+# ── Workbench session retention ─────────────────────────────
+# Workbench sessions are observability/UI records, not execution ownership.
+# Archive idle records automatically so stale ChatGPT/E2E terminal sessions do
+# not accumulate in the active workspace/session navigation forever.
+WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS = max(
+    5 * 60, _env_int("CPTR_WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS", 6 * 60 * 60)
+)
+WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS = max(
+    60, _env_int("CPTR_WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS", 15 * 60)
+)
+
 # ── Live-event durability ───────────────────────────────────
 LIVE_EVENT_WRITE_BATCH_SIZE = max(1, _env_int("CPTR_LIVE_EVENT_WRITE_BATCH_SIZE", 64))
 LIVE_EVENT_QUEUE_SIZE = max(64, _env_int("CPTR_LIVE_EVENT_QUEUE_SIZE", 8_192))

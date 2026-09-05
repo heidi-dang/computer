@@ -14,6 +14,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cptr.services.mcp_client_policy import is_active_mcp_client_id
+
 
 class McpActivityClient(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -90,6 +92,9 @@ class McpActivityStore:
         dropped = 0
         async with self._lock:
             for event in events:
+                if not is_active_mcp_client_id(event.client.id):
+                    dropped += 1
+                    continue
                 if event.event_id in self._seen_event_id_set:
                     duplicates += 1
                     continue
@@ -104,6 +109,15 @@ class McpActivityStore:
 
     async def snapshot(self) -> dict[str, object]:
         async with self._lock:
+            self._events = deque(
+                (
+                    event
+                    for event in self._events
+                    if isinstance(event.get("client"), dict)
+                    and is_active_mcp_client_id(event["client"].get("id"))
+                ),
+                maxlen=self.max_events,
+            )
             return {
                 "version": 1,
                 "sequence": self._ingestion_sequence,

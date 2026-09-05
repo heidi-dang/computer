@@ -499,7 +499,12 @@ export function requestTimeline(
 }
 
 export function topologyNodes(state: McpTrafficState): McpTopologyNode[] {
-	const clients = Object.values(state.clients).sort((a, b) => a.id.localeCompare(b.id));
+	// The topology is a live-connection view, not a history browser. Completed
+	// test/E2E identities may remain in the bounded telemetry map briefly for
+	// recent-request analytics, but they must not render as connected clients.
+	const clients = Object.values(state.clients)
+		.filter((client) => client.activeSessions > 0 || client.activeRequests > 0)
+		.sort((a, b) => a.id.localeCompare(b.id));
 	const count = clients.length;
 	if (count === 0) return [];
 

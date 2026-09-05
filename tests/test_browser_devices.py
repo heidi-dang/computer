@@ -243,6 +243,45 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(lease.expires_at)
         db.commit.assert_awaited_once()
 
+    async def test_disconnect_device_sessions_releases_stale_agent_leases(self):
+        store = BrowserDeviceStore()
+        session = SimpleNamespace(
+            id="brs_1",
+            state="AGENT_CONTROL",
+            closed_at=None,
+            updated_at=1,
+        )
+        lease = SimpleNamespace(
+            session_id="brs_1",
+            owner="agent",
+            epoch=4,
+            expires_at=456,
+            updated_at=1,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalars.side_effect = [
+            SimpleNamespace(all=lambda: [session]),
+            SimpleNamespace(all=lambda: [lease]),
+        ]
+
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            patch("cptr.services.browser_devices._now_ms", return_value=999),
+        ):
+            changed = await store.disconnect_device_sessions(device_id="bdv_1")
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(session.state, "DISCONNECTED")
+        self.assertEqual(session.closed_at, 999)
+        self.assertEqual(session.updated_at, 999)
+        self.assertEqual(lease.owner, "none")
+        self.assertEqual(lease.epoch, 5)
+        self.assertIsNone(lease.expires_at)
+        self.assertEqual(lease.updated_at, 999)
+        db.commit.assert_awaited_once()
+
     async def test_transfer_rejects_stale_epoch(self):
         store = BrowserDeviceStore()
         session = SimpleNamespace(

@@ -1106,4 +1106,6 @@ async def browser_device_control_socket(websocket: WebSocket):
             await heartbeat_task
         except asyncio.CancelledError:
             pass
-        await browser_device_connections.detach(device_id=device_id, websocket=websocket)
+        detached = await browser_device_connections.detach(device_id=device_id, websocket=websocket)
+        if detached:
+            await browser_device_store.disconnect_device_sessions(device_id=device_id)

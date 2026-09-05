@@ -83,6 +83,18 @@ class McpDiagnosticsSchemaTests(unittest.TestCase):
 
 
 class McpDiagnosticsStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_chatgpt_client_diagnostics_are_dropped(self):
+        store = McpDiagnosticsStore()
+        event = failure("diagnostic-foreign-client").model_copy(
+            update={"client_id": "foreign-client"}
+        )
+
+        result = await store.ingest([event])
+        snapshot = await store.snapshot()
+
+        self.assertEqual(result, {"accepted": 0, "duplicates": 0, "dropped": 1})
+        self.assertEqual(snapshot["failures"], [])
+
     async def test_latency_snapshot_uses_nearest_rank_percentiles_and_health(self):
         store = McpDiagnosticsStore(
             max_latency_samples_per_edge=5,

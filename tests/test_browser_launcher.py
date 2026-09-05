@@ -13,9 +13,12 @@ class ManagedBrowserStartupPolicyTests(unittest.TestCase):
 
     def test_startup_deadline_is_configurable_but_bounded(self):
         for raw, expected in (("12.5", 12.5), ("1", 5.0), ("999", 60.0), ("invalid", 20.0)):
-            with self.subTest(raw=raw), patch.dict(
-                os.environ,
-                {"CPTR_MANAGED_BROWSER_STARTUP_TIMEOUT_SECONDS": raw},
+            with (
+                self.subTest(raw=raw),
+                patch.dict(
+                    os.environ,
+                    {"CPTR_MANAGED_BROWSER_STARTUP_TIMEOUT_SECONDS": raw},
+                ),
             ):
                 self.assertEqual(_managed_browser_startup_timeout_seconds(), expected)
 

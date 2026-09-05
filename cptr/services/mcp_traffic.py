@@ -15,6 +15,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from cptr.services.mcp_client_policy import is_active_mcp_client_id
+
 
 class McpTrafficClient(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -95,11 +97,19 @@ class McpTrafficStore:
         max_sessions: int = 128,
         subscriber_queue_size: int = 128,
         session_ttl_seconds: int = 300,
+        client_ttl_seconds: int | None = None,
     ) -> None:
         self.max_events = max(1, int(max_events))
         self.max_sessions = max(1, int(max_sessions))
         self.subscriber_queue_size = max(1, int(subscriber_queue_size))
         self.session_ttl_ms = max(1, int(session_ttl_seconds)) * 1000
+        self.client_ttl_ms = (
+            max(
+                1,
+                int(session_ttl_seconds if client_ttl_seconds is None else client_ttl_seconds),
+            )
+            * 1000
+        )
         self.max_active_requests = self.max_events
         self.max_clients = max(8, min(self.max_events, self.max_sessions * 2))
         self._dedupe_capacity = max(32, self.max_events * 4)
@@ -132,6 +142,9 @@ class McpTrafficStore:
         dropped = 0
         async with self._lock:
             for event in events:
+                if not is_active_mcp_client_id(event.client.id):
+                    dropped += 1
+                    continue
                 if event.event_id in self._seen_event_id_set:
                     duplicates += 1
                     continue
@@ -147,10 +160,12 @@ class McpTrafficStore:
 
             self._prune_empty_placeholders()
             self._prune_clients()
+            self._purge_inactive_state()
         return {"accepted": accepted, "duplicates": duplicates, "dropped": dropped}
 
     async def snapshot(self) -> dict[str, object]:
         async with self._lock:
+            self._purge_inactive_state()
             clients = []
             for client_id in sorted(self._clients):
                 client = self._clients[client_id]
@@ -211,8 +226,37 @@ class McpTrafficStore:
             for session_id in stale:
                 self._sessions.pop(session_id, None)
             self._expired_sessions += len(stale)
+            self._prune_stale_clients(current)
             self._prune_clients()
+            self._purge_inactive_state()
             return len(stale)
+
+    def _purge_inactive_state(self) -> None:
+        """Remove legacy non-ChatGPT state left by older telemetry releases."""
+        self._sessions = {
+            session_id: session
+            for session_id, session in self._sessions.items()
+            if is_active_mcp_client_id(session.get("client_id"))
+        }
+        self._active_requests = {
+            request_id: request
+            for request_id, request in self._active_requests.items()
+            if is_active_mcp_client_id(request.get("client_id"))
+        }
+        self._clients = {
+            client_id: state
+            for client_id, state in self._clients.items()
+            if is_active_mcp_client_id(client_id)
+        }
+        self._events = deque(
+            (
+                event
+                for event in self._events
+                if isinstance(event.get("client"), dict)
+                and is_active_mcp_client_id(event["client"].get("id"))
+            ),
+            maxlen=self.max_events,
+        )
 
     def _remember_event_id(self, event_id: str) -> None:
         self._seen_event_ids.append(event_id)
@@ -322,6 +366,24 @@ class McpTrafficStore:
             1 for request in self._active_requests.values() if request["client_id"] == client_id
         )
 
+    def _prune_stale_clients(self, current_ms: int) -> None:
+        """Drop disconnected historical topology identities after a bounded idle TTL.
+
+        Durable usage and engineering analytics live in their own stores; the
+        topology client map is intentionally only a live/recent connection
+        projection. Active sessions and requests always protect a client from
+        pruning, even when its last event timestamp is old.
+        """
+        removable = [
+            client_id
+            for client_id, state in self._clients.items()
+            if self._active_session_count(client_id) == 0
+            and self._active_request_count(client_id) == 0
+            and current_ms - int(state["last_seen"]) > self.client_ttl_ms
+        ]
+        for client_id in removable:
+            self._clients.pop(client_id, None)
+
     def _prune_empty_placeholders(self) -> None:
         removable = [
             client_id
@@ -359,4 +421,5 @@ mcp_traffic_store = McpTrafficStore(
     max_sessions=_bounded_env_int("CPTR_MCP_TRAFFIC_MAX_SESSIONS", 128, 1, 2_000),
     subscriber_queue_size=_bounded_env_int("CPTR_MCP_TRAFFIC_SUBSCRIBER_QUEUE_SIZE", 128, 1, 2_000),
     session_ttl_seconds=_bounded_env_int("CPTR_MCP_TRAFFIC_SESSION_TTL_SECONDS", 300, 10, 86_400),
+    client_ttl_seconds=_bounded_env_int("CPTR_MCP_TRAFFIC_CLIENT_TTL_SECONDS", 300, 10, 86_400),
 )

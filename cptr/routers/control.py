@@ -355,6 +355,8 @@ async def list_workspaces(request: Request, include_unavailable: bool = False):
     workspaces = await Workspace.get_by_user(user_id)
     rows = []
     for workspace in workspaces:
+        if bool(dict(workspace.data or {}).get("_cptr_archived")):
+            continue
         available = is_workspace_available(workspace)
         if not include_unavailable and not available:
             continue

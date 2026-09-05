@@ -388,7 +388,7 @@
 				</p>
 			</div>
 			<div class="flex items-center gap-4 text-[0.7rem] tabular-nums app-muted">
-				<div><span class="font-semibold">{nodes.length}</span> clients</div>
+				<div><span class="font-semibold">{nodes.length}</span> live clients</div>
 				<div>
 					<span class="font-semibold"
 						>{traffic ? Object.keys(traffic.activeRequests).length : 0}</span
