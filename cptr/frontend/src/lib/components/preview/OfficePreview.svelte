@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import DOMPurify from 'dompurify';
 	import { fetchHandler } from '$lib/apis';
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { t } from '$lib/i18n';
@@ -50,13 +51,11 @@
 	async function loadDocx(buf: ArrayBuffer) {
 		const mammoth = await import('mammoth');
 		const result = await mammoth.convertToHtml({ arrayBuffer: buf });
-		const DOMPurify = (await import('dompurify')).default;
 		htmlContent = DOMPurify.sanitize(result.value);
 	}
 
 	async function loadXlsx(buf: ArrayBuffer) {
 		const XLSX = await import('xlsx');
-		const DOMPurify = (await import('dompurify')).default;
 		const workbook = XLSX.read(buf, { type: 'array' });
 		sheetNames = workbook.SheetNames;
 
