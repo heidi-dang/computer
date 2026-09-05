@@ -43,6 +43,26 @@ def traffic_event(
 
 
 class McpTrafficStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_chatgpt_clients_are_dropped_from_traffic(self):
+        store = McpTrafficStore(max_events=8, max_sessions=4, subscriber_queue_size=2)
+
+        result = await store.ingest(
+            [
+                traffic_event(
+                    "event-foreign-client",
+                    "session_opened",
+                    client_id="foreign-client",
+                    label="Foreign client",
+                )
+            ]
+        )
+        snapshot = await store.snapshot()
+
+        self.assertEqual(result, {"accepted": 0, "duplicates": 0, "dropped": 1})
+        self.assertEqual(snapshot["events"], [])
+        self.assertEqual(snapshot["clients"], [])
+        self.assertEqual(snapshot["sessions"], [])
+
     async def test_duplicate_event_id_is_ignored(self):
         store = McpTrafficStore(max_events=8, max_sessions=4, subscriber_queue_size=2)
         first = traffic_event("event-001", "request_started")
@@ -151,8 +171,43 @@ class McpTrafficStoreTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(expired, 1)
         self.assertEqual(snapshot["sessions"], [])
-        self.assertEqual(snapshot["clients"][0]["active_sessions"], 0)
+        self.assertEqual(snapshot["clients"], [])
         self.assertEqual(len(snapshot["events"]), 1)
+
+    async def test_stale_client_history_is_pruned_without_dropping_recent_events(self):
+        store = McpTrafficStore(
+            max_events=8,
+            max_sessions=4,
+            subscriber_queue_size=2,
+            session_ttl_seconds=5,
+            client_ttl_seconds=5,
+        )
+        await store.ingest(
+            [
+                traffic_event(
+                    "event-001",
+                    "request_started",
+                    request_id="request-1",
+                    timestamp_ms=BASE_TS,
+                ),
+                traffic_event(
+                    "event-002",
+                    "request_finished",
+                    request_id="request-1",
+                    status="complete",
+                    response_bytes=20,
+                    timestamp_ms=BASE_TS + 100,
+                ),
+            ]
+        )
+
+        expired = await store.expire_stale_sessions(now_ms=BASE_TS + 6_000)
+        snapshot = await store.snapshot()
+
+        self.assertEqual(expired, 0)
+        self.assertEqual(snapshot["clients"], [])
+        self.assertEqual(len(snapshot["events"]), 2)
+        self.assertEqual(snapshot["events"][-1]["event_id"], "event-002")
 
     async def test_subscriber_queue_drops_oldest_without_blocking_ingest(self):
         store = McpTrafficStore(max_events=8, max_sessions=4, subscriber_queue_size=1)

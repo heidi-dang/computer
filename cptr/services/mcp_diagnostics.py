@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from cptr.services.mcp_pricing import project_usage_cost
+from cptr.services.mcp_client_policy import is_active_mcp_client_id
 from cptr.utils.redaction import redact_external_text
 
 LatencyEdge = Literal[
@@ -249,6 +250,11 @@ class McpDiagnosticsStore:
         dropped = 0
         async with self._lock:
             for event in events:
+                if isinstance(
+                    event, (McpFailureDiagnostic, McpUsageDiagnostic)
+                ) and not is_active_mcp_client_id(event.client_id):
+                    dropped += 1
+                    continue
                 event_id = (
                     event.event_id
                     if isinstance(event, (McpLatencySample, McpUsageDiagnostic))

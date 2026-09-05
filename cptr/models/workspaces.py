@@ -83,6 +83,29 @@ class Workspace(Base):
             return ws
 
     @staticmethod
+    async def archive_by_paths(user_id: str, paths: list[str]) -> int:
+        """Hide workspaces from navigation without breaking durable FK history."""
+        if not paths:
+            return 0
+        async with await get_db() as db:
+            result = await db.execute(
+                select(Workspace).where(
+                    Workspace.user_id == user_id,
+                    Workspace.path.in_(paths),
+                )
+            )
+            rows = list(result.scalars().all())
+            now = int(time.time())
+            for workspace in rows:
+                data = dict(workspace.data or {})
+                data["_cptr_archived"] = True
+                workspace.data = data
+                workspace.updated_at = now
+            if rows:
+                await db.commit()
+            return len(rows)
+
+    @staticmethod
     async def delete_by_path(user_id: str, path: str) -> bool:
         """Delete a workspace. Returns True if it existed."""
         async with await get_db() as db:

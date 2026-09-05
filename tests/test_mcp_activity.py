@@ -54,6 +54,22 @@ class McpActivitySchemaTests(unittest.TestCase):
 
 
 class McpActivityStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_chatgpt_clients_are_dropped(self):
+        store = McpActivityStore(max_events=8, subscriber_queue_size=2)
+
+        result = await store.ingest(
+            [
+                activity_event(
+                    "event-foreign-client",
+                    client={"id": "foreign-client", "label": "Foreign client", "version": "1.0"},
+                )
+            ]
+        )
+        snapshot = await store.snapshot()
+
+        self.assertEqual(result, {"accepted": 0, "duplicates": 0, "dropped": 1})
+        self.assertEqual(snapshot["events"], [])
+
     async def test_store_deduplicates_and_truncates_newest_last(self):
         store = McpActivityStore(max_events=2, subscriber_queue_size=2)
         first = activity_event("event-001")

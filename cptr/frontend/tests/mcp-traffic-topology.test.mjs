@@ -455,8 +455,8 @@ test('topology projection uses stable client ordering and deterministic radial p
 		...snapshot(),
 		clients: [
 			{
-				id: 'gemini',
-				label: 'Gemini',
+				id: 'foreign-client',
+				label: 'Foreign client',
 				version: null,
 				active_sessions: 1,
 				active_requests: 0,
@@ -483,7 +483,42 @@ test('topology projection uses stable client ordering and deterministic radial p
 	assert.deepEqual(first, second);
 	assert.deepEqual(
 		first.map((node) => node.id),
-		['chatgpt', 'gemini']
+		['chatgpt', 'foreign-client']
+	);
+});
+
+test('topology excludes disconnected historical clients while keeping live clients', () => {
+	const state = reducer.hydrateMcpTraffic({
+		...snapshot(),
+		clients: [
+			{
+				id: 'chatgpt-session-stale',
+				label: 'Old E2E client',
+				version: null,
+				active_sessions: 0,
+				active_requests: 0,
+				total_requests: 12,
+				errors: 0,
+				last_seen: 1,
+				last_tool: 'cptr_list_workspaces'
+			},
+			{
+				id: 'chatgpt-session-live',
+				label: 'Current ChatGPT',
+				version: null,
+				active_sessions: 1,
+				active_requests: 0,
+				total_requests: 1,
+				errors: 0,
+				last_seen: 2,
+				last_tool: 'cptr_list_workspaces'
+			}
+		]
+	});
+
+	assert.deepEqual(
+		reducer.topologyNodes(state).map((node) => node.id),
+		['chatgpt-session-live']
 	);
 });
 
@@ -564,13 +599,13 @@ test('reducer keeps active request and session maps bounded under missing termin
 		trafficEvent(5, 'session_opened', {
 			request_id: null,
 			session_id: 'session-b',
-			client: { id: 'gemini', label: 'Gemini', version: '1' },
+			client: { id: 'foreign-client', label: 'Foreign client', version: '1' },
 			status: 'connected'
 		})
 	);
 	assert.deepEqual(Object.keys(state.sessions), ['session-b']);
 	assert.equal(state.clients.chatgpt.activeSessions, 0);
-	assert.equal(state.clients.gemini.activeSessions, 1);
+	assert.equal(state.clients['foreign-client'].activeSessions, 1);
 });
 
 test('reducer projects request completion and failure without unsafe payload fields', () => {

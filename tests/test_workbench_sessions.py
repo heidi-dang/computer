@@ -63,6 +63,40 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.details, {"exit_code": 0})
         db.commit.assert_awaited_once()
 
+    async def test_idle_workbench_records_are_archived_and_unbound_without_touching_execution(self):
+        session = SimpleNamespace(
+            id="wbs_stale",
+            status="RUNNING",
+            active_target_type="command",
+            active_target_id="cmd_old",
+            active_workspace_id="ws_old",
+            updated_at=1,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalars.return_value = SimpleNamespace(all=lambda: [session])
+
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            changed = await WorkbenchSessionStore().archive_stale(
+                idle_seconds=60,
+                now_ms=120_000,
+            )
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(session.status, "ARCHIVED")
+        self.assertEqual(session.archived_at, 120_000)
+        self.assertEqual(session.updated_at, 120_000)
+        self.assertIsNone(session.active_target_type)
+        self.assertIsNone(session.active_target_id)
+        self.assertIsNone(session.active_workspace_id)
+        db.commit.assert_awaited_once()
+
 
 class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
     def test_production_app_registers_current_plugin_session_routes(self):

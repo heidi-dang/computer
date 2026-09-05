@@ -100,7 +100,11 @@ def _workspace_display_name(path: str) -> str:
 
 async def _workspace_summaries(user_id: str) -> list[dict[str, str | int]]:
     workspaces = await Workspace.get_by_user(user_id)
-    summaries = _dedupe_workspaces(workspaces)
+    summaries = [
+        (path, workspace)
+        for path, workspace in _dedupe_workspaces(workspaces)
+        if not bool(dict(workspace.data or {}).get("_cptr_archived"))
+    ]
     from cptr.utils.chat_task import get_active_chat_ids
 
     unread_counts = await Chat.unread_counts_by_workspace(
@@ -206,7 +210,7 @@ async def put_workspace(request: Request, path: str = Query(...)):
         for workspace in await _workspaces_at_path(user_id, workspace_path)
         if workspace.path != workspace_path
     ]
-    await Workspace.delete_by_paths(user_id, old_paths)
+    await Workspace.archive_by_paths(user_id, old_paths)
 
     return {"status": "saved", "path": workspace_path}
 
@@ -221,7 +225,7 @@ async def delete_workspace(request: Request, path: str = Query(...)):
     paths = [workspace.path for workspace in await _workspaces_at_path(user_id, workspace_path)]
     if workspace_path not in paths:
         paths.append(workspace_path)
-    await Workspace.delete_by_paths(user_id, paths)
+    await Workspace.archive_by_paths(user_id, paths)
     return {"status": "deleted"}
 
 

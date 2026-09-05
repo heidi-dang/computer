@@ -323,6 +323,79 @@ class BrowserDeviceStore:
             session.updated_at = now
             await db.commit()
 
+    async def disconnect_device_sessions(self, *, device_id: str) -> int:
+        """Close every durable live session for a device after its socket is gone."""
+        now = _now_ms()
+        async with await get_db() as db:
+            sessions = list(
+                (
+                    await db.scalars(
+                        select(BrowserSession).where(
+                            BrowserSession.device_id == device_id,
+                            BrowserSession.closed_at.is_(None),
+                            BrowserSession.state != "DISCONNECTED",
+                        )
+                    )
+                ).all()
+            )
+            if not sessions:
+                return 0
+            session_ids = [str(session.id) for session in sessions]
+            leases = list(
+                (
+                    await db.scalars(
+                        select(BrowserLease).where(BrowserLease.session_id.in_(session_ids))
+                    )
+                ).all()
+            )
+            for lease in leases:
+                lease.owner = "none"
+                lease.epoch = int(lease.epoch) + 1
+                lease.expires_at = None
+                lease.updated_at = now
+            for session in sessions:
+                session.state = "DISCONNECTED"
+                session.closed_at = now
+                session.updated_at = now
+            await db.commit()
+            return len(sessions)
+
+    async def disconnect_stale_sessions(self) -> int:
+        """Reconcile browser leases that survived a backend process restart."""
+        now = _now_ms()
+        async with await get_db() as db:
+            sessions = list(
+                (
+                    await db.scalars(
+                        select(BrowserSession).where(
+                            BrowserSession.closed_at.is_(None),
+                            BrowserSession.state != "DISCONNECTED",
+                        )
+                    )
+                ).all()
+            )
+            if not sessions:
+                return 0
+            session_ids = [str(session.id) for session in sessions]
+            leases = list(
+                (
+                    await db.scalars(
+                        select(BrowserLease).where(BrowserLease.session_id.in_(session_ids))
+                    )
+                ).all()
+            )
+            for lease in leases:
+                lease.owner = "none"
+                lease.epoch = int(lease.epoch) + 1
+                lease.expires_at = None
+                lease.updated_at = now
+            for session in sessions:
+                session.state = "DISCONNECTED"
+                session.closed_at = now
+                session.updated_at = now
+            await db.commit()
+            return len(sessions)
+
     async def assert_mutation(
         self,
         *,

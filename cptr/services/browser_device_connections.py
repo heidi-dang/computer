@@ -35,11 +35,19 @@ class BrowserDeviceConnectionRegistry:
             except Exception:
                 pass
 
-    async def detach(self, *, device_id: str, websocket: WebSocket) -> None:
+    async def detach(self, *, device_id: str, websocket: WebSocket) -> bool:
+        """Detach this exact socket and report whether it owned the live device slot.
+
+        A replacement socket may already have been attached for the same device.
+        In that case the old socket must not trigger durable session cleanup for
+        the new connection.
+        """
         async with self._lock:
             current = self._connections.get(device_id)
             if current is not None and current.websocket is websocket:
                 self._connections.pop(device_id, None)
+                return True
+        return False
 
     async def send_control(self, *, device_id: str, message: dict[str, Any]) -> bool:
         async with self._lock:

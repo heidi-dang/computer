@@ -70,7 +70,26 @@ async def lifespan(app: FastAPI):
 
     await init_db()
 
-    from cptr.env import FACTORY_RUN_LEASE_MS
+    # Browser device sockets are process-local. Any durable session left open
+    # across a backend restart is stale by definition, so release its lease
+    # before accepting new browser control work.
+    from cptr.services.browser_devices import browser_device_store
+
+    app.state.browser_sessions_reconciled = await browser_device_store.disconnect_stale_sessions()
+
+    from cptr.env import FACTORY_RUN_LEASE_MS, WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
+    from cptr.services.workbench_sessions import (
+        workbench_session_reaper_loop,
+        workbench_session_store,
+    )
+
+    app.state.workbench_sessions_archived = await workbench_session_store.archive_stale(
+        idle_seconds=WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
+    )
+    app.state.workbench_session_reaper_task = asyncio.create_task(
+        workbench_session_reaper_loop(), name="cptr-workbench-session-reaper"
+    )
+
     from cptr.services.factory_control import FactoryControlService
     from cptr.services.factory_production import FactoryProductionRunner
     from cptr.services.factory_runtime import FactoryRuntime
@@ -171,6 +190,7 @@ async def lifespan(app: FastAPI):
 
         for task_name in (
             "command_session_reaper_task",
+            "workbench_session_reaper_task",
             "event_loop_lag_task",
             "memory_worker_task",
         ):
