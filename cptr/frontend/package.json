@@ -87,7 +87,7 @@
 		"marked": "^17.0.6",
 		"mermaid": "^11.15.0",
 		"panzoom": "^9.4.3",
-		"pdfjs-dist": "^5.5.207",
+		"pdfjs-dist": "^6.3.289",
 		"shiki": "^4.2.0",
 		"socket.io-client": "^4.8.3",
 		"sortablejs": "^1.15.7",
@@ -95,6 +95,9 @@
 		"svelte-sonner": "^1.1.1",
 		"tailwindcss": "^4.2.2",
 		"tippy.js": "^6.3.7",
-		"xlsx": "^0.18.5"
+		"xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+	},
+	"overrides": {
+		"cookie": "0.7.2"
 	}
 }
