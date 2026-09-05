@@ -260,13 +260,34 @@ class BrowserDeviceStore:
         now = _now_ms()
         async with await get_db() as db:
             session = await db.get(BrowserSession, session_id)
-            if session is None or session.closed_at is not None:
+            if session is None:
                 raise KeyError("browser session not found")
             lease = (
                 await db.scalars(select(BrowserLease).where(BrowserLease.session_id == session_id))
             ).first()
             if lease is None:
                 raise KeyError("browser lease not found")
+            if session.closed_at is not None:
+                idempotent_release = (
+                    expected_owner == "agent"
+                    and new_owner == "none"
+                    and str(session.state) == "DISCONNECTED"
+                    and lease.owner == "none"
+                    and int(lease.epoch) == expected_epoch + 1
+                )
+                if idempotent_release:
+                    return {
+                        "device_id": lease.device_id,
+                        "tab_id": int(lease.tab_id),
+                        "session_id": session_id,
+                        "owner": lease.owner,
+                        "epoch": int(lease.epoch),
+                        "snapshot_id": session.snapshot_id,
+                        "state": session.state,
+                    }
+                if expected_owner == "agent" and new_owner == "none" and lease.owner == "none":
+                    raise PermissionError("stale browser lease epoch or owner")
+                raise KeyError("browser session not found")
             if int(lease.epoch) != expected_epoch or lease.owner != expected_owner:
                 raise PermissionError("stale browser lease epoch or owner")
             if expected_owner == "human" and new_owner == "agent":
