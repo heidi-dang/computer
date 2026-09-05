@@ -97,6 +97,181 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.active_workspace_id)
         db.commit.assert_awaited_once()
 
+    async def test_manual_archive_clears_active_target_projection(self):
+        session = SimpleNamespace(
+            id="wbs_archive",
+            user_id="user_1",
+            name="Archive",
+            workspace_id="ws_1",
+            status="RUNNING",
+            active_target_type="command",
+            active_target_id="cmd_done",
+            active_workspace_id="ws_1",
+            event_count=3,
+            created_at=1,
+            updated_at=10,
+            last_event_at=10,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalar.return_value = session
+
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            result = await WorkbenchSessionStore().archive(
+                owner_id="user_1",
+                session_id="wbs_archive",
+            )
+
+        self.assertEqual(result["status"], "ARCHIVED")
+        self.assertIsNone(result["active_target_type"])
+        self.assertIsNone(result["active_target_id"])
+        self.assertIsNone(result["active_workspace_id"])
+        self.assertIsNone(session.active_target_type)
+        self.assertIsNone(session.active_target_id)
+        self.assertIsNone(session.active_workspace_id)
+
+    async def test_binding_new_target_reopens_terminal_session_as_running(self):
+        session = SimpleNamespace(
+            id="wbs_rebind",
+            user_id="user_1",
+            name="Rebind",
+            workspace_id="ws_1",
+            status="COMPLETE",
+            active_target_type="command",
+            active_target_id="old_cmd",
+            active_workspace_id="ws_1",
+            event_count=1,
+            created_at=1,
+            updated_at=10,
+            last_event_at=10,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalar.return_value = session
+
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            result = await WorkbenchSessionStore().bind_target(
+                owner_id="user_1",
+                session_id="wbs_rebind",
+                target_type="command",
+                target_id="new_cmd",
+                workspace_id="ws_1",
+            )
+
+        self.assertEqual(result["status"], "RUNNING")
+        self.assertEqual(session.status, "RUNNING")
+        self.assertEqual(session.active_target_id, "new_cmd")
+        db.commit.assert_awaited_once()
+
+    async def test_command_started_event_normalizes_stale_terminal_state_to_running(self):
+        session = SimpleNamespace(
+            id="wbs_event",
+            user_id="user_1",
+            status="COMPLETE",
+            active_target_type=None,
+            active_target_id=None,
+            active_workspace_id=None,
+            event_count=2,
+            updated_at=10,
+            last_event_at=10,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalar.return_value = session
+        added = []
+        db.add = Mock(side_effect=added.append)
+
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            event = await WorkbenchSessionStore().append_event(
+                owner_id="user_1",
+                session_id="wbs_event",
+                event_type="command.started",
+                summary="started",
+                state="COMPLETE",
+                target_type="command",
+                target_id="cmd_new",
+                workspace_id="ws_1",
+            )
+
+        self.assertEqual(event["state"], "RUNNING")
+        self.assertEqual(session.status, "RUNNING")
+        self.assertEqual(session.active_target_id, "cmd_new")
+        self.assertEqual(added[0].state, "RUNNING")
+
+    async def test_terminal_event_only_releases_matching_active_target(self):
+        session = SimpleNamespace(
+            id="wbs_overlap",
+            user_id="user_1",
+            status="RUNNING",
+            active_target_type="command",
+            active_target_id="cmd_new",
+            active_workspace_id="ws_1",
+            event_count=4,
+            updated_at=10,
+            last_event_at=10,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalar.return_value = session
+        db.add = Mock()
+
+        store = WorkbenchSessionStore()
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            old_event = await store.append_event(
+                owner_id="user_1",
+                session_id="wbs_overlap",
+                event_type="command.completed",
+                summary="old complete",
+                state="COMPLETE",
+                target_type="command",
+                target_id="cmd_old",
+                workspace_id="ws_1",
+            )
+            self.assertEqual(old_event["state"], "COMPLETE")
+            self.assertEqual(session.status, "RUNNING")
+            self.assertEqual(session.active_target_id, "cmd_new")
+
+            matched_event = await store.append_event(
+                owner_id="user_1",
+                session_id="wbs_overlap",
+                event_type="command.completed",
+                summary="new complete",
+                state="COMPLETE",
+                target_type="command",
+                target_id="cmd_new",
+                workspace_id="ws_1",
+            )
+
+        self.assertEqual(matched_event["state"], "COMPLETE")
+        self.assertEqual(session.status, "OPEN")
+        self.assertIsNone(session.active_target_type)
+        self.assertIsNone(session.active_target_id)
+        self.assertIsNone(session.active_workspace_id)
+
 
 class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
     def test_production_app_registers_current_plugin_session_routes(self):
