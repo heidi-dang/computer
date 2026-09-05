@@ -11,6 +11,9 @@ never exposed to the LLM — they carry injected execution context:
 
 from __future__ import annotations
 
+import urllib.parse
+import xml.etree.ElementTree as ET
+import httpx
 import asyncio
 import codecs
 import inspect
@@ -3418,8 +3421,61 @@ def normalize_tool_approval(value: Any) -> ToolApprovalPolicy | None:
     return value if isinstance(value, str) and value in TOOL_APPROVAL_POLICIES else None
 
 
+
+async def search_arxiv(
+    query: str,
+    max_results: int = 5,
+    *,
+    __context__: dict,
+) -> str:
+    """Search the ArXiv API for scientific papers related to AI, Quantum, Physics, or Math.
+    Use this to find frontier research, hypotheses, and state-of-the-art methods.
+
+    :param query: The search query string (e.g. "quantum computing", "transformer architecture").
+    :param max_results: Maximum number of papers to return (max 10).
+    """
+    max_results = min(max_results, 10)
+    url = f"https://export.arxiv.org/api/query?search_query=all:{urllib.parse.quote(query)}&start=0&max_results={max_results}"
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, timeout=10.0)
+            response.raise_for_status()
+
+        root = ET.fromstring(response.text)
+        namespace = {'atom': 'http://www.w3.org/2005/Atom'}
+
+        entries = root.findall('atom:entry', namespace)
+        if not entries:
+            return f"No ArXiv results found for query: {query}"
+
+        results = [f"Found {len(entries)} papers on ArXiv:\n"]
+        for entry in entries:
+            title_elem = entry.find('atom:title', namespace)
+            summary_elem = entry.find('atom:summary', namespace)
+            published_elem = entry.find('atom:published', namespace)
+            link_elem = entry.find('atom:id', namespace)
+
+            title = title_elem.text.replace('\n', ' ').strip() if title_elem is not None else "Unknown Title"
+            summary = summary_elem.text.replace('\n', ' ').strip() if summary_elem is not None else "No summary available."
+            published = published_elem.text[:10] if published_elem is not None else "Unknown Date"
+            authors = [author.find('atom:name', namespace).text for author in entry.findall('atom:author', namespace) if author.find('atom:name', namespace) is not None]
+            link = link_elem.text if link_elem is not None else "Unknown Link"
+
+            results.append(f"### {title}")
+            results.append(f"**Authors:** {', '.join(authors)}")
+            results.append(f"**Published:** {published}")
+            results.append(f"**Link:** {link}")
+            results.append(f"**Summary:** {summary[:1000]}...")
+            results.append("")
+
+        return "\n".join(results)
+    except Exception as e:
+        return f"Error querying ArXiv: {e}"
+
 TOOLS: dict[str, dict] = {
     # Auto mode runs these without asking.
+    "search_arxiv": {"fn": search_arxiv, "approval": "allow"},
     "read_file": {"fn": read_file, "approval": "allow"},
     "list_directory": {"fn": list_directory, "approval": "allow"},
     "search_files": {"fn": search_files, "approval": "allow"},
