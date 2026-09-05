@@ -352,6 +352,70 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.closed_at, 999)
         self.assertIsNone(lease.expires_at)
 
+    async def test_transfer_to_none_is_idempotent_after_disconnect_reconciliation(self):
+        store = BrowserDeviceStore()
+        session = SimpleNamespace(
+            id="brs_1", closed_at=999, snapshot_id="snap_old", state="DISCONNECTED", updated_at=999
+        )
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_1",
+            owner="none",
+            epoch=5,
+            expires_at=None,
+            updated_at=999,
+        )
+        db = AsyncMock()
+        db.get.return_value = session
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+
+        with patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)):
+            result = await store.transfer_lease(
+                session_id="brs_1",
+                expected_epoch=4,
+                expected_owner="agent",
+                new_owner="none",
+            )
+
+        self.assertEqual(result["owner"], "none")
+        self.assertEqual(result["epoch"], 5)
+        self.assertEqual(result["state"], "DISCONNECTED")
+        db.commit.assert_not_awaited()
+
+    async def test_transfer_to_none_rejects_unrelated_stale_epoch_after_disconnect(self):
+        store = BrowserDeviceStore()
+        session = SimpleNamespace(
+            id="brs_1", closed_at=999, snapshot_id="snap_old", state="DISCONNECTED", updated_at=999
+        )
+        lease = SimpleNamespace(
+            device_id="bdv_1",
+            tab_id=7,
+            session_id="brs_1",
+            owner="none",
+            epoch=9,
+            expires_at=None,
+            updated_at=999,
+        )
+        db = AsyncMock()
+        db.get.return_value = session
+        db.scalars.return_value = SimpleNamespace(first=lambda: lease)
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+
+        with (
+            patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
+            self.assertRaises(PermissionError),
+        ):
+            await store.transfer_lease(
+                session_id="brs_1",
+                expected_epoch=4,
+                expected_owner="agent",
+                new_owner="none",
+            )
+
     async def test_return_to_agent_requires_fresh_snapshot_and_increments_epoch(self):
         store = BrowserDeviceStore()
         session = SimpleNamespace(
