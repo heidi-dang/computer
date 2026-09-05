@@ -928,21 +928,22 @@ def signal_command_session(
         return "command session already exited"
     normalized = signal_name.lower()
     if normalized == "interrupt":
-        master_fd = session.get("master_fd")
-        if master_fd is not None:
-            try:
-                # A real controlling PTY translates VINTR through the terminal
-                # line discipline to SIGINT for its foreground process group.
-                os.write(master_fd, b"\x03")
-                return None
-            except OSError:
-                return "PTY closed"
         proc = session["proc"]
         try:
             if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
-                os.killpg(proc.pid, signal.SIGINT)
+                # Deliver SIGINT directly to the owned process group rather
+                # than relying on PTY VINTR timing.  The fast Linux PTY path
+                # execs through setpriv/setsid, so immediately after spawn the
+                # wrapper may briefly still belong to the parent's process
+                # group.  Never signal that shared group: kill only the wrapper
+                # PID until it becomes its own group leader.
+                process_group_id = os.getpgid(proc.pid)
+                if process_group_id == proc.pid:
+                    os.killpg(process_group_id, signal.SIGINT)
+                else:
+                    os.kill(proc.pid, signal.SIGINT)
             return None
         except (ProcessLookupError, PermissionError, OSError):
             return "process is not available"

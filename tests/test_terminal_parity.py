@@ -1,5 +1,6 @@
 import asyncio
 import json
+import signal
 import sys
 import tempfile
 import textwrap
@@ -38,6 +39,22 @@ class PtyLaunchStrategyTests(unittest.TestCase):
                 _fast_pty_argv(["true"], None),
                 ["setpriv", "--pdeathsig", "TERM", "setsid", "--ctty", "true"],
             )
+
+
+class PtySignalStrategyTests(unittest.TestCase):
+    def test_interrupt_never_signals_parent_group_during_fast_wrapper_startup(self):
+        proc = SimpleNamespace(pid=4242)
+        session = {"proc": proc, "done": False}
+        with (
+            patch("cptr.utils.tools.get_command_session", return_value=session),
+            patch("cptr.utils.tools.os.getpgid", return_value=3131),
+            patch("cptr.utils.tools.os.kill") as kill,
+            patch("cptr.utils.tools.os.killpg") as killpg,
+        ):
+            self.assertIsNone(signal_command_session(SimpleNamespace(), "session", "interrupt"))
+
+        kill.assert_called_once_with(4242, signal.SIGINT)
+        killpg.assert_not_called()
 
 
 class TerminalParityTests(unittest.IsolatedAsyncioTestCase):
