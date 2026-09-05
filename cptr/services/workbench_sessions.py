@@ -26,6 +26,7 @@ MAX_EVENT_DETAILS_KEYS = 32
 MAX_EVENT_LIST_LIMIT = 200
 DELETE_CONFIRMATION_TTL_MS = 5 * 60 * 1000
 _ALLOWED_TARGET_TYPES = {"task", "command", "monitor"}
+_TERMINAL_TARGET_STATES = {"COMPLETE", "FAILED", "CANCELLED"}
 _ALLOWED_STATES = {
     "OPEN",
     "RUNNING",
@@ -44,6 +45,20 @@ def _now_ms() -> int:
 
 def _clip(value: object, limit: int) -> str:
     return redact_external_text(str(value or "")).strip()[:limit]
+
+
+def _normalized_event_state(event_type: str, state: str | None) -> str:
+    event_name = str(event_type or "").strip().lower()
+    if event_name == "workbench.target.bound" or event_name.endswith(".started"):
+        return "RUNNING"
+    if event_name.endswith((".completed", ".complete")):
+        return "COMPLETE"
+    if event_name.endswith(".failed"):
+        return "FAILED"
+    if event_name.endswith((".cancelled", ".canceled")):
+        return "CANCELLED"
+    normalized = str(state or "").strip().upper()
+    return normalized if normalized in _ALLOWED_STATES else ""
 
 
 def _safe_name(value: str | None) -> str:
@@ -210,6 +225,7 @@ class WorkbenchSessionStore:
         if not event_type or len(event_type) > 120:
             raise ValueError("invalid workbench event type")
         now = _now_ms()
+        normalized_state = _normalized_event_state(event_type, state)
         async with await get_db() as db:
             session = await db.scalar(
                 select(WorkbenchSession).where(
@@ -228,7 +244,7 @@ class WorkbenchSessionStore:
                 source=_clip(source, 40) or "plugin",
                 actor=_clip(actor, 80) or "chatgpt_plugin",
                 event_type=event_type,
-                state=_clip(state, 80) if state else None,
+                state=normalized_state or None,
                 target_type=target_type,
                 target_id=_clip(target_id, 200) if target_id else None,
                 workspace_id=_clip(workspace_id, 200) if workspace_id else None,
@@ -244,11 +260,23 @@ class WorkbenchSessionStore:
             session.updated_at = now
             session.last_event_at = now
             if target_type and target_id:
-                session.active_target_type = target_type
-                session.active_target_id = event.target_id
-                session.active_workspace_id = event.workspace_id
-            normalized_state = (state or "").upper()
-            if normalized_state in _ALLOWED_STATES:
+                target_matches = (
+                    session.active_target_type == target_type
+                    and session.active_target_id == event.target_id
+                )
+                if normalized_state in _TERMINAL_TARGET_STATES:
+                    if target_matches:
+                        session.active_target_type = None
+                        session.active_target_id = None
+                        session.active_workspace_id = None
+                        session.status = "OPEN"
+                else:
+                    session.active_target_type = target_type
+                    session.active_target_id = event.target_id
+                    session.active_workspace_id = event.workspace_id
+                    if normalized_state in _ALLOWED_STATES:
+                        session.status = normalized_state
+            elif normalized_state in _ALLOWED_STATES:
                 session.status = normalized_state
             await db.commit()
             await db.refresh(event)
@@ -305,8 +333,8 @@ class WorkbenchSessionStore:
             session.active_target_type = target_type
             session.active_target_id = _clip(target_id, 200)
             session.active_workspace_id = _clip(workspace_id, 200) if workspace_id else None
-            if session.status == "OPEN":
-                session.status = "RUNNING"
+            session.status = "RUNNING"
+            session.archived_at = None
             session.updated_at = now
             await db.commit()
             await db.refresh(session)
