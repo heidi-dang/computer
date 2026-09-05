@@ -22,7 +22,7 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[index]
 
 
-def _process_snapshot() -> dict[str, int | None]:
+def _process_snapshot() -> dict[str, int | float | None]:
     rss_bytes: int | None = None
     open_fds: int | None = None
     try:
@@ -44,7 +44,11 @@ def _process_snapshot() -> dict[str, int | None]:
             open_fds = len(os.listdir(fd_path))
     except Exception:
         open_fds = None
-    return {"rss_bytes": rss_bytes, "open_fds": open_fds}
+    return {
+        "rss_bytes": rss_bytes,
+        "open_fds": open_fds,
+        "cpu_seconds": round(time.process_time(), 6),
+    }
 
 
 @dataclass

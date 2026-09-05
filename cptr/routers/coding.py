@@ -157,6 +157,7 @@ class CommandRequest(WorkerTargetRequest):
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
     allow_network: bool = False
+    measure_lifecycle: bool = False
     pty: bool = False
     rows: int = Field(default=24, ge=5, le=300)
     cols: int = Field(default=80, ge=20, le=500)
@@ -527,21 +528,6 @@ async def _command_idempotency_put(
     durable_key = _command_idempotency_db_key(workspace_id, key)
     now_ms = int(time.time() * 1000)
     async with await get_db() as db:
-        existing = (
-            await db.execute(
-                select(ControlIdempotency).where(
-                    ControlIdempotency.user_id == user_id,
-                    ControlIdempotency.key == durable_key,
-                )
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            if existing.resource_type != "direct_command":
-                raise HTTPException(status_code=409, detail="command idempotency key collision")
-            authoritative = str(existing.resource_id)
-            _command_idempotency_memory_put(user_id, workspace_id, key, authoritative)
-            return authoritative
-
         db.add(
             ControlIdempotency(
                 user_id=user_id,
@@ -553,8 +539,11 @@ async def _command_idempotency_put(
             )
         )
         try:
+            # The route already performed the replay lookup before launching.
+            # Optimistically persist the common fresh-key path and consult the
+            # unique (user_id, key) winner only when a concurrent request raced us.
             await db.commit()
-        except IntegrityError:
+        except IntegrityError as exc:
             await db.rollback()
             existing = (
                 await db.execute(
@@ -564,8 +553,12 @@ async def _command_idempotency_put(
                     )
                 )
             ).scalar_one_or_none()
-            if existing is None or existing.resource_type != "direct_command":
+            if existing is None:
                 raise
+            if existing.resource_type != "direct_command":
+                raise HTTPException(
+                    status_code=409, detail="command idempotency key collision"
+                ) from exc
             command_id = str(existing.resource_id)
 
     _command_idempotency_memory_put(user_id, workspace_id, key, command_id)
@@ -931,6 +924,7 @@ async def _command_snapshot(
     wait_seconds: int = 0,
     tail_bytes: int | None = None,
 ) -> dict[str, Any]:
+    snapshot_started = time.perf_counter()
     session = get_command_session(request, command_id)
     if session is None or session.get("workspace") != workspace_path:
         recovered = await _recovered_command_snapshot(
@@ -943,6 +937,7 @@ async def _command_snapshot(
             return recovered
         raise HTTPException(status_code=404, detail="command not found")
     waited_out = False
+    wait_started = time.perf_counter()
     if wait_seconds > 0 and not session.get("done"):
         task = session.get("log_task")
         if task is not None and not task.done():
@@ -950,6 +945,7 @@ async def _command_snapshot(
                 await asyncio.wait_for(asyncio.shield(task), timeout=wait_seconds)
             except asyncio.TimeoutError:
                 waited_out = True
+    wait_completed = time.perf_counter()
     if tail_bytes is not None:
         retained = bytes(session.get("output") or b"")
         raw = retained[-tail_bytes:] if tail_bytes else b""
@@ -960,7 +956,7 @@ async def _command_snapshot(
     output_truncated = len(decoded) > MAX_COMMAND_OUTPUT_CHARS
     output = _truncate(decoded)
     created_at = float(session.get("created_at") or time.time())
-    return {
+    result = {
         "command_id": command_id,
         "status": "COMPLETE" if session.get("done") else "RUNNING",
         "exit_code": session.get("exit_code"),
@@ -974,6 +970,12 @@ async def _command_snapshot(
         "cols": int(session.get("cols") or 80),
         "recovered": False,
     }
+    if session.get("measure_lifecycle"):
+        timing = dict(session.get("lifecycle_timing_ms") or {})
+        timing["snapshot_wait_ms"] = round((wait_completed - wait_started) * 1000.0, 3)
+        timing["snapshot_total_ms"] = round((time.perf_counter() - snapshot_started) * 1000.0, 3)
+        result["lifecycle_timing_ms"] = timing
+    return result
 
 
 async def _bounded_tree(
@@ -1970,11 +1972,26 @@ async def delete_workspace_file(request: Request, workspace_id: str, body: Delet
 
 @router.post("/workspaces/{workspace_id}/coding/commands")
 async def start_workspace_command(request: Request, workspace_id: str, body: CommandRequest):
+    measurement_started = time.perf_counter()
+    phase_started = measurement_started
+    lifecycle_timing: dict[str, float] = {}
     user_id = await _user(request, "command:execute")
+    if body.measure_lifecycle:
+        now = time.perf_counter()
+        lifecycle_timing["auth_memory_ms"] = round((now - phase_started) * 1000.0, 3)
+        phase_started = now
     workspace = await _workspace(user_id, workspace_id)
+    if body.measure_lifecycle:
+        now = time.perf_counter()
+        lifecycle_timing["workspace_lookup_ms"] = round((now - phase_started) * 1000.0, 3)
+        phase_started = now
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     _, relative_cwd = _relative_path(body.cwd, root)
     _validate_command(body.command, body.allow_network)
+    if body.measure_lifecycle:
+        now = time.perf_counter()
+        lifecycle_timing["root_validation_ms"] = round((now - phase_started) * 1000.0, 3)
+        phase_started = now
     idempotency_workspace = f"{workspace_id}:{body.worker_id or '-'}"
     if body.idempotency_key:
         existing_id = await _command_idempotency_get(
@@ -2005,17 +2022,24 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         run_options.update({"__rows": body.rows, "__cols": body.cols})
     if body.stdin is not None:
         run_options["__stdin"] = body.stdin
+    command_context = _command_context(
+        request=request,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        workspace_path=str(root),
+        worker_id=body.worker_id,
+    )
+    if body.measure_lifecycle:
+        now = time.perf_counter()
+        lifecycle_timing["route_pre_run_ms"] = round((now - phase_started) * 1000.0, 3)
+        command_context["measure_lifecycle"] = True
+        command_context["lifecycle_timing_ms"] = lifecycle_timing
+        phase_started = now
     response = await run_command(
         body.command,
         relative_cwd,
         body.wait_seconds,
-        __context__=_command_context(
-            request=request,
-            user_id=user_id,
-            workspace_id=workspace_id,
-            workspace_path=str(root),
-            worker_id=body.worker_id,
-        ),
+        __context__=command_context,
         __use_pty=body.pty,
         **run_options,
     )
@@ -2023,6 +2047,14 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     if match is None:
         raise HTTPException(status_code=422, detail=response)
     command_id = match.group(1)
+    if body.measure_lifecycle:
+        now = time.perf_counter()
+        session = get_command_session(request, command_id)
+        if session is not None:
+            timing = session.setdefault("lifecycle_timing_ms", {})
+            timing["run_command_ms"] = round((now - phase_started) * 1000.0, 3)
+            timing["route_to_command_id_ms"] = round((now - measurement_started) * 1000.0, 3)
+        phase_started = now
     await _touch_worker(user_id, workspace_id, body.worker_id)
     if body.idempotency_key:
         authoritative_id = await _command_idempotency_put(
@@ -2031,6 +2063,12 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         if authoritative_id != command_id:
             stop_command_session(request, command_id, force=True)
             command_id = authoritative_id
+    if body.measure_lifecycle:
+        now = time.perf_counter()
+        session = get_command_session(request, command_id)
+        if session is not None:
+            timing = session.setdefault("lifecycle_timing_ms", {})
+            timing["route_post_run_ms"] = round((now - phase_started) * 1000.0, 3)
     snapshot = await _command_snapshot(
         request,
         workspace_path=str(root),

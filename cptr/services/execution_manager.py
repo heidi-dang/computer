@@ -8,6 +8,9 @@ execution service without prematurely enabling unsafe multi-worker serving.
 
 from __future__ import annotations
 
+import asyncio
+import errno
+import os
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
@@ -19,7 +22,7 @@ from cptr.env import COMMAND_SESSION_MAX_RETAINED, COMMAND_SESSION_TTL_SECONDS
 class CommandSessionRegistry:
     def __init__(self) -> None:
         self.sessions: dict[str, dict[str, Any]] = {}
-        self._launch_reservations: dict[object, str | None] = {}
+        self._launch_reservations: dict[object, dict[str, Any]] = {}
         self.total_created = 0
         self.total_reaped = 0
 
@@ -32,10 +35,10 @@ class CommandSessionRegistry:
     ) -> None:
         if reservation_token is not None:
             missing = object()
-            reserved_user = self._launch_reservations.get(reservation_token, missing)
-            if reserved_user is missing:
+            reservation = self._launch_reservations.get(reservation_token, missing)
+            if reservation is missing:
                 raise RuntimeError("command launch reservation is not active")
-            if reserved_user != session.get("user_id"):
+            if reservation.get("user_id") != session.get("user_id"):
                 raise RuntimeError("command launch reservation owner mismatch")
             del self._launch_reservations[reservation_token]
         self.sessions[session_id] = session
@@ -56,6 +59,64 @@ class CommandSessionRegistry:
     def values(self) -> Iterable[dict[str, Any]]:
         self.reconcile()
         return self.sessions.values()
+
+    @staticmethod
+    def _os_process_exit_state(session: dict[str, Any]) -> bool | None:
+        """Ask POSIX for authoritative child/process-group liveness without reaping it.
+
+        asyncio process handles can retain ``returncode=None`` when their waiter was
+        cancelled during request/lifespan teardown.  Capacity accounting must not
+        treat that stale Python object as stronger evidence than the kernel.  Return
+        True only when exit is proven, False when the owned child/group is live, and
+        None when the platform cannot decide safely.
+        """
+        if os.name != "posix":
+            return None
+        proc = session.get("proc")
+        pid = getattr(proc, "pid", None)
+        if not isinstance(pid, int) or pid <= 0:
+            return None
+
+        waitid = getattr(os, "waitid", None)
+        p_pid = getattr(os, "P_PID", None)
+        wexited = int(getattr(os, "WEXITED", 0) or 0)
+        wnohang = int(getattr(os, "WNOHANG", 0) or 0)
+        wnowait = int(getattr(os, "WNOWAIT", 0) or 0)
+        if callable(waitid) and p_pid is not None and wexited and wnohang and wnowait:
+            try:
+                info = waitid(p_pid, pid, wexited | wnohang | wnowait)
+            except ProcessLookupError:
+                return True
+            except ChildProcessError:
+                # The child may already have been reaped by asyncio; verify the
+                # process group below before declaring the command complete.
+                pass
+            except OSError as exc:
+                if exc.errno == errno.ESRCH:
+                    return True
+            else:
+                if info is not None and int(getattr(info, "si_pid", 0) or 0) == pid:
+                    return True
+                return False
+
+        killpg = getattr(os, "killpg", None)
+        if not callable(killpg):
+            return None
+        try:
+            # Every CPTR command is launched in its own process group/session.
+            # Signal 0 performs an existence/permission check without signalling.
+            killpg(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        except OSError as exc:
+            if exc.errno == errno.ESRCH:
+                return True
+            if exc.errno == errno.EPERM:
+                return False
+            return None
+        return False
 
     @staticmethod
     def _process_exit_state(session: dict[str, Any]) -> tuple[bool, int | None]:
@@ -91,6 +152,9 @@ class CommandSessionRegistry:
                 except Exception:
                     return False, None
         if returncode is None:
+            os_exited = CommandSessionRegistry._os_process_exit_state(session)
+            if os_exited is True:
+                return True, None
             return False, None
         try:
             return True, int(returncode)
@@ -146,11 +210,57 @@ class CommandSessionRegistry:
             if self.is_active(session) and (user_id is None or session.get("user_id") == user_id)
         )
 
+    @staticmethod
+    def _task_finished(task: Any) -> bool:
+        if task is None:
+            return False
+        done = getattr(task, "done", None)
+        if not callable(done):
+            return False
+        try:
+            return bool(done())
+        except Exception:
+            return False
+
+    def reconcile_launch_reservations(self) -> int:
+        """Release orphan launch slots without ever ignoring a live owned child.
+
+        A reservation normally lives only inside ``reserve_launch``.  If request
+        teardown prevents that context from unwinding, retain the slot while its
+        owner task is live.  Once the owner is gone, an unbound reservation is
+        provably orphaned; a process-bound reservation remains charged until the
+        child itself has exited.
+        """
+        removed = 0
+        for token, reservation in list(self._launch_reservations.items()):
+            owner_task = reservation.get("owner_task")
+            if not self._task_finished(owner_task):
+                continue
+            proc = reservation.get("proc")
+            if proc is not None:
+                exited, _ = self._process_exit_state({"proc": proc})
+                if not exited:
+                    continue
+            if self._launch_reservations.pop(token, None) is not None:
+                removed += 1
+        return removed
+
+    def bind_launch_process(self, reservation_token: object | None, proc: Any) -> bool:
+        """Bind a reserved slot to its spawned process before any post-spawn await."""
+        if reservation_token is None:
+            return False
+        reservation = self._launch_reservations.get(reservation_token)
+        if reservation is None:
+            return False
+        reservation["proc"] = proc
+        return True
+
     def launch_reservation_count(self, user_id: str | None = None) -> int:
+        self.reconcile_launch_reservations()
         return sum(
             1
-            for reserved_user in self._launch_reservations.values()
-            if user_id is None or reserved_user == user_id
+            for reservation in self._launch_reservations.values()
+            if user_id is None or reservation.get("user_id") == user_id
         )
 
     def capacity_count(self, user_id: str | None = None) -> int:
@@ -161,6 +271,7 @@ class CommandSessionRegistry:
         if limit <= 0:
             return None
         self.reconcile()
+        self.reconcile_launch_reservations()
         active = sum(
             1
             for session in self.sessions.values()
@@ -169,7 +280,15 @@ class CommandSessionRegistry:
         if active + self.launch_reservation_count(user_id) >= limit:
             return None
         token = object()
-        self._launch_reservations[token] = user_id
+        try:
+            owner_task = asyncio.current_task()
+        except RuntimeError:
+            owner_task = None
+        self._launch_reservations[token] = {
+            "user_id": user_id,
+            "owner_task": owner_task,
+            "proc": None,
+        }
         return token
 
     def release_launch_reservation(self, reservation_token: object | None) -> bool:
@@ -197,6 +316,7 @@ class CommandSessionRegistry:
         """Reconcile completion, evict expired sessions, and enforce the retained cap."""
         current = time.time() if now is None else now
         self.reconcile(now=current)
+        self.reconcile_launch_reservations()
         removable = [
             (session_id, session)
             for session_id, session in self.sessions.items()
@@ -226,6 +346,7 @@ class CommandSessionRegistry:
 
     def stats(self) -> dict[str, int]:
         self.reconcile()
+        self.reconcile_launch_reservations()
         active = sum(1 for session in self.sessions.values() if self.is_active(session))
         completed = len(self.sessions) - active
         retained_output_bytes = sum(

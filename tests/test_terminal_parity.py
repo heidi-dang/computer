@@ -12,11 +12,32 @@ from cptr.routers.coding import CommandRequest, _command_snapshot, start_workspa
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
 from cptr.services.lsp_manager import LspManager
 from cptr.utils.tools import (
+    _fast_pty_argv,
     command_sessions,
     run_command,
     signal_command_session,
     stop_command_session,
 )
+
+
+class PtyLaunchStrategyTests(unittest.TestCase):
+    def test_fast_pty_wrapper_preserves_required_preexec_fallback(self):
+        with (
+            patch("cptr.utils.tools._PTY_FAST_SET_PRIV", "setpriv"),
+            patch("cptr.utils.tools._PTY_FAST_SETSID", "setsid"),
+        ):
+            self.assertIsNone(_fast_pty_argv(["true"], lambda: None))
+
+    def test_fast_pty_wrapper_composes_linux_session_and_parent_death_guards(self):
+        with (
+            patch("cptr.utils.tools.sys.platform", "linux"),
+            patch("cptr.utils.tools._PTY_FAST_SET_PRIV", "setpriv"),
+            patch("cptr.utils.tools._PTY_FAST_SETSID", "setsid"),
+        ):
+            self.assertEqual(
+                _fast_pty_argv(["true"], None),
+                ["setpriv", "--pdeathsig", "TERM", "setsid", "--ctty", "true"],
+            )
 
 
 class TerminalParityTests(unittest.IsolatedAsyncioTestCase):

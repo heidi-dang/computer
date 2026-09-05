@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -347,6 +348,43 @@ async def recover_monitors(app: Any) -> None:
     for monitor in await supervisor.store.list_active():
         if monitor.status == MonitorStatus.RUNNING:
             _schedule_monitor(app, monitor.monitor_id)
+
+
+@router.get("/runtime/metrics")
+async def get_runtime_metrics(request: Request):
+    """Return bounded owner-scoped lifecycle/resource counters for benchmarking."""
+    user_id = await _user(request, "task:read")
+    from cptr.services.browser_device_connections import browser_device_connections
+    from cptr.services.browser_devices import browser_device_store
+    from cptr.services.live_events import live_event_hub
+    from cptr.services.runtime_metrics import runtime_metrics
+    from cptr.utils.browser.proxy import manager as browser_manager
+    from cptr.utils.mcp.stdio_manager import stdio_manager
+    from cptr.utils.terminal import manager as terminal_manager
+    from cptr.utils.tools import command_session_metrics
+
+    owned_device_ids = {
+        str(device["device_id"])
+        for device in await browser_device_store.list_devices(user_id=user_id)
+        if isinstance(device.get("device_id"), str)
+    }
+
+    return {
+        "version": 1,
+        "timestamp_ms": int(time.time() * 1000),
+        "runtime": runtime_metrics.snapshot(),
+        "commands": command_session_metrics(),
+        "terminal_sessions": len(terminal_manager._sessions),
+        "browser_proxy_sessions": browser_manager.count(),
+        "browser_device": {
+            **(await browser_device_store.runtime_metrics(user_id=user_id)),
+            "connected_devices": await browser_device_connections.count(
+                device_ids=owned_device_ids
+            ),
+        },
+        "mcp_stdio_sessions": len(stdio_manager._instances),
+        "live_events": live_event_hub.stats(),
+    }
 
 
 @router.get("/workspaces")

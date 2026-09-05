@@ -477,6 +477,58 @@ class BrowserDeviceStore:
                 "expires_at": int(lease.expires_at) if lease.expires_at is not None else None,
             }
 
+    async def runtime_metrics(self, *, user_id: str) -> dict[str, Any]:
+        """Return owner-scoped aggregate browser lifecycle counts without identifiers."""
+        async with await get_db() as db:
+            device_total = int(
+                await db.scalar(
+                    select(func.count()).select_from(BrowserDevice).where(BrowserDevice.user_id == user_id)
+                )
+                or 0
+            )
+            session_rows = (
+                await db.execute(
+                    select(BrowserSession.state, func.count())
+                    .where(BrowserSession.user_id == user_id)
+                    .group_by(BrowserSession.state)
+                )
+            ).all()
+            active_session_rows = (
+                await db.execute(
+                    select(BrowserSession.state, func.count())
+                    .where(
+                        BrowserSession.user_id == user_id,
+                        BrowserSession.closed_at.is_(None),
+                        BrowserSession.state != "DISCONNECTED",
+                    )
+                    .group_by(BrowserSession.state)
+                )
+            ).all()
+            lease_rows = (
+                await db.execute(
+                    select(BrowserLease.owner, func.count())
+                    .join(BrowserSession, BrowserSession.id == BrowserLease.session_id)
+                    .where(
+                        BrowserSession.user_id == user_id,
+                        BrowserSession.closed_at.is_(None),
+                        BrowserSession.state != "DISCONNECTED",
+                    )
+                    .group_by(BrowserLease.owner)
+                )
+            ).all()
+        sessions_by_state = {str(state): int(count) for state, count in session_rows}
+        active_sessions_by_state = {str(state): int(count) for state, count in active_session_rows}
+        leases_by_owner = {str(owner): int(count) for owner, count in lease_rows}
+        return {
+            "devices_total": device_total,
+            "sessions_total": sum(sessions_by_state.values()),
+            "sessions_by_state": sessions_by_state,
+            "active_sessions": sum(active_sessions_by_state.values()),
+            "active_sessions_by_state": active_sessions_by_state,
+            "active_leases": sum(leases_by_owner.values()),
+            "leases_by_owner": leases_by_owner,
+        }
+
     async def replay_device_events(
         self,
         *,

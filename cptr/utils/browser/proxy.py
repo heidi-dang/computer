@@ -75,6 +75,9 @@ class BrowserProxyManager:
             session_id for session_id, session in self._sessions.items() if session.owner == owner
         ]
 
+    def count(self) -> int:
+        return len(self._sessions)
+
     def session(self, session_id: str, owner: str) -> BrowserSession | None:
         session = self._sessions.get(session_id)
         return session if session and session.owner == owner else None
