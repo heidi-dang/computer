@@ -66,5 +66,11 @@ class BrowserDeviceConnectionRegistry:
         async with self._lock:
             return device_id in self._connections
 
+    async def count(self, *, device_ids: set[str] | None = None) -> int:
+        async with self._lock:
+            if device_ids is None:
+                return len(self._connections)
+            return sum(device_id in self._connections for device_id in device_ids)
+
 
 browser_device_connections = BrowserDeviceConnectionRegistry()

@@ -476,6 +476,57 @@ class CommandSessionRetentionTests(unittest.TestCase):
             command_session_registry.launch_reservation_count("stale-lifespan-user"), 0
         )
 
+    def test_registry_releases_unbound_reservation_after_owner_task_finishes(self):
+        registry = CommandSessionRegistry()
+        owner_state = {"done": False}
+        owner_task = SimpleNamespace(done=lambda: owner_state["done"])
+        with patch("cptr.services.execution_manager.asyncio.current_task", return_value=owner_task):
+            token = registry.try_reserve_launch("user-1", 5)
+
+        self.assertIsNotNone(token)
+        self.assertEqual(registry.launch_reservation_count("user-1"), 1)
+
+        owner_state["done"] = True
+        self.assertEqual(registry.launch_reservation_count("user-1"), 0)
+
+    def test_registry_keeps_process_bound_reservation_until_child_exits(self):
+        registry = CommandSessionRegistry()
+        owner_state = {"done": False}
+        owner_task = SimpleNamespace(done=lambda: owner_state["done"])
+        proc = SimpleNamespace(returncode=None, poll=lambda: proc.returncode)
+        with patch("cptr.services.execution_manager.asyncio.current_task", return_value=owner_task):
+            token = registry.try_reserve_launch("user-1", 5)
+
+        self.assertTrue(registry.bind_launch_process(token, proc))
+        owner_state["done"] = True
+        self.assertEqual(registry.launch_reservation_count("user-1"), 1)
+
+        proc.returncode = 0
+        self.assertEqual(registry.launch_reservation_count("user-1"), 0)
+
+    def test_registry_consumes_process_bound_reservation_on_registration(self):
+        registry = CommandSessionRegistry()
+        owner_task = SimpleNamespace(done=lambda: False)
+        proc = SimpleNamespace(returncode=None, poll=lambda: None)
+        with patch("cptr.services.execution_manager.asyncio.current_task", return_value=owner_task):
+            token = registry.try_reserve_launch("user-1", 5)
+
+        self.assertTrue(registry.bind_launch_process(token, proc))
+        registry.register(
+            "registered",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "proc": proc,
+                "created_at": 1.0,
+                "output": bytearray(),
+            },
+            reservation_token=token,
+        )
+
+        self.assertEqual(registry.launch_reservation_count("user-1"), 0)
+        self.assertIn("registered", registry.sessions)
+
     def test_registry_reaps_expired_completed_sessions(self):
         registry = CommandSessionRegistry()
         registry.register(
@@ -538,6 +589,106 @@ class CommandSessionRetentionTests(unittest.TestCase):
         self.assertTrue(registry.sessions["stale"]["done"])
         self.assertEqual(registry.sessions["stale"]["exit_code"], 0)
         self.assertIn("completed_at", registry.sessions["stale"])
+
+    def test_registry_frees_slot_when_cancelled_waiter_and_process_group_is_gone(self):
+        class CancelledWaiter:
+            @staticmethod
+            def done():
+                return True
+
+            @staticmethod
+            def result():
+                raise asyncio.CancelledError()
+
+        registry = CommandSessionRegistry()
+        registry.register(
+            "stale-os-process",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "created_at": 1.0,
+                "proc": SimpleNamespace(pid=424242, returncode=None),
+                "process_wait_task": CancelledWaiter(),
+                "output": bytearray(),
+            },
+        )
+
+        with (
+            patch("cptr.services.execution_manager.os.name", "posix"),
+            patch("cptr.services.execution_manager.os.waitid", None, create=True),
+            patch(
+                "cptr.services.execution_manager.os.killpg",
+                side_effect=ProcessLookupError(),
+                create=True,
+            ),
+        ):
+            self.assertEqual(registry.active_count("user-1"), 0)
+
+        self.assertTrue(registry.sessions["stale-os-process"]["done"])
+        self.assertIn("completed_at", registry.sessions["stale-os-process"])
+
+    def test_registry_keeps_slot_when_cancelled_waiter_but_process_group_is_live(self):
+        class CancelledWaiter:
+            @staticmethod
+            def done():
+                return True
+
+            @staticmethod
+            def result():
+                raise asyncio.CancelledError()
+
+        registry = CommandSessionRegistry()
+        registry.register(
+            "live-os-process",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "created_at": 1.0,
+                "proc": SimpleNamespace(pid=424243, returncode=None),
+                "process_wait_task": CancelledWaiter(),
+                "output": bytearray(),
+            },
+        )
+
+        with (
+            patch("cptr.services.execution_manager.os.name", "posix"),
+            patch("cptr.services.execution_manager.os.waitid", None, create=True),
+            patch("cptr.services.execution_manager.os.killpg", return_value=None, create=True),
+        ):
+            self.assertEqual(registry.active_count("user-1"), 1)
+
+        self.assertFalse(registry.sessions["live-os-process"]["done"])
+
+    def test_registry_detects_exited_child_with_nonreaping_waitid_probe(self):
+        registry = CommandSessionRegistry()
+        registry.register(
+            "zombie-child",
+            {
+                "done": False,
+                "user_id": "user-1",
+                "created_at": 1.0,
+                "proc": SimpleNamespace(pid=424244, returncode=None),
+                "output": bytearray(),
+            },
+        )
+
+        with (
+            patch("cptr.services.execution_manager.os.name", "posix"),
+            patch(
+                "cptr.services.execution_manager.os.waitid",
+                return_value=SimpleNamespace(si_pid=424244),
+                create=True,
+            ),
+            patch("cptr.services.execution_manager.os.P_PID", 1, create=True),
+            patch("cptr.services.execution_manager.os.WEXITED", 4, create=True),
+            patch("cptr.services.execution_manager.os.WNOHANG", 1, create=True),
+            patch("cptr.services.execution_manager.os.WNOWAIT", 0x01000000, create=True),
+            patch("cptr.services.execution_manager.os.killpg", create=True) as killpg,
+        ):
+            self.assertEqual(registry.active_count("user-1"), 0)
+
+        killpg.assert_not_called()
+        self.assertTrue(registry.sessions["zombie-child"]["done"])
 
     def test_registry_frees_slot_when_process_exited_but_capture_is_still_draining(self):
         registry = CommandSessionRegistry()

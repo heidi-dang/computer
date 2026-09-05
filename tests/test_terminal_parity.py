@@ -1,5 +1,6 @@
 import asyncio
 import json
+import signal
 import sys
 import tempfile
 import textwrap
@@ -12,11 +13,48 @@ from cptr.routers.coding import CommandRequest, _command_snapshot, start_workspa
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
 from cptr.services.lsp_manager import LspManager
 from cptr.utils.tools import (
+    _fast_pty_argv,
     command_sessions,
     run_command,
     signal_command_session,
     stop_command_session,
 )
+
+
+class PtyLaunchStrategyTests(unittest.TestCase):
+    def test_fast_pty_wrapper_preserves_required_preexec_fallback(self):
+        with (
+            patch("cptr.utils.tools._PTY_FAST_SET_PRIV", "setpriv"),
+            patch("cptr.utils.tools._PTY_FAST_SETSID", "setsid"),
+        ):
+            self.assertIsNone(_fast_pty_argv(["true"], lambda: None))
+
+    def test_fast_pty_wrapper_composes_linux_session_and_parent_death_guards(self):
+        with (
+            patch("cptr.utils.tools.sys.platform", "linux"),
+            patch("cptr.utils.tools._PTY_FAST_SET_PRIV", "setpriv"),
+            patch("cptr.utils.tools._PTY_FAST_SETSID", "setsid"),
+        ):
+            self.assertEqual(
+                _fast_pty_argv(["true"], None),
+                ["setpriv", "--pdeathsig", "TERM", "setsid", "--ctty", "true"],
+            )
+
+
+class PtySignalStrategyTests(unittest.TestCase):
+    def test_interrupt_never_signals_parent_group_during_fast_wrapper_startup(self):
+        proc = SimpleNamespace(pid=4242)
+        session = {"proc": proc, "done": False}
+        with (
+            patch("cptr.utils.tools.get_command_session", return_value=session),
+            patch("cptr.utils.tools.os.getpgid", return_value=3131),
+            patch("cptr.utils.tools.os.kill") as kill,
+            patch("cptr.utils.tools.os.killpg") as killpg,
+        ):
+            self.assertIsNone(signal_command_session(SimpleNamespace(), "session", "interrupt"))
+
+        kill.assert_called_once_with(4242, signal.SIGINT)
+        killpg.assert_not_called()
 
 
 class TerminalParityTests(unittest.IsolatedAsyncioTestCase):

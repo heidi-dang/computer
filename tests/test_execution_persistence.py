@@ -115,6 +115,17 @@ class DurableCommandIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             recovered = await _command_idempotency_get("user-1", "workspace-1:-", "stable-key")
         self.assertEqual(recovered, "deadbeef")
 
+    async def test_command_idempotency_put_resolves_unique_race_to_existing_winner(self):
+        with patch("cptr.routers.coding.get_db", new=AsyncMock(side_effect=self._db)):
+            first = await _command_idempotency_put(
+                "user-1", "workspace-1:-", "race-key", "deadbeef"
+            )
+            raced = await _command_idempotency_put(
+                "user-1", "workspace-1:-", "race-key", "cafebabe"
+            )
+        self.assertEqual(first, "deadbeef")
+        self.assertEqual(raced, "deadbeef")
+
     async def test_replayed_start_returns_original_durable_transcript_without_reexecution(self):
         with tempfile.TemporaryDirectory() as workspace_root:
             log_dir = Path(workspace_root, ".cptr", "task_logs")

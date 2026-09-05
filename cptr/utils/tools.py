@@ -19,6 +19,7 @@ import mimetypes
 import os
 import re
 import shlex
+import shutil
 import stat
 import sys
 import time
@@ -70,6 +71,10 @@ except ImportError:
     import subprocess
 
     _PTY_AVAILABLE = False  # Windows
+
+_PTY_FAST_SET_PRIV = shutil.which("setpriv") if sys.platform.startswith("linux") else None
+_PTY_FAST_SETSID = shutil.which("setsid") if sys.platform.startswith("linux") else None
+_PTY_FAST_SHELL = shutil.which("sh") if sys.platform.startswith("linux") else None
 
 
 # ── Command session state ───────────────────────────────────
@@ -123,6 +128,28 @@ def _compose_preexec(preexec_fn=None, *, controlling_tty: bool = False):
     return combined
 
 
+def _fast_pty_argv(argv: list[str], preexec_fn=None) -> list[str] | None:
+    """Return a Linux PTY wrapper that avoids Python child-side pre-exec work.
+
+    `setpriv` preserves the parent-death signal and `setsid --ctty` creates the
+    same session/process-group/controlling-terminal relationship as
+    `_compose_preexec(..., controlling_tty=True)`. PAM privilege dropping still
+    requires the existing pre-exec path and therefore never uses this shortcut.
+    """
+    if preexec_fn is not None or not sys.platform.startswith("linux"):
+        return None
+    if not _PTY_FAST_SET_PRIV or not _PTY_FAST_SETSID:
+        return None
+    return [
+        _PTY_FAST_SET_PRIV,
+        "--pdeathsig",
+        "TERM",
+        _PTY_FAST_SETSID,
+        "--ctty",
+        *argv,
+    ]
+
+
 def _spawn_pty(
     command: str,
     cwd: str,
@@ -133,19 +160,28 @@ def _spawn_pty(
     cols: int = 80,
 ) -> tuple:
     """Spawn a shell command under a PTY (Unix only). Returns (proc, master_fd)."""
+    fast_argv = (
+        _fast_pty_argv([_PTY_FAST_SHELL, "-c", command], preexec_fn)
+        if _PTY_FAST_SHELL
+        else None
+    )
     master_fd, slave_fd = pty.openpty()
     try:
         fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         proc = subprocess.Popen(
-            command,
-            shell=True,
+            fast_argv if fast_argv is not None else command,
+            shell=fast_argv is None,
             stdin=slave_fd,
             stdout=slave_fd,
             stderr=slave_fd,
             cwd=cwd,
             env=env,
             start_new_session=False,
-            preexec_fn=_compose_preexec(preexec_fn, controlling_tty=True),
+            preexec_fn=(
+                None
+                if fast_argv is not None
+                else _compose_preexec(preexec_fn, controlling_tty=True)
+            ),
         )
     except Exception:
         os.close(slave_fd)
@@ -165,11 +201,12 @@ def _spawn_pty_argv(
     cols: int = 80,
 ) -> tuple:
     """Spawn an argv command under a PTY without invoking a local shell."""
+    fast_argv = _fast_pty_argv(argv, preexec_fn)
     master_fd, slave_fd = pty.openpty()
     try:
         fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
         proc = subprocess.Popen(
-            argv,
+            fast_argv if fast_argv is not None else argv,
             shell=False,
             stdin=slave_fd,
             stdout=slave_fd,
@@ -177,7 +214,11 @@ def _spawn_pty_argv(
             cwd=cwd,
             env=env,
             start_new_session=False,
-            preexec_fn=_compose_preexec(preexec_fn, controlling_tty=True),
+            preexec_fn=(
+                None
+                if fast_argv is not None
+                else _compose_preexec(preexec_fn, controlling_tty=True)
+            ),
         )
     except Exception:
         os.close(slave_fd)
@@ -887,21 +928,22 @@ def signal_command_session(
         return "command session already exited"
     normalized = signal_name.lower()
     if normalized == "interrupt":
-        master_fd = session.get("master_fd")
-        if master_fd is not None:
-            try:
-                # A real controlling PTY translates VINTR through the terminal
-                # line discipline to SIGINT for its foreground process group.
-                os.write(master_fd, b"\x03")
-                return None
-            except OSError:
-                return "PTY closed"
         proc = session["proc"]
         try:
             if os.name == "nt" and hasattr(signal, "CTRL_BREAK_EVENT"):
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
             else:
-                os.killpg(proc.pid, signal.SIGINT)
+                # Deliver SIGINT directly to the owned process group rather
+                # than relying on PTY VINTR timing.  The fast Linux PTY path
+                # execs through setpriv/setsid, so immediately after spawn the
+                # wrapper may briefly still belong to the parent's process
+                # group.  Never signal that shared group: kill only the wrapper
+                # PID until it becomes its own group leader.
+                process_group_id = os.getpgid(proc.pid)
+                if process_group_id == proc.pid:
+                    os.killpg(process_group_id, signal.SIGINT)
+                else:
+                    os.kill(proc.pid, signal.SIGINT)
             return None
         except (ProcessLookupError, PermissionError, OSError):
             return "process is not available"
@@ -1969,13 +2011,31 @@ async def run_command(
     :param wait: Seconds to wait for the command to finish before returning. The server caps inline waiting at CPTR_COMMAND_INLINE_WAIT_MAX_SECONDS; the command itself keeps running after the call returns. Null returns immediately.
     """
     workspace = __context__["workspace"]
+    measure_lifecycle = bool(__context__.get("measure_lifecycle"))
+    lifecycle_timing = (
+        __context__.get("lifecycle_timing_ms")
+        if isinstance(__context__.get("lifecycle_timing_ms"), dict)
+        else {}
+    )
+    run_started = time.perf_counter()
     if not _accept_new_command_sessions:
         return "Error: CPTR is shutting down and is not accepting new command sessions."
+    phase_started = time.perf_counter()
     command_session_registry.reap()
+    if measure_lifecycle:
+        lifecycle_timing["session_reap_ms"] = round(
+            (time.perf_counter() - phase_started) * 1000.0, 3
+        )
+    phase_started = time.perf_counter()
     try:
         identity = await identity_for_context(__context__)
     except IdentityUnavailable as e:
         return f"Error: {e}"
+    if measure_lifecycle:
+        lifecycle_timing["identity_ms"] = round(
+            (time.perf_counter() - phase_started) * 1000.0, 3
+        )
+    phase_started = time.perf_counter()
     user_id = identity.app_user_id or __context__.get("user_id")
     request = __context__.get("request")
 
@@ -1989,8 +2049,13 @@ async def run_command(
     else:
         env = {**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"}
         preexec = None
+    if measure_lifecycle:
+        lifecycle_timing["process_preflight_ms"] = round(
+            (time.perf_counter() - phase_started) * 1000.0, 3
+        )
     master_fd = None
     proc = None
+    reservation_started = time.perf_counter()
     with command_session_registry.reserve_launch(
         user_id, MAX_COMMAND_SESSIONS
     ) as launch_reservation:
@@ -1998,7 +2063,12 @@ async def run_command(
             used = command_session_registry.capacity_count(user_id)
             return f"Error: too many running command sessions ({used}/{MAX_COMMAND_SESSIONS}). Stop one first."
 
+        if measure_lifecycle:
+            lifecycle_timing["capacity_reservation_ms"] = round(
+                (time.perf_counter() - reservation_started) * 1000.0, 3
+            )
         try:
+            spawn_started = time.perf_counter()
             if _PTY_AVAILABLE and __use_pty:
                 if __argv is None:
                     proc, master_fd = _spawn_pty(
@@ -2037,14 +2107,27 @@ async def run_command(
                         env=env,
                         **kwargs,
                     )
+            if not command_session_registry.bind_launch_process(launch_reservation, proc):
+                _abort_unregistered_command(proc, master_fd)
+                return "Error: command launch reservation lost"
+            if measure_lifecycle:
+                lifecycle_timing["spawn_ms"] = round(
+                    (time.perf_counter() - spawn_started) * 1000.0, 3
+                )
 
             command_session_id = uuid.uuid4().hex[:8]
             log_path = Path(workspace) / ".cptr" / "task_logs" / f"{command_session_id}.jsonl"
             if request is None:
                 _abort_unregistered_command(proc, master_fd)
                 return "Error: request context unavailable"
+            transcript_started = time.perf_counter()
             await Runtime.write_file(request, str(log_path), "")
+            if measure_lifecycle:
+                lifecycle_timing["transcript_init_ms"] = round(
+                    (time.perf_counter() - transcript_started) * 1000.0, 3
+                )
 
+            registration_started = time.perf_counter()
             live_target: dict[str, str] | None = None
             control_task_id = __context__.get("control_task_id")
             workspace_id = __context__.get("workspace_id")
@@ -2094,6 +2177,8 @@ async def run_command(
                 "terminal_event_overflow": [],
                 "terminal_event_overflow_bytes": 0,
                 "terminal_event_queue_high_water": 0,
+                "measure_lifecycle": measure_lifecycle,
+                "lifecycle_timing_ms": lifecycle_timing,
                 "pty": bool(master_fd is not None),
                 "rows": __rows,
                 "cols": __cols,
@@ -2103,6 +2188,10 @@ async def run_command(
                 session,
                 reservation_token=launch_reservation,
             )
+            if measure_lifecycle:
+                lifecycle_timing["session_register_ms"] = round(
+                    (time.perf_counter() - registration_started) * 1000.0, 3
+                )
         except asyncio.CancelledError:
             _abort_unregistered_command(proc, master_fd)
             raise
@@ -2116,6 +2205,7 @@ async def run_command(
     # Establish process ownership and output draining before the first await
     # after registration. A cancelled request must never strand a child process
     # in the five-slot pool without an independent waiter/capture owner.
+    setup_started = time.perf_counter()
     session["process_wait_task"] = asyncio.create_task(
         _wait_for_command_process(proc, pty_mode=bool(master_fd is not None)),
         name=f"cptr-command-wait-{command_session_id}",
@@ -2133,6 +2223,10 @@ async def run_command(
         name=f"cptr-command-capture-{command_session_id}",
     )
     session["log_task"] = log_task
+    if measure_lifecycle:
+        lifecycle_timing["async_task_setup_ms"] = round(
+            (time.perf_counter() - setup_started) * 1000.0, 3
+        )
 
     if __stdin:
         input_error = send_command_session_input(
@@ -2150,6 +2244,7 @@ async def run_command(
             await _abort_unreturned_command_session(command_session_id)
             raise
     if live_target is not None:
+        event_started = time.perf_counter()
         try:
             await _queue_command_session_event(
                 session,
@@ -2163,6 +2258,10 @@ async def run_command(
         except asyncio.CancelledError:
             await _abort_unreturned_command_session(command_session_id)
             raise
+        if measure_lifecycle:
+            lifecycle_timing["started_event_enqueue_ms"] = round(
+                (time.perf_counter() - event_started) * 1000.0, 3
+            )
 
     # Wait for the command to finish inline (matches open-terminal behaviour)
     if wait is None and EXECUTE_TIMEOUT:
@@ -2189,6 +2288,10 @@ async def run_command(
         status = f"exited (code {exit_code})"
     else:
         status = "running"
+    if measure_lifecycle:
+        lifecycle_timing["run_command_internal_ms"] = round(
+            (time.perf_counter() - run_started) * 1000.0, 3
+        )
 
     return f"Task {command_session_id}: {status}\nCommand: {command}\nnext_offset: {next_offset}\n---\n{output}"
 
