@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from cptr.services.workbench_sessions import WorkbenchSessionStore
 from cptr.routers.workbench import (
+    BindWorkbenchSessionTargetRequest,
     CreateWorkbenchSessionRequest,
     RenameWorkbenchSessionRequest,
+    bind_workbench_session,
     create_workbench_session,
     get_workbench_session_events,
     rename_workbench_session,
@@ -320,6 +322,71 @@ class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["event_count"], 1)
         create.assert_awaited_once_with(owner_id="user_1", name="Release work", workspace_id="ws_1")
         self.assertEqual(append.await_args.kwargs["event_type"], "workbench.opened")
+
+    async def test_bind_reconciles_command_that_completed_before_workbench_binding(self):
+        request = SimpleNamespace()
+        bound = {
+            "session_id": "wbs_1",
+            "status": "RUNNING",
+            "active_target_type": "command",
+            "active_target_id": "cmd_fast",
+            "active_workspace_id": "ws_1",
+        }
+        reconciled = {
+            **bound,
+            "status": "OPEN",
+            "active_target_type": None,
+            "active_target_id": None,
+        }
+        command = {
+            "done": True,
+            "exit_code": 0,
+            "live_target": {
+                "target_type": "command",
+                "target_id": "cmd_fast",
+                "workspace_id": "ws_1",
+            },
+        }
+        with (
+            patch("cptr.routers.workbench._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.workbench._ensure_target_owner", new=AsyncMock(return_value=None)),
+            patch("cptr.routers.workbench.get_command_session", return_value=command),
+            patch(
+                "cptr.routers.workbench.workbench_session_store.bind_target",
+                new=AsyncMock(return_value=bound),
+            ),
+            patch(
+                "cptr.routers.workbench.workbench_session_store.append_event",
+                new=AsyncMock(return_value={"sequence": 2}),
+            ),
+            patch(
+                "cptr.routers.workbench.workbench_session_store.reconcile_command_terminal",
+                new=AsyncMock(return_value=1),
+            ) as reconcile,
+            patch(
+                "cptr.routers.workbench.workbench_session_store.get",
+                new=AsyncMock(return_value=reconciled),
+            ),
+        ):
+            result = await bind_workbench_session(
+                request,
+                "wbs_1",
+                BindWorkbenchSessionTargetRequest(
+                    target_type="command",
+                    target_id="cmd_fast",
+                    workspace_id="ws_1",
+                ),
+            )
+
+        reconcile.assert_awaited_once_with(
+            owner_id="user_1",
+            workspace_id="ws_1",
+            command_id="cmd_fast",
+            status="COMPLETE",
+            exit_code=0,
+        )
+        self.assertEqual(result["status"], "OPEN")
+        self.assertIsNone(result["active_target_type"])
 
     async def test_events_return_last_sequence_cursor_expected_by_plugin(self):
         request = SimpleNamespace()

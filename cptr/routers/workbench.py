@@ -181,6 +181,18 @@ async def bind_workbench_session(
         workspace_id=body.workspace_id,
         summary=f"Workbench bound to {body.target_type} activity.",
     )
+    if body.target_type == "command" and body.workspace_id:
+        command = get_command_session(None, body.target_id, context={"user_id": user_id})
+        if command and command.get("done"):
+            raw_exit_code = command.get("exit_code")
+            exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
+            await workbench_session_store.reconcile_command_terminal(
+                owner_id=user_id,
+                workspace_id=body.workspace_id,
+                command_id=body.target_id,
+                status="COMPLETE" if exit_code == 0 else "FAILED",
+                exit_code=exit_code,
+            )
     return await workbench_session_store.get(owner_id=user_id, session_id=session_id) or session
 
 
