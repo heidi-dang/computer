@@ -50,6 +50,21 @@ _managed_base_url: str | None = None
 _managed_lock = asyncio.Lock()
 
 
+def _managed_browser_startup_timeout_seconds() -> float:
+    """Return the bounded managed-Chrome readiness deadline.
+
+    Hosted CI runners can occasionally take longer than the former fixed ten-second
+    window to publish their local CDP endpoint. Operators may tune the deadline,
+    but it remains bounded so a broken browser cannot stall requests indefinitely.
+    """
+    raw = os.environ.get("CPTR_MANAGED_BROWSER_STARTUP_TIMEOUT_SECONDS", "20")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = 20.0
+    return min(60.0, max(5.0, value))
+
+
 def find_browser() -> str | None:
     """Find a compatible Chrome-family browser without launching it."""
     import platform
@@ -231,19 +246,27 @@ async def ensure_managed_browser() -> str:
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        for _ in range(20):
+        startup_timeout = _managed_browser_startup_timeout_seconds()
+        deadline = asyncio.get_running_loop().time() + startup_timeout
+        while True:
             await asyncio.sleep(0.5)
             if _managed_process.returncode is not None:
                 break
             if await _probe_cdp(base_url):
                 _managed_base_url = base_url
                 return base_url
+            if asyncio.get_running_loop().time() >= deadline:
+                break
 
+        returncode = _managed_process.returncode
         try:
             _managed_process.terminate()
         except ProcessLookupError:
             pass
-        raise RuntimeError("Managed Chrome started but its local CDP endpoint did not become ready")
+        raise RuntimeError(
+            "Managed Chrome did not expose its local CDP endpoint within "
+            f"{startup_timeout:.1f}s (binary: {chrome_path}, returncode: {returncode})"
+        )
 
 
 async def shutdown_browser() -> None:
