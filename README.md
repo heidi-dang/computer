@@ -29,6 +29,10 @@ MCP tool servers require the optional MCP dependencies: `pip install 'cptr[mcp]'
 To install every optional feature group, use `pip install 'cptr[all]'`.
 The Docker image includes all optional feature groups.
 
+### Paired Chrome cross-repo contract
+
+The CPTR browser-device implementation is pinned to `contracts/browser-protocol-v1.json`. `tests/test_browser_protocol_contract.py` fails if the backend action/lease contract drifts from that manifest, and the plugin repository's aggregate cross-repo gate requires the plugin, backend, and Chrome extension manifests to be identical. Browser wire changes therefore require coordinated manifests/tests across all three repositories; breaking changes require an explicit protocol-version transition.
+
 Or with [uv](https://docs.astral.sh/uv/): `uvx cptr@latest run`
 
 On Windows, if opening a terminal reports a missing `VCRUNTIME140.dll` or Universal CRT DLL, install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) and restart `cptr`.
