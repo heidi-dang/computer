@@ -97,6 +97,45 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.active_workspace_id)
         db.commit.assert_awaited_once()
 
+    async def test_manual_archive_clears_active_target_projection(self):
+        session = SimpleNamespace(
+            id="wbs_archive",
+            user_id="user_1",
+            name="Archive",
+            workspace_id="ws_1",
+            status="RUNNING",
+            active_target_type="command",
+            active_target_id="cmd_done",
+            active_workspace_id="ws_1",
+            event_count=3,
+            created_at=1,
+            updated_at=10,
+            last_event_at=10,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalar.return_value = session
+
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            result = await WorkbenchSessionStore().archive(
+                owner_id="user_1",
+                session_id="wbs_archive",
+            )
+
+        self.assertEqual(result["status"], "ARCHIVED")
+        self.assertIsNone(result["active_target_type"])
+        self.assertIsNone(result["active_target_id"])
+        self.assertIsNone(result["active_workspace_id"])
+        self.assertIsNone(session.active_target_type)
+        self.assertIsNone(session.active_target_id)
+        self.assertIsNone(session.active_workspace_id)
+
     async def test_binding_new_target_reopens_terminal_session_as_running(self):
         session = SimpleNamespace(
             id="wbs_rebind",

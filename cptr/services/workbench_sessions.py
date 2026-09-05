@@ -433,6 +433,9 @@ class WorkbenchSessionStore:
                 return None
             session.status = "ARCHIVED"
             session.archived_at = now
+            session.active_target_type = None
+            session.active_target_id = None
+            session.active_workspace_id = None
             session.updated_at = now
             await db.commit()
             await db.refresh(session)
