@@ -90,6 +90,25 @@ async def _ensure_target_owner(
         raise HTTPException(status_code=404, detail="target not found")
 
 
+async def _reconcile_terminal_command_if_needed(
+    *, user_id: str, command_id: str, workspace_id: str | None
+) -> None:
+    if not workspace_id:
+        return
+    command = get_command_session(None, command_id, context={"user_id": user_id})
+    if not command or not command.get("done"):
+        return
+    raw_exit_code = command.get("exit_code")
+    exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
+    await workbench_session_store.reconcile_command_terminal(
+        owner_id=user_id,
+        workspace_id=workspace_id,
+        command_id=command_id,
+        status="COMPLETE" if exit_code == 0 else "FAILED",
+        exit_code=exit_code,
+    )
+
+
 @router.post("/workbench-sessions")
 async def create_workbench_session(request: Request, body: CreateWorkbenchSessionRequest):
     user_id = await _user(request, "task:write")
@@ -181,18 +200,12 @@ async def bind_workbench_session(
         workspace_id=body.workspace_id,
         summary=f"Workbench bound to {body.target_type} activity.",
     )
-    if body.target_type == "command" and body.workspace_id:
-        command = get_command_session(None, body.target_id, context={"user_id": user_id})
-        if command and command.get("done"):
-            raw_exit_code = command.get("exit_code")
-            exit_code = raw_exit_code if isinstance(raw_exit_code, int) else None
-            await workbench_session_store.reconcile_command_terminal(
-                owner_id=user_id,
-                workspace_id=body.workspace_id,
-                command_id=body.target_id,
-                status="COMPLETE" if exit_code == 0 else "FAILED",
-                exit_code=exit_code,
-            )
+    if body.target_type == "command":
+        await _reconcile_terminal_command_if_needed(
+            user_id=user_id,
+            command_id=body.target_id,
+            workspace_id=body.workspace_id,
+        )
     return await workbench_session_store.get(owner_id=user_id, session_id=session_id) or session
 
 
@@ -228,6 +241,12 @@ async def append_workbench_session_event(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if event is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
+    if body.target_type == "command" and body.event_type == "command.started":
+        await _reconcile_terminal_command_if_needed(
+            user_id=user_id,
+            command_id=body.target_id or "",
+            workspace_id=body.workspace_id,
+        )
     return event
 
 
