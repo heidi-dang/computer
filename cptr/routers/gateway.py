@@ -807,6 +807,7 @@ async def _ensure_chat(
 
 DEFAULT_CONTROL_SCOPES = (
     "workspace:read",
+    "memory:read",
     "task:read",
     "task:write",
     "autonomous:run",
