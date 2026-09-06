@@ -6,12 +6,27 @@
 		openMcpServicesStream,
 		startMcpServicesMaintain,
 		type McpMaintainJob,
+		type McpMaintenanceSystemStatus,
 		type McpServiceBand,
 		type McpServiceStatus,
 		type McpServicesSnapshot
 	} from '$lib/apis/mcp';
 
 	type StreamStatus = 'loading' | 'live' | 'reconnecting' | 'error';
+	type WorkerWatchdogSnapshot = {
+		aggregate?: McpServiceBand;
+		worker_count?: number;
+		workers?: Record<
+			string,
+			{
+				status?: string;
+				task_running?: boolean;
+				restart_count_window?: number;
+				restart_limit?: number;
+				last_error?: string | null;
+			}
+		>;
+	};
 
 	let snapshot = $state<McpServicesSnapshot | null>(null);
 	let streamStatus = $state<StreamStatus>('loading');
@@ -30,11 +45,28 @@
 	const jobRunning = $derived(
 		maintainBusy || maintainJob?.status === 'queued' || maintainJob?.status === 'running'
 	);
+	const backendService = $derived(serviceById('backend'));
+	const workerWatchdog = $derived.by(() => {
+		const value = backendService?.stats?.worker_watchdog;
+		return value && typeof value === 'object' ? (value as WorkerWatchdogSnapshot) : null;
+	});
 
 	function bandClass(band: McpServiceBand | string): string {
 		if (band === 'healthy') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
 		if (band === 'moderate') return 'border-amber-500/40 bg-amber-500/10 text-amber-300';
 		return 'border-rose-500/40 bg-rose-500/10 text-rose-300';
+	}
+
+	function systemStatusBand(status: McpMaintenanceSystemStatus | null | undefined): McpServiceBand {
+		if (status === 'STABLE') return 'healthy';
+		if (status === 'FAILED') return 'unhealthy';
+		return 'moderate';
+	}
+
+	function workerStatusBand(status: string | undefined): McpServiceBand {
+		if (status === 'healthy' || status === 'restarted') return 'healthy';
+		if (status === 'stalled' || status === 'degraded') return 'moderate';
+		return 'unhealthy';
 	}
 
 	function applySnapshot(next: McpServicesSnapshot) {
@@ -168,7 +200,7 @@
 					disabled={jobRunning}
 					onclick={() => runMaintain('all')}
 				>
-					{jobRunning ? 'Maintaining…' : 'Maintain all'}
+					{jobRunning ? 'Stabilizing…' : 'Stabilize All'}
 				</button>
 				<button
 					class="app-interactive rounded-lg border px-3 py-1.5 text-xs font-medium"
@@ -194,8 +226,10 @@
 			<section class="app-subtle-surface mb-4 rounded-xl border p-3">
 				<div class="mb-2 flex flex-wrap items-center gap-2">
 					<h2 class="text-sm font-semibold">Plugin</h2>
-					<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(plugin?.band ?? 'unhealthy')}"
-						>{plugin?.band ?? 'unknown'}</span
+					<span
+						class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(
+							plugin?.band ?? 'unhealthy'
+						)}">{plugin?.band ?? 'unknown'}</span
 					>
 				</div>
 				<div class="grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
@@ -213,12 +247,19 @@
 					</div>
 					<div>
 						<p class="app-muted">Refresh required</p>
-						<p class="font-medium">{plugin?.refresh_required === true ? 'yes' : plugin?.refresh_required === false ? 'no' : '—'}</p>
+						<p class="font-medium">
+							{plugin?.refresh_required === true
+								? 'yes'
+								: plugin?.refresh_required === false
+									? 'no'
+									: '—'}
+						</p>
 					</div>
 				</div>
 				{#if plugin?.refresh_required}
 					<p class="mt-2 text-xs text-amber-300">
-						ChatGPT host must refresh the frozen tool snapshot (Settings → Apps → CPTR Computer → Refresh).
+						ChatGPT host must refresh the frozen tool snapshot (Settings → Apps → CPTR Computer →
+						Refresh).
 					</p>
 				{/if}
 			</section>
@@ -229,8 +270,10 @@
 					<article class="app-subtle-surface rounded-xl border p-3">
 						<div class="mb-2 flex flex-wrap items-center gap-2">
 							<h3 class="text-sm font-semibold">{service.name}</h3>
-							<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(service.band)}"
-								>{service.band}</span
+							<span
+								class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(
+									service.band
+								)}">{service.band}</span
 							>
 							<span class="text-[0.65rem] app-muted">score {service.score.toFixed(2)}</span>
 							<button
@@ -250,14 +293,40 @@
 						>
 							{expandedServiceId === service.id ? 'Hide probes' : 'Why this band'}
 						</button>
+						{#if service.id === 'backend' && workerWatchdog?.workers}
+							<div class="mt-2 border-t border-white/5 pt-2">
+								<div class="flex items-center justify-between gap-2 text-[0.7rem]">
+									<span class="font-medium">Background workers</span>
+									<span class="app-muted">
+										{workerWatchdog.worker_count ?? Object.keys(workerWatchdog.workers).length} supervised
+									</span>
+								</div>
+								<ul class="mt-1.5 grid gap-1 sm:grid-cols-2">
+									{#each Object.entries(workerWatchdog.workers) as [workerName, worker] (workerName)}
+										<li class="flex min-w-0 items-center gap-2 text-[0.65rem]">
+											<span class="min-w-0 flex-1 truncate">{workerName.replaceAll('_', ' ')}</span>
+											<span
+												class="rounded border px-1.5 py-0.5 uppercase {bandClass(
+													workerStatusBand(worker.status)
+												)}"
+											>
+												{worker.status ?? 'unknown'}
+											</span>
+										</li>
+									{/each}
+								</ul>
+							</div>
+						{/if}
 						{#if expandedServiceId === service.id}
 							<ul class="mt-2 space-y-1.5 text-[0.7rem]">
 								{#each service.probes as probe}
 									<li class="rounded-lg border border-white/5 px-2 py-1.5">
 										<div class="flex items-center gap-2">
 											<span class="font-medium">{probe.id}</span>
-											<span class="rounded border px-1.5 py-0.5 text-[0.6rem] uppercase {bandClass(probe.band_hint)}"
-												>{probe.band_hint}</span
+											<span
+												class="rounded border px-1.5 py-0.5 text-[0.6rem] uppercase {bandClass(
+													probe.band_hint
+												)}">{probe.band_hint}</span
 											>
 											{#if probe.critical}
 												<span class="text-[0.6rem] app-muted">critical</span>
@@ -275,13 +344,56 @@
 			<!-- Job drawer -->
 			{#if maintainJob}
 				<section class="app-subtle-surface mt-4 rounded-xl border p-3">
+					<div
+						class="mb-3 rounded-lg border border-white/5 px-2.5 py-2"
+						role="status"
+						aria-live="polite"
+						aria-atomic="true"
+					>
+						<div class="flex flex-wrap items-center gap-2 text-xs">
+							<span class="font-medium">
+								{jobRunning
+									? 'Running deterministic stabilization…'
+									: maintainJob.system_status
+										? `System ${maintainJob.system_status}`
+										: 'Maintenance finished'}
+							</span>
+							{#if maintainJob.system_status}
+								<span
+									class="rounded-full border px-2 py-0.5 text-[0.65rem] font-semibold {bandClass(
+										systemStatusBand(maintainJob.system_status)
+									)}"
+								>
+									{maintainJob.system_status}
+								</span>
+							{/if}
+							<span class="ml-auto app-muted">pass {maintainJob.pass_count || 1} / 2 max</span>
+						</div>
+						{#if jobRunning}
+							<progress class="mt-2 h-1.5 w-full" max="100" aria-label="Stabilization in progress"
+							></progress>
+						{:else}
+							<progress
+								class="mt-2 h-1.5 w-full"
+								max="100"
+								value="100"
+								aria-label="Stabilization complete"
+							></progress>
+						{/if}
+					</div>
 					<div class="mb-2 flex flex-wrap items-center gap-2">
-						<h2 class="text-sm font-semibold">Maintain job</h2>
+						<h2 class="text-sm font-semibold">
+							{maintainJob.service_id === 'all' ? 'Stabilization run' : 'Maintenance run'}
+						</h2>
 						<span class="text-[0.7rem] app-muted">{maintainJob.job_id}</span>
-						<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase">{maintainJob.status}</span>
+						<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase"
+							>{maintainJob.status}</span
+						>
 						{#if maintainJob.post_band}
-							<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(maintainJob.post_band)}"
-								>post {maintainJob.post_band}</span
+							<span
+								class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(
+									maintainJob.post_band
+								)}">post {maintainJob.post_band}</span
 							>
 						{/if}
 					</div>
@@ -293,7 +405,12 @@
 									<span class="app-muted">{step.result ?? '…'}</span>
 								</div>
 								{#if step.evidence && Object.keys(step.evidence).length}
-									<pre class="mt-1 max-h-24 overflow-auto whitespace-pre-wrap app-muted">{JSON.stringify(step.evidence, null, 0)}</pre>
+									<pre
+										class="mt-1 max-h-24 overflow-auto whitespace-pre-wrap app-muted">{JSON.stringify(
+											step.evidence,
+											null,
+											0
+										)}</pre>
 								{/if}
 							</li>
 						{/each}

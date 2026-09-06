@@ -146,6 +146,8 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(job_payload["job_id"], job_id)
             self.assertIn("steps", job_payload)
+            self.assertEqual(job_payload["system_status"], "STABLE")
+            self.assertEqual(job_payload["pass_count"], 1)
 
     async def test_maintain_rejects_unknown_service_id(self):
         admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))

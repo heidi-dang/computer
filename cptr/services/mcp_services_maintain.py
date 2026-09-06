@@ -13,6 +13,10 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Literal
 
+from cptr.services.maintenance_orchestrator import (
+    MaintenanceOrchestrator,
+    SystemStatus,
+)
 from cptr.services.mcp_services_health import (
     McpServicesHealthService,
     mcp_services_health,
@@ -78,6 +82,8 @@ class MaintainJob:
     post_band: str | None = None
     post_aggregate: str | None = None
     error: str | None = None
+    system_status: SystemStatus | None = None
+    pass_count: int = 0
     owner_id: str | None = None
     events: list[dict[str, Any]] = field(default_factory=list)
 
@@ -92,6 +98,8 @@ class MaintainJob:
             "post_band": self.post_band,
             "post_aggregate": self.post_aggregate,
             "error": self.error,
+            "system_status": self.system_status,
+            "pass_count": self.pass_count,
         }
 
 
@@ -101,9 +109,11 @@ class McpServicesMaintainService:
         *,
         health: McpServicesHealthService | None = None,
         max_jobs: int = MAX_JOBS,
+        orchestrator: MaintenanceOrchestrator | None = None,
     ) -> None:
         self.health = health or mcp_services_health
         self.max_jobs = max(1, int(max_jobs))
+        self.orchestrator = orchestrator or MaintenanceOrchestrator(max_passes=2)
         self._lock = Lock()
         self._jobs: dict[str, MaintainJob] = {}
         self._active_job_ids: dict[str, str] = {}
@@ -218,48 +228,47 @@ class McpServicesMaintainService:
         job.started_at = _iso_now()
         self._emit("job_started", {"job_id": job_id, "service_id": job.service_id})
 
-        targets: list[str]
-        if job.service_id == "all":
-            targets = ["backend", "plugin", "extension", "mcp_transport"]
-        else:
-            targets = [job.service_id]
-
         try:
-            for target in targets:
-                # Services are maintained independently. A backend playbook failure
-                # must not suppress safe plugin/extension/MCP maintenance work.
-                await self._run_service_playbook(job, target)
+            latest_snapshot: dict[str, Any] = {}
 
-            # Mandatory post-check: band only from probes.
-            snapshot = await self.health.snapshot(
-                user_id=job.owner_id,
-                active_job_id=job.job_id,
-            )
-            job.post_aggregate = str(snapshot.get("aggregate"))
-            if job.service_id == "all":
-                job.post_band = job.post_aggregate
-            else:
-                match = next(
-                    (
-                        s
-                        for s in snapshot.get("services", [])
-                        if isinstance(s, dict) and s.get("id") == job.service_id
-                    ),
-                    None,
+            async def snapshot_fn() -> dict[str, Any]:
+                nonlocal latest_snapshot
+                latest_snapshot = await self.health.snapshot(
+                    user_id=job.owner_id,
+                    active_job_id=job.job_id,
                 )
-                job.post_band = str(match.get("band")) if match else job.post_aggregate
+                return latest_snapshot
 
-            has_failed_step = any(s.result == "failed" for s in job.steps)
-            has_ok_step = any(s.result == "ok" for s in job.steps)
-            # Post-health is authoritative: unhealthy can never be reported as
-            # success/partial even when some maintenance actions completed.
-            if job.post_band == "unhealthy":
-                job.status = "failed"
-            elif has_failed_step:
-                job.status = "partial" if has_ok_step else "failed"
-            elif job.post_band == "healthy":
+            def on_pass(pass_number: int, targets: tuple[str, ...]) -> None:
+                job.pass_count = pass_number
+                self._emit(
+                    "pass",
+                    {
+                        "job_id": job.job_id,
+                        "pass_count": pass_number,
+                        "targets": list(targets),
+                    },
+                )
+
+            result = await self.orchestrator.stabilize(
+                service_id=job.service_id,
+                repair_fn=lambda target: self._run_service_playbook(job, target),
+                snapshot_fn=snapshot_fn,
+                action_required_fn=lambda: any(
+                    step.evidence.get("action") == "host_refresh_required"
+                    for step in job.steps
+                    if isinstance(step.evidence, dict)
+                ),
+                on_pass_fn=on_pass,
+            )
+            job.pass_count = result.pass_count
+            job.system_status = result.system_status
+            job.post_band = result.final_band
+            job.post_aggregate = str(latest_snapshot.get("aggregate") or result.final_band)
+
+            if result.system_status == "STABLE":
                 job.status = "succeeded"
-            elif job.post_band == "moderate":
+            elif result.system_status in {"DEGRADED", "ACTION_REQUIRED"}:
                 job.status = "partial"
             else:
                 job.status = "failed"
@@ -279,6 +288,8 @@ class McpServicesMaintainService:
                     "status": job.status,
                     "post_band": job.post_band,
                     "post_aggregate": job.post_aggregate,
+                    "system_status": job.system_status,
+                    "pass_count": job.pass_count,
                 },
             )
 
@@ -371,7 +382,30 @@ class McpServicesMaintainService:
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
 
-        # 4. Re-probe metrics
+        # 4. Reconcile permanent background workers. This may restart workers
+        # that have exited, but never cancels a live worker merely because its
+        # heartbeat is stale.
+        step = MaintainStep(step_id="backend.reconcile_workers", started_at=_iso_now())
+        try:
+            from cptr.services.worker_watchdog import worker_watchdog
+
+            worker_result = await worker_watchdog.reconcile()
+            worker_band = str(worker_result.get("aggregate") or "unhealthy")
+            if worker_band == "healthy":
+                step.result = "ok"
+            elif worker_band == "moderate":
+                step.result = "report_only"
+            else:
+                step.result = "failed"
+            step.evidence = dict(worker_result)
+        except Exception as exc:
+            step.result = "failed"
+            step.evidence = {"error": str(exc)}
+        step.ended_at = _iso_now()
+        job.steps.append(step)
+        self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
+
+        # 5. Re-probe metrics
         step = MaintainStep(step_id="backend.reprobe_metrics", started_at=_iso_now())
         try:
             from cptr.services.runtime_metrics import runtime_metrics
@@ -388,7 +422,11 @@ class McpServicesMaintainService:
         step.ended_at = _iso_now()
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
-        return step.result != "failed"
+        return all(
+            item.result != "failed"
+            for item in job.steps
+            if item.step_id.startswith("backend.")
+        )
 
     async def _playbook_plugin(self, job: MaintainJob) -> bool:
         step = MaintainStep(step_id="plugin.probe_identity", started_at=_iso_now())

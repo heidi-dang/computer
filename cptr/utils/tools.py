@@ -980,9 +980,13 @@ def reap_command_sessions() -> list[str]:
 
 
 async def command_session_reaper_loop() -> None:
+    from cptr.services.worker_watchdog import heartbeat_sleep, heartbeat_worker
+
+    heartbeat_worker("command_reaper", success=True)
     while True:
-        await asyncio.sleep(COMMAND_SESSION_REAPER_INTERVAL_SECONDS)
+        await heartbeat_sleep("command_reaper", COMMAND_SESSION_REAPER_INTERVAL_SECONDS)
         command_session_registry.reap()
+        heartbeat_worker("command_reaper", success=True)
 
 
 async def shutdown_command_sessions(*, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS) -> None:

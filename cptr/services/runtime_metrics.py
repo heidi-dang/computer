@@ -135,6 +135,8 @@ runtime_metrics = RuntimeMetrics()
 
 async def event_loop_lag_worker() -> None:
     """Measure scheduler delay without blocking or generating external I/O."""
+    from cptr.services.worker_watchdog import heartbeat_worker
+
     interval = EVENT_LOOP_LAG_SAMPLE_INTERVAL_MS / 1000.0
     loop = asyncio.get_running_loop()
     expected = loop.time() + interval
@@ -142,4 +144,5 @@ async def event_loop_lag_worker() -> None:
         await asyncio.sleep(interval)
         now = loop.time()
         runtime_metrics.observe_event_loop_lag(max(0.0, now - expected) * 1000.0)
+        heartbeat_worker("event_loop_monitor", success=True)
         expected = now + interval

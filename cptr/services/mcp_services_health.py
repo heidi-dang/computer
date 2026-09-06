@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Literal, cast
 
 import httpx
 
@@ -284,6 +284,58 @@ def probe_open_fds(open_fds: int | None) -> ProbeResult:
         band_hint=band,
         detail=f"open_fds={open_fds}",
         value=open_fds,
+    )
+
+
+def probe_worker_watchdog(snapshot: dict[str, Any] | None) -> ProbeResult:
+    if not snapshot:
+        return ProbeResult(
+            id="backend.worker_watchdog",
+            ok=False,
+            critical=False,
+            band_hint="moderate",
+            detail="worker watchdog unavailable",
+            value=None,
+        )
+    raw_band = str(snapshot.get("aggregate") or "moderate")
+    band = (
+        cast(Band, raw_band)
+        if raw_band in {"healthy", "moderate", "unhealthy"}
+        else "moderate"
+    )
+    workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), dict) else {}
+    unhealthy = sorted(
+        name
+        for name, item in workers.items()
+        if isinstance(item, dict)
+        and str(item.get("status")) in {"missing", "crashed", "restart_suspended"}
+    )
+    stalled = sorted(
+        name
+        for name, item in workers.items()
+        if isinstance(item, dict) and str(item.get("status")) == "stalled"
+    )
+    degraded = sorted(
+        name
+        for name, item in workers.items()
+        if isinstance(item, dict) and str(item.get("status")) == "degraded"
+    )
+    return ProbeResult(
+        id="backend.worker_watchdog",
+        ok=band == "healthy",
+        critical=True,
+        band_hint=band,
+        detail=(
+            f"workers={len(workers)} unhealthy={len(unhealthy)} "
+            f"stalled={len(stalled)} degraded={len(degraded)}"
+        ),
+        value={
+            "worker_count": len(workers),
+            "unhealthy": unhealthy,
+            "stalled": stalled,
+            "degraded": degraded,
+            "workers": workers,
+        },
     )
 
 
@@ -635,6 +687,7 @@ class McpServicesHealthService:
         diagnostics_snapshot_fn: Callable[[], Any] | None = None,
         is_device_connected_fn: Callable[..., Any] | None = None,
         plugin_manifest_fn: Callable[[], Any] | None = None,
+        worker_snapshot_fn: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
         # Plugin identity must come from the plugin's own release manifest, not
         # from MCP clientInfo (which describes ChatGPT, not this server).
@@ -643,6 +696,7 @@ class McpServicesHealthService:
         backend_service = await self._probe_backend(
             database_ready_fn=database_ready_fn,
             metrics_fn=metrics_fn,
+            worker_snapshot_fn=worker_snapshot_fn,
         )
         plugin_service, plugin_block = self._probe_plugin()
         extension_service = await self._probe_extension(
@@ -692,6 +746,7 @@ class McpServicesHealthService:
         *,
         database_ready_fn: Callable[[], Any] | None,
         metrics_fn: Callable[[], dict[str, Any]] | None,
+        worker_snapshot_fn: Callable[[], Any] | None,
     ) -> dict[str, Any]:
         probes: list[ProbeResult] = [probe_backend_liveness(process_up=True)]
         last_error: str | None = None
@@ -750,6 +805,30 @@ class McpServicesHealthService:
                 probe_open_fds(int(open_fds) if open_fds is not None else None)
             )
 
+        worker_snapshot: dict[str, Any] = {}
+        try:
+            if worker_snapshot_fn is None:
+                from cptr.services.worker_watchdog import worker_watchdog
+
+                worker_snapshot = dict(await worker_watchdog.snapshot())
+            else:
+                worker_result = worker_snapshot_fn()
+                if hasattr(worker_result, "__await__"):
+                    worker_result = await worker_result  # type: ignore[misc]
+                worker_snapshot = dict(worker_result or {})
+            probes.append(probe_worker_watchdog(worker_snapshot))
+        except Exception as exc:
+            last_error = str(exc)
+            probes.append(
+                ProbeResult(
+                    id="backend.worker_watchdog",
+                    ok=False,
+                    critical=False,
+                    band_hint="moderate",
+                    detail=f"worker watchdog unavailable: {exc}",
+                )
+            )
+
         band = band_from_probes(probes)
         return {
             "id": "backend",
@@ -762,6 +841,7 @@ class McpServicesHealthService:
                 "event_loop": metrics.get("event_loop"),
                 "requests": metrics.get("requests"),
                 "process": metrics.get("process"),
+                "worker_watchdog": worker_snapshot,
             },
             "last_ok_at": _iso_now() if band == "healthy" else None,
             "last_error": last_error,

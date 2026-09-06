@@ -7,7 +7,6 @@ command, and autonomous execution state.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import secrets
 import time
@@ -545,9 +544,13 @@ async def workbench_session_reaper_loop() -> None:
         WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS,
         WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS,
     )
+    from cptr.services.worker_watchdog import heartbeat_sleep, heartbeat_worker
 
     while True:
         await workbench_session_store.archive_stale(
             idle_seconds=WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
         )
-        await asyncio.sleep(WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS)
+        heartbeat_worker("workbench_reaper", success=True)
+        await heartbeat_sleep(
+            "workbench_reaper", WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS
+        )

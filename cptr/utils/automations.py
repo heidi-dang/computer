@@ -89,8 +89,10 @@ async def scheduler_worker_loop(app) -> None:
     Claims due automations and dispatches them as asyncio tasks.
     """
     from cptr.env import AUTOMATION_POLL_INTERVAL
+    from cptr.services.worker_watchdog import heartbeat_sleep, heartbeat_worker
 
     logger.info("Automation scheduler started (poll interval: %ds)", AUTOMATION_POLL_INTERVAL)
+    heartbeat_worker("automation_scheduler", success=True)
 
     while True:
         try:
@@ -101,10 +103,14 @@ async def scheduler_worker_loop(app) -> None:
                 logger.info("Claimed %d due automation(s)", len(batch))
             for automation in batch:
                 asyncio.create_task(execute_automation(app, automation))
+            heartbeat_worker("automation_scheduler", success=True)
         except Exception:
             logger.exception("Scheduler worker error")
+            heartbeat_worker("automation_scheduler")
 
-        await asyncio.sleep(AUTOMATION_POLL_INTERVAL + random.uniform(0, 2))
+        await heartbeat_sleep(
+            "automation_scheduler", AUTOMATION_POLL_INTERVAL + random.uniform(0, 2)
+        )
 
 
 ####################

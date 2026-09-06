@@ -191,9 +191,7 @@ export interface McpTopologyConfig {
 }
 
 export type McpLatencyEdge =
-	| 'client-mcp-connector'
-	| 'mcp-connector-cptr-mcp'
-	| 'cptr-mcp-cptr-backend';
+	'client-mcp-connector' | 'mcp-connector-cptr-mcp' | 'cptr-mcp-cptr-backend';
 export type McpLatencyMetric = 'observed_request_time' | 'adapter_handoff' | 'backend_api_rtt';
 export type McpFailureStage =
 	| 'client_transport'
@@ -969,10 +967,7 @@ export interface McpMemoryStreamCallbacks {
 }
 
 export type McpDiagnosticsEvent = (
-	| McpLatencySample
-	| McpFailureDiagnostic
-	| McpBackendMetricsSample
-	| McpUsageDiagnostic
+	McpLatencySample | McpFailureDiagnostic | McpBackendMetricsSample | McpUsageDiagnostic
 ) & { ingestion_sequence: number };
 
 export interface McpDiagnosticsSnapshot {
@@ -1406,6 +1401,8 @@ export interface McpMaintainStep {
 	evidence: Record<string, unknown>;
 }
 
+export type McpMaintenanceSystemStatus = 'STABLE' | 'DEGRADED' | 'ACTION_REQUIRED' | 'FAILED';
+
 export interface McpMaintainJob {
 	job_id: string;
 	service_id: string;
@@ -1416,6 +1413,8 @@ export interface McpMaintainJob {
 	post_band: string | null;
 	post_aggregate?: string | null;
 	error: string | null;
+	system_status: McpMaintenanceSystemStatus | null;
+	pass_count: number;
 }
 
 export interface McpServicesStreamCallbacks {

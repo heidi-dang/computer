@@ -46,7 +46,7 @@ test('McpServices renders aggregate bands, probes, and maintain controls', async
 	assert.match(component, /'healthy'/);
 	assert.match(component, /'moderate'/);
 	assert.match(component, /'unhealthy'/);
-	assert.match(component, /Maintain all/);
+	assert.match(component, /Stabilize All/);
 	assert.match(component, /Why this band/);
 	assert.match(component, /jobRunning/);
 	assert.match(component, /disabled=\{jobRunning\}/);
@@ -58,6 +58,27 @@ test('McpServices renders aggregate bands, probes, and maintain controls', async
 	assert.match(api, /\/api\/mcp\/services\/snapshot/);
 	assert.match(api, /\/api\/mcp\/services\/stream/);
 	assert.match(api, /\/api\/mcp\/services\/maintain/);
+});
+
+test('Stabilize All exposes accessible deterministic progress and final system state', async () => {
+	const [component, api] = await Promise.all([
+		read('lib/components/mcp/McpServices.svelte'),
+		read('lib/apis/mcp.ts')
+	]);
+	assert.match(component, /Stabilize All/);
+	assert.match(component, /role="status"/);
+	assert.match(component, /aria-live="polite"/);
+	assert.match(component, /<progress/);
+	assert.match(component, /system_status/);
+	assert.match(component, /pass_count/);
+	assert.match(component, /worker_watchdog/);
+	assert.match(api, /McpMaintenanceSystemStatus/);
+	assert.match(api, /'STABLE'/);
+	assert.match(api, /'DEGRADED'/);
+	assert.match(api, /'ACTION_REQUIRED'/);
+	assert.match(api, /'FAILED'/);
+	assert.match(api, /system_status:/);
+	assert.match(api, /pass_count:/);
 });
 
 test('bandClass maps healthy/moderate/unhealthy to distinct visual tokens', async () => {

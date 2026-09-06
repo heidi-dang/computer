@@ -172,6 +172,46 @@ class SnapshotIntegrationTests(unittest.IsolatedAsyncioTestCase):
         backend = next(s for s in snap["services"] if s["id"] == "backend")
         self.assertEqual(backend["band"], "healthy")
 
+    async def test_worker_watchdog_stall_makes_backend_moderate(self):
+        cache = PluginIdentityCache()
+        cache.set(
+            PluginIdentity(
+                version=EXPECTED_CONTRACT_VERSION,
+                contract_version=EXPECTED_CONTRACT_VERSION,
+                tool_count=EXPECTED_TOOL_COUNT,
+                refresh_required=False,
+                source="test",
+            )
+        )
+        service = McpServicesHealthService(identity_cache=cache, plugin_update_url="")
+        snap = await service.snapshot(
+            user_id="user-1",
+            database_ready_fn=lambda: True,
+            metrics_fn=lambda: {
+                "uptime_seconds": 10,
+                "event_loop": {"last_lag_ms": 1.0},
+                "requests": {"latency_ms": {"p95": 10, "samples": 50}},
+                "process": {"open_fds": 10},
+            },
+            worker_snapshot_fn=lambda: {
+                "aggregate": "moderate",
+                "workers": {"memory": {"status": "stalled"}},
+            },
+            list_devices_fn=lambda **_: [
+                {"device_id": "bdv_1", "status": "ACTIVE", "connected": True}
+            ],
+            list_leases_fn=lambda **_: [],
+            traffic_snapshot_fn=lambda: {"stream_health": {"slow_subscriber_drops": 0}},
+            diagnostics_snapshot_fn=lambda: {"stream_health": {"slow_subscriber_drops": 0}},
+        )
+        backend = next(s for s in snap["services"] if s["id"] == "backend")
+        self.assertEqual(backend["band"], "moderate")
+        watchdog_probe = next(
+            p for p in backend["probes"] if p["id"] == "backend.worker_watchdog"
+        )
+        self.assertFalse(watchdog_probe["ok"])
+        self.assertEqual(watchdog_probe["band_hint"], "moderate")
+
     async def test_unreachable_plugin_makes_aggregate_unhealthy(self):
         service = McpServicesHealthService(
             identity_cache=PluginIdentityCache(), plugin_update_url=""
@@ -410,15 +450,33 @@ class MaintainIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(maintain.active_job_id(owner_id="u2"), second.job_id)
             self.assertIsNone(maintain.get_job(first.job_id, owner_id="u2"))
 
-    async def test_maintain_all_runs_every_service_after_backend_failure(self):
+    async def test_maintain_all_runs_every_service_then_retries_only_unhealthy(self):
         health, maintain = self.make_service()
-        playbook = AsyncMock(side_effect=[False, True, True, True])
+        playbook = AsyncMock(side_effect=[False, True, True, True, True])
+        snapshots = AsyncMock(
+            side_effect=[
+                {
+                    "aggregate": "unhealthy",
+                    "services": [
+                        {"id": "backend", "band": "unhealthy"},
+                        {"id": "plugin", "band": "healthy"},
+                        {"id": "extension", "band": "healthy"},
+                        {"id": "mcp_transport", "band": "healthy"},
+                    ],
+                },
+                {
+                    "aggregate": "healthy",
+                    "services": [
+                        {"id": "backend", "band": "healthy"},
+                        {"id": "plugin", "band": "healthy"},
+                        {"id": "extension", "band": "healthy"},
+                        {"id": "mcp_transport", "band": "healthy"},
+                    ],
+                },
+            ]
+        )
         with (
-            patch.object(
-                health,
-                "snapshot",
-                new=AsyncMock(return_value={"aggregate": "unhealthy", "services": []}),
-            ),
+            patch.object(health, "snapshot", new=snapshots),
             patch.object(maintain, "_run_service_playbook", playbook),
         ):
             job = await maintain.start(service_id="all", owner_id="u1")
@@ -428,15 +486,17 @@ class MaintainIdempotencyTests(unittest.IsolatedAsyncioTestCase):
                     break
                 await asyncio.sleep(0.02)
 
-        self.assertEqual(playbook.await_count, 4)
+        self.assertEqual(playbook.await_count, 5)
         self.assertEqual(
             [call.args[1] for call in playbook.await_args_list],
-            ["backend", "plugin", "extension", "mcp_transport"],
+            ["backend", "plugin", "extension", "mcp_transport", "backend"],
         )
         final = maintain.get_job(job.job_id)
         self.assertIsNotNone(final)
         assert final is not None
-        self.assertEqual(final.status, "failed")
+        self.assertEqual(final.status, "succeeded")
+        self.assertEqual(final.system_status, "STABLE")
+        self.assertEqual(final.pass_count, 2)
 
     async def test_unhealthy_postcheck_cannot_succeed(self):
         health, maintain = self.make_service()
