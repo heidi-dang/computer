@@ -10,7 +10,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from cptr.routers.coding import _command_snapshot, _workspace
+from cptr.routers.coding import _coding_root, _command_snapshot, _workspace
 from cptr.routers.control import _services, _user
 from cptr.services.live_events import LiveEventEnvelope, command_target_key, live_event_hub
 from cptr.utils.redaction import redact_external_text
@@ -166,12 +166,14 @@ async def _direct_command_live_snapshot(
     *,
     workspace_id: str,
     command_id: str,
+    worker_id: str | None = None,
 ) -> dict[str, Any]:
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
+    root = await _coding_root(user_id, workspace_id, workspace, worker_id)
     command = await _command_snapshot(
         request,
-        workspace_path=workspace.path,
+        workspace_path=str(root),
         command_id=command_id,
     )
     # The replay stream is the authoritative terminal-output surface. Keep the
@@ -190,11 +192,13 @@ async def command_stream_snapshot(
     request: Request,
     workspace_id: str,
     command_id: str,
+    worker_id: str | None = None,
 ):
     snapshot = await _direct_command_live_snapshot(
         request,
         workspace_id=workspace_id,
         command_id=command_id,
+        worker_id=worker_id,
     )
     return await _recovery_snapshot(
         target_key=command_target_key(workspace_id, command_id),
@@ -209,11 +213,13 @@ async def command_stream(
     request: Request,
     workspace_id: str,
     command_id: str,
+    worker_id: str | None = None,
 ):
     snapshot = await _direct_command_live_snapshot(
         request,
         workspace_id=workspace_id,
         command_id=command_id,
+        worker_id=worker_id,
     )
     return StreamingResponse(
         _stream(

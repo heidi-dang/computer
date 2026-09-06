@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -156,6 +157,35 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("output", snapshot["snapshot"])
         self.assertEqual(snapshot["replay"]["target_key"], target_key)
         self.assertEqual(snapshot["replay"]["events"][0]["type"], "terminal.chunk")
+
+    async def test_worker_command_recovery_snapshot_resolves_the_direct_worker_root(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace(headers={}, query_params={"after": "0"})
+        user = AsyncMock(return_value="user-1")
+        workspace = SimpleNamespace(path="/tmp/base-workspace")
+        workspace_lookup = AsyncMock(return_value=workspace)
+        coding_root = AsyncMock(return_value=Path("/tmp/worker-worktree"))
+        command_snapshot = AsyncMock(
+            return_value={"command_id": "cmd-worker", "status": "COMPLETE", "exit_code": 0}
+        )
+        with (
+            patch.object(control_stream, "live_event_hub", hub),
+            patch.object(control_stream, "_user", new=user),
+            patch.object(control_stream, "_workspace", new=workspace_lookup),
+            patch.object(control_stream, "_coding_root", new=coding_root),
+            patch.object(control_stream, "_command_snapshot", new=command_snapshot),
+        ):
+            snapshot = await control_stream.command_stream_snapshot(
+                request, "ws-1", "cmd-worker", worker_id="dcw-worker"
+            )
+
+        coding_root.assert_awaited_once_with("user-1", "ws-1", workspace, "dcw-worker")
+        command_snapshot.assert_awaited_once_with(
+            request,
+            workspace_path="/tmp/worker-worktree",
+            command_id="cmd-worker",
+        )
+        self.assertEqual(snapshot["snapshot"]["command_id"], "cmd-worker")
 
     async def test_command_sse_stream_is_workspace_isolated_and_replays_live_events(self):
         hub = LiveEventHub(store=LiveEventStore())
