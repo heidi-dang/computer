@@ -174,6 +174,43 @@ class MemoryAdvancedTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(after["observations"], before["observations"])
         self.assertAlmostEqual(sum(after["weights"].values()), 1.0, places=6)
 
+    async def test_freeform_procedures_do_not_conflict_as_generic_assignments(self):
+        await self._memory(
+            "Verified operational procedure: `python -m unittest tests.test_memory_core` completed successfully with exit code 0.",
+            kind="procedure",
+        )
+        second = await self._memory(
+            "Verified operational procedure: `npm run check && npm run build` completed successfully with exit code 0.",
+            kind="procedure",
+        )
+        conflicts = await self.service.analyze_conflicts(second.memory_id)
+        self.assertEqual(conflicts, [])
+        self.assertEqual(
+            await self.conflicts.list(user_id="user-1", workspace="/repo", status="open"), []
+        )
+
+    async def test_rebuild_removes_legacy_false_procedure_conflicts(self):
+        first = await self._memory("Verified operational procedure: first.", kind="procedure")
+        second = await self._memory("Verified operational procedure: second.", kind="procedure")
+        await self.conflicts.record(
+            user_id="user-1",
+            workspace="/repo",
+            fact_key="verified operational procedure|equals",
+            left_memory_id=first.memory_id,
+            right_memory_id=second.memory_id,
+            classification="temporal_change_candidate",
+            confidence=0.94,
+            reason="legacy false positive",
+        )
+        self.assertEqual(
+            len(await self.conflicts.list(user_id="user-1", workspace="/repo", status="open")),
+            1,
+        )
+        await self.service.rebuild_derived_indexes("user-1", "/repo")
+        self.assertEqual(
+            await self.conflicts.list(user_id="user-1", workspace="/repo", status="open"), []
+        )
+
     async def test_conflict_detection_and_temporal_resolution_preserve_history(self):
         old = await self._memory(
             "Production database is SQLite.",

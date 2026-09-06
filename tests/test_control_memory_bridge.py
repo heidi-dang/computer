@@ -35,16 +35,24 @@ class ControlMemoryBridgeTests(unittest.IsolatedAsyncioTestCase):
                             "confidence": 0.98,
                             "trust_level": "verified_system_fact",
                             "verification_stale": False,
+                            "features": {"bm25": 1.0, "vector": 0.6, "trust": 1.0},
                         }
                     ]
                 }
             ),
-            service=SimpleNamespace(record_event=AsyncMock(return_value="event-1")),
+            service=SimpleNamespace(
+                record_event=AsyncMock(return_value="event-1"),
+                feedback=AsyncMock(return_value=None),
+            ),
         )
         workspace = SimpleNamespace(path="/repo")
         with (
-            patch("cptr.routers.control._user", new=AsyncMock(return_value="user-1")) as require_user,
-            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=workspace)) as ensure_workspace,
+            patch(
+                "cptr.routers.control._user", new=AsyncMock(return_value="user-1")
+            ) as require_user,
+            patch(
+                "cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=workspace)
+            ) as ensure_workspace,
             patch("cptr.routers.control.MemoryMcpAdapter", return_value=adapter) as adapter_factory,
         ):
             result = await endpoint(request, body)
@@ -63,12 +71,24 @@ class ControlMemoryBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["action"], "search")
         self.assertEqual(result["workspace_id"], "ws-1")
         self.assertEqual(result["result"]["results"][0]["memory_id"], "mem-1")
+        self.assertNotIn("features", result["result"]["results"][0])
+        adapter.service.feedback.assert_awaited_once()
+        exposure = adapter.service.feedback.await_args.args[0]
+        self.assertEqual(exposure.memory_id, "mem-1")
+        self.assertTrue(exposure.used)
+        self.assertIsNone(exposure.helpful)
+        self.assertIsNone(exposure.outcome)
+        self.assertEqual(exposure.features["bm25"], 1.0)
         adapter.service.record_event.assert_awaited_once()
         event = adapter.service.record_event.await_args.kwargs
         self.assertEqual(event["user_id"], "user-1")
         self.assertEqual(event["workspace"], "/repo")
         self.assertEqual(event["event_type"], "recall")
         self.assertEqual(event["payload"]["items"][0]["node_id"], "mem-1")
+        self.assertTrue(str(event["payload"]["feedback_context_id"]).startswith("mcpctx_"))
+        self.assertEqual(event["payload"]["feedback_items"][0]["memory_id"], "mem-1")
+        self.assertEqual(event["payload"]["feedback_items"][0]["features"]["vector"], 0.6)
+        self.assertNotIn("deployment procedure", str(event["payload"]))
 
     async def test_control_memory_read_rejects_mutation_actions(self):
         request_model = getattr(control, "MemoryReadRequest", None)
