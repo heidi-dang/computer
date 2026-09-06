@@ -1,7 +1,14 @@
+import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
+from sqlalchemy import event, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from cptr.models import Base, User, WorkbenchSession, WorkbenchSessionEvent
 from cptr.services.workbench_sessions import WorkbenchSessionStore
 from cptr.routers.workbench import (
     AppendWorkbenchSessionEventRequest,
@@ -21,23 +28,11 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
     async def test_completed_command_releases_only_matching_active_target_and_keeps_workbench_open(
         self,
     ):
-        session = SimpleNamespace(
-            id="wbs_command",
-            user_id="user_1",
-            status="RUNNING",
-            active_target_type="command",
-            active_target_id="cmd_1",
-            active_workspace_id="ws_1",
-            event_count=4,
-            updated_at=10,
-            last_event_at=10,
-            archived_at=None,
-            deleted_at=None,
-        )
+        claimed = SimpleNamespace(id="wbs_command", event_count=5)
         db = AsyncMock()
         db.__aenter__.return_value = db
         db.__aexit__.return_value = False
-        db.scalars.return_value = SimpleNamespace(all=lambda: [session])
+        db.execute.return_value = SimpleNamespace(all=lambda: [claimed])
         added = []
         db.add = Mock(side_effect=added.append)
 
@@ -54,13 +49,9 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(changed, 1)
-        self.assertEqual(session.status, "OPEN")
-        self.assertIsNone(session.active_target_type)
-        self.assertIsNone(session.active_target_id)
-        self.assertIsNone(session.active_workspace_id)
-        self.assertEqual(session.event_count, 5)
         self.assertEqual(len(added), 1)
         event = added[0]
+        self.assertEqual(event.sequence, 5)
         self.assertEqual(event.event_type, "command.completed")
         self.assertEqual(event.state, "COMPLETE")
         self.assertEqual(event.target_id, "cmd_1")
@@ -180,23 +171,17 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
         db.commit.assert_awaited_once()
 
     async def test_command_started_event_normalizes_stale_terminal_state_to_running(self):
-        session = SimpleNamespace(
-            id="wbs_event",
-            user_id="user_1",
-            status="COMPLETE",
-            active_target_type=None,
-            active_target_id=None,
-            active_workspace_id=None,
-            event_count=2,
-            updated_at=10,
-            last_event_at=10,
-            archived_at=None,
-            deleted_at=None,
-        )
         db = AsyncMock()
         db.__aenter__.return_value = db
         db.__aexit__.return_value = False
-        db.scalar.return_value = session
+        claim_result = Mock()
+        claim_result.one_or_none.return_value = SimpleNamespace(
+            id="wbs_event",
+            event_count=3,
+            active_target_type=None,
+            active_target_id=None,
+        )
+        db.execute.return_value = claim_result
         added = []
         db.add = Mock(side_effect=added.append)
 
@@ -216,28 +201,29 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(event["state"], "RUNNING")
-        self.assertEqual(session.status, "RUNNING")
-        self.assertEqual(session.active_target_id, "cmd_new")
+        self.assertEqual(event["sequence"], 3)
         self.assertEqual(added[0].state, "RUNNING")
+        self.assertEqual(db.execute.await_count, 2)
 
     async def test_terminal_event_only_releases_matching_active_target(self):
-        session = SimpleNamespace(
-            id="wbs_overlap",
-            user_id="user_1",
-            status="RUNNING",
-            active_target_type="command",
-            active_target_id="cmd_new",
-            active_workspace_id="ws_1",
-            event_count=4,
-            updated_at=10,
-            last_event_at=10,
-            archived_at=None,
-            deleted_at=None,
-        )
         db = AsyncMock()
         db.__aenter__.return_value = db
         db.__aexit__.return_value = False
-        db.scalar.return_value = session
+        first_claim = Mock()
+        first_claim.one_or_none.return_value = SimpleNamespace(
+            id="wbs_overlap",
+            event_count=5,
+            active_target_type="command",
+            active_target_id="cmd_new",
+        )
+        second_claim = Mock()
+        second_claim.one_or_none.return_value = SimpleNamespace(
+            id="wbs_overlap",
+            event_count=6,
+            active_target_type="command",
+            active_target_id="cmd_new",
+        )
+        db.execute.side_effect = [first_claim, second_claim, Mock()]
         db.add = Mock()
 
         store = WorkbenchSessionStore()
@@ -256,8 +242,6 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
                 workspace_id="ws_1",
             )
             self.assertEqual(old_event["state"], "COMPLETE")
-            self.assertEqual(session.status, "RUNNING")
-            self.assertEqual(session.active_target_id, "cmd_new")
 
             matched_event = await store.append_event(
                 owner_id="user_1",
@@ -271,10 +255,202 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(matched_event["state"], "COMPLETE")
+        self.assertEqual(old_event["sequence"], 5)
+        self.assertEqual(matched_event["sequence"], 6)
+        self.assertEqual(db.execute.await_count, 3)
+
+
+class _TwoPartyBarrier:
+    def __init__(self):
+        self._count = 0
+        self._lock = asyncio.Lock()
+        self._ready = asyncio.Event()
+
+    async def wait(self):
+        async with self._lock:
+            self._count += 1
+            if self._count >= 2:
+                self._ready.set()
+        await self._ready.wait()
+
+
+class _RaceSession:
+    """Synchronize the first DB operation without changing transaction semantics."""
+
+    def __init__(self, session, barrier: _TwoPartyBarrier):
+        self._session = session
+        self._barrier = barrier
+        self._synchronized = False
+
+    async def __aenter__(self):
+        await self._session.__aenter__()
+        return self
+
+    async def __aexit__(self, *args):
+        return await self._session.__aexit__(*args)
+
+    async def _before_write(self):
+        if self._synchronized:
+            return
+        self._synchronized = True
+        await self._barrier.wait()
+
+    async def _after_read(self):
+        if self._synchronized:
+            return
+        self._synchronized = True
+        await self._barrier.wait()
+
+    async def execute(self, statement, *args, **kwargs):
+        await self._before_write()
+        return await self._session.execute(statement, *args, **kwargs)
+
+    async def scalar(self, statement, *args, **kwargs):
+        value = await self._session.scalar(statement, *args, **kwargs)
+        await self._after_read()
+        return value
+
+    async def scalars(self, statement, *args, **kwargs):
+        value = await self._session.scalars(statement, *args, **kwargs)
+        await self._after_read()
+        return value
+
+    def add(self, value):
+        self._session.add(value)
+
+    async def commit(self):
+        return await self._session.commit()
+
+    async def refresh(self, value):
+        return await self._session.refresh(value)
+
+
+class WorkbenchSessionConcurrencyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.engine = create_async_engine(
+            f"sqlite+aiosqlite:///{Path(self.temp.name) / 'workbench-race.db'}"
+        )
+
+        @event.listens_for(self.engine.sync_engine, "connect")
+        def _enable_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA foreign_keys=ON")
+                cursor.execute("PRAGMA busy_timeout=5000")
+                cursor.execute("PRAGMA journal_mode=WAL")
+            finally:
+                cursor.close()
+
+        async with self.engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        self.factory = async_sessionmaker(self.engine, expire_on_commit=False)
+        async with self.factory() as db:
+            db.add(User(id="user-race", role="user", settings={}, created_at=1))
+            await db.commit()
+            db.add(
+                WorkbenchSession(
+                    id="wbs_race",
+                    user_id="user-race",
+                    name="Race",
+                    status="OPEN",
+                    event_count=0,
+                    created_at=1,
+                    updated_at=1,
+                )
+            )
+            await db.commit()
+
+    async def asyncTearDown(self):
+        await self.engine.dispose()
+        self.temp.cleanup()
+
+    async def test_concurrent_appenders_allocate_distinct_sequences_atomically(self):
+        barrier = _TwoPartyBarrier()
+
+        async def race_db():
+            return _RaceSession(self.factory(), barrier)
+
+        store = WorkbenchSessionStore()
+        with patch("cptr.services.workbench_sessions.get_db", new=race_db):
+            results = await asyncio.gather(
+                store.append_event(
+                    owner_id="user-race",
+                    session_id="wbs_race",
+                    event_type="race.a",
+                    summary="a",
+                ),
+                store.append_event(
+                    owner_id="user-race",
+                    session_id="wbs_race",
+                    event_type="race.b",
+                    summary="b",
+                ),
+            )
+
+        self.assertEqual(sorted(result["sequence"] for result in results), [1, 2])
+        async with self.factory() as db:
+            session = await db.get(WorkbenchSession, "wbs_race")
+            events = (
+                await db.scalars(
+                    select(WorkbenchSessionEvent)
+                    .where(WorkbenchSessionEvent.session_id == "wbs_race")
+                    .order_by(WorkbenchSessionEvent.sequence)
+                )
+            ).all()
+        self.assertEqual(session.event_count, 2)
+        self.assertEqual([event.sequence for event in events], [1, 2])
+
+    async def test_append_and_terminal_reconcile_share_one_atomic_sequence_allocator(self):
+        async with self.factory() as db:
+            session = await db.get(WorkbenchSession, "wbs_race")
+            session.status = "RUNNING"
+            session.active_target_type = "command"
+            session.active_target_id = "cmd_race"
+            session.active_workspace_id = "ws_race"
+            await db.commit()
+
+        barrier = _TwoPartyBarrier()
+
+        async def race_db():
+            return _RaceSession(self.factory(), barrier)
+
+        store = WorkbenchSessionStore()
+        with patch("cptr.services.workbench_sessions.get_db", new=race_db):
+            appended, reconciled = await asyncio.gather(
+                store.append_event(
+                    owner_id="user-race",
+                    session_id="wbs_race",
+                    event_type="mcp.tool",
+                    summary="parallel observability event",
+                ),
+                store.reconcile_command_terminal(
+                    owner_id="user-race",
+                    workspace_id="ws_race",
+                    command_id="cmd_race",
+                    status="COMPLETE",
+                    exit_code=0,
+                ),
+            )
+
+        self.assertEqual(reconciled, 1)
+        self.assertIn(appended["sequence"], {1, 2})
+        async with self.factory() as db:
+            session = await db.get(WorkbenchSession, "wbs_race")
+            events = (
+                await db.scalars(
+                    select(WorkbenchSessionEvent)
+                    .where(WorkbenchSessionEvent.session_id == "wbs_race")
+                    .order_by(WorkbenchSessionEvent.sequence)
+                )
+            ).all()
+        self.assertEqual(session.event_count, 2)
         self.assertEqual(session.status, "OPEN")
         self.assertIsNone(session.active_target_type)
         self.assertIsNone(session.active_target_id)
         self.assertIsNone(session.active_workspace_id)
+        self.assertEqual([event.sequence for event in events], [1, 2])
+        self.assertEqual({event.event_type for event in events}, {"mcp.tool", "command.completed"})
 
 
 class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
