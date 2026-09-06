@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- 🩺 **MCP Services health tab and maintain jobs.** Admins can view cross-service bands (backend, plugin, extension, MCP transport) from `/mcp` → Services, stream snapshot updates, expand probe evidence, and run fixed maintain playbooks that always re-probe before reporting a post-band.
+- 🔌 **Services health API.** `GET /api/mcp/services/snapshot`, `GET /api/mcp/services/stream`, `POST /api/mcp/services/maintain`, and job status/event endpoints expose bounded, admin-only health aggregates without free-form remediation.
 - 📈 **Backend performance metrics and readiness checks.** Admins can inspect bounded request, database, event-loop, command-session, live-event, process-memory, file-descriptor, and SQLite WAL metrics; separate liveness and readiness endpoints make service supervision more reliable.
 - 🧪 **Performance regression contracts.** Tests now guard bounded directory traversal, concurrent batch reads, deduplicated search context reads, terminal chunk integrity, live-event batching, and command-session retention.
 

@@ -46,6 +46,8 @@ from cptr.services.mcp_diagnostics import (
 from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
 from cptr.services.mcp_usage_store import mcp_usage_store
 from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
+from cptr.services.mcp_services_health import mcp_services_health
+from cptr.services.mcp_services_maintain import mcp_services_maintain
 from cptr.services.memory_observability import MemoryObservabilityService
 from cptr.services.system_metrics import mcp_metrics_sampler
 from cptr.utils import memory as managed_memory
@@ -194,6 +196,13 @@ class McpTopologyConfigUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     aliases: dict[str, str | None]
+
+
+class McpServicesMaintainRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    service_id: str = "all"
+    idempotency_key: str | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -1090,3 +1099,130 @@ async def read_server_resource(request: Request, server_id: str, body: ResourceR
     except Exception as exc:
         raise HTTPException(502, f"MCP error: {exc}")
     return {"server_id": server_id, "uri": body.uri, "contents": contents}
+
+
+def _services_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
+
+
+# ── Services health / maintain ───────────────────────────────────────────────
+
+
+@router.get("/services/snapshot")
+async def get_mcp_services_snapshot(request: Request):
+    """Full cross-repo services health snapshot (admin)."""
+    admin = require_admin(request)
+    return await mcp_services_health.snapshot(
+        user_id=admin.user_id,
+        active_job_id=mcp_services_maintain.active_job_id(),
+    )
+
+
+@router.get("/services/stream")
+async def stream_mcp_services(request: Request):
+    """SSE of services snapshot deltas / heartbeats for the admin UI."""
+    admin = require_admin(request)
+
+    async def _event_stream():
+        previous_fingerprint: str | None = None
+        quiet_ticks = 0
+        yield "retry: 2000\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            snapshot = await mcp_services_health.snapshot(
+                user_id=admin.user_id,
+                active_job_id=mcp_services_maintain.active_job_id(),
+            )
+            fingerprint = str(snapshot.get("fingerprint") or "")
+            if fingerprint != previous_fingerprint:
+                previous_fingerprint = fingerprint
+                quiet_ticks = 0
+                yield _services_sse("snapshot", snapshot)
+            else:
+                quiet_ticks += 1
+                if quiet_ticks >= 10:
+                    quiet_ticks = 0
+                    yield ": keepalive\n\n"
+            await asyncio.sleep(2.0)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/services/maintain")
+async def start_mcp_services_maintain(
+    request: Request, body: McpServicesMaintainRequest | None = None
+):
+    """Start an idempotent maintain job; returns job_id immediately."""
+    admin = require_admin(request)
+    payload = body or McpServicesMaintainRequest()
+    service_id = (payload.service_id or "all").strip().lower()
+    allowed = {"all", "backend", "plugin", "extension", "mcp_transport"}
+    if service_id not in allowed:
+        raise HTTPException(400, f"service_id must be one of {sorted(allowed)}")
+    job = await mcp_services_maintain.start(
+        service_id=service_id,  # type: ignore[arg-type]
+        owner_id=admin.user_id,
+        idempotency_key=payload.idempotency_key,
+    )
+    return {"job_id": job.job_id, "status": job.status, "service_id": job.service_id}
+
+
+@router.get("/services/maintain/{job_id}")
+async def get_mcp_services_maintain_job(request: Request, job_id: str):
+    """Job status + steps + evidence."""
+    require_admin(request)
+    job = mcp_services_maintain.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, f"maintain job '{job_id}' not found")
+    return job.as_dict()
+
+
+@router.get("/services/maintain/{job_id}/events")
+async def stream_mcp_services_maintain_events(request: Request, job_id: str):
+    """Optional SSE for maintain job progress."""
+    require_admin(request)
+    job = mcp_services_maintain.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, f"maintain job '{job_id}' not found")
+
+    queue = mcp_services_maintain.subscribe()
+
+    async def _event_stream():
+        yield "retry: 1000\n\n"
+        yield _services_sse("job", job.as_dict())
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                current = mcp_services_maintain.get_job(job_id)
+                if current is None:
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=2.0)
+                    if event.get("job_id") in (None, job_id):
+                        yield _services_sse(str(event.get("event") or "event"), event)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                current = mcp_services_maintain.get_job(job_id)
+                if current is not None and current.status not in ("queued", "running"):
+                    yield _services_sse("job", current.as_dict())
+                    break
+        finally:
+            mcp_services_maintain.unsubscribe(queue)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )

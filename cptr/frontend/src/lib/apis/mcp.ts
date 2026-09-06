@@ -1352,3 +1352,107 @@ export const readServerResource = (serverId: string, uri: string) =>
 		`/api/mcp/servers/${serverId}/resources/read`,
 		jsonBody({ uri })
 	).then((r) => r.contents);
+
+// ── Services health / maintain ───────────────────────────────────────────────
+
+export type McpServiceBand = 'healthy' | 'moderate' | 'unhealthy';
+
+export interface McpServiceProbe {
+	id: string;
+	ok: boolean;
+	critical: boolean;
+	band_hint: McpServiceBand;
+	detail: string;
+	measured_at?: string;
+	value?: unknown;
+}
+
+export interface McpServiceStatus {
+	id: string;
+	name: string;
+	band: McpServiceBand;
+	score: number;
+	probes: McpServiceProbe[];
+	stats: Record<string, unknown>;
+	last_ok_at: string | null;
+	last_error: string | null;
+}
+
+export interface McpServicesPluginIdentity {
+	version: string | null;
+	contract_version: string | null;
+	tool_count: number | null;
+	release_sha?: string | null;
+	refresh_required?: boolean | null;
+	source?: string;
+	band: McpServiceBand;
+	probes: McpServiceProbe[];
+}
+
+export interface McpServicesSnapshot {
+	aggregate: McpServiceBand;
+	generated_at: string;
+	fingerprint?: string;
+	plugin: McpServicesPluginIdentity;
+	services: McpServiceStatus[];
+	maintain: { active_job_id: string | null };
+}
+
+export interface McpMaintainStep {
+	step_id: string;
+	started_at: string | null;
+	ended_at: string | null;
+	result: 'ok' | 'skipped' | 'failed' | 'report_only' | null;
+	evidence: Record<string, unknown>;
+}
+
+export interface McpMaintainJob {
+	job_id: string;
+	service_id: string;
+	status: 'queued' | 'running' | 'succeeded' | 'failed' | 'partial';
+	started_at: string | null;
+	ended_at: string | null;
+	steps: McpMaintainStep[];
+	post_band: string | null;
+	post_aggregate?: string | null;
+	error: string | null;
+}
+
+export interface McpServicesStreamCallbacks {
+	onSnapshot: (snapshot: McpServicesSnapshot) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown) => void;
+}
+
+export const getMcpServicesSnapshot = () =>
+	fetchJSON<McpServicesSnapshot>('/api/mcp/services/snapshot');
+
+export function openMcpServicesStream(callbacks: McpServicesStreamCallbacks): () => void {
+	const source = new EventSource('/api/mcp/services/stream');
+	const parse = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onSnapshot(JSON.parse(message.data) as McpServicesSnapshot);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+	source.addEventListener('snapshot', (event) => parse(event as MessageEvent<string>));
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+	return () => source.close();
+}
+
+export const startMcpServicesMaintain = (
+	serviceId: string = 'all',
+	idempotencyKey?: string | null
+) =>
+	fetchJSON<{ job_id: string; status: string; service_id: string }>(
+		'/api/mcp/services/maintain',
+		jsonBody({
+			service_id: serviceId,
+			...(idempotencyKey ? { idempotency_key: idempotencyKey } : {})
+		})
+	);
+
+export const getMcpServicesMaintainJob = (jobId: string) =>
+	fetchJSON<McpMaintainJob>(`/api/mcp/services/maintain/${encodeURIComponent(jobId)}`);

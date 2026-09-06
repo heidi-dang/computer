@@ -152,6 +152,20 @@ GET /api/metrics      # authenticated administrator only
 
 The metrics snapshot is bounded and contains no prompt, command output, credentials, or file content. It reports request and database latency percentiles, database errors/busy events, SQLite database/WAL/SHM sizes, event-loop lag, command-session retention/output bytes, live-event queue/subscriber state, API-key cache size, RSS memory, and open file descriptors where the platform exposes them.
 
+### MCP Services health (admin UI)
+
+`computer` owns cross-repo service health aggregation for the MCP surface. The admin UI at `/mcp` → **Services** consumes:
+
+```text
+GET  /api/mcp/services/snapshot
+GET  /api/mcp/services/stream
+POST /api/mcp/services/maintain
+GET  /api/mcp/services/maintain/{job_id}
+GET  /api/mcp/services/maintain/{job_id}/events
+```
+
+Bands are `healthy | moderate | unhealthy` and are derived only from re-measured probes (backend readiness/metrics, plugin identity/contract, extension device connectivity, MCP diagnostics/traffic stores). Maintain jobs run fixed playbooks only—no free-form shell—and always re-probe before setting `post_band`. Missing or unreachable signals fail closed (never invent healthy).
+
 ## Execution-plane scaling boundary
 
 CPTR still runs one API/execution process by default. Command process handles, browser ownership, live subscribers, and several coordination caches are intentionally process-local. Do **not** increase Uvicorn worker count as a performance workaround: another worker cannot safely inherit ownership of a command or browser session started elsewhere.
