@@ -46,6 +46,13 @@ def fact_signature(row: dict[str, Any]) -> tuple[str, str] | None:
         normalized_value = _normalize(value, 300)
         return (key, normalized_value) if normalized_value else None
 
+    # Procedure/failure prose often contains labels followed by a colon, such as
+    # "Verified operational procedure: ...".  Treating those labels as assignment
+    # subjects creates false contradictions between independent runbooks/incidents.
+    # Explicit structured facts above remain eligible for conflict detection.
+    if str(row.get("kind") or "").strip().lower() in {"procedure", "failure"}:
+        return None
+
     text = " ".join(str(row.get("canonical_text") or "").split())
     match = _FACT_RE.match(text)
     if match:

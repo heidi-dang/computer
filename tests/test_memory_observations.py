@@ -89,6 +89,86 @@ class MemoryObservationTests(unittest.IsolatedAsyncioTestCase):
         counts = await self.jobs.counts(user_id="user-1", workspace="/repo")
         self.assertEqual(counts["pending"], 0)
 
+    async def test_semantic_command_variants_reuse_existing_procedure(self):
+        first_job = await observe_execution_outcome(
+            user_id="user-1",
+            workspace="/repo",
+            action="command",
+            command="python -m unittest -q tests.test_memory_core",
+            status="COMPLETE",
+            exit_code=0,
+            service=self.service,
+        )
+        self.assertIsNotNone(first_job)
+        await self._process_one()
+
+        second_job = await observe_execution_outcome(
+            user_id="user-1",
+            workspace="/repo",
+            action="command",
+            command='PATH="$PWD/.venv/bin:$PATH" python -m unittest -v tests.test_memory_core',
+            status="COMPLETE",
+            exit_code=0,
+            service=self.service,
+        )
+        self.assertIsNone(second_job)
+        rows = await self.store.list_candidates(
+            user_id="user-1",
+            workspace="/repo",
+            include_historical=False,
+            limit=20,
+        )
+        self.assertEqual(len(rows), 1)
+        events = await self.events.list_events("user-1", workspace="/repo", limit=50)
+        self.assertTrue(any(event["event_type"] == "observation_reused" for event in events))
+        counts = await self.jobs.counts(user_id="user-1", workspace="/repo")
+        self.assertEqual(counts["pending"], 0)
+
+    async def test_completed_outcome_trains_recent_mcp_recall_context(self):
+        recalled = await self.store.create_memory(
+            user_id="user-1",
+            workspace="/repo",
+            scope="workspace",
+            kind="procedure",
+            canonical_text="Run the verified memory regression before deployment.",
+            trust_level="verified_system_fact",
+        )
+        await self.events.record_event(
+            user_id="user-1",
+            workspace="/repo",
+            event_type="recall",
+            reason="retrieved by ChatGPT MCP persistent-memory bridge",
+            payload={
+                "feedback_context_id": "mcpctx-test",
+                "query_hash": "abc123",
+                "feedback_items": [
+                    {
+                        "memory_id": recalled.memory_id,
+                        "rank": 1,
+                        "score": 0.9,
+                        "features": {"bm25": 1.0, "vector": 0.7, "trust": 1.0},
+                        "verification_stale": False,
+                    }
+                ],
+            },
+        )
+        before = await self.store.get_retrieval_profile("user-1", "/repo")
+        job_id = await observe_execution_outcome(
+            user_id="user-1",
+            workspace="/repo",
+            action="command",
+            command="npm run check",
+            status="COMPLETE",
+            exit_code=0,
+            service=self.service,
+        )
+        self.assertIsNotNone(job_id)
+        after = await self.store.get_retrieval_profile("user-1", "/repo")
+        self.assertGreater(after["observations"], before["observations"])
+        feedback = await self.store.list_feedback("user-1", recalled.memory_id)
+        self.assertTrue(any(row["context_id"] == "mcpctx-test" for row in feedback))
+        self.assertTrue(any(row["outcome"] == "success" for row in feedback))
+
     async def test_failure_memory_is_bounded_and_secret_redacted(self):
         secret = "supersecretvalue123"
         job_id = await observe_execution_outcome(

@@ -14,6 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from cptr.memory.domain import RetrievalFeedback
 from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
 from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor
@@ -478,7 +479,12 @@ async def read_memory(request: Request, body: MemoryReadRequest):
             if not query:
                 raise HTTPException(
                     status_code=422,
-                    detail={"code": "MEMORY_QUERY_REQUIRED", "message": "query is required for memory search", "retriable": False, "field": "query"},
+                    detail={
+                        "code": "MEMORY_QUERY_REQUIRED",
+                        "message": "query is required for memory search",
+                        "retriable": False,
+                        "field": "query",
+                    },
                 )
             raw = await adapter.call_tool(
                 "memory.search",
@@ -489,7 +495,15 @@ async def read_memory(request: Request, body: MemoryReadRequest):
                 },
             )
             results = []
-            for item in list(raw.get("results") or [])[: body.limit]:
+            feedback_items: list[dict[str, Any]] = []
+            context_id = (
+                "mcpctx_"
+                + hashlib.sha256(
+                    f"{user_id}:{workspace_path}:{time.time_ns()}".encode("utf-8")
+                ).hexdigest()[:24]
+            )
+            query_hash = hashlib.sha256(query.encode("utf-8")).hexdigest()
+            for rank, item in enumerate(list(raw.get("results") or [])[: body.limit], start=1):
                 if not isinstance(item, dict):
                     continue
                 shaped = {
@@ -509,8 +523,43 @@ async def read_memory(request: Request, body: MemoryReadRequest):
                 text = str(item.get("text") or "")
                 shaped["text"] = text[:4_000] + ("…" if len(text) > 4_000 else "")
                 results.append(shaped)
+                memory_id = str(item.get("memory_id") or "").strip()
+                features = item.get("features") if isinstance(item.get("features"), dict) else {}
+                if memory_id:
+                    feedback_items.append(
+                        {
+                            "memory_id": memory_id,
+                            "rank": rank,
+                            "score": max(0.0, min(1.0, float(item.get("score") or 0.0))),
+                            "features": {
+                                str(key): max(0.0, min(1.0, float(value)))
+                                for key, value in features.items()
+                                if isinstance(value, (int, float))
+                            },
+                            "verification_stale": bool(item.get("verification_stale", False)),
+                        }
+                    )
             context_chars = sum(len(str(item.get("text") or "")) for item in results)
             try:
+                # A returned result is known to have entered ChatGPT's tool context, so
+                # persist exposure/use telemetry immediately. Helpfulness remains unknown
+                # until a later backend-observed action supplies a real terminal outcome.
+                for item in feedback_items[:8]:
+                    await adapter.service.feedback(
+                        RetrievalFeedback(
+                            user_id=user_id,
+                            workspace=workspace_path,
+                            memory_id=str(item["memory_id"]),
+                            context_id=context_id,
+                            query=query,
+                            rank=int(item["rank"]),
+                            score=float(item["score"]),
+                            used=True,
+                            helpful=None,
+                            outcome=None,
+                            features=dict(item["features"]),
+                        )
+                    )
                 await adapter.service.record_event(
                     user_id=user_id,
                     workspace=workspace_path,
@@ -533,6 +582,9 @@ async def read_memory(request: Request, body: MemoryReadRequest):
                         ][:50],
                         "context_chars": context_chars,
                         "item_count": len(results),
+                        "feedback_context_id": context_id,
+                        "query_hash": query_hash,
+                        "feedback_items": feedback_items[:8],
                     },
                 )
             except Exception:
@@ -543,14 +595,26 @@ async def read_memory(request: Request, body: MemoryReadRequest):
             if not memory_id:
                 raise HTTPException(
                     status_code=422,
-                    detail={"code": "MEMORY_ID_REQUIRED", "message": "memory_id is required for memory inspection", "retriable": False, "field": "memory_id"},
+                    detail={
+                        "code": "MEMORY_ID_REQUIRED",
+                        "message": "memory_id is required for memory inspection",
+                        "retriable": False,
+                        "field": "memory_id",
+                    },
                 )
-            result = _public_memory_record(await adapter.call_tool("memory.inspect", {"memory_id": memory_id}))
+            result = _public_memory_record(
+                await adapter.call_tool("memory.inspect", {"memory_id": memory_id})
+            )
         elif body.action == "timeline":
             if body.at_ms is None:
                 raise HTTPException(
                     status_code=422,
-                    detail={"code": "MEMORY_TIME_REQUIRED", "message": "at_ms is required for memory timeline reads", "retriable": False, "field": "at_ms"},
+                    detail={
+                        "code": "MEMORY_TIME_REQUIRED",
+                        "message": "at_ms is required for memory timeline reads",
+                        "retriable": False,
+                        "field": "at_ms",
+                    },
                 )
             raw = await adapter.call_tool(
                 "memory.timeline",
@@ -573,13 +637,29 @@ async def read_memory(request: Request, body: MemoryReadRequest):
     except HTTPException:
         raise
     except KeyError as exc:
-        raise HTTPException(status_code=404, detail={"code": "MEMORY_NOT_FOUND", "message": "memory not found", "retriable": False}) from exc
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "MEMORY_NOT_FOUND", "message": "memory not found", "retriable": False},
+        ) from exc
     except PermissionError as exc:
-        raise HTTPException(status_code=403, detail={"code": "MEMORY_READ_FORBIDDEN", "message": str(exc), "retriable": False}) from exc
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "MEMORY_READ_FORBIDDEN", "message": str(exc), "retriable": False},
+        ) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail={"code": "MEMORY_READ_INVALID", "message": str(exc), "retriable": False}) from exc
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "MEMORY_READ_INVALID", "message": str(exc), "retriable": False},
+        ) from exc
     except MemoryUnavailableError as exc:
-        raise HTTPException(status_code=503, detail={"code": "MEMORY_UNAVAILABLE", "message": "persistent memory is temporarily unavailable", "retriable": True}) from exc
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "MEMORY_UNAVAILABLE",
+                "message": "persistent memory is temporarily unavailable",
+                "retriable": True,
+            },
+        ) from exc
 
     return {"action": body.action, "workspace_id": body.workspace_id, "result": result}
 

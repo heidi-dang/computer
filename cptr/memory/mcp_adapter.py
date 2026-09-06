@@ -178,6 +178,10 @@ class MemoryMcpAdapter:
                         "confidence": row.confidence,
                         "trust_level": row.trust_level,
                         "verification_stale": row.verification_stale,
+                        # Internal ranking features are consumed by the authenticated
+                        # Control bridge to record retrieval feedback. The public
+                        # ChatGPT response is shaped separately and does not expose them.
+                        "features": dict(row.features),
                     }
                     for row in results
                 ]

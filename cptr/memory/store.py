@@ -538,6 +538,29 @@ class SqlMemoryStore:
                     )
                 )
 
+    async def feedback_context_has_outcome(
+        self,
+        *,
+        user_id: str,
+        workspace: str,
+        context_id: str,
+    ) -> bool:
+        """Return whether one retrieval context already received a terminal outcome."""
+        if not str(context_id or "").strip():
+            return False
+        async with self._session() as db:
+            existing = await db.scalar(
+                select(MemoryRetrievalFeedback.id)
+                .where(
+                    MemoryRetrievalFeedback.user_id == user_id,
+                    MemoryRetrievalFeedback.workspace == _workspace(workspace),
+                    MemoryRetrievalFeedback.context_id == context_id,
+                    MemoryRetrievalFeedback.outcome.is_not(None),
+                )
+                .limit(1)
+            )
+        return existing is not None
+
     async def list_feedback(
         self, user_id: str, memory_id: str, limit: int = 50
     ) -> list[dict[str, Any]]:
