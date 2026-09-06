@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
@@ -24,6 +23,22 @@ StepResult = Literal["ok", "skipped", "failed", "report_only"]
 ServiceTarget = Literal["all", "backend", "plugin", "extension", "mcp_transport"]
 
 MAX_JOBS = 50
+
+
+class MaintainConflictError(RuntimeError):
+    def __init__(self, active_job_id: str) -> None:
+        super().__init__(f"maintain job already active: {active_job_id}")
+        self.active_job_id = active_job_id
+
+
+class MaintainIdempotencyConflictError(RuntimeError):
+    def __init__(self, job_id: str) -> None:
+        super().__init__(f"idempotency key is already bound to maintain job: {job_id}")
+        self.job_id = job_id
+
+
+def _owner_key(owner_id: str | None) -> str:
+    return owner_id or "__system__"
 
 
 def _iso_now() -> str:
@@ -91,16 +106,24 @@ class McpServicesMaintainService:
         self.max_jobs = max(1, int(max_jobs))
         self._lock = Lock()
         self._jobs: dict[str, MaintainJob] = {}
-        self._active_job_id: str | None = None
+        self._active_job_ids: dict[str, str] = {}
+        self._idempotency_jobs: dict[tuple[str, str], str] = {}
         self._subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
 
-    def active_job_id(self) -> str | None:
+    def active_job_id(self, *, owner_id: str | None = None) -> str | None:
         with self._lock:
-            return self._active_job_id
+            return self._active_job_ids.get(_owner_key(owner_id))
 
-    def get_job(self, job_id: str) -> MaintainJob | None:
+    def get_job(
+        self, job_id: str, *, owner_id: str | None = None
+    ) -> MaintainJob | None:
         with self._lock:
-            return self._jobs.get(job_id)
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if owner_id is not None and job.owner_id != owner_id:
+                return None
+            return job
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
@@ -125,18 +148,26 @@ class McpServicesMaintainService:
                 except asyncio.QueueFull:
                     pass
 
-    def _store_job(self, job: MaintainJob) -> None:
-        with self._lock:
-            self._jobs[job.job_id] = job
-            while len(self._jobs) > self.max_jobs:
-                oldest = next(iter(self._jobs))
-                if oldest == self._active_job_id:
-                    # skip active; drop next
-                    keys = list(self._jobs)
-                    if len(keys) < 2:
-                        break
-                    oldest = keys[1]
-                self._jobs.pop(oldest, None)
+    def _prune_jobs_locked(self) -> None:
+        while len(self._jobs) > self.max_jobs:
+            removable = next(
+                (
+                    job_id
+                    for job_id, job in self._jobs.items()
+                    if job.status not in ("queued", "running")
+                ),
+                None,
+            )
+            if removable is None:
+                break
+            self._jobs.pop(removable, None)
+            stale_keys = [
+                key
+                for key, mapped_job_id in self._idempotency_jobs.items()
+                if mapped_job_id == removable
+            ]
+            for key in stale_keys:
+                self._idempotency_jobs.pop(key, None)
 
     async def start(
         self,
@@ -145,25 +176,36 @@ class McpServicesMaintainService:
         owner_id: str | None = None,
         idempotency_key: str | None = None,
     ) -> MaintainJob:
+        owner_key = _owner_key(owner_id)
+        normalized_key = (idempotency_key or "").strip()[:128]
         with self._lock:
-            if self._active_job_id and self._active_job_id in self._jobs:
-                active = self._jobs[self._active_job_id]
-                if active.status in ("queued", "running"):
-                    # Idempotent: return active job instead of starting parallel maintain.
-                    return active
+            if normalized_key:
+                mapped_id = self._idempotency_jobs.get((owner_key, normalized_key))
+                if mapped_id:
+                    mapped = self._jobs.get(mapped_id)
+                    if mapped is not None:
+                        if mapped.service_id != service_id:
+                            raise MaintainIdempotencyConflictError(mapped.job_id)
+                        return mapped
+                    self._idempotency_jobs.pop((owner_key, normalized_key), None)
+
+            active_id = self._active_job_ids.get(owner_key)
+            if active_id:
+                active = self._jobs.get(active_id)
+                if active is not None and active.status in ("queued", "running"):
+                    raise MaintainConflictError(active.job_id)
+                self._active_job_ids.pop(owner_key, None)
 
             job = MaintainJob(
-                job_id=_job_id() if not idempotency_key else f"msvc_{idempotency_key[:24]}",
+                job_id=_job_id(),
                 service_id=service_id,
                 owner_id=owner_id,
             )
-            if job.job_id in self._jobs and self._jobs[job.job_id].status in (
-                "queued",
-                "running",
-            ):
-                return self._jobs[job.job_id]
             self._jobs[job.job_id] = job
-            self._active_job_id = job.job_id
+            self._active_job_ids[owner_key] = job.job_id
+            if normalized_key:
+                self._idempotency_jobs[(owner_key, normalized_key)] = job.job_id
+            self._prune_jobs_locked()
 
         asyncio.create_task(self._run_job(job.job_id))
         return job
@@ -182,22 +224,11 @@ class McpServicesMaintainService:
         else:
             targets = [job.service_id]
 
-        hard_failure = False
         try:
             for target in targets:
-                if hard_failure and target != targets[0]:
-                    step = MaintainStep(
-                        step_id=f"{target}.skipped_dependency",
-                        started_at=_iso_now(),
-                        ended_at=_iso_now(),
-                        result="skipped",
-                        evidence={"reason": "upstream dependency hard failure"},
-                    )
-                    job.steps.append(step)
-                    continue
-                ok = await self._run_service_playbook(job, target)
-                if not ok and target == "backend":
-                    hard_failure = True
+                # Services are maintained independently. A backend playbook failure
+                # must not suppress safe plugin/extension/MCP maintenance work.
+                await self._run_service_playbook(job, target)
 
             # Mandatory post-check: band only from probes.
             snapshot = await self.health.snapshot(
@@ -218,21 +249,29 @@ class McpServicesMaintainService:
                 )
                 job.post_band = str(match.get("band")) if match else job.post_aggregate
 
-            if hard_failure or any(s.result == "failed" for s in job.steps):
-                if any(s.result == "ok" for s in job.steps):
-                    job.status = "partial"
-                else:
-                    job.status = "failed"
-            else:
+            has_failed_step = any(s.result == "failed" for s in job.steps)
+            has_ok_step = any(s.result == "ok" for s in job.steps)
+            # Post-health is authoritative: unhealthy can never be reported as
+            # success/partial even when some maintenance actions completed.
+            if job.post_band == "unhealthy":
+                job.status = "failed"
+            elif has_failed_step:
+                job.status = "partial" if has_ok_step else "failed"
+            elif job.post_band == "healthy":
                 job.status = "succeeded"
+            elif job.post_band == "moderate":
+                job.status = "partial"
+            else:
+                job.status = "failed"
         except Exception as exc:
             job.status = "failed"
             job.error = str(exc)
         finally:
             job.ended_at = _iso_now()
             with self._lock:
-                if self._active_job_id == job_id:
-                    self._active_job_id = None
+                owner_key = _owner_key(job.owner_id)
+                if self._active_job_ids.get(owner_key) == job_id:
+                    self._active_job_ids.pop(owner_key, None)
             self._emit(
                 "job_finished",
                 {
@@ -280,24 +319,54 @@ class McpServicesMaintainService:
         if step.result == "failed":
             return False
 
-        # 2. WAL checkpoint — report_only in v1 (no public operator API yet)
+        # 2. Run a bounded, non-blocking WAL checkpoint. PASSIVE never waits for
+        # readers and reports whether a busy reader prevented full checkpointing.
         step = MaintainStep(step_id="backend.wal_checkpoint", started_at=_iso_now())
-        step.result = "report_only"
-        step.evidence = {
-            "action": "not_available",
-            "note": "PRAGMA wal_autocheckpoint only; no operator-triggered checkpoint API",
-        }
+        try:
+            from sqlalchemy import text
+
+            from cptr.utils.db import get_engine
+
+            async with get_engine().connect() as connection:
+                result = await connection.execute(text("PRAGMA wal_checkpoint(PASSIVE)"))
+                row = result.first()
+            busy = int(row[0]) if row is not None else 0
+            log_frames = int(row[1]) if row is not None and len(row) > 1 else 0
+            checkpointed_frames = int(row[2]) if row is not None and len(row) > 2 else 0
+            step.result = "ok" if busy == 0 else "report_only"
+            step.evidence = {
+                "mode": "PASSIVE",
+                "busy": busy,
+                "log_frames": log_frames,
+                "checkpointed_frames": checkpointed_frames,
+            }
+        except Exception as exc:
+            step.result = "failed"
+            step.evidence = {"error": str(exc)}
         step.ended_at = _iso_now()
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
 
-        # 3. Session reconcile — report_only unless wired later
+        # 3. Reconcile stale command completion/capacity state and reap only
+        # already-completed sessions that satisfy normal registry retention policy.
         step = MaintainStep(step_id="backend.reconcile_sessions", started_at=_iso_now())
-        step.result = "report_only"
-        step.evidence = {
-            "action": "not_wired",
-            "note": "stale session reconcile not exposed as maintain hook in v1",
-        }
+        try:
+            from cptr.services.execution_manager import command_session_registry
+
+            reconciled_sessions = command_session_registry.reconcile()
+            reconciled_reservations = command_session_registry.reconcile_launch_reservations()
+            reaped = command_session_registry.reap()
+            step.result = "ok"
+            step.evidence = {
+                "reconciled_sessions": reconciled_sessions,
+                "released_orphan_reservations": reconciled_reservations,
+                "reaped_completed_sessions": len(reaped),
+                "active_sessions": command_session_registry.active_count(),
+                "capacity_used": command_session_registry.capacity_count(),
+            }
+        except Exception as exc:
+            step.result = "failed"
+            step.evidence = {"error": str(exc)}
         step.ended_at = _iso_now()
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
@@ -323,9 +392,11 @@ class McpServicesMaintainService:
 
     async def _playbook_plugin(self, job: MaintainJob) -> bool:
         step = MaintainStep(step_id="plugin.probe_identity", started_at=_iso_now())
-        identity = self.health.identity_cache.get()
-        has_identity = any(
-            [identity.version, identity.contract_version, identity.tool_count is not None]
+        identity = await self.health.refresh_plugin_identity(force=True)
+        has_identity = bool(
+            identity.version
+            and identity.contract_version
+            and identity.tool_count is not None
         )
         step.result = "ok" if has_identity else "failed"
         step.evidence = {
@@ -340,7 +411,7 @@ class McpServicesMaintainService:
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
 
         step = MaintainStep(step_id="plugin.refresh_required", started_at=_iso_now())
-        if identity.refresh_required:
+        if identity.refresh_required is True:
             step.result = "report_only"
             step.evidence = {
                 "action": "host_refresh_required",
@@ -352,9 +423,15 @@ class McpServicesMaintainService:
                     "Refresh",
                 ],
             }
-        else:
+        elif identity.refresh_required is False:
             step.result = "ok"
             step.evidence = {"refresh_required": False}
+        else:
+            step.result = "report_only"
+            step.evidence = {
+                "action": "unknown",
+                "note": "plugin manifest did not report refresh_required",
+            }
         step.ended_at = _iso_now()
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
@@ -368,7 +445,7 @@ class McpServicesMaintainService:
         step.ended_at = _iso_now()
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
-        return True
+        return has_identity
 
     async def _playbook_extension(self, job: MaintainJob) -> bool:
         step = MaintainStep(step_id="extension.list_devices", started_at=_iso_now())
@@ -399,6 +476,7 @@ class McpServicesMaintainService:
         step.ended_at = _iso_now()
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
+        devices_ok = step.result != "failed"
 
         # Clear stuck leases — report_only without session ids/epochs in v1
         step = MaintainStep(step_id="extension.clear_stuck_leases", started_at=_iso_now())
@@ -413,12 +491,27 @@ class McpServicesMaintainService:
         step.ended_at = _iso_now()
         job.steps.append(step)
         self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
-        return step.result != "failed"
+        return devices_ok
 
     async def _playbook_mcp(self, job: MaintainJob) -> bool:
+        step = MaintainStep(step_id="mcp.expire_stale_sessions", started_at=_iso_now())
+        try:
+            from cptr.services.mcp_traffic import mcp_traffic_store
+
+            expired = await mcp_traffic_store.expire_stale_sessions()
+            step.result = "ok"
+            step.evidence = {"expired_sessions": expired}
+        except Exception as exc:
+            step.result = "failed"
+            step.evidence = {"error": str(exc)}
+        step.ended_at = _iso_now()
+        job.steps.append(step)
+        self._emit("step", {"job_id": job.job_id, "step": step.as_dict()})
+        maintenance_ok = step.result != "failed"
+
         step = MaintainStep(step_id="mcp.reprobe_stores", started_at=_iso_now())
         evidence: dict[str, Any] = {}
-        ok = True
+        ok = maintenance_ok
         try:
             from cptr.services.mcp_diagnostics import mcp_diagnostics_store
 

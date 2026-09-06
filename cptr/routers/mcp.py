@@ -47,7 +47,11 @@ from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
 from cptr.services.mcp_usage_store import mcp_usage_store
 from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
 from cptr.services.mcp_services_health import mcp_services_health
-from cptr.services.mcp_services_maintain import mcp_services_maintain
+from cptr.services.mcp_services_maintain import (
+    MaintainConflictError,
+    MaintainIdempotencyConflictError,
+    mcp_services_maintain,
+)
 from cptr.services.memory_observability import MemoryObservabilityService
 from cptr.services.system_metrics import mcp_metrics_sampler
 from cptr.utils import memory as managed_memory
@@ -1114,7 +1118,7 @@ async def get_mcp_services_snapshot(request: Request):
     admin = require_admin(request)
     return await mcp_services_health.snapshot(
         user_id=admin.user_id,
-        active_job_id=mcp_services_maintain.active_job_id(),
+        active_job_id=mcp_services_maintain.active_job_id(owner_id=admin.user_id),
     )
 
 
@@ -1132,7 +1136,7 @@ async def stream_mcp_services(request: Request):
                 break
             snapshot = await mcp_services_health.snapshot(
                 user_id=admin.user_id,
-                active_job_id=mcp_services_maintain.active_job_id(),
+                active_job_id=mcp_services_maintain.active_job_id(owner_id=admin.user_id),
             )
             fingerprint = str(snapshot.get("fingerprint") or "")
             if fingerprint != previous_fingerprint:
@@ -1167,19 +1171,36 @@ async def start_mcp_services_maintain(
     allowed = {"all", "backend", "plugin", "extension", "mcp_transport"}
     if service_id not in allowed:
         raise HTTPException(400, f"service_id must be one of {sorted(allowed)}")
-    job = await mcp_services_maintain.start(
-        service_id=service_id,  # type: ignore[arg-type]
-        owner_id=admin.user_id,
-        idempotency_key=payload.idempotency_key,
-    )
+    try:
+        job = await mcp_services_maintain.start(
+            service_id=service_id,  # type: ignore[arg-type]
+            owner_id=admin.user_id,
+            idempotency_key=payload.idempotency_key,
+        )
+    except MaintainIdempotencyConflictError as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "MCP_SERVICES_IDEMPOTENCY_CONFLICT",
+                "job_id": exc.job_id,
+            },
+        ) from exc
+    except MaintainConflictError as exc:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "MCP_SERVICES_MAINTAIN_ACTIVE",
+                "active_job_id": exc.active_job_id,
+            },
+        ) from exc
     return {"job_id": job.job_id, "status": job.status, "service_id": job.service_id}
 
 
 @router.get("/services/maintain/{job_id}")
 async def get_mcp_services_maintain_job(request: Request, job_id: str):
     """Job status + steps + evidence."""
-    require_admin(request)
-    job = mcp_services_maintain.get_job(job_id)
+    admin = require_admin(request)
+    job = mcp_services_maintain.get_job(job_id, owner_id=admin.user_id)
     if job is None:
         raise HTTPException(404, f"maintain job '{job_id}' not found")
     return job.as_dict()
@@ -1188,8 +1209,8 @@ async def get_mcp_services_maintain_job(request: Request, job_id: str):
 @router.get("/services/maintain/{job_id}/events")
 async def stream_mcp_services_maintain_events(request: Request, job_id: str):
     """Optional SSE for maintain job progress."""
-    require_admin(request)
-    job = mcp_services_maintain.get_job(job_id)
+    admin = require_admin(request)
+    job = mcp_services_maintain.get_job(job_id, owner_id=admin.user_id)
     if job is None:
         raise HTTPException(404, f"maintain job '{job_id}' not found")
 
@@ -1202,7 +1223,9 @@ async def stream_mcp_services_maintain_events(request: Request, job_id: str):
             while True:
                 if await request.is_disconnected():
                     break
-                current = mcp_services_maintain.get_job(job_id)
+                current = mcp_services_maintain.get_job(
+                    job_id, owner_id=admin.user_id
+                )
                 if current is None:
                     break
                 try:
@@ -1211,7 +1234,9 @@ async def stream_mcp_services_maintain_events(request: Request, job_id: str):
                         yield _services_sse(str(event.get("event") or "event"), event)
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
-                current = mcp_services_maintain.get_job(job_id)
+                current = mcp_services_maintain.get_job(
+                    job_id, owner_id=admin.user_id
+                )
                 if current is not None and current.status not in ("queued", "running"):
                     yield _services_sse("job", current.as_dict())
                     break

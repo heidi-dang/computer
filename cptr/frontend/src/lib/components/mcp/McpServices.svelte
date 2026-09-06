@@ -99,8 +99,9 @@
 		if (jobRunning) return;
 		maintainError = null;
 		maintainBusy = true;
+		const idempotencyKey = crypto.randomUUID();
 		try {
-			const started = await startMcpServicesMaintain(serviceId);
+			const started = await startMcpServicesMaintain(serviceId, idempotencyKey);
 			await refreshJob(started.job_id);
 			// Poll job until terminal
 			const deadline = Date.now() + 60_000;
@@ -192,7 +193,7 @@
 			<!-- Plugin identity -->
 			<section class="app-subtle-surface mb-4 rounded-xl border p-3">
 				<div class="mb-2 flex flex-wrap items-center gap-2">
-					h2 class="text-sm font-semibold">Plugin</h2>
+					<h2 class="text-sm font-semibold">Plugin</h2>
 					<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(plugin?.band ?? 'unhealthy')}"
 						>{plugin?.band ?? 'unknown'}</span
 					>
@@ -227,7 +228,7 @@
 				{#each services as service (service.id)}
 					<article class="app-subtle-surface rounded-xl border p-3">
 						<div class="mb-2 flex flex-wrap items-center gap-2">
-							h3 class="text-sm font-semibold">{service.name}</h3>
+							<h3 class="text-sm font-semibold">{service.name}</h3>
 							<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase {bandClass(service.band)}"
 								>{service.band}</span
 							>
@@ -275,7 +276,7 @@
 			{#if maintainJob}
 				<section class="app-subtle-surface mt-4 rounded-xl border p-3">
 					<div class="mb-2 flex flex-wrap items-center gap-2">
-						h2 class="text-sm font-semibold">Maintain job</h2>
+						<h2 class="text-sm font-semibold">Maintain job</h2>
 						<span class="text-[0.7rem] app-muted">{maintainJob.job_id}</span>
 						<span class="rounded-full border px-2 py-0.5 text-[0.65rem] uppercase">{maintainJob.status}</span>
 						{#if maintainJob.post_band}

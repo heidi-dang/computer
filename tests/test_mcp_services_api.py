@@ -41,7 +41,7 @@ def make_health() -> McpServicesHealthService:
             source="test",
         )
     )
-    return McpServicesHealthService(identity_cache=cache)
+    return McpServicesHealthService(identity_cache=cache, plugin_update_url="")
 
 
 def snapshot_kwargs():
@@ -157,6 +157,71 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
                 )
         self.assertEqual(raised.exception.status_code, 400)
 
+    async def test_maintain_job_is_owner_scoped(self):
+        health = make_health()
+        maintain = McpServicesMaintainService(health=health)
+        job = await maintain.start(
+            service_id="backend", owner_id="admin-1", idempotency_key="owner-scope"
+        )
+        other_admin = Mock(return_value=SimpleNamespace(user_id="admin-2"))
+        with (
+            patch.object(mcp_router, "require_admin", other_admin),
+            patch.object(mcp_router, "mcp_services_maintain", maintain),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await mcp_router.get_mcp_services_maintain_job(
+                    route_request(), job.job_id
+                )
+        self.assertEqual(raised.exception.status_code, 404)
+
+    async def test_maintain_conflict_returns_409_with_active_job(self):
+        health = make_health()
+        maintain = McpServicesMaintainService(health=health)
+        admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
+        await maintain.start(
+            service_id="backend", owner_id="admin-1", idempotency_key="first"
+        )
+        with (
+            patch.object(mcp_router, "require_admin", admin),
+            patch.object(mcp_router, "mcp_services_maintain", maintain),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await mcp_router.start_mcp_services_maintain(
+                    route_request(),
+                    mcp_router.McpServicesMaintainRequest(
+                        service_id="plugin", idempotency_key="second"
+                    ),
+                )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(
+            raised.exception.detail["code"], "MCP_SERVICES_MAINTAIN_ACTIVE"
+        )
+        self.assertTrue(raised.exception.detail["active_job_id"].startswith("msvc_"))
+
+    async def test_idempotency_key_reuse_for_different_service_returns_409(self):
+        health = make_health()
+        maintain = McpServicesMaintainService(health=health)
+        admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
+        await maintain.start(
+            service_id="backend", owner_id="admin-1", idempotency_key="same-key"
+        )
+        with (
+            patch.object(mcp_router, "require_admin", admin),
+            patch.object(mcp_router, "mcp_services_maintain", maintain),
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await mcp_router.start_mcp_services_maintain(
+                    route_request(),
+                    mcp_router.McpServicesMaintainRequest(
+                        service_id="plugin", idempotency_key="same-key"
+                    ),
+                )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(
+            raised.exception.detail["code"], "MCP_SERVICES_IDEMPOTENCY_CONFLICT"
+        )
+        self.assertTrue(raised.exception.detail["job_id"].startswith("msvc_"))
+
     async def test_maintain_job_not_found(self):
         admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
         maintain = McpServicesMaintainService()
@@ -171,7 +236,9 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.status_code, 404)
 
     async def test_failure_path_backend_readiness_fails_job(self):
-        health = McpServicesHealthService(identity_cache=PluginIdentityCache())
+        health = McpServicesHealthService(
+            identity_cache=PluginIdentityCache(), plugin_update_url=""
+        )
         maintain = McpServicesMaintainService(health=health)
 
         async def snapshot(**kwargs):

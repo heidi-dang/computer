@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { vitePreprocess } from '@sveltejs/vite-plugin-svelte';
+import { compile, preprocess } from 'svelte/compiler';
 
 const root = new URL('../src/', import.meta.url);
 const read = (path) => readFile(new URL(path, root), 'utf8');
@@ -15,6 +17,19 @@ test('Services tab is registered next to Memory on /mcp', async () => {
 	assert.match(page, /view === 'memory'/);
 });
 
+test('McpServices compiles through the Svelte TypeScript preprocess path', async () => {
+	const source = await read('lib/components/mcp/McpServices.svelte');
+	const processed = await preprocess(source, vitePreprocess(), {
+		filename: 'McpServices.svelte'
+	});
+	assert.doesNotThrow(() =>
+		compile(processed.code, {
+			filename: 'McpServices.svelte',
+			generate: 'client'
+		})
+	);
+});
+
 test('McpServices renders aggregate bands, probes, and maintain controls', async () => {
 	const [component, api] = await Promise.all([
 		read('lib/components/mcp/McpServices.svelte'),
@@ -24,6 +39,8 @@ test('McpServices renders aggregate bands, probes, and maintain controls', async
 	assert.match(component, /getMcpServicesSnapshot/);
 	assert.match(component, /openMcpServicesStream/);
 	assert.match(component, /startMcpServicesMaintain/);
+	assert.match(component, /crypto\.randomUUID\(\)/);
+	assert.match(component, /startMcpServicesMaintain\(serviceId, idempotencyKey\)/);
 	assert.match(component, /getMcpServicesMaintainJob/);
 	assert.match(component, /bandClass/);
 	assert.match(component, /'healthy'/);

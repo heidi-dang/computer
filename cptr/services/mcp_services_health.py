@@ -8,18 +8,30 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Callable, Literal
 
+import httpx
+
 Band = Literal["healthy", "moderate", "unhealthy"]
 SERVICE_IDS = ("backend", "plugin", "extension", "mcp_transport")
 
-# Phase 0 frozen expectations (live plugin status at lock time).
-EXPECTED_CONTRACT_VERSION = "1.4.5"
-EXPECTED_TOOL_COUNT = 83
+# Cross-repo contract expectations. Defaults match the current paired plugin
+# release, while environment overrides avoid hard-coding future releases into
+# the health implementation.
+EXPECTED_CONTRACT_VERSION = (
+    os.environ.get("CPTR_MCP_EXPECTED_CONTRACT_VERSION", "1.4.5").strip() or "1.4.5"
+)
+try:
+    EXPECTED_TOOL_COUNT = max(
+        1, int(os.environ.get("CPTR_MCP_EXPECTED_TOOL_COUNT", "83"))
+    )
+except ValueError:
+    EXPECTED_TOOL_COUNT = 83
 
 # Thresholds
 EVENT_LOOP_LAG_HEALTHY_MS = 50.0
@@ -37,6 +49,23 @@ def _iso_now() -> str:
 
 def _ms_now() -> int:
     return int(time.time() * 1000)
+
+
+def _plugin_update_url_from_env() -> str | None:
+    explicit = os.environ.get("CPTR_MCP_PLUGIN_UPDATE_URL", "").strip()
+    if explicit:
+        return explicit
+    base = os.environ.get("CPTR_MCP_PLUGIN_BASE_URL", "").strip()
+    if base:
+        return f"{base.rstrip('/')}/plugin/update"
+    return None
+
+
+def _bounded_text(value: Any, limit: int) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:limit] if text else None
 
 
 @dataclass
@@ -210,9 +239,9 @@ def probe_request_p95(p95_ms: float | None, sample_count: int) -> ProbeResult:
     if sample_count < REQUEST_SAMPLE_MIN or p95_ms is None:
         return ProbeResult(
             id="backend.request_p95",
-            ok=True,
+            ok=False,
             critical=False,
-            band_hint="healthy",
+            band_hint="moderate",
             detail=f"insufficient samples ({sample_count})",
             value={"p95_ms": p95_ms, "samples": sample_count},
         )
@@ -236,9 +265,9 @@ def probe_open_fds(open_fds: int | None) -> ProbeResult:
     if open_fds is None:
         return ProbeResult(
             id="backend.open_fds",
-            ok=True,
+            ok=False,
             critical=False,
-            band_hint="healthy",
+            band_hint="moderate",
             detail="open_fds unavailable on this platform",
             value=None,
         )
@@ -565,10 +594,33 @@ class McpServicesHealthService:
         identity_cache: PluginIdentityCache | None = None,
         expected_contract_version: str = EXPECTED_CONTRACT_VERSION,
         expected_tool_count: int = EXPECTED_TOOL_COUNT,
+        plugin_update_url: str | None = None,
+        plugin_probe_timeout_seconds: float = 2.0,
+        plugin_probe_interval_seconds: float | None = None,
     ) -> None:
         self.identity_cache = identity_cache or plugin_identity_cache
         self.expected_contract_version = expected_contract_version
         self.expected_tool_count = expected_tool_count
+        self.plugin_update_url = (
+            plugin_update_url
+            if plugin_update_url is not None
+            else _plugin_update_url_from_env()
+        )
+        self.plugin_probe_timeout_seconds = max(
+            0.1, min(float(plugin_probe_timeout_seconds), 10.0)
+        )
+        if plugin_probe_interval_seconds is None:
+            try:
+                plugin_probe_interval_seconds = float(
+                    os.environ.get("CPTR_MCP_PLUGIN_PROBE_INTERVAL_SECONDS", "15")
+                )
+            except ValueError:
+                plugin_probe_interval_seconds = 15.0
+        self.plugin_probe_interval_ms = int(
+            max(1.0, min(float(plugin_probe_interval_seconds), 300.0)) * 1000
+        )
+        self._plugin_probe_attempted_at_ms = 0
+        self._plugin_probe_error: str | None = None
 
     async def snapshot(
         self,
@@ -582,9 +634,11 @@ class McpServicesHealthService:
         traffic_snapshot_fn: Callable[[], Any] | None = None,
         diagnostics_snapshot_fn: Callable[[], Any] | None = None,
         is_device_connected_fn: Callable[..., Any] | None = None,
+        plugin_manifest_fn: Callable[[], Any] | None = None,
     ) -> dict[str, Any]:
-        # Soft-fill plugin identity from traffic clients when cache is empty.
-        await self._maybe_refresh_identity_from_traffic(traffic_snapshot_fn)
+        # Plugin identity must come from the plugin's own release manifest, not
+        # from MCP clientInfo (which describes ChatGPT, not this server).
+        await self.refresh_plugin_identity(manifest_fn=plugin_manifest_fn)
 
         backend_service = await self._probe_backend(
             database_ready_fn=database_ready_fn,
@@ -713,45 +767,87 @@ class McpServicesHealthService:
             "last_error": last_error,
         }
 
-    async def _maybe_refresh_identity_from_traffic(
-        self, traffic_snapshot_fn: Callable[[], Any] | None
-    ) -> None:
-        """Phase 2: derive version signal from live MCP traffic clients if cache empty."""
-        current = self.identity_cache.get()
-        if current.version or current.contract_version or current.tool_count is not None:
-            return
-        try:
-            if traffic_snapshot_fn is None:
-                from cptr.services.mcp_traffic import mcp_traffic_store
+    async def refresh_plugin_identity(
+        self,
+        *,
+        manifest_fn: Callable[[], Any] | None = None,
+        force: bool = False,
+    ) -> PluginIdentity:
+        """Refresh plugin identity from the authoritative plugin release manifest.
 
-                traffic = await mcp_traffic_store.snapshot()
+        The companion plugin exposes `/plugin/update`; operators provide its URL
+        with CPTR_MCP_PLUGIN_UPDATE_URL or CPTR_MCP_PLUGIN_BASE_URL. When an
+        authoritative probe is configured and fails, the identity fails closed.
+        """
+        if manifest_fn is None and not self.plugin_update_url:
+            self._plugin_probe_error = None
+            return self.identity_cache.get()
+
+        if manifest_fn is None:
+            now_ms = _ms_now()
+            if (
+                not force
+                and self._plugin_probe_attempted_at_ms
+                and now_ms - self._plugin_probe_attempted_at_ms
+                < self.plugin_probe_interval_ms
+            ):
+                return self.identity_cache.get()
+            self._plugin_probe_attempted_at_ms = now_ms
+
+        try:
+            if manifest_fn is not None:
+                manifest = manifest_fn()
+                if hasattr(manifest, "__await__"):
+                    manifest = await manifest  # type: ignore[misc]
             else:
-                traffic = traffic_snapshot_fn()
-                if hasattr(traffic, "__await__"):
-                    traffic = await traffic  # type: ignore[misc]
-            clients = list((traffic or {}).get("clients") or [])
-            versions = [
-                str(c.get("version"))
-                for c in clients
-                if c.get("version") and str(c.get("version")).strip()
-            ]
-            if not versions:
-                return
-            # Prefer version matching expected contract; else first seen.
-            chosen = next(
-                (v for v in versions if v == self.expected_contract_version), versions[0]
+                assert self.plugin_update_url is not None
+                if not self.plugin_update_url.startswith(("http://", "https://")):
+                    raise ValueError("plugin update URL must use http or https")
+                async with httpx.AsyncClient(
+                    timeout=self.plugin_probe_timeout_seconds,
+                    follow_redirects=False,
+                ) as client:
+                    response = await client.get(
+                        self.plugin_update_url,
+                        headers={"Accept": "application/json"},
+                    )
+                    response.raise_for_status()
+                    manifest = response.json()
+
+            if not isinstance(manifest, dict):
+                raise ValueError("plugin update manifest must be an object")
+
+            raw_tool_count = manifest.get("tool_count")
+            tool_count: int | None
+            if raw_tool_count is None:
+                tool_count = None
+            else:
+                tool_count = int(raw_tool_count)
+                if tool_count < 1:
+                    raise ValueError("plugin tool_count must be positive")
+
+            raw_refresh = manifest.get("refresh_required")
+            refresh_required = raw_refresh if isinstance(raw_refresh, bool) else None
+            identity = PluginIdentity(
+                version=_bounded_text(manifest.get("version"), 64),
+                contract_version=_bounded_text(manifest.get("contract_version"), 64),
+                tool_count=tool_count,
+                release_sha=_bounded_text(manifest.get("release_sha"), 128),
+                refresh_required=refresh_required,
+                source="plugin_update",
             )
-            self.identity_cache.set(
-                PluginIdentity(
-                    version=chosen,
-                    contract_version=chosen,
-                    tool_count=None,  # unknown from traffic alone → moderate tool_count
-                    refresh_required=None,
-                    source="mcp_traffic",
-                )
-            )
-        except Exception:
-            return
+            if not any(
+                [identity.version, identity.contract_version, identity.tool_count is not None]
+            ):
+                raise ValueError("plugin update manifest contains no identity fields")
+
+            self.identity_cache.set(identity)
+            self._plugin_probe_error = None
+            return self.identity_cache.get()
+        except Exception as exc:
+            self._plugin_probe_error = _bounded_text(exc, 240) or "plugin manifest probe failed"
+            self.identity_cache.set(PluginIdentity(source="plugin_update_error"))
+            return self.identity_cache.get()
 
     def _probe_plugin(self) -> tuple[dict[str, Any], dict[str, Any]]:
         identity = self.identity_cache.get()
@@ -784,9 +880,12 @@ class McpServicesHealthService:
                 "refresh_required": identity.refresh_required,
             },
             "last_ok_at": _iso_now() if band == "healthy" else None,
-            "last_error": None
-            if band != "unhealthy"
-            else next((p.detail for p in probes if not p.ok), None),
+            "last_error": self._plugin_probe_error
+            or (
+                None
+                if band != "unhealthy"
+                else next((p.detail for p in probes if not p.ok), None)
+            ),
         }
         return service, plugin_block
 

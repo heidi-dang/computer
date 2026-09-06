@@ -164,7 +164,11 @@ GET  /api/mcp/services/maintain/{job_id}
 GET  /api/mcp/services/maintain/{job_id}/events
 ```
 
-Bands are `healthy | moderate | unhealthy` and are derived only from re-measured probes (backend readiness/metrics, plugin identity/contract, extension device connectivity, MCP diagnostics/traffic stores). Maintain jobs run fixed playbooks only—no free-form shell—and always re-probe before setting `post_band`. Missing or unreachable signals fail closed (never invent healthy).
+Bands are `healthy | moderate | unhealthy` and are derived only from re-measured probes (backend readiness/metrics, plugin identity/contract, extension device connectivity, MCP diagnostics/traffic stores). Maintain jobs run fixed playbooks only—no free-form shell—and always re-probe before setting `post_band`. Backend maintenance performs a non-blocking SQLite `wal_checkpoint(PASSIVE)` plus command-session/reservation reconciliation and normal completed-session reaping; MCP transport maintenance expires stale traffic sessions before re-probing its bounded stores. Operations that Computer cannot perform safely with its current ownership information, such as force-releasing a Chrome debugger lease or refreshing ChatGPT's frozen tool snapshot, remain explicitly `report_only` rather than pretending to repair them. A job can report `succeeded` only when its mandatory post-check is healthy; moderate post-health is `partial`, and unhealthy post-health is `failed`. Missing or unreachable signals fail closed (never invent healthy).
+
+Plugin identity is read from the companion plugin's authoritative `/plugin/update` manifest rather than from MCP `clientInfo` (which describes the ChatGPT client). Configure either `CPTR_MCP_PLUGIN_UPDATE_URL` directly or `CPTR_MCP_PLUGIN_BASE_URL` and Computer will append `/plugin/update`. Regular health snapshots rate-limit this cross-repo probe with `CPTR_MCP_PLUGIN_PROBE_INTERVAL_SECONDS` (15 seconds by default); an explicit plugin/all Maintain job bypasses that cache and forces a fresh manifest probe before its mandatory post-check. Cross-repo expectations can be advanced without code changes through `CPTR_MCP_EXPECTED_CONTRACT_VERSION` and `CPTR_MCP_EXPECTED_TOOL_COUNT`.
+
+Maintain jobs are isolated by authenticated admin owner. Idempotency keys replay only the same owner's request; a different request from that owner while a job is active returns HTTP 409 with the active job ID, while another owner cannot read or subscribe to that job.
 
 ## Execution-plane scaling boundary
 
