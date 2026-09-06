@@ -12,6 +12,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from cptr.services.action_traces import action_trace_store, trace_context_from_request
 from cptr.services.browser_command_results import browser_command_results
 from cptr.services.browser_evaluate_approvals import browser_evaluate_approvals
 from cptr.services.browser_device_connections import browser_device_connections
@@ -170,6 +171,58 @@ class HumanInputBody(BaseModel):
 
 async def _control_user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
+
+
+async def _trace_browser_stage(
+    request: Request | None,
+    *,
+    user_id: str,
+    session_id: str,
+    name: str,
+    status: Literal["started", "running", "ok", "error", "cancelled"],
+    layer: Literal["browser", "cleanup"] = "browser",
+    workspace_id: str | None = None,
+    error_code: str | None = None,
+    trace_id: str | None = None,
+    dedupe_key: str | None = None,
+) -> str | None:
+    """Append payload-free browser lifecycle metadata to the session's original trace."""
+    try:
+        context = trace_context_from_request(request) if request is not None else None
+        selected_trace = trace_id
+        if selected_trace is None:
+            selected_trace = await action_trace_store.resolve_entity(
+                owner_id=user_id,
+                entity_type="browser",
+                entity_id=session_id,
+            )
+            if selected_trace is None and context is not None:
+                selected_trace = context.trace_id
+                await action_trace_store.link_entity(
+                    owner_id=user_id,
+                    trace_id=selected_trace,
+                    entity_type="browser",
+                    entity_id=session_id,
+                )
+        if selected_trace is None:
+            return None
+        await action_trace_store.append(
+            owner_id=user_id,
+            trace_id=selected_trace,
+            layer=layer,
+            name=name,
+            status=status,
+            request_id=context.request_id if context is not None else None,
+            tool_name=context.tool_name if context is not None else None,
+            workspace_id=workspace_id,
+            entity_type="browser",
+            entity_id=session_id,
+            error_code=error_code,
+            dedupe_key=dedupe_key or f"browser:{session_id}:{name}",
+        )
+        return selected_trace
+    except Exception:
+        return None
 
 
 def _session_wire_mode(session: Any) -> str:
@@ -380,6 +433,15 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
     except PermissionError as exc:
         raise HTTPException(status_code=404, detail="browser device not found") from exc
 
+    browser_trace_id = await _trace_browser_stage(
+        request,
+        user_id=user_id,
+        session_id=session.id,
+        name="browser.session.opened",
+        status="running",
+        trace_id=None,
+    )
+
     lease = await browser_device_store.session_lease(session_id=session.id)
     if lease is None:
         raise HTTPException(status_code=409, detail="browser lease is unavailable")
@@ -453,7 +515,24 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
             session_id=session.id,
             expected_epoch=int(acquired["epoch"]),
         )
+        await _trace_browser_stage(
+            request,
+            user_id=user_id,
+            session_id=session.id,
+            name="browser.session.attach_failed",
+            status="error",
+            error_code="browser_attach_failed",
+            trace_id=browser_trace_id,
+        )
         raise HTTPException(status_code=409, detail="browser attach failed")
+    await _trace_browser_stage(
+        request,
+        user_id=user_id,
+        session_id=session.id,
+        name="browser.session.attached",
+        status="ok",
+        trace_id=browser_trace_id,
+    )
     return {
         "session_id": session.id,
         "device_id": session.device_id,
@@ -778,6 +857,17 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
         timeout_seconds=body.wait_seconds,
         timeout_detail="browser command timed out",
     )
+    await _trace_browser_stage(
+        request,
+        user_id=user_id,
+        session_id=session_id,
+        name=f"browser.command.{body.action}",
+        status="ok" if result.get("type") == "browser.command.completed" else "error",
+        error_code=(
+            None if result.get("type") == "browser.command.completed" else "browser_command_failed"
+        ),
+        dedupe_key=f"browser:{session_id}:command:{body.command_id}",
+    )
     return {
         "accepted": True,
         "command_id": body.command_id,
@@ -865,7 +955,9 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
         raise HTTPException(status_code=404, detail="browser session not found")
     detached_before_release = True
     if body.expected_owner == "agent" and body.new_owner == "none":
-        detached_before_release = await _detach_agent_session(session_id, session, body.expected_epoch)
+        detached_before_release = await _detach_agent_session(
+            session_id, session, body.expected_epoch
+        )
     try:
         result = await browser_device_store.transfer_lease(
             session_id=session_id,
@@ -877,6 +969,14 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
         if body.new_owner == "none" and not detached_before_release:
             _browser_stream_viewers.pop(session_id, None)
             await browser_visual_frames.clear(device_id=session.device_id, session_id=session_id)
+            await _trace_browser_stage(
+                request,
+                user_id=user_id,
+                session_id=session_id,
+                name="browser.session.released",
+                status="ok",
+                layer="cleanup",
+            )
             return result
         event_type = (
             "browser.handoff.returned"
@@ -924,6 +1024,22 @@ async def transfer_browser_lease(request: Request, session_id: str, body: Transf
         if body.new_owner == "none":
             _browser_stream_viewers.pop(session_id, None)
             await browser_visual_frames.clear(device_id=session.device_id, session_id=session_id)
+            await _trace_browser_stage(
+                request,
+                user_id=user_id,
+                session_id=session_id,
+                name="browser.session.released",
+                status="ok",
+                layer="cleanup",
+            )
+        else:
+            await _trace_browser_stage(
+                request,
+                user_id=user_id,
+                session_id=session_id,
+                name="browser.lease.transferred",
+                status="ok",
+            )
         return result
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="browser session not found") from exc

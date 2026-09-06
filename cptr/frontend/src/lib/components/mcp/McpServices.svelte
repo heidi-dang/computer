@@ -1,10 +1,15 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import {
+		getMcpActionTrace,
 		getMcpServicesMaintainJob,
 		getMcpServicesSnapshot,
 		openMcpServicesStream,
 		startMcpServicesMaintain,
+		type McpActionTraceDetail,
+		type McpActionTraceLayer,
+		type McpActionTraceStatus,
+		type McpActionTraceSummary,
 		type McpMaintainJob,
 		type McpMaintenanceSystemStatus,
 		type McpServiceBand,
@@ -31,6 +36,12 @@
 
 	let snapshot = $state<McpServicesSnapshot | null>(null);
 	let telemetry = $state<McpServicesTelemetry | null>(null);
+	let traces = $state<McpActionTraceSummary[]>([]);
+	let traceSequence = $state(0);
+	let expandedTraceId = $state<string | null>(null);
+	let traceDetail = $state<McpActionTraceDetail | null>(null);
+	let traceLoading = $state(false);
+	let traceError = $state<string | null>(null);
 	let streamStatus = $state<StreamStatus>('loading');
 	let errorMessage = $state<string | null>(null);
 	let closeStream: (() => void) | null = null;
@@ -95,6 +106,27 @@
 		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 	}
 
+	const traceLayerLabels: Record<McpActionTraceLayer, string> = {
+		chatgpt: 'ChatGPT',
+		mcp: 'MCP',
+		backend: 'Backend',
+		command: 'Command',
+		workbench: 'Workbench',
+		browser: 'Browser',
+		cleanup: 'Cleanup'
+	};
+
+	function traceStatusClass(status: McpActionTraceStatus): string {
+		if (status === 'ok') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
+		if (status === 'error') return 'border-rose-500/40 bg-rose-500/10 text-rose-300';
+		if (status === 'cancelled') return 'border-slate-500/40 bg-slate-500/10 text-slate-300';
+		return 'border-sky-500/40 bg-sky-500/10 text-sky-300';
+	}
+
+	function shortTraceId(traceId: string): string {
+		return traceId.length <= 18 ? traceId : `${traceId.slice(0, 8)}…${traceId.slice(-6)}`;
+	}
+
 	function bandClass(band: McpServiceBand | string): string {
 		if (band === 'healthy') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
 		if (band === 'moderate') return 'border-amber-500/40 bg-amber-500/10 text-amber-300';
@@ -133,6 +165,29 @@
 		}
 	}
 
+	async function toggleTrace(traceId: string) {
+		if (expandedTraceId === traceId) {
+			expandedTraceId = null;
+			traceDetail = null;
+			traceError = null;
+			return;
+		}
+		expandedTraceId = traceId;
+		traceDetail = null;
+		traceError = null;
+		traceLoading = true;
+		try {
+			const detail = await getMcpActionTrace(traceId);
+			if (expandedTraceId === traceId) traceDetail = detail;
+		} catch (error) {
+			if (expandedTraceId === traceId) {
+				traceError = error instanceof Error ? error.message : 'Failed to load action trace';
+			}
+		} finally {
+			if (expandedTraceId === traceId) traceLoading = false;
+		}
+	}
+
 	function connectStream() {
 		closeStream?.();
 		const generation = ++connectionGeneration;
@@ -145,6 +200,11 @@
 			onTelemetry: (next) => {
 				if (generation !== connectionGeneration) return;
 				telemetry = next;
+			},
+			onTraces: (next) => {
+				if (generation !== connectionGeneration || next.sequence < traceSequence) return;
+				traceSequence = next.sequence;
+				traces = next.traces;
 			},
 			onOpen: () => {
 				if (generation !== connectionGeneration) return;
@@ -449,6 +509,125 @@
 				</section>
 			{/if}
 
+			<section class="trace-explorer deferred-panel app-subtle-surface mb-4 rounded-xl border p-3">
+				<div class="mb-2 flex items-start justify-between gap-3">
+					<div>
+						<h2 class="text-sm font-semibold">Action traces</h2>
+						<p class="mt-0.5 text-[0.68rem] app-muted">
+							One correlation ID across ChatGPT → MCP → Backend → execution → Cleanup
+						</p>
+					</div>
+					<span class="shrink-0 text-[0.68rem] tabular-nums app-muted">{traces.length} recent</span>
+				</div>
+
+				{#if traces.length === 0}
+					<p class="rounded-lg border border-white/5 px-3 py-3 text-xs app-muted">
+						No correlated action traces have arrived yet.
+					</p>
+				{:else}
+					<ul class="trace-list space-y-2">
+						{#each traces as trace (trace.trace_id)}
+							<li class="trace-row overflow-hidden rounded-lg border border-white/5">
+								<button
+									class="touch-target trace-toggle app-interactive flex w-full min-w-0 items-center gap-2 px-3 py-2 text-left"
+									type="button"
+									aria-expanded={expandedTraceId === trace.trace_id}
+									aria-controls={`trace-detail-${trace.trace_id}`}
+									onclick={() => toggleTrace(trace.trace_id)}
+								>
+									<span
+										class="shrink-0 rounded-full border px-2 py-0.5 text-[0.62rem] font-semibold uppercase {traceStatusClass(
+											trace.status
+										)}"
+									>
+										{trace.status}
+									</span>
+									<span class="min-w-0 flex-1">
+										<span class="block truncate text-xs font-medium">
+											{trace.tool_name ?? 'MCP action'}
+										</span>
+										<span class="mt-0.5 block truncate text-[0.64rem] tabular-nums app-muted">
+											{shortTraceId(trace.trace_id)} · {formatMs(trace.duration_ms)} · {trace.stage_count}
+											stages
+										</span>
+									</span>
+									<span class="shrink-0 text-[0.7rem] app-muted" aria-hidden="true">
+										{expandedTraceId === trace.trace_id ? '−' : '+'}
+									</span>
+								</button>
+
+								<div
+									class="trace-layers flex min-w-0 gap-1 overflow-x-auto border-t border-white/5 px-3 py-2"
+								>
+									{#each trace.layers as layer, index (layer)}
+										<span
+											class="trace-layer-chip shrink-0 rounded border border-white/5 px-1.5 py-0.5 text-[0.6rem] app-muted"
+										>
+											{traceLayerLabels[layer]}
+										</span>
+										{#if index < trace.layers.length - 1}
+											<span class="self-center text-[0.6rem] app-muted" aria-hidden="true">→</span>
+										{/if}
+									{/each}
+								</div>
+
+								{#if expandedTraceId === trace.trace_id}
+									<div
+										id={`trace-detail-${trace.trace_id}`}
+										class="trace-detail border-t border-white/5 px-3 py-2"
+									>
+										{#if traceLoading}
+											<p class="text-[0.7rem] app-muted" role="status">
+												Loading bounded trace detail…
+											</p>
+										{:else if traceError}
+											<p class="text-[0.7rem] text-rose-300">{traceError}</p>
+										{:else if traceDetail?.trace_id === trace.trace_id}
+											<ol class="trace-timeline space-y-1.5">
+												{#each traceDetail.stages as stage (stage.sequence)}
+													<li
+														class="trace-stage grid min-w-0 grid-cols-[4.4rem_minmax(0,1fr)] gap-2 rounded-md border border-white/5 px-2 py-1.5 text-[0.68rem]"
+													>
+														<time
+															class="tabular-nums app-muted"
+															datetime={new Date(stage.timestamp_ms).toISOString()}
+														>
+															{formatClock(stage.timestamp_ms)}
+														</time>
+														<div class="min-w-0">
+															<div class="flex min-w-0 flex-wrap items-center gap-1.5">
+																<span class="font-medium">{traceLayerLabels[stage.layer]}</span>
+																<span class="min-w-0 truncate">{stage.name}</span>
+																<span
+																	class="rounded border px-1 py-0.5 text-[0.58rem] uppercase {traceStatusClass(
+																		stage.status
+																	)}"
+																>
+																	{stage.status}
+																</span>
+															</div>
+															{#if stage.entity_id || stage.error_code || stage.duration_ms != null}
+																<p class="mt-0.5 break-all text-[0.62rem] app-muted">
+																	{#if stage.entity_id}{stage.entity_type}: {stage.entity_id}{/if}
+																	{#if stage.duration_ms != null}
+																		· {formatMs(stage.duration_ms)}{/if}
+																	{#if stage.error_code}
+																		· {stage.error_code}{/if}
+																</p>
+															{/if}
+														</div>
+													</li>
+												{/each}
+											</ol>
+										{/if}
+									</div>
+								{/if}
+							</li>
+						{/each}
+					</ul>
+				{/if}
+			</section>
+
 			<!-- Plugin identity -->
 			<section class="app-subtle-surface mb-4 rounded-xl border p-3">
 				<div class="mb-2 flex flex-wrap items-center gap-2">
@@ -708,6 +887,28 @@
 		text-align: right;
 		font-weight: 500;
 		overflow-wrap: anywhere;
+	}
+
+	.trace-row {
+		background: color-mix(in oklab, var(--app-surface-subtle) 84%, transparent);
+	}
+
+	.trace-toggle {
+		min-height: 3rem;
+	}
+
+	.trace-layers {
+		scrollbar-width: none;
+		overscroll-behavior-x: contain;
+	}
+
+	.trace-layers::-webkit-scrollbar {
+		display: none;
+	}
+
+	.trace-stage {
+		content-visibility: auto;
+		contain-intrinsic-size: auto 2.75rem;
 	}
 
 	.deferred-panel {

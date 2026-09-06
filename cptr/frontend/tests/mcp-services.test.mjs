@@ -105,6 +105,37 @@ test('Services observability uses one SSE and mobile-first progressive disclosur
 	assert.doesNotMatch(component, /loadSnapshot\(\)\.then\(\(\) => connectStream\(\)\)/);
 });
 
+test('Action Trace Explorer reuses Services SSE and loads bounded detail on demand', async () => {
+	const [component, api] = await Promise.all([
+		read('lib/components/mcp/McpServices.svelte'),
+		read('lib/apis/mcp.ts')
+	]);
+
+	assert.match(api, /export interface McpActionTraceSummary/);
+	assert.match(api, /export interface McpActionTraceDetail/);
+	assert.match(api, /onTraces:/);
+	assert.match(api, /addEventListener\('traces'/);
+	assert.match(api, /getMcpActionTrace/);
+	assert.match(api, /\/api\/mcp\/services\/traces\//);
+	const servicesStream =
+		api.match(
+			/export function openMcpServicesStream[\s\S]*?return \(\) => source\.close\(\);\n\}/
+		)?.[0] ?? '';
+	assert.equal((servicesStream.match(/new EventSource/g) ?? []).length, 1);
+	assert.match(component, /onTraces:/);
+	assert.match(component, /Action traces/);
+	assert.match(component, /ChatGPT/);
+	assert.match(component, /MCP/);
+	assert.match(component, /Backend/);
+	assert.match(component, /Cleanup/);
+	assert.match(component, /getMcpActionTrace/);
+	assert.match(component, /aria-expanded=/);
+	assert.match(component, /aria-controls=/);
+	assert.match(component, /trace-timeline/);
+	assert.match(component, /touch-target/);
+	assert.match(component, /content-visibility:\s*auto/);
+});
+
 test('bandClass maps healthy/moderate/unhealthy to distinct visual tokens', async () => {
 	const component = await read('lib/components/mcp/McpServices.svelte');
 	const match = component.match(/function bandClass\([\s\S]*?\n\t\}/);

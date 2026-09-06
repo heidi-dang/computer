@@ -1452,6 +1452,52 @@ export interface McpServicesTelemetry {
 	};
 }
 
+export type McpActionTraceLayer =
+	'chatgpt' | 'mcp' | 'backend' | 'command' | 'workbench' | 'browser' | 'cleanup';
+
+export type McpActionTraceStatus = 'started' | 'running' | 'ok' | 'error' | 'cancelled';
+
+export interface McpActionTraceSummary {
+	trace_id: string;
+	request_id: string | null;
+	mcp_session_id: string | null;
+	tool_name: string | null;
+	status: McpActionTraceStatus;
+	started_at_ms: number;
+	updated_at_ms: number;
+	duration_ms: number;
+	stage_count: number;
+	layers: McpActionTraceLayer[];
+	error_code: string | null;
+	entities: Partial<Record<'command' | 'workbench' | 'browser', string[]>>;
+}
+
+export interface McpActionTraceStage {
+	sequence: number;
+	timestamp_ms: number;
+	layer: McpActionTraceLayer;
+	name: string;
+	status: McpActionTraceStatus;
+	duration_ms?: number;
+	request_id?: string;
+	tool_name?: string;
+	workspace_id?: string;
+	entity_type?: 'command' | 'workbench' | 'browser';
+	entity_id?: string;
+	error_code?: string;
+}
+
+export interface McpActionTraceDetail extends McpActionTraceSummary {
+	version: 1;
+	stages: McpActionTraceStage[];
+}
+
+export interface McpActionTraceSummaries {
+	version: 1;
+	sequence: number;
+	traces: McpActionTraceSummary[];
+}
+
 export interface McpMaintainStep {
 	step_id: string;
 	started_at: string | null;
@@ -1479,12 +1525,16 @@ export interface McpMaintainJob {
 export interface McpServicesStreamCallbacks {
 	onSnapshot: (snapshot: McpServicesSnapshot) => void;
 	onTelemetry: (telemetry: McpServicesTelemetry) => void;
+	onTraces: (traces: McpActionTraceSummaries) => void;
 	onOpen?: () => void;
 	onError?: (error: unknown) => void;
 }
 
 export const getMcpServicesSnapshot = () =>
 	fetchJSON<McpServicesSnapshot>('/api/mcp/services/snapshot');
+
+export const getMcpActionTrace = (traceId: string) =>
+	fetchJSON<McpActionTraceDetail>(`/api/mcp/services/traces/${encodeURIComponent(traceId)}`);
 
 export function openMcpServicesStream(callbacks: McpServicesStreamCallbacks): () => void {
 	const source = new EventSource('/api/mcp/services/stream');
@@ -1502,8 +1552,16 @@ export function openMcpServicesStream(callbacks: McpServicesStreamCallbacks): ()
 			callbacks.onError?.(error);
 		}
 	};
+	const parseTraces = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onTraces(JSON.parse(message.data) as McpActionTraceSummaries);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
 	source.addEventListener('snapshot', (event) => parseSnapshot(event as MessageEvent<string>));
 	source.addEventListener('telemetry', (event) => parseTelemetry(event as MessageEvent<string>));
+	source.addEventListener('traces', (event) => parseTraces(event as MessageEvent<string>));
 	source.onopen = () => callbacks.onOpen?.();
 	source.onerror = (event) => callbacks.onError?.(event);
 	return () => source.close();

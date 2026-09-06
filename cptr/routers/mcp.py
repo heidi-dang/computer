@@ -40,6 +40,7 @@ from cptr.env import (
 from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
 from cptr.routers.admin import require_admin
+from cptr.services.action_traces import action_trace_store
 from cptr.services.coding_benchmark import SUITE_ID, coding_benchmark_store
 from cptr.services.control_auth import require_control_user
 from cptr.services.factory_observability import FactoryObservabilityService
@@ -555,6 +556,13 @@ async def ingest_mcp_diagnostics(request: Request, body: McpDiagnosticsBatch):
         filtered_events.append(event)
     result = await mcp_diagnostics_store.ingest(filtered_events)
     result["duplicates"] += durable_duplicates
+    try:
+        await action_trace_store.observe_mcp_diagnostics(
+            owner_id=owner_id,
+            events=filtered_events,
+        )
+    except Exception:
+        logger.debug("action trace diagnostics projection failed", exc_info=True)
     return result
 
 
@@ -692,9 +700,14 @@ async def stream_mcp_activity(request: Request):
 @router.post("/traffic/events")
 async def ingest_mcp_traffic(request: Request, body: McpTrafficBatch):
     """Accept one bounded batch of sanitized telemetry from the MCP adapter."""
-    await _require_traffic_writer(request)
+    owner_id = await _require_traffic_writer(request)
     await mcp_traffic_store.expire_stale_sessions()
-    return await mcp_traffic_store.ingest(body.events)
+    result = await mcp_traffic_store.ingest(body.events)
+    try:
+        await action_trace_store.observe_mcp_traffic(owner_id=owner_id, events=body.events)
+    except Exception:
+        logger.debug("action trace traffic projection failed", exc_info=True)
+    return result
 
 
 @router.get("/traffic/snapshot")
@@ -1129,6 +1142,16 @@ async def get_mcp_services_snapshot(request: Request):
     )
 
 
+@router.get("/services/traces/{trace_id}")
+async def get_mcp_action_trace(request: Request, trace_id: str):
+    """Return one bounded owner-scoped action trace when the admin opens it."""
+    admin = require_admin(request)
+    trace = await action_trace_store.get(owner_id=admin.user_id, trace_id=trace_id)
+    if trace is None:
+        raise HTTPException(status_code=404, detail="action trace not found")
+    return trace
+
+
 @router.get("/services/stream")
 async def stream_mcp_services(request: Request):
     """One low-overhead SSE carrying slow health state and compact telemetry deltas."""
@@ -1140,6 +1163,7 @@ async def stream_mcp_services(request: Request):
         keepalive_interval = MCP_SERVICES_KEEPALIVE_INTERVAL_MS / 1000.0
         loop_interval = max(0.25, min(1.0, telemetry_interval, health_interval))
         previous_fingerprint: str | None = None
+        previous_trace_sequence = -1
 
         yield "retry: 3000\n\n"
 
@@ -1155,6 +1179,12 @@ async def stream_mcp_services(request: Request):
             yield _services_sse("telemetry", await mcp_services_observability.snapshot())
         except Exception:
             logger.debug("services telemetry initial snapshot unavailable", exc_info=True)
+        try:
+            traces = await action_trace_store.summaries(owner_id=admin.user_id, limit=20)
+            previous_trace_sequence = int(traces.get("sequence") or 0)
+            yield _services_sse("traces", traces)
+        except Exception:
+            logger.debug("services action traces initial snapshot unavailable", exc_info=True)
 
         now = time.monotonic()
         next_health = now + health_interval
@@ -1192,6 +1222,16 @@ async def stream_mcp_services(request: Request):
                 else:
                     yield _services_sse("telemetry", telemetry)
                     emitted = True
+                try:
+                    traces = await action_trace_store.summaries(owner_id=admin.user_id, limit=20)
+                except Exception:
+                    logger.debug("services action traces refresh unavailable", exc_info=True)
+                else:
+                    trace_sequence = int(traces.get("sequence") or 0)
+                    if trace_sequence != previous_trace_sequence:
+                        previous_trace_sequence = trace_sequence
+                        yield _services_sse("traces", traces)
+                        emitted = True
 
             if emitted:
                 next_keepalive = now + keepalive_interval
@@ -1274,9 +1314,7 @@ async def stream_mcp_services_maintain_events(request: Request, job_id: str):
             while True:
                 if await request.is_disconnected():
                     break
-                current = mcp_services_maintain.get_job(
-                    job_id, owner_id=admin.user_id
-                )
+                current = mcp_services_maintain.get_job(job_id, owner_id=admin.user_id)
                 if current is None:
                     break
                 try:
@@ -1285,9 +1323,7 @@ async def stream_mcp_services_maintain_events(request: Request, job_id: str):
                         yield _services_sse(str(event.get("event") or "event"), event)
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
-                current = mcp_services_maintain.get_job(
-                    job_id, owner_id=admin.user_id
-                )
+                current = mcp_services_maintain.get_job(job_id, owner_id=admin.user_id)
                 if current is not None and current.status not in ("queued", "running"):
                     yield _services_sse("job", current.as_dict())
                     break

@@ -84,7 +84,7 @@ def snapshot_kwargs():
 
 
 class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
-    async def test_services_stream_emits_one_initial_health_snapshot_then_compact_telemetry(self):
+    async def test_services_stream_emits_health_telemetry_and_trace_summaries_on_one_sse(self):
         health = make_health()
         fixed = await health.snapshot(user_id="admin-1", **snapshot_kwargs())
         telemetry = {
@@ -101,6 +101,20 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
         request = route_request()
         health_snapshot = AsyncMock(return_value=fixed)
         telemetry_snapshot = AsyncMock(return_value=telemetry)
+        trace_summaries = AsyncMock(
+            return_value={
+                "version": 1,
+                "sequence": 7,
+                "traces": [
+                    {
+                        "trace_id": "trace-1",
+                        "tool_name": "cptr_code_run_command",
+                        "status": "running",
+                        "layers": ["chatgpt", "mcp", "backend", "command"],
+                    }
+                ],
+            }
+        )
 
         with (
             patch.object(mcp_router, "require_admin", admin),
@@ -111,19 +125,48 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
                 "snapshot",
                 new=telemetry_snapshot,
             ),
+            patch.object(
+                mcp_router.action_trace_store,
+                "summaries",
+                new=trace_summaries,
+            ),
         ):
             response = await mcp_router.stream_mcp_services(request)
             iterator = response.body_iterator
             retry = await anext(iterator)
             health_event = await anext(iterator)
             telemetry_event = await anext(iterator)
+            traces_event = await anext(iterator)
             await iterator.aclose()
 
         self.assertEqual(retry, "retry: 3000\n\n")
         self.assertIn("event: snapshot", health_event)
         self.assertIn("event: telemetry", telemetry_event)
+        self.assertIn("event: traces", traces_event)
         self.assertEqual(health_snapshot.await_count, 1)
         self.assertEqual(telemetry_snapshot.await_count, 1)
+        trace_summaries.assert_awaited_once_with(owner_id="admin-1", limit=20)
+
+    async def test_trace_detail_is_admin_owner_scoped(self):
+        admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
+        trace = {
+            "version": 1,
+            "trace_id": "trace-1",
+            "status": "ok",
+            "stages": [{"layer": "backend", "name": "backend.request", "status": "ok"}],
+        }
+        with (
+            patch.object(mcp_router, "require_admin", admin),
+            patch.object(
+                mcp_router.action_trace_store,
+                "get",
+                new=AsyncMock(return_value=trace),
+            ) as get_trace,
+        ):
+            payload = await mcp_router.get_mcp_action_trace(route_request(), "trace-1")
+
+        self.assertEqual(payload["trace_id"], "trace-1")
+        get_trace.assert_awaited_once_with(owner_id="admin-1", trace_id="trace-1")
 
     async def test_snapshot_requires_admin_and_shape(self):
         health = make_health()
@@ -182,9 +225,7 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(final.status, ("succeeded", "partial", "failed"))
             self.assertIsNotNone(final.post_band)
 
-            job_payload = await mcp_router.get_mcp_services_maintain_job(
-                route_request(), job_id
-            )
+            job_payload = await mcp_router.get_mcp_services_maintain_job(route_request(), job_id)
             self.assertEqual(job_payload["job_id"], job_id)
             self.assertIn("steps", job_payload)
             self.assertEqual(job_payload["system_status"], "STABLE")
@@ -250,18 +291,14 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
             patch.object(mcp_router, "mcp_services_maintain", maintain),
         ):
             with self.assertRaises(HTTPException) as raised:
-                await mcp_router.get_mcp_services_maintain_job(
-                    route_request(), job.job_id
-                )
+                await mcp_router.get_mcp_services_maintain_job(route_request(), job.job_id)
         self.assertEqual(raised.exception.status_code, 404)
 
     async def test_maintain_conflict_returns_409_with_active_job(self):
         health = make_health()
         maintain = McpServicesMaintainService(health=health)
         admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
-        await maintain.start(
-            service_id="backend", owner_id="admin-1", idempotency_key="first"
-        )
+        await maintain.start(service_id="backend", owner_id="admin-1", idempotency_key="first")
         with (
             patch.object(mcp_router, "require_admin", admin),
             patch.object(mcp_router, "mcp_services_maintain", maintain),
@@ -274,18 +311,14 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
         self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(
-            raised.exception.detail["code"], "MCP_SERVICES_MAINTAIN_ACTIVE"
-        )
+        self.assertEqual(raised.exception.detail["code"], "MCP_SERVICES_MAINTAIN_ACTIVE")
         self.assertTrue(raised.exception.detail["active_job_id"].startswith("msvc_"))
 
     async def test_idempotency_key_reuse_for_different_service_returns_409(self):
         health = make_health()
         maintain = McpServicesMaintainService(health=health)
         admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
-        await maintain.start(
-            service_id="backend", owner_id="admin-1", idempotency_key="same-key"
-        )
+        await maintain.start(service_id="backend", owner_id="admin-1", idempotency_key="same-key")
         with (
             patch.object(mcp_router, "require_admin", admin),
             patch.object(mcp_router, "mcp_services_maintain", maintain),
@@ -298,9 +331,7 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 )
         self.assertEqual(raised.exception.status_code, 409)
-        self.assertEqual(
-            raised.exception.detail["code"], "MCP_SERVICES_IDEMPOTENCY_CONFLICT"
-        )
+        self.assertEqual(raised.exception.detail["code"], "MCP_SERVICES_IDEMPOTENCY_CONFLICT")
         self.assertTrue(raised.exception.detail["job_id"].startswith("msvc_"))
 
     async def test_maintain_job_not_found(self):
@@ -311,9 +342,7 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
             patch.object(mcp_router, "mcp_services_maintain", maintain),
         ):
             with self.assertRaises(HTTPException) as raised:
-                await mcp_router.get_mcp_services_maintain_job(
-                    route_request(), "msvc_missing"
-                )
+                await mcp_router.get_mcp_services_maintain_job(route_request(), "msvc_missing")
         self.assertEqual(raised.exception.status_code, 404)
 
     async def test_failure_path_backend_readiness_fails_job(self):
