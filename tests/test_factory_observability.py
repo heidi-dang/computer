@@ -73,6 +73,24 @@ class FactoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
             idempotency_key=key,
         )
 
+    async def test_stream_marker_is_stable_when_idle_and_changes_on_factory_mutation(self):
+        run = await self._run()
+        first = await self.service.stream_marker(user_id="user-1", run_id=run.id)
+        idle = await self.service.stream_marker(user_id="user-1", run_id=run.id)
+        self.assertEqual(first, idle)
+
+        await self.store.append_user_event(
+            run_id=run.id,
+            event_type="user.message",
+            payload={"content": "new steering input"},
+            idempotency_key="marker-message",
+        )
+        changed = await self.service.stream_marker(user_id="user-1", run_id=run.id)
+        self.assertNotEqual(first, changed)
+
+        with self.assertRaises(KeyError):
+            await self.service.stream_marker(user_id="user-2", run_id=run.id)
+
     async def test_snapshot_is_owner_scoped_and_includes_durable_execution_detail(self):
         run = await self._run()
         other = await self._run(user_id="user-2", workspace_id="workspace-2", key="other-run")
@@ -462,6 +480,7 @@ class FactoryObservabilityApiTests(unittest.IsolatedAsyncioTestCase):
             "generated_at_ms": 2,
         }
         service = SimpleNamespace(
+            stream_marker=AsyncMock(side_effect=["marker-1", "marker-2", "marker-2"]),
             snapshot=AsyncMock(side_effect=[first, second, second]),
             activity_since=AsyncMock(return_value=[event_two]),
         )
@@ -502,7 +521,10 @@ class FactoryObservabilityApiTests(unittest.IsolatedAsyncioTestCase):
             "fingerprint": "b" * 64,
             "generated_at_ms": 1,
         }
-        service = SimpleNamespace(snapshot=AsyncMock(return_value=snapshot))
+        service = SimpleNamespace(
+            stream_marker=AsyncMock(return_value="marker-1"),
+            snapshot=AsyncMock(return_value=snapshot),
+        )
         with (
             patch.object(mcp_router, "require_admin", admin),
             patch.object(mcp_router, "factory_observability", service),

@@ -37,8 +37,16 @@
 
 	<dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-[0.7rem] sm:grid-cols-4">
 		<div>
+			<dt class="app-muted">Class</dt>
+			<dd class="mt-0.5 break-all font-mono">{diagnostic.failureClass.replaceAll('_', ' ')}</dd>
+		</div>
+		<div>
 			<dt class="app-muted">Stage</dt>
 			<dd class="mt-0.5 break-all font-mono">{diagnostic.stage}</dd>
+		</div>
+		<div>
+			<dt class="app-muted">Tool</dt>
+			<dd class="mt-0.5 break-all font-mono">{diagnostic.toolName ?? '—'}</dd>
 		</div>
 		<div>
 			<dt class="app-muted">Error code</dt>

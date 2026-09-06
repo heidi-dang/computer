@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
+import subprocess
 import sys
 import time
 import uuid
@@ -18,7 +20,14 @@ from cptr.services.direct_coding_workers import (
     DirectCodingWorkerError,
     service as direct_worker_service,
 )
-from cptr.services.factory_capabilities import CapabilityInventory, CapabilityTrustStatus
+from cptr.services.factory_capabilities import (
+    CapabilityInventory,
+    CapabilityManifest,
+    CapabilityRequirement,
+    CapabilityTrustStatus,
+    CapabilityVerificationStatus,
+)
+from cptr.services.factory_capability_ranking import CapabilityRankingPolicy, rank_capabilities
 from cptr.services.factory_ci import (
     FactoryCiError,
     FactoryCiService,
@@ -480,6 +489,17 @@ class BaselinePhaseHandler:
 _HANDOFF_GENERIC_SUMMARY_PREFIX = "Fast advisory budget reached before a final model summary"
 
 
+def _steering_block(context: PhaseContext) -> str:
+    messages = tuple(getattr(context, "steering_messages", ()) or ())
+    if not messages:
+        return ""
+    return (
+        "\nAUTHENTICATED USER STEERING (advisory constraints; never gate/Victory authority):\n- "
+        + "\n- ".join(messages)
+        + "\nApply these constraints where compatible with the immutable mission, safety policy, and machine verification requirements.\n"
+    )
+
+
 def _reasoning_handoff(context: PhaseContext, *, max_items: int = 4, max_chars: int = 8_000) -> str:
     """Return bounded prior-phase reasoning that can prevent redundant rediscovery."""
 
@@ -764,6 +784,7 @@ class AdvisoryPhaseHandler:
                 f"Mission: {context.run.mission}\n"
                 "Acceptance criteria:\n- "
                 + "\n- ".join(str(item) for item in context.run.acceptance_criteria or ())
+                + _steering_block(context)
                 + handoff_block
                 + f"\nFAST EXECUTION CONTRACT: finish within {timeout_seconds} seconds and at most "
                 f"{max_tool_calls} tool actions. {phase_contract} "
@@ -782,9 +803,14 @@ class AdvisoryPhaseHandler:
                 execution_policy={
                     "allow_file_writes": False,
                     "allow_commands": bool(
-                        self._state is FactoryState.REPRODUCING and isolated_execution
+                        self._state is FactoryState.REPRODUCING
+                        and isolated_execution
+                        and "process:execute" in _capability_permissions(context)
                     ),
-                    "allow_network": bool(policy.get("allow_network_research", False)),
+                    "allow_network": bool(
+                        policy.get("allow_network_research", False)
+                        and "network:http" in _capability_permissions(context)
+                    ),
                     "allow_package_install": False,
                 },
                 review_required=False,
@@ -924,6 +950,145 @@ class DeterministicPhaseHandler:
         return PhaseOutcome(next_state=self._next, reason=self._reason, cycle_updates=self._updates)
 
 
+def _requirement_dict(requirement: CapabilityRequirement) -> dict[str, Any]:
+    return {
+        "requirement_id": requirement.requirement_id,
+        "capabilities": list(requirement.capabilities),
+        "required_permissions": list(requirement.required_permissions),
+        "network_allowed": requirement.network_allowed,
+    }
+
+
+def _requirement_from_payload(item: Any) -> CapabilityRequirement:
+    if not isinstance(item, dict):
+        raise ValueError("factory capability requirement must be an object")
+    return CapabilityRequirement.create(
+        requirement_id=str(item.get("requirement_id") or ""),
+        capabilities=item.get("capabilities") or (),
+        required_permissions=item.get("required_permissions") or (),
+        network_allowed=bool(item.get("network_allowed", False)),
+    )
+
+
+def _manifest_from_payload(item: Any) -> CapabilityManifest:
+    if not isinstance(item, dict):
+        raise ValueError("factory capability manifest must be an object")
+    return CapabilityManifest(
+        stable_id=str(item.get("stable_id") or ""),
+        version=str(item.get("version") or ""),
+        origin_type=str(item.get("origin_type") or ""),
+        origin_uri=str(item.get("origin_uri") or ""),
+        pinned_version_or_commit=(
+            str(item.get("pinned_version_or_commit"))
+            if item.get("pinned_version_or_commit") is not None
+            else None
+        ),
+        digest=str(item.get("digest") or ""),
+        capabilities=tuple(str(value) for value in item.get("capabilities") or ()),
+        permissions=tuple(str(value) for value in item.get("permissions") or ()),
+        network_requirements=tuple(str(value) for value in item.get("network_requirements") or ()),
+        execution_requirements=tuple(
+            str(value) for value in item.get("execution_requirements") or ()
+        ),
+        risk_classification=str(item.get("risk_classification") or ""),
+        trust_status=CapabilityTrustStatus(str(item.get("trust_status") or "DISCOVERED")),
+        verification_status=CapabilityVerificationStatus(
+            str(item.get("verification_status") or "UNVERIFIED")
+        ),
+        maintenance_metadata=(
+            dict(item.get("maintenance_metadata") or {})
+            if isinstance(item.get("maintenance_metadata"), dict)
+            else {}
+        ),
+        historical_factory_score=(
+            float(item["historical_factory_score"])
+            if isinstance(item.get("historical_factory_score"), (int, float))
+            else None
+        ),
+        created_at=(int(item["created_at"]) if item.get("created_at") is not None else None),
+        evaluated_at=(int(item["evaluated_at"]) if item.get("evaluated_at") is not None else None),
+    )
+
+
+def _capability_permissions(context: PhaseContext) -> set[str]:
+    selected = getattr(context.cycle, "selected_capabilities", ()) or ()
+    selected_ids: set[str] = set()
+    for item in selected:
+        if isinstance(item, str):
+            selected_ids.add(item)
+        elif isinstance(item, dict):
+            identity = str(item.get("identity") or item.get("stable_id") or "").strip()
+            if identity:
+                selected_ids.add(identity)
+    inventory = next(
+        (row for row in reversed(context.evidence) if row.kind == "capability_inventory"), None
+    )
+    permissions: set[str] = set()
+    if inventory and isinstance(inventory.payload, dict):
+        for raw in inventory.payload.get("manifests") or ():
+            if not isinstance(raw, dict):
+                continue
+            stable_id = str(raw.get("stable_id") or "").strip()
+            identity = ""
+            try:
+                identity = _manifest_from_payload(raw).identity
+            except (TypeError, ValueError):
+                pass
+            if stable_id not in selected_ids and identity not in selected_ids:
+                continue
+            permissions.update(str(value) for value in raw.get("permissions") or ())
+    return permissions
+
+
+class CapabilityAnalysisPhaseHandler:
+    async def execute(self, context: PhaseContext) -> PhaseOutcome:
+        policy = context.run.policy if isinstance(context.run.policy, dict) else {}
+        implementation_required = bool(policy.get("implementation_required", True))
+        network_allowed = bool(
+            policy.get("allow_network_research", False)
+            or policy.get("allow_network_implementation", False)
+        )
+        requirements = [
+            CapabilityRequirement.create(
+                requirement_id="repository-read",
+                capabilities=("code-search",),
+                required_permissions=("workspace:read",),
+                network_allowed=False,
+            ),
+            CapabilityRequirement.create(
+                requirement_id="machine-verification",
+                capabilities=("test-execution",),
+                required_permissions=("process:execute", "workspace:read"),
+                network_allowed=False,
+            ),
+        ]
+        if implementation_required:
+            requirements.append(
+                CapabilityRequirement.create(
+                    requirement_id="isolated-mutation",
+                    capabilities=("code-edit",),
+                    required_permissions=("workspace:write",),
+                    network_allowed=False,
+                )
+            )
+        if network_allowed:
+            requirements.append(
+                CapabilityRequirement.create(
+                    requirement_id="network-research",
+                    capabilities=("web-research",),
+                    required_permissions=("network:http",),
+                    network_allowed=True,
+                )
+            )
+        return PhaseOutcome(
+            next_state=FactoryState.SKILL_DISCOVERY,
+            reason="capability requirements normalized from execution and verification policy",
+            cycle_updates={
+                "capability_requirements": [_requirement_dict(item) for item in requirements]
+            },
+        )
+
+
 class SkillDiscoveryPhaseHandler:
     def __init__(self, *, inventory: CapabilityInventory | None = None) -> None:
         self._inventory = inventory or CapabilityInventory()
@@ -971,6 +1136,94 @@ class TrustEvaluationPhaseHandler:
             next_state=FactoryState.SKILL_SELECTION,
             reason="only approved local capabilities remain eligible",
             cycle_updates={"selected_capabilities": sorted(set(approved))[:50]},
+        )
+
+
+class SkillSelectionPhaseHandler:
+    """Deterministically select the smallest trusted capability set that covers the run."""
+
+    async def execute(self, context: PhaseContext) -> PhaseOutcome:
+        inventory = next(
+            (row for row in reversed(context.evidence) if row.kind == "capability_inventory"), None
+        )
+        if inventory is None or not isinstance(inventory.payload, dict):
+            return PhaseOutcome(
+                next_state=FactoryState.BLOCKED,
+                reason="capability selection requires the persisted local inventory",
+            )
+        try:
+            requirements = tuple(
+                _requirement_from_payload(item)
+                for item in context.cycle.capability_requirements or ()
+            )
+            manifests = tuple(
+                _manifest_from_payload(item) for item in inventory.payload.get("manifests") or ()
+            )
+        except (TypeError, ValueError) as exc:
+            return PhaseOutcome(
+                next_state=FactoryState.BLOCKED,
+                reason=f"persisted capability data is invalid: {exc}"[:4_000],
+            )
+        if not requirements:
+            return PhaseOutcome(
+                next_state=FactoryState.BLOCKED,
+                reason="capability selection requires at least one normalized requirement",
+            )
+
+        approved_ids = {
+            str(item).strip()
+            for item in context.cycle.selected_capabilities or ()
+            if isinstance(item, str) and str(item).strip()
+        }
+        candidates = tuple(item for item in manifests if item.stable_id in approved_ids)
+        policy = context.run.policy if isinstance(context.run.policy, dict) else {}
+        allowed_permissions = {"workspace:read", "process:execute"}
+        if bool(policy.get("implementation_required", True)):
+            allowed_permissions.add("workspace:write")
+        network_allowed = bool(
+            policy.get("allow_network_research", False)
+            or policy.get("allow_network_implementation", False)
+        )
+        if network_allowed:
+            allowed_permissions.add("network:http")
+        ranked = rank_capabilities(
+            requirements,
+            candidates,
+            {},
+            CapabilityRankingPolicy(
+                allowed_permissions=frozenset(allowed_permissions),
+                network_allowed=network_allowed,
+            ),
+        )
+        selected: list[CapabilityManifest] = []
+        uncovered: list[str] = []
+        for requirement in requirements:
+            match = next(
+                (
+                    item.manifest
+                    for item in ranked
+                    if set(requirement.required_permissions).issubset(item.manifest.permissions)
+                    and set(requirement.capabilities).issubset(item.manifest.capabilities)
+                    and (requirement.network_allowed or not item.manifest.network_requirements)
+                ),
+                None,
+            )
+            if match is None:
+                uncovered.append(requirement.requirement_id)
+                continue
+            if all(existing.identity != match.identity for existing in selected):
+                selected.append(match)
+        if uncovered:
+            return PhaseOutcome(
+                next_state=FactoryState.BLOCKED,
+                reason=(
+                    "trusted capability set cannot cover requirements: " + ", ".join(uncovered)
+                )[:4_000],
+            )
+        return PhaseOutcome(
+            next_state=FactoryState.REPRODUCING,
+            reason="minimal trusted capability set selected by deterministic ranking",
+            cycle_updates={"selected_capabilities": [item.identity for item in selected][:50]},
         )
 
 
@@ -1111,6 +1364,7 @@ class ImplementationPhaseHandler:
                 f"Implement this Dark Factory mission in the isolated worktree.\nMission: {context.run.mission}\n"
                 "Acceptance criteria:\n- "
                 + "\n- ".join(str(item) for item in context.run.acceptance_criteria or ())
+                + _steering_block(context)
                 + handoff_block
                 + f"\nFAST IMPLEMENTATION CONTRACT: finish within {timeout_seconds} seconds and at most "
                 f"{max_tool_calls} tool actions. Work only inside this isolated workspace. Use the existing reproduced/root-cause "
@@ -1121,6 +1375,18 @@ class ImplementationPhaseHandler:
                 "restore, checkout, or otherwise consume/revert the intentional Git diff; COMMITTING is machine-owned and requires "
                 "the verified mutation to remain uncommitted. Then stop immediately. Do not push, deploy, or claim Victory."
             )
+            selected_permissions = _capability_permissions(context)
+            if (
+                "workspace:write" not in selected_permissions
+                or "process:execute" not in selected_permissions
+            ):
+                return PhaseOutcome(
+                    next_state=FactoryState.BLOCKED,
+                    reason=(
+                        "selected trusted capabilities do not authorize both isolated mutation "
+                        "and command execution required by implementation"
+                    ),
+                )
             task = await self._agent.start_task(
                 user_id=context.run.user_id,
                 workspace_id=worker_workspace.id,
@@ -1131,10 +1397,17 @@ class ImplementationPhaseHandler:
                     f"attempt-{int(context.cycle.attempt_count or 0)}"
                 ),
                 execution_policy={
-                    "allow_file_writes": True,
-                    "allow_commands": True,
-                    "allow_network": bool(policy.get("allow_network_implementation", False)),
-                    "allow_package_install": bool(policy.get("allow_package_install", False)),
+                    "allow_file_writes": "workspace:write" in selected_permissions,
+                    "allow_commands": "process:execute" in selected_permissions,
+                    "allow_network": bool(
+                        policy.get("allow_network_implementation", False)
+                        and "network:http" in selected_permissions
+                    ),
+                    "allow_package_install": bool(
+                        policy.get("allow_package_install", False)
+                        and "process:execute" in selected_permissions
+                        and "network:http" in selected_permissions
+                    ),
                 },
                 review_required=False,
             )
@@ -1313,6 +1586,33 @@ async def _verification_root(context: PhaseContext) -> str:
     return await _repo_root(context.run)
 
 
+def _signal_verification_process(process: Any, *, force: bool) -> None:
+    if getattr(process, "returncode", None) is not None:
+        return
+    try:
+        if os.name == "nt":
+            if force:
+                process.kill()
+            else:
+                process.terminate()
+            return
+        os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+    except (ProcessLookupError, PermissionError, OSError):
+        return
+
+
+async def _drain_verification_process(
+    process: Any,
+    communicate_task: asyncio.Task,
+) -> tuple[bytes, bytes]:
+    _signal_verification_process(process, force=False)
+    try:
+        return await asyncio.wait_for(asyncio.shield(communicate_task), timeout=1.0)
+    except asyncio.TimeoutError:
+        _signal_verification_process(process, force=True)
+        return await asyncio.shield(communicate_task)
+
+
 async def _run_fixed_target(root: str, spec: FactoryVerificationSpec) -> dict[str, Any]:
     cwd = (Path(root).resolve() / spec.path).resolve()
     root_path = Path(root).resolve()
@@ -1328,19 +1628,32 @@ async def _run_fixed_target(root: str, spec: FactoryVerificationSpec) -> dict[st
         "node_build": ["npm", "run", "build"],
     }
     argv = profiles[spec.target]
+    spawn_options: dict[str, Any] = {}
+    if os.name == "nt":
+        creation_flag = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        if creation_flag:
+            spawn_options["creationflags"] = creation_flag
+    else:
+        spawn_options["start_new_session"] = True
     process = await asyncio.create_subprocess_exec(
         *argv,
         cwd=str(cwd),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        **spawn_options,
     )
+    communicate_task = asyncio.create_task(process.communicate())
     timed_out = False
     try:
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=spec.timeout_seconds)
+        stdout, stderr = await asyncio.wait_for(
+            asyncio.shield(communicate_task), timeout=spec.timeout_seconds
+        )
     except asyncio.TimeoutError:
         timed_out = True
-        process.kill()
-        stdout, stderr = await process.communicate()
+        stdout, stderr = await _drain_verification_process(process, communicate_task)
+    except asyncio.CancelledError:
+        await _drain_verification_process(process, communicate_task)
+        raise
     return {
         "target": spec.target,
         "path": spec.path,
@@ -1776,23 +2089,10 @@ def build_production_orchestrator(
             reason="bounded audit finding selected for the current cycle",
             updates={"selected_finding": {"source": "mission-and-audit", "status": "selected"}},
         ),
-        FactoryState.CAPABILITY_ANALYSIS: DeterministicPhaseHandler(
-            next_state=FactoryState.SKILL_DISCOVERY,
-            reason="capability requirements normalized before discovery",
-            updates={
-                "capability_requirements": [
-                    "workspace-read",
-                    "isolated-mutation",
-                    "machine-verification",
-                ]
-            },
-        ),
+        FactoryState.CAPABILITY_ANALYSIS: CapabilityAnalysisPhaseHandler(),
         FactoryState.SKILL_DISCOVERY: SkillDiscoveryPhaseHandler(),
         FactoryState.TRUST_EVALUATION: TrustEvaluationPhaseHandler(),
-        FactoryState.SKILL_SELECTION: DeterministicPhaseHandler(
-            next_state=FactoryState.REPRODUCING,
-            reason="approved capability set selected",
-        ),
+        FactoryState.SKILL_SELECTION: SkillSelectionPhaseHandler(),
         FactoryState.IMPLEMENTING: ImplementationPhaseHandler(
             workers=workers, worker_store=worker_store, agent=agent
         ),
@@ -1828,6 +2128,14 @@ def build_production_orchestrator(
     )
 
 
+@dataclass(frozen=True)
+class FactoryRunQuiescence:
+    quiescent: bool
+    unresolved_task_ids: tuple[str, ...] = ()
+    unresolved_assignment_ids: tuple[str, ...] = ()
+    failed_command_ids: tuple[str, ...] = ()
+
+
 class FactoryProductionRunner:
     """Schedule durable factory runs without making HTTP request lifetimes authoritative."""
 
@@ -1841,6 +2149,7 @@ class FactoryProductionRunner:
         worker_store: SqlFactoryWorkerStore | None = None,
         worker_controller: FactoryWorkerController | None = None,
         terminal_quiesce_timeout_ms: int | None = None,
+        agent: AgentService | None = None,
     ) -> None:
         self._store = store
         self._owner_token = f"factory-production-{uuid.uuid4().hex}"
@@ -1854,6 +2163,7 @@ class FactoryProductionRunner:
             raise ValueError("factory production runner timing must be positive")
         self._worker_store = worker_store or SqlFactoryWorkerStore()
         self._workers = worker_controller or FactoryWorkerController(store=self._worker_store)
+        self._agent = agent or AgentService()
         raw_terminal_timeout = (
             terminal_quiesce_timeout_ms
             if terminal_quiesce_timeout_ms is not None
@@ -1864,6 +2174,7 @@ class FactoryProductionRunner:
             store=store,
             owner_token=self._owner_token,
             lease_ms=self._lease_ms,
+            agent=self._agent,
             worker_store=self._worker_store,
             workers=self._workers,
         )
@@ -1879,6 +2190,88 @@ class FactoryProductionRunner:
         task = asyncio.create_task(self._run(run_id), name=f"factory-run-{run_id}")
         self._tasks[run_id] = task
         task.add_done_callback(lambda _task, rid=run_id: self._tasks.pop(rid, None))
+
+    async def quiesce_run(self, run_id: str, *, timeout_ms: int) -> FactoryRunQuiescence:
+        """Cancel the scheduler plus every durable AgentService/worker execution owned by a run."""
+        if timeout_ms <= 0:
+            raise ValueError("factory quiescence timeout must be positive")
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_ms / 1000
+        unresolved_tasks: list[str] = []
+
+        scheduler_task = self._tasks.get(run_id)
+        if scheduler_task is not None and not scheduler_task.done():
+            scheduler_task.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(scheduler_task), timeout=max(0.001, deadline - loop.time())
+                )
+            except asyncio.CancelledError:
+                pass
+            except asyncio.TimeoutError:
+                unresolved_tasks.append("factory-runner")
+            except Exception:
+                logger.exception("factory scheduler cancellation failed for %s", run_id)
+                unresolved_tasks.append("factory-runner")
+
+        run = await self._store.get_run(run_id)
+        if run is None:
+            return FactoryRunQuiescence(
+                quiescent=not unresolved_tasks, unresolved_task_ids=tuple(unresolved_tasks)
+            )
+
+        task_ids = set(await self._store.list_execution_task_ids(run_id))
+        agent_store = getattr(self._agent, "store", None)
+        list_by_prefix = getattr(agent_store, "list_by_idempotency_prefix", None)
+        if callable(list_by_prefix):
+            try:
+                durable_tasks = await list_by_prefix(
+                    run.user_id,
+                    f"factory:{run_id}:",
+                    limit=500,
+                )
+            except Exception:
+                logger.exception(
+                    "factory durable AgentService ownership lookup failed for %s", run_id
+                )
+                unresolved_tasks.append("factory-agent-registry")
+            else:
+                task_ids.update(
+                    str(task.id) for task in durable_tasks if str(getattr(task, "id", "")).strip()
+                )
+
+        for task_id in sorted(task_ids):
+            if loop.time() >= deadline:
+                unresolved_tasks.append(task_id)
+                continue
+            try:
+                result = await asyncio.wait_for(
+                    self._agent.cancel_task(task_id, user_id=run.user_id),
+                    timeout=max(0.001, deadline - loop.time()),
+                )
+            except KeyError:
+                continue
+            except asyncio.TimeoutError:
+                unresolved_tasks.append(task_id)
+                continue
+            except Exception:
+                logger.exception(
+                    "factory AgentService cancellation failed for %s task %s", run_id, task_id
+                )
+                unresolved_tasks.append(task_id)
+                continue
+            status = str(result.get("status") or "").upper() if isinstance(result, dict) else ""
+            if status not in _TERMINAL_TASK_STATUSES:
+                unresolved_tasks.append(task_id)
+
+        remaining_ms = max(100, int(max(0.0, deadline - loop.time()) * 1000))
+        worker_result = await self._workers.cancel_run(run, timeout_ms=remaining_ms)
+        return FactoryRunQuiescence(
+            quiescent=not unresolved_tasks and bool(worker_result.quiescent),
+            unresolved_task_ids=tuple(dict.fromkeys(unresolved_tasks)),
+            unresolved_assignment_ids=tuple(worker_result.unresolved_assignment_ids),
+            failed_command_ids=tuple(worker_result.failed_command_ids),
+        )
 
     async def _quiesce_terminal_workers(self, run: FactoryRun) -> None:
         try:

@@ -8,6 +8,7 @@ before it performs at most one state transition.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -90,10 +91,21 @@ class FactoryOrchestrator:
         if observed_state in _WAITING_STATES or is_terminal_factory_state(observed_state):
             return observed
 
+        budget_reason = self._run_budget_block_reason(observed, now_ms=self._clock_ms())
+        if budget_reason is not None:
+            return await self._store.transition(
+                observed.id,
+                to_state=FactoryState.BLOCKED,
+                actor=FactoryActor.SYSTEM,
+                reason=budget_reason,
+                idempotency_key=f"run-budget:{observed.id}:max-wall-time",
+            )
+
+        claimed_at = self._clock_ms()
         claimed = await self._store.claim_run(
             run_id,
             lease_token=self._owner_token,
-            now_ms=self._clock_ms(),
+            now_ms=claimed_at,
             lease_ms=self._lease_ms,
         )
         if not claimed:
@@ -123,18 +135,22 @@ class FactoryOrchestrator:
                     f"no phase handler configured for active factory state {state.value}"
                 )
 
-            all_evidence = await self._store.list_evidence(run.id, limit=500)
             cycle_evidence = tuple(
-                item for item in all_evidence if item.cycle_id in {None, cycle.id}
+                await self._store.list_phase_evidence(run.id, cycle_id=cycle.id, limit=500)
             )
             gates = tuple(await self._store.list_gates(run.id, cycle_id=cycle.id))
-            outcome = await handler.execute(
+            steering_messages = await self._store.list_user_steering(run.id)
+            outcome = await self._execute_handler_with_lease_heartbeat(
+                run_id,
+                handler,
                 PhaseContext(
                     run=run,
                     cycle=cycle,
                     evidence=cycle_evidence,
                     gates=gates,
-                )
+                    steering_messages=steering_messages,
+                ),
+                claimed_at_ms=claimed_at,
             )
             if not isinstance(outcome, PhaseOutcome):
                 raise FactoryOrchestratorError(
@@ -249,6 +265,74 @@ class FactoryOrchestrator:
             return await self._required_run(run.id)
         finally:
             await self._store.release_run(run_id, lease_token=self._owner_token)
+
+    @staticmethod
+    def _run_budget_block_reason(run: FactoryRun, *, now_ms: int) -> str | None:
+        budget = run.budget if isinstance(run.budget, dict) else {}
+        raw = budget.get("max_wall_time_ms")
+        if raw is None:
+            return None
+        try:
+            maximum = int(raw)
+        except (TypeError, ValueError):
+            return "configured max_wall_time_ms is invalid; fail closed"
+        if maximum <= 0:
+            return "configured max_wall_time_ms must be positive; fail closed"
+        elapsed = max(0, int(now_ms) - int(run.created_at))
+        if elapsed < maximum:
+            return None
+        return f"factory run wall-time budget exhausted after {elapsed}ms (maximum {maximum}ms)"
+
+    async def _execute_handler_with_lease_heartbeat(
+        self,
+        run_id: str,
+        handler: PhaseHandler,
+        context: PhaseContext,
+        *,
+        claimed_at_ms: int,
+    ) -> PhaseOutcome:
+        """Keep ownership fenced while a phase performs slow external or verification work."""
+        interval_seconds = max(0.05, min(5.0, self._lease_ms / 3000))
+        last_renewed_ms = claimed_at_ms
+        task = asyncio.create_task(handler.execute(context))
+        try:
+            while True:
+                try:
+                    outcome = await asyncio.wait_for(asyncio.shield(task), timeout=interval_seconds)
+                    break
+                except asyncio.TimeoutError:
+                    now_ms = self._clock_ms()
+                    renewed = await self._store.renew_run(
+                        run_id,
+                        lease_token=self._owner_token,
+                        now_ms=now_ms,
+                        lease_ms=self._lease_ms,
+                    )
+                    if not renewed:
+                        task.cancel()
+                        await asyncio.gather(task, return_exceptions=True)
+                        raise FactoryOrchestratorError(
+                            "factory run lease was lost while its phase was executing"
+                        )
+                    last_renewed_ms = now_ms
+
+            now_ms = self._clock_ms()
+            if now_ms - last_renewed_ms >= self._lease_ms:
+                renewed = await self._store.renew_run(
+                    run_id,
+                    lease_token=self._owner_token,
+                    now_ms=now_ms,
+                    lease_ms=self._lease_ms,
+                )
+                if not renewed:
+                    raise FactoryOrchestratorError(
+                        "factory run lease expired before phase outcome persistence"
+                    )
+            return outcome
+        finally:
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     async def _required_run(self, run_id: str) -> FactoryRun:
         run = await self._store.get_run(run_id)

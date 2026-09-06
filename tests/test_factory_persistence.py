@@ -1,5 +1,7 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -29,33 +31,62 @@ class FactoryPersistenceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.engine.dispose()
 
-    async def test_create_run_is_idempotent_and_preserves_immutable_input(self):
-        first = await self.store.create_run(
-            user_id="user-1",
-            workspace_id="workspace-1",
-            mission="Original mission",
-            acceptance_criteria=["criterion-a", "criterion-b"],
-            policy={"allow_network": False},
-            budget={"max_cycles": 4},
-            model_id="configured-model",
-            idempotency_key="factory-run-1",
-        )
-        second = await self.store.create_run(
-            user_id="user-1",
-            workspace_id="workspace-1",
-            mission="Changed mission",
-            acceptance_criteria=["different"],
-            policy={"allow_network": True},
-            budget={"max_cycles": 99},
-            model_id="other-model",
-            idempotency_key="factory-run-1",
-        )
+    async def test_create_run_replay_requires_the_same_immutable_request(self):
+        request = {
+            "user_id": "user-1",
+            "workspace_id": "workspace-1",
+            "mission": "Original mission",
+            "acceptance_criteria": ["criterion-a", "criterion-b"],
+            "policy": {"allow_network": False},
+            "budget": {"max_cycles": 4},
+            "model_id": "configured-model",
+            "idempotency_key": "factory-run-1",
+        }
+        first = await self.store.create_run(**request)
+        replay = await self.store.create_run(**request)
+        self.assertEqual(first.id, replay.id)
 
-        self.assertEqual(first.id, second.id)
+        with self.assertRaises(FactoryIdempotencyConflict):
+            await self.store.create_run(
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="Changed mission",
+                acceptance_criteria=["different"],
+                policy={"allow_network": True},
+                budget={"max_cycles": 99},
+                model_id="other-model",
+                idempotency_key="factory-run-1",
+            )
+
         reloaded = await SqlFactoryStore(session_factory=self.sessions).get_run(first.id)
         self.assertEqual(reloaded.mission, "Original mission")
         self.assertEqual(reloaded.acceptance_criteria, ["criterion-a", "criterion-b"])
         self.assertEqual(reloaded.state, FactoryState.MISSION.value)
+
+    async def test_concurrent_equal_run_starts_converge_to_one_idempotent_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = create_async_engine(f"sqlite+aiosqlite:///{Path(tmp) / 'factory-start.db'}")
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            store = SqlFactoryStore(session_factory=sessions)
+            request = {
+                "user_id": "user-1",
+                "workspace_id": "workspace-1",
+                "mission": "concurrent start",
+                "acceptance_criteria": ["one durable run"],
+                "policy": {},
+                "budget": {},
+                "model_id": "configured-model",
+                "idempotency_key": "concurrent-start-key",
+            }
+            try:
+                runs = await asyncio.gather(*(store.create_run(**request) for _ in range(12)))
+                self.assertEqual(len({run.id for run in runs}), 1)
+                persisted = await store.list_events(runs[0].id, limit=20)
+                self.assertEqual([event.event_type for event in persisted], ["run.created"])
+            finally:
+                await engine.dispose()
 
     async def test_transition_replay_is_idempotent_and_payload_mismatch_fails_closed(self):
         run = await self._create_run("transition-run")
@@ -311,6 +342,41 @@ class FactoryPersistenceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn(active.id, {item.id for item in recoverable})
         self.assertNotIn(terminal.id, {item.id for item in recoverable})
+
+    async def test_concurrent_user_events_allocate_unique_monotonic_sequences(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = create_async_engine(f"sqlite+aiosqlite:///{Path(tmp) / 'factory.db'}")
+            async with engine.begin() as connection:
+                await connection.run_sync(Base.metadata.create_all)
+            sessions = async_sessionmaker(engine, expire_on_commit=False)
+            store = SqlFactoryStore(session_factory=sessions)
+            try:
+                run = await store.create_run(
+                    user_id="user-1",
+                    workspace_id="workspace-1",
+                    mission="concurrent events",
+                    acceptance_criteria=["all events persist"],
+                    policy={},
+                    budget={},
+                    model_id="configured-model",
+                    idempotency_key="concurrent-events-run",
+                )
+                events = await asyncio.gather(
+                    *(
+                        store.append_user_event(
+                            run_id=run.id,
+                            event_type="user.message",
+                            payload={"content": f"message-{index}"},
+                            idempotency_key=f"message-{index}",
+                        )
+                        for index in range(40)
+                    )
+                )
+                self.assertEqual(len({event.sequence for event in events}), 40)
+                persisted = await store.list_events(run.id, limit=100)
+                self.assertEqual([event.sequence for event in persisted], list(range(1, 42)))
+            finally:
+                await engine.dispose()
 
     async def test_event_sequences_are_monotonic_and_bounded_listing_is_cursor_based(self):
         run = await self._create_run("event-run")

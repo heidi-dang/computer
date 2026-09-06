@@ -35,6 +35,14 @@ FailureStage = Literal[
     "activity_delivery",
     "traffic_delivery",
 ]
+FailureClass = Literal[
+    "request_rejected",
+    "backend_failure",
+    "transport_failure",
+    "tool_failure",
+    "internal_failure",
+    "telemetry_failure",
+]
 
 
 class McpLatencySample(BaseModel):
@@ -94,6 +102,7 @@ class McpFailureDiagnostic(BaseModel):
     method: str | None = Field(default=None, max_length=128)
     tool_name: str | None = Field(default=None, max_length=256)
     stage: FailureStage
+    failure_class: FailureClass | None = None
     error_code: str = Field(min_length=1, max_length=64)
     http_status: int | None = Field(default=None, ge=100, le=599)
     retryable: bool | None = None
@@ -177,6 +186,22 @@ def _nearest_rank(values: list[int], percentile: float) -> int:
         return 0
     rank = max(1, math.ceil(percentile * len(ordered)))
     return ordered[min(len(ordered), rank) - 1]
+
+
+def _failure_class(event: McpFailureDiagnostic) -> FailureClass:
+    status = event.http_status
+    if status is not None and 400 <= status < 500:
+        return "request_rejected"
+    if event.stage in {"activity_delivery", "traffic_delivery"}:
+        return "telemetry_failure"
+    if event.stage == "cptr_backend":
+        return "transport_failure" if status is None else "backend_failure"
+    if event.stage in {"client_transport", "mcp_connector"}:
+        if status is None or status >= 500 or event.retryable is True:
+            return "transport_failure"
+    if event.stage == "cptr_mcp" and event.error_code == "tool_error":
+        return "tool_failure"
+    return "internal_failure"
 
 
 class McpDiagnosticsStore:
@@ -281,9 +306,12 @@ class McpDiagnosticsStore:
                     safe_summary = redact_external_text(event.summary).strip()[:500]
                     if not safe_summary:
                         safe_summary = "MCP request failed."
-                    projected = event.model_copy(update={"summary": safe_summary}).model_dump(
-                        mode="json"
-                    )
+                    projected = event.model_copy(
+                        update={
+                            "summary": safe_summary,
+                            "failure_class": event.failure_class or _failure_class(event),
+                        }
+                    ).model_dump(mode="json")
                     self._failures.append(projected)
 
                 projected = {**projected, "ingestion_sequence": self._sequence}
@@ -394,14 +422,14 @@ class McpDiagnosticsStore:
         health_values = [int(sample["duration_ms"]) for sample in health_samples]
         health_p95 = _nearest_rank(health_values, 0.95) if health_values else 0
         latest_health_status = str(health_samples[-1]["status"]) if health_samples else "ok"
+        # Latency health measures timing only. Request outcome belongs to traffic/failure
+        # diagnostics and must not turn a fast 4xx/5xx response into a latency error.
+        # This also keeps rolling upgrades safe when an older adapter still marks
+        # rejected requests with latency status="error".
         health = (
-            "error"
-            if latest_health_status == "error"
-            else (
-                "degraded"
-                if health_values and health_p95 >= self._thresholds.get(metric_type, 86_400_000)
-                else "healthy"
-            )
+            "degraded"
+            if health_values and health_p95 >= self._thresholds.get(metric_type, 86_400_000)
+            else "healthy"
         )
         setup_breakdown: dict[str, dict[str, object]] = {}
         setup_kinds = sorted(
@@ -442,6 +470,7 @@ class McpDiagnosticsStore:
             "setup_breakdown": setup_breakdown,
             "last_updated_ms": int(latest["timestamp_ms"]),
             "latest_status": latest_status,
+            "latest_health_status": latest_health_status,
             "health": health,
         }
 

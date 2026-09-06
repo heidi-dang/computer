@@ -2,6 +2,7 @@ import type {
 	McpBackendMetricsSample,
 	McpDiagnosticsEvent,
 	McpDiagnosticsSnapshot,
+	McpFailureClass,
 	McpFailureDiagnostic,
 	McpFailureStage,
 	McpGpuMetrics,
@@ -25,8 +26,11 @@ export type McpLatencySummaryState = {
 	p95Ms: number;
 	maxMs: number;
 	sampleCount: number;
+	healthP95Ms: number;
+	healthSampleCount: number;
 	lastUpdatedMs: number;
 	latestStatus: 'ok' | 'error';
+	latestHealthStatus: 'ok' | 'error';
 	health: 'healthy' | 'degraded' | 'error';
 };
 
@@ -39,6 +43,7 @@ export type McpFailureState = {
 	method: string | null;
 	toolName: string | null;
 	stage: McpFailureStage;
+	failureClass: McpFailureClass;
 	errorCode: string;
 	httpStatus: number | null;
 	retryable: boolean | null;
@@ -182,10 +187,33 @@ function latencyState(
 		p95Ms: aggregate.p95_ms,
 		maxMs: aggregate.max_ms,
 		sampleCount: aggregate.sample_count,
+		healthP95Ms: aggregate.health_p95_ms ?? aggregate.p95_ms,
+		healthSampleCount: aggregate.health_sample_count ?? aggregate.sample_count,
 		lastUpdatedMs: aggregate.last_updated_ms,
 		latestStatus: aggregate.latest_status,
+		latestHealthStatus: aggregate.latest_health_status ?? aggregate.latest_status,
 		health: aggregate.health
 	};
+}
+
+function inferredFailureClass(event: McpFailureDiagnostic): McpFailureClass {
+	if (event.failure_class) return event.failure_class;
+	if (event.http_status != null && event.http_status >= 400 && event.http_status < 500) {
+		return 'request_rejected';
+	}
+	if (event.stage === 'activity_delivery' || event.stage === 'traffic_delivery') {
+		return 'telemetry_failure';
+	}
+	if (event.stage === 'cptr_backend') {
+		return event.http_status == null ? 'transport_failure' : 'backend_failure';
+	}
+	if (event.stage === 'cptr_mcp' && event.error_code === 'tool_error') return 'tool_failure';
+	if (event.stage === 'client_transport' || event.stage === 'mcp_connector') {
+		if (event.http_status == null || event.http_status >= 500 || event.retryable === true) {
+			return 'transport_failure';
+		}
+	}
+	return 'internal_failure';
 }
 
 function failureState(event: McpFailureDiagnostic): McpFailureState {
@@ -198,6 +226,7 @@ function failureState(event: McpFailureDiagnostic): McpFailureState {
 		method: event.method,
 		toolName: event.tool_name,
 		stage: event.stage,
+		failureClass: inferredFailureClass(event),
 		errorCode: event.error_code,
 		httpStatus: event.http_status,
 		retryable: event.retryable,
@@ -522,6 +551,15 @@ export function applyMcpDiagnosticsEvent(
 	const averageMs = current
 		? (current.averageMs * current.sampleCount + event.duration_ms) / sampleCount
 		: event.duration_ms;
+	const healthEligible = event.health_eligible !== false;
+	const healthSampleCount = (current?.healthSampleCount ?? 0) + (healthEligible ? 1 : 0);
+	const latestHealthStatus = healthEligible
+		? event.status
+		: (current?.latestHealthStatus ?? 'ok');
+	// Incremental latency events carry request outcome for compatibility, but latency
+	// health is timing-only. Preserve degraded timing state until the next aggregate
+	// snapshot and never turn a fast failed/rejected request into a latency error.
+	const health = current?.health === 'degraded' ? 'degraded' : 'healthy';
 	const next: McpLatencySummaryState = {
 		edgeId: event.edge_id,
 		metricType: event.metric_type,
@@ -531,9 +569,12 @@ export function applyMcpDiagnosticsEvent(
 		p95Ms: current?.p95Ms ?? event.duration_ms,
 		maxMs: Math.max(current?.maxMs ?? 0, event.duration_ms),
 		sampleCount,
+		healthP95Ms: current?.healthP95Ms ?? (healthEligible ? event.duration_ms : 0),
+		healthSampleCount,
 		lastUpdatedMs: event.timestamp_ms,
 		latestStatus: event.status,
-		health: event.status === 'error' ? 'error' : (current?.health ?? 'healthy')
+		latestHealthStatus,
+		health
 	};
 	return {
 		...state,

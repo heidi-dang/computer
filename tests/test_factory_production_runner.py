@@ -1,4 +1,6 @@
 import asyncio
+import os
+import signal
 import subprocess
 import tempfile
 import unittest
@@ -16,15 +18,37 @@ from cptr.services.factory_phases import PhaseContext, RecoveryPhaseHandler
 from cptr.services.factory_production import (
     AdvisoryPhaseHandler,
     BaselinePhaseHandler,
+    CapabilityAnalysisPhaseHandler,
     FactoryProductionRunner,
     ImplementationPhaseHandler,
     ProductionCiPhaseHandler,
+    SkillSelectionPhaseHandler,
+    TrustEvaluationPhaseHandler,
     _reset_isolated_reproduction,
     _run_fixed_target,
     build_production_orchestrator,
 )
 from cptr.services.factory_runtime import FactoryRuntime
 from cptr.services.factory_store import SqlFactoryStore
+
+
+async def _builtin_capability_context():
+    inventory = CapabilityInventory(
+        skill_discoverer=lambda _workspace: [],
+        mcp_server_loader=lambda: [],
+        include_builtins=True,
+    )
+    manifests = await inventory.discover_local(".")
+    selected = [
+        item.identity
+        for item in manifests
+        if item.origin_uri in {"cptr:cptr-direct-coding", "cptr:command-execution"}
+    ]
+    evidence = SimpleNamespace(
+        kind="capability_inventory",
+        payload={"count": len(manifests), "manifests": [item.to_dict() for item in manifests]},
+    )
+    return selected, evidence, manifests
 
 
 class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -38,11 +62,11 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.engine.dispose()
 
-    async def test_python_verification_uses_current_interpreter(self):
+    async def test_python_verification_uses_current_interpreter_and_isolated_process_group(self):
         process = SimpleNamespace(
             returncode=0,
             communicate=AsyncMock(return_value=(b"ok", b"")),
-            kill=lambda: None,
+            pid=321,
         )
         spec = SimpleNamespace(
             path=".",
@@ -64,6 +88,89 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             spawn.await_args.args[:4],
             ("/opt/cptr/python", "-m", "pytest", "test_smoke.py"),
+        )
+        if os.name != "nt":
+            self.assertTrue(spawn.await_args.kwargs["start_new_session"])
+
+    async def test_verification_timeout_terminates_the_entire_process_group(self):
+        spec = SimpleNamespace(
+            path=".",
+            test_path=None,
+            target="python_pytest",
+            timeout_seconds=0.01,
+        )
+        stopped = asyncio.Event()
+        process = SimpleNamespace(returncode=None, pid=987)
+
+        async def communicate():
+            await stopped.wait()
+            return b"partial output", b""
+
+        process.communicate = communicate
+
+        def terminate_group(pid, sent_signal):
+            self.assertEqual(pid, 987)
+            self.assertEqual(sent_signal, signal.SIGTERM)
+            process.returncode = -15
+            stopped.set()
+
+        with tempfile.TemporaryDirectory() as root:
+            with (
+                patch(
+                    "cptr.services.factory_production.asyncio.create_subprocess_exec",
+                    new=AsyncMock(return_value=process),
+                ),
+                patch(
+                    "cptr.services.factory_production.os.killpg", side_effect=terminate_group
+                ) as killpg,
+            ):
+                result = await _run_fixed_target(root, spec)
+
+        self.assertTrue(result["timed_out"])
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["exit_code"], -15)
+        if os.name != "nt":
+            killpg.assert_called_once_with(987, signal.SIGTERM)
+
+    async def test_production_capability_pipeline_selects_minimal_trusted_execution_set(self):
+        _selected, capability_evidence, manifests = await _builtin_capability_context()
+        run = SimpleNamespace(
+            policy={"implementation_required": True},
+        )
+        analysis = await CapabilityAnalysisPhaseHandler().execute(
+            SimpleNamespace(run=run, cycle=SimpleNamespace(), evidence=(), gates=())
+        )
+        self.assertEqual(analysis.next_state, FactoryState.SKILL_DISCOVERY)
+
+        trust = await TrustEvaluationPhaseHandler().execute(
+            SimpleNamespace(
+                run=run,
+                cycle=SimpleNamespace(),
+                evidence=(capability_evidence,),
+                gates=(),
+            )
+        )
+        self.assertEqual(trust.next_state, FactoryState.SKILL_SELECTION)
+
+        selection = await SkillSelectionPhaseHandler().execute(
+            SimpleNamespace(
+                run=run,
+                cycle=SimpleNamespace(
+                    capability_requirements=analysis.cycle_updates["capability_requirements"],
+                    selected_capabilities=trust.cycle_updates["selected_capabilities"],
+                ),
+                evidence=(capability_evidence,),
+                gates=(),
+            )
+        )
+        self.assertEqual(selection.next_state, FactoryState.REPRODUCING)
+        selected_identities = set(selection.cycle_updates["selected_capabilities"])
+        selected_origins = {
+            item.origin_uri for item in manifests if item.identity in selected_identities
+        }
+        self.assertEqual(
+            selected_origins,
+            {"cptr:cptr-direct-coding", "cptr:command-execution"},
         )
 
     @staticmethod
@@ -153,6 +260,7 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
             cycle=SimpleNamespace(id="cycle-fast", attempt_count=0),
             evidence=(),
             gates=(),
+            steering_messages=("Do not modify frontend code.",),
         )
 
         outcome = await handler.execute(context)
@@ -162,6 +270,8 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("at most 6 tool actions", prompt)
         self.assertIn("do not run tests", prompt)
         self.assertIn("Stop exploring", prompt)
+        self.assertIn("AUTHENTICATED USER STEERING", prompt)
+        self.assertIn("Do not modify frontend code.", prompt)
         payload = outcome.artifacts[0].payload
         self.assertEqual(payload["phase_state"], "AUDITING")
         self.assertEqual(payload["timeout_seconds"], 90)
@@ -224,6 +334,7 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(payload["handoff_evidence_chars"], 0)
 
     async def test_reproduction_runs_commands_only_in_prepared_isolated_worker(self):
+        selected, capability_evidence, _manifests = await _builtin_capability_context()
         agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-repro"}))
         handler = AdvisoryPhaseHandler(
             state=FactoryState.REPRODUCING,
@@ -244,8 +355,9 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 id="cycle-repro",
                 attempt_count=0,
                 mutation_worker_id="worker-1",
+                selected_capabilities=selected,
             ),
-            evidence=(),
+            evidence=(capability_evidence,),
             gates=(),
         )
 
@@ -266,6 +378,7 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_reproduction_handoff_tightens_budget_and_keeps_isolated_commands(self):
+        selected, capability_evidence, _manifests = await _builtin_capability_context()
         agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-repro-handoff"}))
         handler = AdvisoryPhaseHandler(
             state=FactoryState.REPRODUCING,
@@ -286,8 +399,10 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 id="cycle-repro-handoff",
                 attempt_count=0,
                 mutation_worker_id="worker-1",
+                selected_capabilities=selected,
             ),
             evidence=(
+                capability_evidence,
                 SimpleNamespace(
                     kind="reasoning_advice",
                     payload={
@@ -555,6 +670,7 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, "")
 
     async def test_implementation_handoff_reuses_prior_evidence_and_tightens_budget(self):
+        selected, capability_evidence, _manifests = await _builtin_capability_context()
         agent = SimpleNamespace(
             start_task=AsyncMock(return_value={"id": "task-implementation-handoff"})
         )
@@ -582,8 +698,10 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 id="cycle-implementation-handoff",
                 attempt_count=0,
                 mutation_worker_id="worker-1",
+                selected_capabilities=selected,
             ),
             evidence=(
+                capability_evidence,
                 SimpleNamespace(
                     kind="reasoning_advice",
                     payload={
@@ -871,7 +989,12 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
             model_id=None,
             idempotency_key="production-no-mutation",
         )
-        builtin = CapabilityInventory._builtin_manifests()[0]
+        builtins = CapabilityInventory._builtin_manifests()
+        verification_capabilities = [
+            item
+            for item in builtins
+            if item.origin_uri in {"cptr:fdx-repository-intelligence", "cptr:command-execution"}
+        ]
         orchestrator = build_production_orchestrator(
             store=self.store,
             owner_token="production-test",
@@ -890,7 +1013,9 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
                 new=AsyncMock(return_value=None),
             ),
             patch.object(
-                CapabilityInventory, "discover_local", new=AsyncMock(return_value=[builtin])
+                CapabilityInventory,
+                "discover_local",
+                new=AsyncMock(return_value=verification_capabilities),
             ),
         ):
             for _ in range(40):
@@ -1172,6 +1297,150 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         quiesced_run = worker_controller.cancel_run.await_args.args[0]
         self.assertEqual(quiesced_run.id, terminal.id)
         self.assertEqual(worker_controller.cancel_run.await_args.kwargs["timeout_ms"], 5000)
+
+    async def test_quiesce_run_cancels_scheduler_agent_tasks_and_workers_before_control(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="quiesce all factory execution",
+            acceptance_criteria=["no execution survives pause"],
+            policy={},
+            budget={},
+            model_id=None,
+            idempotency_key="production-runner-quiesce",
+        )
+        started = asyncio.Event()
+
+        async def slow_run_once(_run_id):
+            started.set()
+            await asyncio.Event().wait()
+
+        orchestrator = SimpleNamespace(run_once=AsyncMock(side_effect=slow_run_once))
+        agent = SimpleNamespace(cancel_task=AsyncMock(return_value={"status": "CANCELLED"}))
+        worker_controller = SimpleNamespace(
+            cancel_run=AsyncMock(
+                return_value=SimpleNamespace(
+                    quiescent=True,
+                    unresolved_assignment_ids=(),
+                    failed_command_ids=(),
+                )
+            )
+        )
+        worker_store = SimpleNamespace(list_terminal_blocking_run_ids=AsyncMock(return_value=[]))
+        runner = FactoryProductionRunner(
+            store=self.store,
+            lease_ms=10_000,
+            poll_interval=0.001,
+            orchestrator=orchestrator,
+            worker_store=worker_store,
+            worker_controller=worker_controller,
+            agent=agent,
+        )
+        with patch.object(
+            self.store,
+            "list_execution_task_ids",
+            new=AsyncMock(return_value=["task-1"]),
+        ):
+            runner.schedule(run.id)
+            await asyncio.wait_for(started.wait(), timeout=1)
+            result = await runner.quiesce_run(run.id, timeout_ms=1000)
+
+        self.assertTrue(result.quiescent)
+        agent.cancel_task.assert_awaited_once_with("task-1", user_id="user-1")
+        worker_controller.cancel_run.assert_awaited_once()
+        self.assertTrue(orchestrator.run_once.await_args is not None)
+        await runner.close()
+
+    async def test_quiesce_run_fails_closed_when_agent_execution_does_not_stop(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="fail closed on active agent work",
+            acceptance_criteria=["pause cannot lie"],
+            policy={},
+            budget={},
+            model_id=None,
+            idempotency_key="production-runner-quiesce-blocked",
+        )
+        agent = SimpleNamespace(cancel_task=AsyncMock(return_value={"status": "CANCEL_REQUESTED"}))
+        worker_controller = SimpleNamespace(
+            cancel_run=AsyncMock(
+                return_value=SimpleNamespace(
+                    quiescent=True,
+                    unresolved_assignment_ids=(),
+                    failed_command_ids=(),
+                )
+            )
+        )
+        runner = FactoryProductionRunner(
+            store=self.store,
+            lease_ms=10_000,
+            orchestrator=SimpleNamespace(run_once=AsyncMock()),
+            worker_store=SimpleNamespace(list_terminal_blocking_run_ids=AsyncMock(return_value=[])),
+            worker_controller=worker_controller,
+            agent=agent,
+        )
+        with patch.object(
+            self.store,
+            "list_execution_task_ids",
+            new=AsyncMock(return_value=["task-still-running"]),
+        ):
+            result = await runner.quiesce_run(run.id, timeout_ms=1000)
+
+        self.assertFalse(result.quiescent)
+        self.assertEqual(result.unresolved_task_ids, ("task-still-running",))
+        await runner.close()
+
+    async def test_quiesce_run_finds_durable_agent_task_before_factory_evidence_is_persisted(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="close task ownership creation race",
+            acceptance_criteria=["pause cancels tasks before evidence persistence"],
+            policy={},
+            budget={},
+            model_id=None,
+            idempotency_key="production-runner-quiesce-prefix",
+        )
+        agent_store = SimpleNamespace(
+            list_by_idempotency_prefix=AsyncMock(
+                return_value=[SimpleNamespace(id="task-before-evidence")]
+            )
+        )
+        agent = SimpleNamespace(
+            store=agent_store,
+            cancel_task=AsyncMock(return_value={"status": "CANCELLED"}),
+        )
+        worker_controller = SimpleNamespace(
+            cancel_run=AsyncMock(
+                return_value=SimpleNamespace(
+                    quiescent=True,
+                    unresolved_assignment_ids=(),
+                    failed_command_ids=(),
+                )
+            )
+        )
+        runner = FactoryProductionRunner(
+            store=self.store,
+            lease_ms=10_000,
+            orchestrator=SimpleNamespace(run_once=AsyncMock()),
+            worker_store=SimpleNamespace(list_terminal_blocking_run_ids=AsyncMock(return_value=[])),
+            worker_controller=worker_controller,
+            agent=agent,
+        )
+        with patch.object(
+            self.store,
+            "list_execution_task_ids",
+            new=AsyncMock(return_value=[]),
+        ):
+            result = await runner.quiesce_run(run.id, timeout_ms=1000)
+
+        self.assertTrue(result.quiescent)
+        agent_store.list_by_idempotency_prefix.assert_awaited_once_with(
+            "user-1", f"factory:{run.id}:", limit=500
+        )
+        agent.cancel_task.assert_awaited_once_with("task-before-evidence", user_id="user-1")
+        await runner.close()
 
     async def test_scheduler_is_single_flight_and_stops_at_waiting_state(self):
         run = await self.store.create_run(

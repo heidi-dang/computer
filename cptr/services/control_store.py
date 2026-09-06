@@ -544,6 +544,27 @@ class ControlTaskStore:
             )
             return result.scalar_one_or_none()
 
+    async def list_by_idempotency_prefix(
+        self, user_id: str, prefix: str, *, limit: int = 500
+    ) -> list[ControlTask]:
+        """Find bounded durable tasks belonging to a namespaced control operation."""
+        prefix = str(prefix).strip()
+        if not prefix:
+            raise ValueError("control task idempotency prefix must not be blank")
+        limit = max(1, min(int(limit), 500))
+        async with await get_db() as db:
+            result = await db.execute(
+                select(ControlTask)
+                .where(
+                    ControlTask.user_id == user_id,
+                    ControlTask.idempotency_key.is_not(None),
+                    ControlTask.idempotency_key.startswith(prefix),
+                )
+                .order_by(ControlTask.created_at.desc(), ControlTask.id.desc())
+                .limit(limit)
+            )
+            return list(result.scalars().all())
+
     async def create(self, task: ControlTask) -> ControlTask:
         async with await get_db() as db:
             db.add(task)

@@ -143,6 +143,7 @@ class PhaseContext:
     cycle: FactoryCycle
     evidence: tuple[FactoryEvidence, ...]
     gates: tuple[FactoryGateResult, ...]
+    steering_messages: tuple[str, ...] = ()
 
 
 class PhaseHandler(Protocol):
