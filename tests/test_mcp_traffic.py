@@ -43,6 +43,39 @@ def traffic_event(
 
 
 class McpTrafficStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_summary_reports_compact_live_request_and_error_totals(self):
+        store = McpTrafficStore(max_events=16, max_sessions=4, subscriber_queue_size=2)
+        await store.ingest(
+            [
+                traffic_event(
+                    "summary-session",
+                    "session_opened",
+                    request_id=None,
+                    status="connected",
+                    tool_name=None,
+                ),
+                traffic_event("summary-running", "request_started", request_id="request-running"),
+                traffic_event("summary-failed-start", "request_started", request_id="request-failed"),
+                traffic_event(
+                    "summary-failed-end",
+                    "request_failed",
+                    request_id="request-failed",
+                    status="error",
+                    error_code="tool_error",
+                ),
+            ]
+        )
+
+        summary = await store.summary()
+
+        self.assertNotIn("events", summary)
+        self.assertEqual(summary["client_count"], 1)
+        self.assertEqual(summary["session_count"], 1)
+        self.assertEqual(summary["active_requests"], 1)
+        self.assertEqual(summary["total_requests"], 1)
+        self.assertEqual(summary["errors"], 1)
+        self.assertEqual(summary["stream_health"]["event_capacity"], 16)
+
     async def test_non_chatgpt_clients_are_dropped_from_traffic(self):
         store = McpTrafficStore(max_events=8, max_sessions=4, subscriber_queue_size=2)
 

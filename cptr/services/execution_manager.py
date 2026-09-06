@@ -344,6 +344,52 @@ class CommandSessionRegistry:
                 removed.append(session_id)
         return removed
 
+    def passive_stats(self) -> dict[str, int]:
+        """Return a read-only execution projection without reconciliation or OS probes.
+
+        Monitoring must never mutate command ownership or consume process state. A
+        child whose cached returncode/process-wait task already proves exit is
+        reported separately as ``exited_unreconciled`` until the normal reaper or
+        explicit maintenance path reconciles the registry.
+        """
+        active = 0
+        exited_unreconciled = 0
+        completed = 0
+        retained_output_bytes = 0
+        for session in self.sessions.values():
+            retained_output_bytes += len(session.get("output") or b"")
+            if session.get("done"):
+                completed += 1
+                continue
+            proc = session.get("proc")
+            cached_exit = proc is not None and getattr(proc, "returncode", None) is not None
+            wait_task = session.get("process_wait_task")
+            waiter_done = False
+            done = getattr(wait_task, "done", None)
+            if callable(done):
+                try:
+                    waiter_done = bool(done())
+                except Exception:
+                    waiter_done = False
+            if cached_exit or waiter_done:
+                exited_unreconciled += 1
+            else:
+                active += 1
+
+        launching = len(self._launch_reservations)
+        return {
+            "active": active,
+            "launching": launching,
+            "capacity_used": active + launching,
+            "completed_retained": completed,
+            "exited_unreconciled": exited_unreconciled,
+            "total_retained": len(self.sessions),
+            "retained_output_bytes": retained_output_bytes,
+            "total_created": self.total_created,
+            "total_reaped": self.total_reaped,
+            "retained_cap": COMMAND_SESSION_MAX_RETAINED,
+        }
+
     def stats(self) -> dict[str, int]:
         self.reconcile()
         self.reconcile_launch_reservations()

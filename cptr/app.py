@@ -78,16 +78,10 @@ async def lifespan(app: FastAPI):
     app.state.browser_sessions_reconciled = await browser_device_store.disconnect_stale_sessions()
 
     from cptr.env import FACTORY_RUN_LEASE_MS, WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
-    from cptr.services.workbench_sessions import (
-        workbench_session_reaper_loop,
-        workbench_session_store,
-    )
+    from cptr.services.workbench_sessions import workbench_session_store
 
     app.state.workbench_sessions_archived = await workbench_session_store.archive_stale(
         idle_seconds=WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
-    )
-    app.state.workbench_session_reaper_task = asyncio.create_task(
-        workbench_session_reaper_loop(), name="cptr-workbench-session-reaper"
     )
 
     from cptr.services.factory_control import FactoryControlService
@@ -112,22 +106,10 @@ async def lifespan(app: FastAPI):
     )
 
     from cptr.services.live_events import live_event_hub
-    from cptr.services.runtime_metrics import event_loop_lag_worker
-    from cptr.utils.tools import command_session_reaper_loop, start_command_session_manager
+    from cptr.utils.tools import start_command_session_manager
 
     await live_event_hub.start()
     start_command_session_manager()
-    app.state.command_session_reaper_task = asyncio.create_task(
-        command_session_reaper_loop(), name="cptr-command-session-reaper"
-    )
-    app.state.event_loop_lag_task = asyncio.create_task(
-        event_loop_lag_worker(), name="cptr-event-loop-lag"
-    )
-    from cptr.memory.worker import memory_worker_loop
-
-    app.state.memory_worker_task = asyncio.create_task(
-        memory_worker_loop(), name="cptr-memory-maintenance"
-    )
 
     from cptr.routers.control import recover_monitors
 
@@ -148,15 +130,18 @@ async def lifespan(app: FastAPI):
 
     await warm_model_cache(app.state)
 
-    # Start automation scheduler
-    from cptr.utils.automations import scheduler_worker_loop
-
-    app.state.scheduler_task = asyncio.create_task(scheduler_worker_loop(app))
-
-    from cptr.utils.timers import recover_timers, timer_worker_loop
+    # Reconcile durable timer state before permanent runtime loops start.
+    from cptr.utils.timers import recover_timers
 
     await recover_timers()
-    app.state.timer_task = asyncio.create_task(timer_worker_loop(app))
+
+    # One deterministic supervisor owns CPTR's permanent model-free background
+    # loops. It can restart exited workers within a bounded budget, but never
+    # cancels a live worker merely because its heartbeat is stale.
+    from cptr.services.worker_watchdog import configure_runtime_workers, worker_watchdog
+
+    app.state.worker_watchdog = configure_runtime_workers(app, watchdog=worker_watchdog)
+    app.state.worker_watchdog_initial = await worker_watchdog.start()
 
     # Start messaging bots
     from cptr.utils.bridge import BotManager
@@ -176,29 +161,10 @@ async def lifespan(app: FastAPI):
         for monitor_task in getattr(app.state, "control_monitor_tasks", {}).values():
             with suppress(asyncio.CancelledError):
                 await monitor_task
-        timer_task = getattr(app.state, "timer_task", None)
-        if timer_task:
-            timer_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await timer_task
-
-        scheduler_task = getattr(app.state, "scheduler_task", None)
-        if scheduler_task:
-            scheduler_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await scheduler_task
-
-        for task_name in (
-            "command_session_reaper_task",
-            "workbench_session_reaper_task",
-            "event_loop_lag_task",
-            "memory_worker_task",
-        ):
-            background_task = getattr(app.state, task_name, None)
-            if background_task:
-                background_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await background_task
+        runtime_watchdog = getattr(app.state, "worker_watchdog", None)
+        if runtime_watchdog is not None:
+            await runtime_watchdog.close()
+            runtime_watchdog.clear()
 
         bot_manager = getattr(app.state, "bot_manager", None)
         if bot_manager:

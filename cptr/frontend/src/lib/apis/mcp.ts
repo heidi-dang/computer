@@ -191,9 +191,7 @@ export interface McpTopologyConfig {
 }
 
 export type McpLatencyEdge =
-	| 'client-mcp-connector'
-	| 'mcp-connector-cptr-mcp'
-	| 'cptr-mcp-cptr-backend';
+	'client-mcp-connector' | 'mcp-connector-cptr-mcp' | 'cptr-mcp-cptr-backend';
 export type McpLatencyMetric = 'observed_request_time' | 'adapter_handoff' | 'backend_api_rtt';
 export type McpFailureStage =
 	| 'client_transport'
@@ -969,10 +967,7 @@ export interface McpMemoryStreamCallbacks {
 }
 
 export type McpDiagnosticsEvent = (
-	| McpLatencySample
-	| McpFailureDiagnostic
-	| McpBackendMetricsSample
-	| McpUsageDiagnostic
+	McpLatencySample | McpFailureDiagnostic | McpBackendMetricsSample | McpUsageDiagnostic
 ) & { ingestion_sequence: number };
 
 export interface McpDiagnosticsSnapshot {
@@ -1352,3 +1347,237 @@ export const readServerResource = (serverId: string, uri: string) =>
 		`/api/mcp/servers/${serverId}/resources/read`,
 		jsonBody({ uri })
 	).then((r) => r.contents);
+
+// ── Services health / maintain ───────────────────────────────────────────────
+
+export type McpServiceBand = 'healthy' | 'moderate' | 'unhealthy';
+
+export interface McpServiceProbe {
+	id: string;
+	ok: boolean;
+	critical: boolean;
+	band_hint: McpServiceBand;
+	detail: string;
+	measured_at?: string;
+	value?: unknown;
+}
+
+export interface McpServiceStatus {
+	id: string;
+	name: string;
+	band: McpServiceBand;
+	score: number;
+	probes: McpServiceProbe[];
+	stats: Record<string, unknown>;
+	last_ok_at: string | null;
+	last_error: string | null;
+}
+
+export interface McpServicesPluginIdentity {
+	version: string | null;
+	contract_version: string | null;
+	tool_count: number | null;
+	release_sha?: string | null;
+	refresh_required?: boolean | null;
+	source?: string;
+	band: McpServiceBand;
+	probes: McpServiceProbe[];
+}
+
+export interface McpServicesSnapshot {
+	aggregate: McpServiceBand;
+	generated_at: string;
+	fingerprint?: string;
+	plugin: McpServicesPluginIdentity;
+	services: McpServiceStatus[];
+	maintain: { active_job_id: string | null };
+}
+
+export interface McpServicesTelemetry {
+	version: 1;
+	generated_at_ms: number;
+	runtime: {
+		uptime_seconds: number;
+		requests: { count: number; server_error_count: number; p95_ms: number; samples: number };
+		database: {
+			query_count: number;
+			error_count: number;
+			busy_count: number;
+			p95_ms: number;
+			samples: number;
+		};
+		event_loop: { last_lag_ms?: number | null; max_lag_ms?: number | null };
+		process: { rss_bytes?: number | null; open_fds?: number | null; cpu_seconds?: number | null };
+	};
+	execution: {
+		commands: {
+			active?: number;
+			launching?: number;
+			capacity_used?: number;
+			capacity_limit?: number;
+			completed_retained?: number;
+			exited_unreconciled?: number;
+			terminal_events_published?: number;
+			terminal_event_dropped_bytes?: number;
+		};
+		live_events: Record<string, number>;
+	};
+	workers: {
+		aggregate: string;
+		total: number;
+		healthy: number;
+		degraded: number;
+		restarts: number;
+	};
+	mcp: {
+		client_count: number;
+		session_count: number;
+		active_requests: number;
+		total_requests: number;
+		errors: number;
+		failure_count: number;
+		backend_rtt_p95_ms: number;
+		backend_rtt_samples: number;
+		backend_rtt_health: string;
+	};
+	host: McpBackendMetricsSample | null;
+	pressure: {
+		live_event_queue_percent: number;
+		live_event_queue_depth: number;
+		live_event_queue_capacity: number;
+		live_event_subscribers: number;
+		live_event_slow_disconnects: number;
+		mcp_diagnostics_slow_drops: number;
+		mcp_traffic_slow_drops: number;
+	};
+}
+
+export type McpActionTraceLayer =
+	'chatgpt' | 'mcp' | 'backend' | 'command' | 'workbench' | 'browser' | 'cleanup';
+
+export type McpActionTraceStatus = 'started' | 'running' | 'ok' | 'error' | 'cancelled';
+
+export interface McpActionTraceSummary {
+	trace_id: string;
+	request_id: string | null;
+	mcp_session_id: string | null;
+	tool_name: string | null;
+	status: McpActionTraceStatus;
+	started_at_ms: number;
+	updated_at_ms: number;
+	duration_ms: number;
+	stage_count: number;
+	layers: McpActionTraceLayer[];
+	error_code: string | null;
+	entities: Partial<Record<'command' | 'workbench' | 'browser', string[]>>;
+}
+
+export interface McpActionTraceStage {
+	sequence: number;
+	timestamp_ms: number;
+	layer: McpActionTraceLayer;
+	name: string;
+	status: McpActionTraceStatus;
+	duration_ms?: number;
+	request_id?: string;
+	tool_name?: string;
+	workspace_id?: string;
+	entity_type?: 'command' | 'workbench' | 'browser';
+	entity_id?: string;
+	error_code?: string;
+}
+
+export interface McpActionTraceDetail extends McpActionTraceSummary {
+	version: 1;
+	stages: McpActionTraceStage[];
+}
+
+export interface McpActionTraceSummaries {
+	version: 1;
+	sequence: number;
+	traces: McpActionTraceSummary[];
+}
+
+export interface McpMaintainStep {
+	step_id: string;
+	started_at: string | null;
+	ended_at: string | null;
+	result: 'ok' | 'skipped' | 'failed' | 'report_only' | null;
+	evidence: Record<string, unknown>;
+}
+
+export type McpMaintenanceSystemStatus = 'STABLE' | 'DEGRADED' | 'ACTION_REQUIRED' | 'FAILED';
+
+export interface McpMaintainJob {
+	job_id: string;
+	service_id: string;
+	status: 'queued' | 'running' | 'succeeded' | 'failed' | 'partial';
+	started_at: string | null;
+	ended_at: string | null;
+	steps: McpMaintainStep[];
+	post_band: string | null;
+	post_aggregate?: string | null;
+	error: string | null;
+	system_status: McpMaintenanceSystemStatus | null;
+	pass_count: number;
+}
+
+export interface McpServicesStreamCallbacks {
+	onSnapshot: (snapshot: McpServicesSnapshot) => void;
+	onTelemetry: (telemetry: McpServicesTelemetry) => void;
+	onTraces: (traces: McpActionTraceSummaries) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown) => void;
+}
+
+export const getMcpServicesSnapshot = () =>
+	fetchJSON<McpServicesSnapshot>('/api/mcp/services/snapshot');
+
+export const getMcpActionTrace = (traceId: string) =>
+	fetchJSON<McpActionTraceDetail>(`/api/mcp/services/traces/${encodeURIComponent(traceId)}`);
+
+export function openMcpServicesStream(callbacks: McpServicesStreamCallbacks): () => void {
+	const source = new EventSource('/api/mcp/services/stream');
+	const parseSnapshot = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onSnapshot(JSON.parse(message.data) as McpServicesSnapshot);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+	const parseTelemetry = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onTelemetry(JSON.parse(message.data) as McpServicesTelemetry);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+	const parseTraces = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onTraces(JSON.parse(message.data) as McpActionTraceSummaries);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+	source.addEventListener('snapshot', (event) => parseSnapshot(event as MessageEvent<string>));
+	source.addEventListener('telemetry', (event) => parseTelemetry(event as MessageEvent<string>));
+	source.addEventListener('traces', (event) => parseTraces(event as MessageEvent<string>));
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+	return () => source.close();
+}
+
+export const startMcpServicesMaintain = (
+	serviceId: string = 'all',
+	idempotencyKey?: string | null
+) =>
+	fetchJSON<{ job_id: string; status: string; service_id: string }>(
+		'/api/mcp/services/maintain',
+		jsonBody({
+			service_id: serviceId,
+			...(idempotencyKey ? { idempotency_key: idempotencyKey } : {})
+		})
+	);
+
+export const getMcpServicesMaintainJob = (jobId: string) =>
+	fetchJSON<McpMaintainJob>(`/api/mcp/services/maintain/${encodeURIComponent(jobId)}`);

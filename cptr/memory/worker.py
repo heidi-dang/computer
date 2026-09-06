@@ -112,8 +112,11 @@ class MemoryWorker:
 
 
 async def memory_worker_loop() -> None:
+    from cptr.services.worker_watchdog import heartbeat_sleep, heartbeat_worker
+
     worker = MemoryWorker()
     await worker.job_store.recover_stale()
+    heartbeat_worker("memory_maintenance", success=True)
     while True:
         try:
             from cptr.utils.memory import get_memory_settings
@@ -121,7 +124,8 @@ async def memory_worker_loop() -> None:
             settings = await get_memory_settings()
             interval = max(5, int(settings.get("maintenance_interval_seconds") or 30))
             if not bool(settings.get("maintenance_enabled", True)):
-                await asyncio.sleep(interval)
+                heartbeat_worker("memory_maintenance", success=True)
+                await heartbeat_sleep("memory_maintenance", interval, success=True)
                 continue
             processed = 0
             # Bound each turn so a backlog cannot monopolize the event loop.
@@ -131,9 +135,13 @@ async def memory_worker_loop() -> None:
                     break
                 await worker.process(job)
                 processed += 1
-            await asyncio.sleep(0 if processed >= 20 else interval)
+            heartbeat_worker("memory_maintenance", success=True)
+            await heartbeat_sleep(
+                "memory_maintenance", 0 if processed >= 20 else interval, success=True
+            )
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.warning("memory maintenance worker iteration failed", exc_info=True)
-            await asyncio.sleep(10)
+            heartbeat_worker("memory_maintenance")
+            await heartbeat_sleep("memory_maintenance", 10)

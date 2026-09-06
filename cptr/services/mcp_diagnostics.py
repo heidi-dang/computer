@@ -326,6 +326,34 @@ class McpDiagnosticsStore:
             self._system.append(projected)
             self._fan_out({**projected, "ingestion_sequence": self._sequence})
 
+    def _stream_health(self) -> dict[str, int]:
+        return {
+            "subscriber_count": len(self._subscribers),
+            "slow_subscriber_drops": self._slow_subscriber_drops,
+            "latency_sample_capacity_per_edge": self.max_latency_samples_per_edge,
+            "failure_capacity": self.max_failures,
+            "system_sample_capacity": self.max_system_samples,
+            "usage_capacity": self.max_usage,
+            "subscriber_queue_capacity": self.subscriber_queue_size,
+        }
+
+    async def summary(self) -> dict[str, object]:
+        """Return a compact dashboard projection without copying bounded event histories."""
+        async with self._lock:
+            latency = {
+                edge_id: self._latency_aggregate(samples)
+                for edge_id, samples in sorted(self._latency.items())
+                if samples
+            }
+            return {
+                "version": 1,
+                "sequence": self._sequence,
+                "latency": latency,
+                "failure_count": len(self._failures),
+                "latest_system": dict(self._system[-1]) if self._system else None,
+                "stream_health": self._stream_health(),
+            }
+
     async def snapshot(self) -> dict[str, object]:
         async with self._lock:
             latency = {
@@ -342,15 +370,7 @@ class McpDiagnosticsStore:
                 "usage": list(self._usage),
                 "current_model": dict(self._usage[-1]) if self._usage else None,
                 "usage_totals": self._usage_totals(),
-                "stream_health": {
-                    "subscriber_count": len(self._subscribers),
-                    "slow_subscriber_drops": self._slow_subscriber_drops,
-                    "latency_sample_capacity_per_edge": self.max_latency_samples_per_edge,
-                    "failure_capacity": self.max_failures,
-                    "system_sample_capacity": self.max_system_samples,
-                    "usage_capacity": self.max_usage,
-                    "subscriber_queue_capacity": self.subscriber_queue_size,
-                },
+                "stream_health": self._stream_health(),
             }
 
     def _accumulate_usage(self, item: dict[str, object]) -> None:

@@ -200,8 +200,24 @@ FDX_MAX_RESPONSE_BYTES = max(16 * 1024, _env_int("CPTR_FDX_MAX_RESPONSE_BYTES", 
 
 # ── Runtime metrics ─────────────────────────────────────────
 METRICS_SAMPLE_WINDOW = max(128, _env_int("CPTR_METRICS_SAMPLE_WINDOW", 2_048))
+METRICS_PROCESS_SAMPLE_INTERVAL_MS = max(
+    1_000,
+    min(_env_int("CPTR_METRICS_PROCESS_SAMPLE_INTERVAL_MS", 5_000), 60_000),
+)
 EVENT_LOOP_LAG_SAMPLE_INTERVAL_MS = max(
     100, _env_int("CPTR_EVENT_LOOP_LAG_SAMPLE_INTERVAL_MS", 1_000)
+)
+MCP_SERVICES_TELEMETRY_INTERVAL_MS = max(
+    1_000,
+    min(_env_int("CPTR_MCP_SERVICES_TELEMETRY_INTERVAL_MS", 2_000), 10_000),
+)
+MCP_SERVICES_HEALTH_INTERVAL_MS = max(
+    2_000,
+    min(_env_int("CPTR_MCP_SERVICES_HEALTH_INTERVAL_MS", 10_000), 60_000),
+)
+MCP_SERVICES_KEEPALIVE_INTERVAL_MS = max(
+    10_000,
+    min(_env_int("CPTR_MCP_SERVICES_KEEPALIVE_INTERVAL_MS", 20_000), 60_000),
 )
 
 # ── CORS ────────────────────────────────────────────────────

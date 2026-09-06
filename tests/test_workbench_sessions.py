@@ -613,6 +613,73 @@ class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
             exit_code=0,
         )
 
+    async def test_command_binding_joins_workbench_to_original_command_trace(self):
+        request = SimpleNamespace(
+            headers={
+                "x-cptr-trace-id": "trace-bind-call",
+                "x-cptr-request-id": "request-bind",
+                "x-cptr-tool-name": "cptr_bind_live_workbench_session",
+            }
+        )
+        bound = {
+            "session_id": "wbs_trace",
+            "status": "RUNNING",
+            "active_target_type": "command",
+            "active_target_id": "cmd_trace",
+            "active_workspace_id": "ws_1",
+        }
+        with (
+            patch("cptr.routers.workbench._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.workbench._ensure_target_owner", new=AsyncMock(return_value=None)),
+            patch(
+                "cptr.routers.workbench.workbench_session_store.bind_target",
+                new=AsyncMock(return_value=bound),
+            ),
+            patch(
+                "cptr.routers.workbench.workbench_session_store.append_event",
+                new=AsyncMock(return_value={"sequence": 2}),
+            ),
+            patch(
+                "cptr.routers.workbench.workbench_session_store.get",
+                new=AsyncMock(return_value=bound),
+            ),
+            patch(
+                "cptr.routers.workbench.action_trace_store.resolve_entity",
+                new=AsyncMock(return_value="trace-command-origin"),
+            ) as resolve_trace,
+            patch(
+                "cptr.routers.workbench.action_trace_store.link_entity",
+                new=AsyncMock(return_value=True),
+            ) as link_trace,
+            patch(
+                "cptr.routers.workbench.action_trace_store.append",
+                new=AsyncMock(return_value=True),
+            ) as append_trace,
+        ):
+            result = await bind_workbench_session(
+                request,
+                "wbs_trace",
+                BindWorkbenchSessionTargetRequest(
+                    target_type="command",
+                    target_id="cmd_trace",
+                    workspace_id="ws_1",
+                ),
+            )
+
+        self.assertEqual(result["session_id"], "wbs_trace")
+        resolve_trace.assert_awaited_once_with(
+            owner_id="user_1", entity_type="command", entity_id="cmd_trace"
+        )
+        link_trace.assert_awaited_once_with(
+            owner_id="user_1",
+            trace_id="trace-command-origin",
+            entity_type="workbench",
+            entity_id="wbs_trace",
+        )
+        self.assertEqual(append_trace.await_args.kwargs["trace_id"], "trace-command-origin")
+        self.assertEqual(append_trace.await_args.kwargs["layer"], "workbench")
+        self.assertEqual(append_trace.await_args.kwargs["name"], "workbench.target.bound")
+
     async def test_events_return_last_sequence_cursor_expected_by_plugin(self):
         request = SimpleNamespace()
         events = [{"sequence": 3, "summary": "done"}]

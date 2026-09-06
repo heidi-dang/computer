@@ -161,9 +161,7 @@ def _spawn_pty(
 ) -> tuple:
     """Spawn a shell command under a PTY (Unix only). Returns (proc, master_fd)."""
     fast_argv = (
-        _fast_pty_argv([_PTY_FAST_SHELL, "-c", command], preexec_fn)
-        if _PTY_FAST_SHELL
-        else None
+        _fast_pty_argv([_PTY_FAST_SHELL, "-c", command], preexec_fn) if _PTY_FAST_SHELL else None
     )
     master_fd, slave_fd = pty.openpty()
     try:
@@ -482,6 +480,45 @@ async def _command_event_writer(command_session_id: str) -> None:
 async def _queue_command_session_event(
     session: dict[str, Any] | None, event_type: str, payload: dict[str, Any]
 ) -> None:
+    if session and event_type in {"command.started", "command.completed"}:
+        trace_id = session.get("trace_id")
+        user_id = session.get("user_id")
+        command_id = session.get("command_session_id")
+        if isinstance(trace_id, str) and isinstance(user_id, str) and isinstance(command_id, str):
+            try:
+                from cptr.services.action_traces import action_trace_store
+
+                completed = event_type == "command.completed"
+                failed = completed and str(payload.get("status") or "") == "FAILED"
+                await action_trace_store.append(
+                    owner_id=user_id,
+                    trace_id=trace_id,
+                    layer="command",
+                    name=event_type,
+                    status="error" if failed else "ok" if completed else "running",
+                    timestamp_ms=int(time.time() * 1000),
+                    request_id=(
+                        str(session.get("trace_request_id"))
+                        if session.get("trace_request_id") is not None
+                        else None
+                    ),
+                    tool_name=(
+                        str(session.get("trace_tool_name"))
+                        if session.get("trace_tool_name") is not None
+                        else None
+                    ),
+                    workspace_id=(
+                        str(session.get("trace_workspace_id"))
+                        if session.get("trace_workspace_id") is not None
+                        else None
+                    ),
+                    entity_type="command",
+                    entity_id=command_id,
+                    error_code="command_failed" if failed else None,
+                    dedupe_key=f"command:{command_id}:{event_type}",
+                )
+            except Exception:
+                pass
     queue = session.get("event_queue") if session else None
     if isinstance(queue, asyncio.Queue):
         await queue.put((event_type, payload))
@@ -980,9 +1017,13 @@ def reap_command_sessions() -> list[str]:
 
 
 async def command_session_reaper_loop() -> None:
+    from cptr.services.worker_watchdog import heartbeat_sleep, heartbeat_worker
+
+    heartbeat_worker("command_reaper", success=True)
     while True:
-        await asyncio.sleep(COMMAND_SESSION_REAPER_INTERVAL_SECONDS)
+        await heartbeat_sleep("command_reaper", COMMAND_SESSION_REAPER_INTERVAL_SECONDS)
         command_session_registry.reap()
+        heartbeat_worker("command_reaper", success=True)
 
 
 async def shutdown_command_sessions(*, timeout: float = TASK_CANCELLATION_TIMEOUT_SECONDS) -> None:
@@ -1040,10 +1081,10 @@ async def shutdown_command_sessions(*, timeout: float = TASK_CANCELLATION_TIMEOU
     _accept_new_command_sessions = True
 
 
-def command_session_metrics() -> dict[str, int]:
-    stats = command_session_registry.stats()
+def _command_terminal_metrics(stats: dict[str, int]) -> dict[str, int]:
     stats.update(
         {
+            "capacity_limit": MAX_COMMAND_SESSIONS,
             "terminal_events_published": sum(
                 int(session.get("terminal_events_published") or 0)
                 for session in command_sessions.values()
@@ -1055,6 +1096,16 @@ def command_session_metrics() -> dict[str, int]:
         }
     )
     return stats
+
+
+def command_session_passive_metrics() -> dict[str, int]:
+    """Return read-only command telemetry; never reconcile process ownership."""
+    return _command_terminal_metrics(command_session_registry.passive_stats())
+
+
+def command_session_metrics() -> dict[str, int]:
+    """Return authoritative command metrics after lifecycle reconciliation."""
+    return _command_terminal_metrics(command_session_registry.stats())
 
 
 def _owned_command_sessions(message_id: str) -> list[dict[str, Any]]:
@@ -1991,6 +2042,23 @@ async def _abort_unreturned_command_session(command_session_id: str) -> None:
         except Exception:
             pass
     command_session_registry.reconcile()
+    user_id = session.get("user_id")
+    if isinstance(user_id, str):
+        try:
+            from cptr.services.action_traces import action_trace_store
+
+            await action_trace_store.append_for_entity(
+                owner_id=user_id,
+                entity_type="command",
+                entity_id=command_session_id,
+                layer="cleanup",
+                name="command.abort.cleanup",
+                status="cancelled",
+                timestamp_ms=int(time.time() * 1000),
+                dedupe_key=f"command:{command_session_id}:abort-cleanup",
+            )
+        except Exception:
+            pass
 
 
 async def run_command(
@@ -2032,9 +2100,7 @@ async def run_command(
     except IdentityUnavailable as e:
         return f"Error: {e}"
     if measure_lifecycle:
-        lifecycle_timing["identity_ms"] = round(
-            (time.perf_counter() - phase_started) * 1000.0, 3
-        )
+        lifecycle_timing["identity_ms"] = round((time.perf_counter() - phase_started) * 1000.0, 3)
     phase_started = time.perf_counter()
     user_id = identity.app_user_id or __context__.get("user_id")
     request = __context__.get("request")
@@ -2128,6 +2194,9 @@ async def run_command(
                 )
 
             registration_started = time.perf_counter()
+            from cptr.services.action_traces import trace_context_from_request
+
+            trace_context = trace_context_from_request(request)
             live_target: dict[str, str] | None = None
             control_task_id = __context__.get("control_task_id")
             workspace_id = __context__.get("workspace_id")
@@ -2157,6 +2226,10 @@ async def run_command(
                 "message_id": __context__.get("message_id"),
                 "call_id": __context__.get("call_id"),
                 "live_target": live_target,
+                "trace_id": trace_context.trace_id if trace_context else None,
+                "trace_request_id": trace_context.request_id if trace_context else None,
+                "trace_tool_name": trace_context.tool_name if trace_context else None,
+                "trace_workspace_id": str(workspace_id) if workspace_id else None,
                 "created_at": time.time(),
                 "completed_at": None,
                 "done": False,
@@ -2188,6 +2261,18 @@ async def run_command(
                 session,
                 reservation_token=launch_reservation,
             )
+            if trace_context is not None:
+                try:
+                    from cptr.services.action_traces import action_trace_store
+
+                    await action_trace_store.link_entity(
+                        owner_id=str(user_id),
+                        trace_id=trace_context.trace_id,
+                        entity_type="command",
+                        entity_id=command_session_id,
+                    )
+                except Exception:
+                    pass
             if measure_lifecycle:
                 lifecycle_timing["session_register_ms"] = round(
                     (time.perf_counter() - registration_started) * 1000.0, 3

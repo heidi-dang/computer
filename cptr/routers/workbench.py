@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from cptr.models import AutonomousMonitor, ControlTask, Workspace
+from cptr.services.action_traces import action_trace_store, trace_context_from_request
 from cptr.services.control_auth import require_control_user
 from cptr.services.workbench_sessions import MAX_EVENT_LIST_LIMIT, workbench_session_store
 from cptr.utils.db import get_db
@@ -90,6 +91,62 @@ async def _ensure_target_owner(
         raise HTTPException(status_code=404, detail="target not found")
 
 
+async def _trace_workbench_event(
+    request: Request,
+    *,
+    user_id: str,
+    session_id: str,
+    event_type: str,
+    status: str,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    workspace_id: str | None = None,
+    tool_name: str | None = None,
+) -> None:
+    """Join Workbench lifecycle to an existing command trace or the current MCP trace."""
+    try:
+        context = trace_context_from_request(request)
+        trace_id = context.trace_id if context is not None else None
+        if target_type == "command" and target_id:
+            command_trace = await action_trace_store.resolve_entity(
+                owner_id=user_id,
+                entity_type="command",
+                entity_id=target_id,
+            )
+            trace_id = command_trace or trace_id
+        if trace_id is None:
+            return
+        await action_trace_store.link_entity(
+            owner_id=user_id,
+            trace_id=trace_id,
+            entity_type="workbench",
+            entity_id=session_id,
+        )
+        normalized = str(status or "").upper()
+        trace_status = (
+            "error"
+            if normalized in {"ERROR", "FAILED", "FAILURE"}
+            else "ok"
+            if normalized in {"COMPLETE", "COMPLETED", "SUCCEEDED", "ARCHIVED"}
+            else "running"
+        )
+        await action_trace_store.append(
+            owner_id=user_id,
+            trace_id=trace_id,
+            layer="workbench",
+            name=event_type,
+            status=trace_status,
+            request_id=context.request_id if context is not None else None,
+            tool_name=tool_name or (context.tool_name if context is not None else None),
+            workspace_id=workspace_id,
+            entity_type="workbench",
+            entity_id=session_id,
+            dedupe_key=f"workbench:{session_id}:{event_type}:{target_id or ''}",
+        )
+    except Exception:
+        return
+
+
 async def _reconcile_terminal_command_if_needed(
     *, user_id: str, command_id: str, workspace_id: str | None
 ) -> None:
@@ -125,6 +182,14 @@ async def create_workbench_session(request: Request, body: CreateWorkbenchSessio
         state="OPEN",
         workspace_id=body.workspace_id,
         summary="CPTR Workbench Session is ready.",
+    )
+    await _trace_workbench_event(
+        request,
+        user_id=user_id,
+        session_id=session["session_id"],
+        event_type="workbench.opened",
+        status="OPEN",
+        workspace_id=body.workspace_id,
     )
     current = await workbench_session_store.get(owner_id=user_id, session_id=session["session_id"])
     return current or session
@@ -200,6 +265,16 @@ async def bind_workbench_session(
         workspace_id=body.workspace_id,
         summary=f"Workbench bound to {body.target_type} activity.",
     )
+    await _trace_workbench_event(
+        request,
+        user_id=user_id,
+        session_id=session_id,
+        event_type="workbench.target.bound",
+        status=session["status"],
+        target_type=body.target_type,
+        target_id=body.target_id,
+        workspace_id=body.workspace_id,
+    )
     if body.target_type == "command":
         await _reconcile_terminal_command_if_needed(
             user_id=user_id,
@@ -241,6 +316,17 @@ async def append_workbench_session_event(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if event is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
+    await _trace_workbench_event(
+        request,
+        user_id=user_id,
+        session_id=session_id,
+        event_type=body.event_type,
+        status=body.state or "RUNNING",
+        target_type=body.target_type,
+        target_id=body.target_id,
+        workspace_id=body.workspace_id,
+        tool_name=body.tool_name,
+    )
     if body.target_type == "command" and body.event_type == "command.started":
         await _reconcile_terminal_command_if_needed(
             user_id=user_id,

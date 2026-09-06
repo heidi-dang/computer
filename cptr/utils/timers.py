@@ -198,16 +198,20 @@ async def _launch_timer(timer, app) -> None:
 async def timer_worker_loop(app) -> None:
     """Poll durable pending timers and wake their parent chats."""
     from cptr.models import Chat
+    from cptr.services.worker_watchdog import heartbeat_sleep, heartbeat_worker
 
     logger.info("Timer worker started (poll interval: %ds)", TIMER_POLL_INTERVAL)
+    heartbeat_worker("timer_worker", success=True)
     while True:
         try:
             due = await Chat.get_due_timers(time.time_ns())
             for timer in due:
                 await _launch_timer(timer, app)
+            heartbeat_worker("timer_worker", success=True)
         except Exception:
             logger.exception("Timer worker error")
-        await asyncio.sleep(TIMER_POLL_INTERVAL)
+            heartbeat_worker("timer_worker")
+        await heartbeat_sleep("timer_worker", TIMER_POLL_INTERVAL)
 
 
 async def recover_timers() -> None:
