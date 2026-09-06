@@ -13,7 +13,7 @@ import secrets
 import time
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
 from cptr.models import WorkbenchSession, WorkbenchSessionEvent
 from cptr.utils.db import get_db
@@ -227,18 +227,36 @@ class WorkbenchSessionStore:
         now = _now_ms()
         normalized_state = _normalized_event_state(event_type, state)
         async with await get_db() as db:
-            session = await db.scalar(
-                select(WorkbenchSession).where(
+            # Claim the sequence with the first write in this transaction. SQLite
+            # serializes writers, and UPDATE ... RETURNING also gives PostgreSQL
+            # row-level serialization if this store is migrated later. This avoids
+            # the read-then-increment race where two appenders observed the same
+            # event_count and attempted the same (session_id, sequence).
+            claimed_result = await db.execute(
+                update(WorkbenchSession)
+                .where(
                     WorkbenchSession.id == session_id,
                     WorkbenchSession.user_id == owner_id,
                     WorkbenchSession.deleted_at.is_(None),
                 )
+                .values(
+                    event_count=WorkbenchSession.event_count + 1,
+                    updated_at=now,
+                    last_event_at=now,
+                )
+                .returning(
+                    WorkbenchSession.id,
+                    WorkbenchSession.event_count,
+                    WorkbenchSession.active_target_type,
+                    WorkbenchSession.active_target_id,
+                )
             )
-            if session is None:
+            claimed = claimed_result.one_or_none()
+            if claimed is None:
                 return None
-            sequence = int(session.event_count or 0) + 1
+            sequence = int(claimed.event_count)
             event = WorkbenchSessionEvent(
-                session_id=session.id,
+                session_id=claimed.id,
                 user_id=owner_id,
                 sequence=sequence,
                 source=_clip(source, 40) or "plugin",
@@ -256,28 +274,39 @@ class WorkbenchSessionStore:
                 created_at=now,
             )
             db.add(event)
-            session.event_count = sequence
-            session.updated_at = now
-            session.last_event_at = now
+            projection: dict[str, Any] = {}
             if target_type and target_id:
                 target_matches = (
-                    session.active_target_type == target_type
-                    and session.active_target_id == event.target_id
+                    claimed.active_target_type == target_type
+                    and claimed.active_target_id == event.target_id
                 )
                 if normalized_state in _TERMINAL_TARGET_STATES:
                     if target_matches:
-                        session.active_target_type = None
-                        session.active_target_id = None
-                        session.active_workspace_id = None
-                        session.status = "OPEN"
+                        projection.update(
+                            active_target_type=None,
+                            active_target_id=None,
+                            active_workspace_id=None,
+                            status="OPEN",
+                        )
                 else:
-                    session.active_target_type = target_type
-                    session.active_target_id = event.target_id
-                    session.active_workspace_id = event.workspace_id
+                    projection.update(
+                        active_target_type=target_type,
+                        active_target_id=event.target_id,
+                        active_workspace_id=event.workspace_id,
+                    )
                     if normalized_state in _ALLOWED_STATES:
-                        session.status = normalized_state
+                        projection["status"] = normalized_state
             elif normalized_state in _ALLOWED_STATES:
-                session.status = normalized_state
+                projection["status"] = normalized_state
+            if projection:
+                await db.execute(
+                    update(WorkbenchSession)
+                    .where(
+                        WorkbenchSession.id == claimed.id,
+                        WorkbenchSession.user_id == owner_id,
+                    )
+                    .values(**projection)
+                )
             await db.commit()
             await db.refresh(event)
             return _event_dict(event)
@@ -354,8 +383,14 @@ class WorkbenchSessionStore:
             raise ValueError("invalid command terminal status")
         now = _now_ms()
         async with await get_db() as db:
-            rows = await db.scalars(
-                select(WorkbenchSession).where(
+            # Terminal reconciliation competes with plugin-originated appends, so
+            # claim every matching session's next sequence in the same atomic
+            # UPDATE that clears the active target projection. Re-checking the
+            # target predicates in the write also prevents a stale pre-read from
+            # completing a newer command binding.
+            claimed_result = await db.execute(
+                update(WorkbenchSession)
+                .where(
                     WorkbenchSession.user_id == owner_id,
                     WorkbenchSession.deleted_at.is_(None),
                     WorkbenchSession.archived_at.is_(None),
@@ -363,15 +398,24 @@ class WorkbenchSessionStore:
                     WorkbenchSession.active_target_id == command_id,
                     WorkbenchSession.active_workspace_id == workspace_id,
                 )
+                .values(
+                    event_count=WorkbenchSession.event_count + 1,
+                    updated_at=now,
+                    last_event_at=now,
+                    active_target_type=None,
+                    active_target_id=None,
+                    active_workspace_id=None,
+                    status="OPEN",
+                )
+                .returning(WorkbenchSession.id, WorkbenchSession.event_count)
             )
-            sessions = rows.all()
-            for session in sessions:
-                sequence = int(session.event_count or 0) + 1
+            claimed_sessions = claimed_result.all()
+            for claimed in claimed_sessions:
                 db.add(
                     WorkbenchSessionEvent(
-                        session_id=session.id,
+                        session_id=claimed.id,
                         user_id=owner_id,
-                        sequence=sequence,
+                        sequence=int(claimed.event_count),
                         source="backend",
                         actor="cptr_runtime",
                         event_type="command.completed",
@@ -390,16 +434,9 @@ class WorkbenchSessionStore:
                         created_at=now,
                     )
                 )
-                session.event_count = sequence
-                session.updated_at = now
-                session.last_event_at = now
-                session.active_target_type = None
-                session.active_target_id = None
-                session.active_workspace_id = None
-                session.status = "OPEN"
-            if sessions:
+            if claimed_sessions:
                 await db.commit()
-            return len(sessions)
+            return len(claimed_sessions)
 
     async def rename(self, *, owner_id: str, session_id: str, name: str) -> dict[str, Any] | None:
         now = _now_ms()
