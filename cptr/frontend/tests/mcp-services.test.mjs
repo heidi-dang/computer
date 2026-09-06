@@ -81,6 +81,30 @@ test('Stabilize All exposes accessible deterministic progress and final system s
 	assert.match(api, /pass_count:/);
 });
 
+test('Services observability uses one SSE and mobile-first progressive disclosure', async () => {
+	const [component, api] = await Promise.all([
+		read('lib/components/mcp/McpServices.svelte'),
+		read('lib/apis/mcp.ts')
+	]);
+
+	assert.match(api, /export interface McpServicesTelemetry/);
+	assert.match(api, /onTelemetry:/);
+	assert.match(api, /addEventListener\('telemetry'/);
+	assert.match(component, /onTelemetry:/);
+	assert.match(component, /Runtime overview/);
+	assert.match(component, /Active MCP/);
+	assert.match(component, /Request p95/);
+	assert.match(component, /Commands/);
+	assert.match(component, /Workers/);
+	assert.match(component, /<details/);
+	assert.match(component, /mobile-edge-padding/);
+	assert.match(component, /mobile-safe-bottom/);
+	assert.match(component, /touch-target/);
+	assert.match(component, /content-visibility:\s*auto/);
+	assert.match(component, /contain-intrinsic-size/);
+	assert.doesNotMatch(component, /loadSnapshot\(\)\.then\(\(\) => connectStream\(\)\)/);
+});
+
 test('bandClass maps healthy/moderate/unhealthy to distinct visual tokens', async () => {
 	const component = await read('lib/components/mcp/McpServices.svelte');
 	const match = component.match(/function bandClass\([\s\S]*?\n\t\}/);

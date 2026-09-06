@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
-from cptr.env import EVENT_LOOP_LAG_SAMPLE_INTERVAL_MS, METRICS_SAMPLE_WINDOW
+from cptr.env import (
+    EVENT_LOOP_LAG_SAMPLE_INTERVAL_MS,
+    METRICS_PROCESS_SAMPLE_INTERVAL_MS,
+    METRICS_SAMPLE_WINDOW,
+)
 
 
 def _percentile(values: list[float], percentile: float) -> float:
@@ -67,7 +71,15 @@ class RuntimeMetrics:
     max_event_loop_lag_ms: float = 0.0
     last_event_loop_lag_ms: float = 0.0
     started_at: float = field(default_factory=time.time)
+    process_sample_interval_seconds: float = field(
+        default_factory=lambda: METRICS_PROCESS_SAMPLE_INTERVAL_MS / 1000.0
+    )
     _lock: Lock = field(default_factory=Lock, repr=False)
+    _process_lock: Lock = field(default_factory=Lock, repr=False)
+    _cached_process_snapshot: dict[str, int | float | None] | None = field(
+        default=None, repr=False
+    )
+    _last_process_sample_at: float = field(default=float("-inf"), repr=False)
 
     def observe_request(self, duration_ms: float, *, status_code: int) -> None:
         with self._lock:
@@ -94,39 +106,63 @@ class RuntimeMetrics:
                 self.max_event_loop_lag_ms, self.last_event_loop_lag_ms
             )
 
+    def _process_metrics_snapshot(self) -> dict[str, int | float | None]:
+        now = time.monotonic()
+        with self._process_lock:
+            interval = max(0.1, float(self.process_sample_interval_seconds))
+            if (
+                self._cached_process_snapshot is None
+                or now - self._last_process_sample_at >= interval
+            ):
+                self._cached_process_snapshot = _process_snapshot()
+                self._last_process_sample_at = now
+            return dict(self._cached_process_snapshot)
+
     def snapshot(self) -> dict[str, Any]:
+        # Keep the instrumentation lock tiny: copy bounded state under lock, then
+        # sort/aggregate outside it so request/DB observers are never blocked by
+        # percentile work or process probes.
         with self._lock:
             requests = list(self.request_latencies_ms)
             db = list(self.db_latencies_ms)
-            payload = {
-                "uptime_seconds": int(time.time() - self.started_at),
-                "requests": {
-                    "count": self.request_count,
-                    "server_error_count": self.request_error_count,
-                    "latency_ms": {
-                        "p50": round(_percentile(requests, 0.50), 3),
-                        "p95": round(_percentile(requests, 0.95), 3),
-                        "p99": round(_percentile(requests, 0.99), 3),
-                        "samples": len(requests),
-                    },
+            request_count = self.request_count
+            request_error_count = self.request_error_count
+            db_query_count = self.db_query_count
+            db_error_count = self.db_error_count
+            db_busy_count = self.db_busy_count
+            last_event_loop_lag_ms = self.last_event_loop_lag_ms
+            max_event_loop_lag_ms = self.max_event_loop_lag_ms
+            started_at = self.started_at
+
+        payload = {
+            "uptime_seconds": int(time.time() - started_at),
+            "requests": {
+                "count": request_count,
+                "server_error_count": request_error_count,
+                "latency_ms": {
+                    "p50": round(_percentile(requests, 0.50), 3),
+                    "p95": round(_percentile(requests, 0.95), 3),
+                    "p99": round(_percentile(requests, 0.99), 3),
+                    "samples": len(requests),
                 },
-                "database": {
-                    "query_count": self.db_query_count,
-                    "error_count": self.db_error_count,
-                    "busy_count": self.db_busy_count,
-                    "latency_ms": {
-                        "p50": round(_percentile(db, 0.50), 3),
-                        "p95": round(_percentile(db, 0.95), 3),
-                        "p99": round(_percentile(db, 0.99), 3),
-                        "samples": len(db),
-                    },
+            },
+            "database": {
+                "query_count": db_query_count,
+                "error_count": db_error_count,
+                "busy_count": db_busy_count,
+                "latency_ms": {
+                    "p50": round(_percentile(db, 0.50), 3),
+                    "p95": round(_percentile(db, 0.95), 3),
+                    "p99": round(_percentile(db, 0.99), 3),
+                    "samples": len(db),
                 },
-                "event_loop": {
-                    "last_lag_ms": round(self.last_event_loop_lag_ms, 3),
-                    "max_lag_ms": round(self.max_event_loop_lag_ms, 3),
-                },
-            }
-        payload["process"] = _process_snapshot()
+            },
+            "event_loop": {
+                "last_lag_ms": round(last_event_loop_lag_ms, 3),
+                "max_lag_ms": round(max_event_loop_lag_ms, 3),
+            },
+            "process": self._process_metrics_snapshot(),
+        }
         return payload
 
 

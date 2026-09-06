@@ -163,6 +163,32 @@ class McpTrafficStore:
             self._purge_inactive_state()
         return {"accepted": accepted, "duplicates": duplicates, "dropped": dropped}
 
+    def _stream_health(self) -> dict[str, int]:
+        return {
+            "subscriber_count": len(self._subscribers),
+            "slow_subscriber_drops": self._slow_subscriber_drops,
+            "session_evictions": self._session_evictions,
+            "request_evictions": self._request_evictions,
+            "expired_sessions": self._expired_sessions,
+            "event_capacity": self.max_events,
+            "session_capacity": self.max_sessions,
+        }
+
+    async def summary(self) -> dict[str, object]:
+        """Return live aggregate traffic counters without copying the event ring."""
+        async with self._lock:
+            self._purge_inactive_state()
+            return {
+                "version": 1,
+                "sequence": self._ingestion_sequence,
+                "client_count": len(self._clients),
+                "session_count": len(self._sessions),
+                "active_requests": len(self._active_requests),
+                "total_requests": sum(int(client["total_requests"]) for client in self._clients.values()),
+                "errors": sum(int(client["errors"]) for client in self._clients.values()),
+                "stream_health": self._stream_health(),
+            }
+
     async def snapshot(self) -> dict[str, object]:
         async with self._lock:
             self._purge_inactive_state()
@@ -204,15 +230,7 @@ class McpTrafficStore:
                 "clients": clients,
                 "sessions": sessions,
                 "events": list(self._events),
-                "stream_health": {
-                    "subscriber_count": len(self._subscribers),
-                    "slow_subscriber_drops": self._slow_subscriber_drops,
-                    "session_evictions": self._session_evictions,
-                    "request_evictions": self._request_evictions,
-                    "expired_sessions": self._expired_sessions,
-                    "event_capacity": self.max_events,
-                    "session_capacity": self.max_sessions,
-                },
+                "stream_health": self._stream_health(),
             }
 
     async def expire_stale_sessions(self, now_ms: int | None = None) -> int:

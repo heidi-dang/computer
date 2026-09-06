@@ -9,7 +9,8 @@
 		type McpMaintenanceSystemStatus,
 		type McpServiceBand,
 		type McpServiceStatus,
-		type McpServicesSnapshot
+		type McpServicesSnapshot,
+		type McpServicesTelemetry
 	} from '$lib/apis/mcp';
 
 	type StreamStatus = 'loading' | 'live' | 'reconnecting' | 'error';
@@ -29,6 +30,7 @@
 	};
 
 	let snapshot = $state<McpServicesSnapshot | null>(null);
+	let telemetry = $state<McpServicesTelemetry | null>(null);
 	let streamStatus = $state<StreamStatus>('loading');
 	let errorMessage = $state<string | null>(null);
 	let closeStream: (() => void) | null = null;
@@ -50,6 +52,48 @@
 		const value = backendService?.stats?.worker_watchdog;
 		return value && typeof value === 'object' ? (value as WorkerWatchdogSnapshot) : null;
 	});
+	const commandTelemetry = $derived(telemetry?.execution.commands ?? {});
+	const hostTelemetry = $derived(telemetry?.host ?? null);
+
+	function formatMs(value: number | null | undefined): string {
+		if (value == null || !Number.isFinite(value)) return '—';
+		if (value < 1) return `${value.toFixed(2)} ms`;
+		if (value < 100) return `${value.toFixed(1)} ms`;
+		return `${Math.round(value)} ms`;
+	}
+
+	function formatBytes(value: number | null | undefined): string {
+		if (value == null || !Number.isFinite(value) || value < 0) return '—';
+		if (value < 1024) return `${Math.round(value)} B`;
+		const units = ['KB', 'MB', 'GB', 'TB'];
+		let current = value / 1024;
+		let index = 0;
+		while (current >= 1024 && index < units.length - 1) {
+			current /= 1024;
+			index += 1;
+		}
+		return `${current >= 10 ? current.toFixed(0) : current.toFixed(1)} ${units[index]}`;
+	}
+
+	function formatPercent(value: number | null | undefined): string {
+		if (value == null || !Number.isFinite(value)) return '—';
+		return `${value.toFixed(value < 10 ? 1 : 0)}%`;
+	}
+
+	function usedPercent(
+		total: number | null | undefined,
+		available: number | null | undefined
+	): number | null {
+		if (!total || total <= 0 || available == null) return null;
+		return Math.max(0, Math.min(100, ((total - available) / total) * 100));
+	}
+
+	function formatClock(value: string | number | null | undefined): string {
+		if (value == null) return '—';
+		const date = new Date(value);
+		if (Number.isNaN(date.getTime())) return '—';
+		return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+	}
 
 	function bandClass(band: McpServiceBand | string): string {
 		if (band === 'healthy') return 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300';
@@ -69,10 +113,10 @@
 		return 'unhealthy';
 	}
 
-	function applySnapshot(next: McpServicesSnapshot) {
+	function applySnapshot(next: McpServicesSnapshot, fromStream = true) {
 		snapshot = next;
 		errorMessage = null;
-		streamStatus = 'live';
+		if (fromStream) streamStatus = 'live';
 		const activeId = next.maintain?.active_job_id;
 		if (activeId && (!maintainJob || maintainJob.job_id !== activeId)) {
 			void refreshJob(activeId);
@@ -82,7 +126,7 @@
 	async function loadSnapshot() {
 		try {
 			const next = await getMcpServicesSnapshot();
-			applySnapshot(next);
+			applySnapshot(next, false);
 		} catch (error) {
 			errorMessage = error instanceof Error ? error.message : 'Failed to load services snapshot';
 			streamStatus = 'error';
@@ -97,6 +141,10 @@
 			onSnapshot: (next) => {
 				if (generation !== connectionGeneration) return;
 				applySnapshot(next);
+			},
+			onTelemetry: (next) => {
+				if (generation !== connectionGeneration) return;
+				telemetry = next;
 			},
 			onOpen: () => {
 				if (generation !== connectionGeneration) return;
@@ -152,10 +200,10 @@
 	}
 
 	onMount(() => {
-		void loadSnapshot().then(() => connectStream());
+		connectStream();
 		pollTimer = setInterval(() => {
 			if (streamStatus !== 'live') void loadSnapshot();
-		}, 8000);
+		}, 10_000);
 	});
 
 	onDestroy(() => {
@@ -173,8 +221,10 @@
 	}
 </script>
 
-<div class="flex h-full min-h-0 flex-col overflow-hidden">
-	<header class="app-surface shrink-0 border-b px-3 py-3 sm:px-4">
+<div class="services-shell flex h-full min-h-0 flex-col overflow-hidden">
+	<header
+		class="services-header mobile-edge-padding app-surface shrink-0 border-b px-3 py-3 sm:px-4"
+	>
 		<div class="flex flex-wrap items-center gap-2">
 			<span
 				class="rounded-full border px-2.5 py-1 text-xs font-semibold uppercase tracking-wide {bandClass(
@@ -192,18 +242,20 @@
 						: streamStatus}
 			</span>
 			{#if snapshot?.generated_at}
-				<span class="text-[0.7rem] app-muted">{snapshot.generated_at}</span>
+				<span class="text-[0.7rem] tabular-nums app-muted"
+					>{formatClock(snapshot.generated_at)}</span
+				>
 			{/if}
-			<div class="ml-auto flex flex-wrap gap-2">
+			<div class="services-actions ml-auto flex flex-wrap gap-2">
 				<button
-					class="app-interactive rounded-lg border px-3 py-1.5 text-xs font-medium disabled:opacity-50"
+					class="touch-target app-interactive rounded-lg border px-3 py-1.5 text-xs font-medium disabled:opacity-50"
 					disabled={jobRunning}
 					onclick={() => runMaintain('all')}
 				>
 					{jobRunning ? 'Stabilizing…' : 'Stabilize All'}
 				</button>
 				<button
-					class="app-interactive rounded-lg border px-3 py-1.5 text-xs font-medium"
+					class="touch-target app-interactive rounded-lg border px-3 py-1.5 text-xs font-medium"
 					onclick={() => loadSnapshot()}
 				>
 					Refresh
@@ -218,10 +270,185 @@
 		{/if}
 	</header>
 
-	<div class="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4">
+	<div
+		class="services-scroll mobile-edge-padding mobile-safe-bottom min-h-0 flex-1 overflow-y-auto p-3 sm:p-4"
+	>
 		{#if !snapshot}
 			<p class="text-sm app-muted">Loading services snapshot…</p>
 		{:else}
+			{#if telemetry}
+				<section class="observability-section app-subtle-surface mb-4 rounded-xl border p-3">
+					<div class="mb-3 flex items-center justify-between gap-3">
+						<div>
+							<h2 class="text-sm font-semibold">Runtime overview</h2>
+							<p class="mt-0.5 text-[0.68rem] app-muted">
+								Bounded telemetry · no payloads or browser frames
+							</p>
+						</div>
+						<span class="shrink-0 text-[0.68rem] tabular-nums app-muted">
+							{formatClock(telemetry.generated_at_ms)}
+						</span>
+					</div>
+
+					<div class="observability-grid grid grid-cols-2 gap-2 lg:grid-cols-3 xl:grid-cols-6">
+						<article class="metric-card rounded-lg border border-white/5 p-2.5">
+							<p class="metric-label app-muted">Active MCP</p>
+							<p class="metric-value">{telemetry.mcp.active_requests}</p>
+							<p class="metric-meta app-muted">
+								{telemetry.mcp.session_count} sessions · {telemetry.mcp.client_count} clients
+							</p>
+						</article>
+						<article class="metric-card rounded-lg border border-white/5 p-2.5">
+							<p class="metric-label app-muted">Request p95</p>
+							<p class="metric-value">{formatMs(telemetry.runtime.requests.p95_ms)}</p>
+							<p class="metric-meta app-muted">
+								{telemetry.runtime.requests.server_error_count} backend errors
+							</p>
+						</article>
+						<article class="metric-card rounded-lg border border-white/5 p-2.5">
+							<p class="metric-label app-muted">Commands</p>
+							<p class="metric-value">
+								{commandTelemetry.capacity_used ?? 0}/{commandTelemetry.capacity_limit ?? '—'}
+							</p>
+							<p class="metric-meta app-muted">
+								{commandTelemetry.active ?? 0} active · {commandTelemetry.launching ?? 0} launching
+							</p>
+						</article>
+						<article class="metric-card rounded-lg border border-white/5 p-2.5">
+							<p class="metric-label app-muted">Workers</p>
+							<p class="metric-value">{telemetry.workers.healthy}/{telemetry.workers.total}</p>
+							<p class="metric-meta app-muted">{telemetry.workers.restarts} restarts in window</p>
+						</article>
+						<article class="metric-card rounded-lg border border-white/5 p-2.5">
+							<p class="metric-label app-muted">Host CPU</p>
+							<p class="metric-value">{formatPercent(hostTelemetry?.cpu_usage_percent)}</p>
+							<p class="metric-meta app-muted">
+								CPTR {formatPercent(hostTelemetry?.cptr_process?.cpu_percent)}
+							</p>
+						</article>
+						<article class="metric-card rounded-lg border border-white/5 p-2.5">
+							<p class="metric-label app-muted">Event loop</p>
+							<p class="metric-value">{formatMs(telemetry.runtime.event_loop.last_lag_ms)}</p>
+							<p class="metric-meta app-muted">
+								{telemetry.runtime.process.open_fds ?? '—'} open FDs
+							</p>
+						</article>
+					</div>
+
+					<div class="mt-2 grid gap-2 lg:grid-cols-3">
+						<details class="observability-detail rounded-lg border border-white/5">
+							<summary
+								class="touch-target flex cursor-pointer items-center px-3 text-xs font-medium"
+								>Runtime details</summary
+							>
+							<dl class="detail-grid border-t border-white/5 px-3 py-2 text-[0.7rem]">
+								<div>
+									<dt>HTTP requests</dt>
+									<dd>{telemetry.runtime.requests.count}</dd>
+								</div>
+								<div>
+									<dt>HTTP errors</dt>
+									<dd>{telemetry.runtime.requests.server_error_count}</dd>
+								</div>
+								<div>
+									<dt>DB p95</dt>
+									<dd>{formatMs(telemetry.runtime.database.p95_ms)}</dd>
+								</div>
+								<div>
+									<dt>DB busy</dt>
+									<dd>{telemetry.runtime.database.busy_count}</dd>
+								</div>
+								<div>
+									<dt>DB errors</dt>
+									<dd>{telemetry.runtime.database.error_count}</dd>
+								</div>
+								<div>
+									<dt>CPTR RSS</dt>
+									<dd>{formatBytes(telemetry.runtime.process.rss_bytes)}</dd>
+								</div>
+							</dl>
+						</details>
+						<details class="observability-detail rounded-lg border border-white/5">
+							<summary
+								class="touch-target flex cursor-pointer items-center px-3 text-xs font-medium"
+								>Execution & pressure</summary
+							>
+							<dl class="detail-grid border-t border-white/5 px-3 py-2 text-[0.7rem]">
+								<div>
+									<dt>MCP total</dt>
+									<dd>{telemetry.mcp.total_requests}</dd>
+								</div>
+								<div>
+									<dt>MCP errors</dt>
+									<dd>{telemetry.mcp.errors}</dd>
+								</div>
+								<div>
+									<dt>Backend RTT p95</dt>
+									<dd>{formatMs(telemetry.mcp.backend_rtt_p95_ms)}</dd>
+								</div>
+								<div>
+									<dt>Retained commands</dt>
+									<dd>{commandTelemetry.completed_retained ?? 0}</dd>
+								</div>
+								<div>
+									<dt>Unreconciled exits</dt>
+									<dd>{commandTelemetry.exited_unreconciled ?? 0}</dd>
+								</div>
+								<div>
+									<dt>Live-event queue</dt>
+									<dd>{telemetry.pressure.live_event_queue_percent.toFixed(2)}%</dd>
+								</div>
+							</dl>
+						</details>
+						<details class="observability-detail rounded-lg border border-white/5">
+							<summary
+								class="touch-target flex cursor-pointer items-center px-3 text-xs font-medium"
+								>Host resources</summary
+							>
+							{#if hostTelemetry}
+								<dl class="detail-grid border-t border-white/5 px-3 py-2 text-[0.7rem]">
+									<div>
+										<dt>Memory used</dt>
+										<dd>
+											{formatPercent(
+												usedPercent(
+													hostTelemetry.memory_total_bytes,
+													hostTelemetry.memory_available_bytes
+												)
+											)}
+										</dd>
+									</div>
+									<div>
+										<dt>Memory free</dt>
+										<dd>{formatBytes(hostTelemetry.memory_available_bytes)}</dd>
+									</div>
+									<div>
+										<dt>Disk free</dt>
+										<dd>{formatBytes(hostTelemetry.disk_free_bytes)}</dd>
+									</div>
+									<div>
+										<dt>Network RX</dt>
+										<dd>{formatBytes(hostTelemetry.network_rx_bytes_per_s)}/s</dd>
+									</div>
+									<div>
+										<dt>Network TX</dt>
+										<dd>{formatBytes(hostTelemetry.network_tx_bytes_per_s)}/s</dd>
+									</div>
+									<div>
+										<dt>GPU</dt>
+										<dd>{hostTelemetry.gpu_status}</dd>
+									</div>
+								</dl>
+							{:else}
+								<p class="border-t border-white/5 px-3 py-2 text-[0.7rem] app-muted">
+									Host sampler has not produced a sample yet.
+								</p>
+							{/if}
+						</details>
+					</div>
+				</section>
+			{/if}
+
 			<!-- Plugin identity -->
 			<section class="app-subtle-surface mb-4 rounded-xl border p-3">
 				<div class="mb-2 flex flex-wrap items-center gap-2">
@@ -265,7 +492,7 @@
 			</section>
 
 			<!-- Service grid -->
-			<section class="grid gap-3 md:grid-cols-2">
+			<section class="deferred-panel grid gap-3 md:grid-cols-2">
 				{#each services as service (service.id)}
 					<article class="app-subtle-surface rounded-xl border p-3">
 						<div class="mb-2 flex flex-wrap items-center gap-2">
@@ -277,7 +504,7 @@
 							>
 							<span class="text-[0.65rem] app-muted">score {service.score.toFixed(2)}</span>
 							<button
-								class="ml-auto app-interactive rounded-md border px-2 py-1 text-[0.65rem] disabled:opacity-50"
+								class="touch-target ml-auto app-interactive rounded-md border px-2 py-1 text-[0.65rem] disabled:opacity-50"
 								disabled={jobRunning}
 								onclick={() => runMaintain(service.id)}
 							>
@@ -288,7 +515,7 @@
 							<p class="mb-1 text-[0.7rem] text-rose-300">{service.last_error}</p>
 						{/if}
 						<button
-							class="text-[0.7rem] app-muted underline-offset-2 hover:underline"
+							class="touch-target inline-flex items-center text-[0.7rem] app-muted underline-offset-2 hover:underline"
 							onclick={() => toggleService(service.id)}
 						>
 							{expandedServiceId === service.id ? 'Hide probes' : 'Why this band'}
@@ -343,7 +570,7 @@
 
 			<!-- Job drawer -->
 			{#if maintainJob}
-				<section class="app-subtle-surface mt-4 rounded-xl border p-3">
+				<section class="deferred-panel app-subtle-surface mt-4 rounded-xl border p-3">
 					<div
 						class="mb-3 rounded-lg border border-white/5 px-2.5 py-2"
 						role="status"
@@ -406,7 +633,7 @@
 								</div>
 								{#if step.evidence && Object.keys(step.evidence).length}
 									<pre
-										class="mt-1 max-h-24 overflow-auto whitespace-pre-wrap app-muted">{JSON.stringify(
+										class="mt-1 max-h-24 overflow-auto whitespace-pre-wrap break-all app-muted">{JSON.stringify(
 											step.evidence,
 											null,
 											0
@@ -423,3 +650,100 @@
 		{/if}
 	</div>
 </div>
+
+<style>
+	.metric-card,
+	.detail-grid dd,
+	.services-header {
+		font-variant-numeric: tabular-nums;
+	}
+
+	.metric-card {
+		min-width: 0;
+		background: color-mix(in oklab, var(--app-surface-subtle) 88%, transparent);
+	}
+
+	.metric-label {
+		font-size: 0.68rem;
+	}
+
+	.metric-value {
+		margin-top: 0.15rem;
+		font-size: 1.05rem;
+		font-weight: 650;
+		line-height: 1.25;
+		letter-spacing: -0.015em;
+	}
+
+	.metric-meta {
+		margin-top: 0.25rem;
+		font-size: 0.64rem;
+		line-height: 1.25;
+	}
+
+	.observability-detail > summary {
+		min-height: 2.75rem;
+		list-style-position: inside;
+	}
+
+	.detail-grid {
+		display: grid;
+		gap: 0.4rem;
+	}
+
+	.detail-grid > div {
+		display: flex;
+		min-width: 0;
+		align-items: baseline;
+		justify-content: space-between;
+		gap: 0.75rem;
+	}
+
+	.detail-grid dt {
+		color: var(--app-muted);
+	}
+
+	.detail-grid dd {
+		min-width: 0;
+		text-align: right;
+		font-weight: 500;
+		overflow-wrap: anywhere;
+	}
+
+	.deferred-panel {
+		content-visibility: auto;
+		contain-intrinsic-size: auto 320px;
+	}
+
+	@media (max-width: 767px) {
+		.services-header,
+		.services-scroll {
+			padding-left: max(0.75rem, env(safe-area-inset-left, 0px));
+			padding-right: max(0.75rem, env(safe-area-inset-right, 0px));
+		}
+
+		.services-scroll {
+			overscroll-behavior: contain;
+			-webkit-overflow-scrolling: touch;
+		}
+
+		.services-actions {
+			margin-left: 0;
+			width: 100%;
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) auto;
+		}
+
+		.services-actions > button {
+			min-height: 2.75rem;
+		}
+
+		.metric-card {
+			min-height: 5.25rem;
+		}
+
+		.observability-section {
+			padding: 0.65rem;
+		}
+	}
+</style>

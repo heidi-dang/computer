@@ -343,8 +343,14 @@ def _disk_capacity() -> tuple[int | None, int | None, int | None]:
         return None, None, None
 
 
-def collect_backend_counters() -> BackendCounterSnapshot:
-    """Collect one best-effort synchronous host counter snapshot."""
+def collect_backend_counters(
+    *,
+    include_expensive: bool = True,
+    cached_processes: list[McpProcessMetrics] | None = None,
+    cached_gpu_status: _GPU_STATUS = "unavailable",
+    cached_gpus: list[McpGpuMetrics] | None = None,
+) -> BackendCounterSnapshot:
+    """Collect one best-effort host snapshot with optional expensive process/GPU probes."""
     timestamp_ms = int(time.time() * 1000)
     cpu_total, cpu_idle = _read_proc_cpu()
     memory_total, memory_available = _read_proc_memory()
@@ -352,7 +358,13 @@ def collect_backend_counters() -> BackendCounterSnapshot:
     disk_read, disk_write, disk_read_ops, disk_write_ops = _read_proc_diskstats()
     network_rx, network_tx = _read_proc_network()
     process_ticks, process_rss, clock_ticks, process_name = _read_process_counters()
-    gpu_status, gpus = _collect_gpu_metrics()
+    if include_expensive:
+        processes = _collect_processes()
+        gpu_status, gpus = _collect_gpu_metrics()
+    else:
+        processes = list(cached_processes or [])[:10]
+        gpu_status = cached_gpu_status
+        gpus = list(cached_gpus or [])[:16]
     try:
         load_avg = [max(0.0, float(value)) for value in os.getloadavg()[:3]]
     except (AttributeError, OSError):
@@ -380,7 +392,7 @@ def collect_backend_counters() -> BackendCounterSnapshot:
         cptr_process_rss_bytes=process_rss,
         clock_ticks_per_second=clock_ticks,
         cptr_process_name=process_name,
-        processes=_collect_processes(),
+        processes=processes,
         gpus=gpus,
         gpu_status=gpu_status,
     )
@@ -533,12 +545,25 @@ def _fallback_counter_snapshot() -> BackendCounterSnapshot:
 
 
 class BackendMetricsSampler:
-    """Idempotent asynchronous sampler that keeps all blocking probes off-loop."""
+    """Idempotent sampler with cheap fast counters and decimated process/GPU probes."""
 
-    def __init__(self, store: _SystemSampleStore, interval_seconds: float = 1.0) -> None:
+    def __init__(
+        self,
+        store: _SystemSampleStore,
+        interval_seconds: float = 1.0,
+        expensive_interval_seconds: float = 10.0,
+    ) -> None:
         self.store = store
         self.interval_seconds = min(10.0, max(0.5, float(interval_seconds)))
+        self.expensive_interval_seconds = min(
+            60.0,
+            max(self.interval_seconds, float(expensive_interval_seconds)),
+        )
         self._previous: BackendCounterSnapshot | None = None
+        self._cached_processes: list[McpProcessMetrics] = []
+        self._cached_gpu_status: _GPU_STATUS = "unavailable"
+        self._cached_gpus: list[McpGpuMetrics] = []
+        self._next_expensive_sample_at = 0.0
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._start_lock = asyncio.Lock()
@@ -551,10 +576,23 @@ class BackendMetricsSampler:
             self._task = asyncio.create_task(self._run(), name="mcp-backend-metrics")
 
     async def sample_once(self) -> McpBackendMetricsSample:
+        now = time.monotonic()
+        include_expensive = now >= self._next_expensive_sample_at
         try:
-            counters = await asyncio.to_thread(collect_backend_counters)
+            counters = await asyncio.to_thread(
+                collect_backend_counters,
+                include_expensive=include_expensive,
+                cached_processes=self._cached_processes,
+                cached_gpu_status=self._cached_gpu_status,
+                cached_gpus=self._cached_gpus,
+            )
         except Exception:
             counters = _fallback_counter_snapshot()
+        if include_expensive:
+            self._cached_processes = list(counters.processes)[:10]
+            self._cached_gpu_status = counters.gpu_status
+            self._cached_gpus = list(counters.gpus)[:16]
+            self._next_expensive_sample_at = now + self.expensive_interval_seconds
         sample = derive_backend_metrics(self._previous, counters)
         self._previous = counters
         await self.store.record_system_sample(sample)
@@ -592,6 +630,15 @@ mcp_metrics_sampler = BackendMetricsSampler(
     mcp_diagnostics_store,
     interval_seconds=(
         _bounded_env_int("CPTR_MCP_SYSTEM_METRICS_INTERVAL_MS", 1000, 500, 10_000) / 1000
+    ),
+    expensive_interval_seconds=(
+        _bounded_env_int(
+            "CPTR_MCP_SYSTEM_METRICS_EXPENSIVE_INTERVAL_MS",
+            10_000,
+            2_000,
+            60_000,
+        )
+        / 1000
     ),
 )
 

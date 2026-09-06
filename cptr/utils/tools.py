@@ -1044,10 +1044,10 @@ async def shutdown_command_sessions(*, timeout: float = TASK_CANCELLATION_TIMEOU
     _accept_new_command_sessions = True
 
 
-def command_session_metrics() -> dict[str, int]:
-    stats = command_session_registry.stats()
+def _command_terminal_metrics(stats: dict[str, int]) -> dict[str, int]:
     stats.update(
         {
+            "capacity_limit": MAX_COMMAND_SESSIONS,
             "terminal_events_published": sum(
                 int(session.get("terminal_events_published") or 0)
                 for session in command_sessions.values()
@@ -1059,6 +1059,16 @@ def command_session_metrics() -> dict[str, int]:
         }
     )
     return stats
+
+
+def command_session_passive_metrics() -> dict[str, int]:
+    """Return read-only command telemetry; never reconcile process ownership."""
+    return _command_terminal_metrics(command_session_registry.passive_stats())
+
+
+def command_session_metrics() -> dict[str, int]:
+    """Return authoritative command metrics after lifecycle reconciliation."""
+    return _command_terminal_metrics(command_session_registry.stats())
 
 
 def _owned_command_sessions(message_id: str) -> list[dict[str, Any]]:

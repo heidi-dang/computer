@@ -133,6 +133,56 @@ class SystemMetricsGpuTests(unittest.TestCase):
 
 
 class SystemMetricsSamplerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_expensive_process_and_gpu_probes_are_decimated(self):
+        store = SimpleNamespace(record_system_sample=AsyncMock())
+        sampler = BackendMetricsSampler(
+            store,
+            interval_seconds=1,
+            expensive_interval_seconds=10,
+        )
+        current = BackendCounterSnapshot(
+            timestamp_ms=1000,
+            cpu_total=1000,
+            cpu_idle=400,
+            cpu_count=8,
+            memory_total=2000,
+            memory_available=500,
+            disk_total=4000,
+            disk_used=1000,
+            disk_free=3000,
+            disk_read_bytes=None,
+            disk_write_bytes=None,
+            disk_read_ops=None,
+            disk_write_ops=None,
+            network_rx_bytes=None,
+            network_tx_bytes=None,
+            uptime_seconds=10,
+            load_avg=[],
+            cptr_process_cpu_ticks=None,
+            cptr_process_rss_bytes=None,
+            clock_ticks_per_second=None,
+            cptr_process_name="cptr",
+            processes=[],
+            gpus=[],
+            gpu_status="unavailable",
+        )
+        modes: list[bool] = []
+
+        def collect(**kwargs):
+            modes.append(bool(kwargs.get("include_expensive")))
+            return replace(current, timestamp_ms=1000 + len(modes) * 1000)
+
+        with (
+            patch("cptr.services.system_metrics.collect_backend_counters", side_effect=collect),
+            patch("cptr.services.system_metrics.time.monotonic", side_effect=[100.0, 101.0]),
+        ):
+            await sampler.sample_once()
+            await sampler.sample_once()
+
+        self.assertEqual(modes, [True, False])
+        self.assertEqual(store.record_system_sample.await_count, 2)
+        await sampler.close()
+
     async def test_sample_once_collects_off_loop_and_records_derived_sample(self):
         store = SimpleNamespace(record_system_sample=AsyncMock())
         sampler = BackendMetricsSampler(store, interval_seconds=1)

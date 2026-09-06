@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from collections import deque
 from typing import Any
 
@@ -31,6 +32,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 
+from cptr.env import (
+    MCP_SERVICES_HEALTH_INTERVAL_MS,
+    MCP_SERVICES_KEEPALIVE_INTERVAL_MS,
+    MCP_SERVICES_TELEMETRY_INTERVAL_MS,
+)
 from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
 from cptr.routers.admin import require_admin
@@ -47,6 +53,7 @@ from cptr.services.mcp_traffic import McpTrafficBatch, mcp_traffic_store
 from cptr.services.mcp_usage_store import mcp_usage_store
 from cptr.services.mcp_topology_config import get_topology_config, update_topology_aliases
 from cptr.services.mcp_services_health import mcp_services_health
+from cptr.services.mcp_services_observability import mcp_services_observability
 from cptr.services.mcp_services_maintain import (
     MaintainConflictError,
     MaintainIdempotencyConflictError,
@@ -1124,31 +1131,75 @@ async def get_mcp_services_snapshot(request: Request):
 
 @router.get("/services/stream")
 async def stream_mcp_services(request: Request):
-    """SSE of services snapshot deltas / heartbeats for the admin UI."""
+    """One low-overhead SSE carrying slow health state and compact telemetry deltas."""
     admin = require_admin(request)
 
     async def _event_stream():
+        health_interval = MCP_SERVICES_HEALTH_INTERVAL_MS / 1000.0
+        telemetry_interval = MCP_SERVICES_TELEMETRY_INTERVAL_MS / 1000.0
+        keepalive_interval = MCP_SERVICES_KEEPALIVE_INTERVAL_MS / 1000.0
+        loop_interval = max(0.25, min(1.0, telemetry_interval, health_interval))
         previous_fingerprint: str | None = None
-        quiet_ticks = 0
-        yield "retry: 2000\n\n"
+
+        yield "retry: 3000\n\n"
+
+        # Initial state is self-contained, so the UI does not need to perform a
+        # duplicate full snapshot before opening the stream.
+        snapshot = await mcp_services_health.snapshot(
+            user_id=admin.user_id,
+            active_job_id=mcp_services_maintain.active_job_id(owner_id=admin.user_id),
+        )
+        previous_fingerprint = str(snapshot.get("fingerprint") or "")
+        yield _services_sse("snapshot", snapshot)
+        try:
+            yield _services_sse("telemetry", await mcp_services_observability.snapshot())
+        except Exception:
+            logger.debug("services telemetry initial snapshot unavailable", exc_info=True)
+
+        now = time.monotonic()
+        next_health = now + health_interval
+        next_telemetry = now + telemetry_interval
+        next_keepalive = now + keepalive_interval
+
         while True:
             if await request.is_disconnected():
                 break
-            snapshot = await mcp_services_health.snapshot(
-                user_id=admin.user_id,
-                active_job_id=mcp_services_maintain.active_job_id(owner_id=admin.user_id),
-            )
-            fingerprint = str(snapshot.get("fingerprint") or "")
-            if fingerprint != previous_fingerprint:
-                previous_fingerprint = fingerprint
-                quiet_ticks = 0
-                yield _services_sse("snapshot", snapshot)
-            else:
-                quiet_ticks += 1
-                if quiet_ticks >= 10:
-                    quiet_ticks = 0
-                    yield ": keepalive\n\n"
-            await asyncio.sleep(2.0)
+            now = time.monotonic()
+            emitted = False
+
+            if now >= next_health:
+                next_health = now + health_interval
+                try:
+                    snapshot = await mcp_services_health.snapshot(
+                        user_id=admin.user_id,
+                        active_job_id=mcp_services_maintain.active_job_id(owner_id=admin.user_id),
+                    )
+                except Exception:
+                    logger.debug("services health refresh unavailable", exc_info=True)
+                else:
+                    fingerprint = str(snapshot.get("fingerprint") or "")
+                    if fingerprint != previous_fingerprint:
+                        previous_fingerprint = fingerprint
+                        yield _services_sse("snapshot", snapshot)
+                        emitted = True
+
+            if now >= next_telemetry:
+                next_telemetry = now + telemetry_interval
+                try:
+                    telemetry = await mcp_services_observability.snapshot()
+                except Exception:
+                    logger.debug("services telemetry refresh unavailable", exc_info=True)
+                else:
+                    yield _services_sse("telemetry", telemetry)
+                    emitted = True
+
+            if emitted:
+                next_keepalive = now + keepalive_interval
+            elif now >= next_keepalive:
+                next_keepalive = now + keepalive_interval
+                yield ": keepalive\n\n"
+
+            await asyncio.sleep(loop_interval)
 
     return StreamingResponse(
         _event_stream(),

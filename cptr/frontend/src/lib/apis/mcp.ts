@@ -1393,6 +1393,65 @@ export interface McpServicesSnapshot {
 	maintain: { active_job_id: string | null };
 }
 
+export interface McpServicesTelemetry {
+	version: 1;
+	generated_at_ms: number;
+	runtime: {
+		uptime_seconds: number;
+		requests: { count: number; server_error_count: number; p95_ms: number; samples: number };
+		database: {
+			query_count: number;
+			error_count: number;
+			busy_count: number;
+			p95_ms: number;
+			samples: number;
+		};
+		event_loop: { last_lag_ms?: number | null; max_lag_ms?: number | null };
+		process: { rss_bytes?: number | null; open_fds?: number | null; cpu_seconds?: number | null };
+	};
+	execution: {
+		commands: {
+			active?: number;
+			launching?: number;
+			capacity_used?: number;
+			capacity_limit?: number;
+			completed_retained?: number;
+			exited_unreconciled?: number;
+			terminal_events_published?: number;
+			terminal_event_dropped_bytes?: number;
+		};
+		live_events: Record<string, number>;
+	};
+	workers: {
+		aggregate: string;
+		total: number;
+		healthy: number;
+		degraded: number;
+		restarts: number;
+	};
+	mcp: {
+		client_count: number;
+		session_count: number;
+		active_requests: number;
+		total_requests: number;
+		errors: number;
+		failure_count: number;
+		backend_rtt_p95_ms: number;
+		backend_rtt_samples: number;
+		backend_rtt_health: string;
+	};
+	host: McpBackendMetricsSample | null;
+	pressure: {
+		live_event_queue_percent: number;
+		live_event_queue_depth: number;
+		live_event_queue_capacity: number;
+		live_event_subscribers: number;
+		live_event_slow_disconnects: number;
+		mcp_diagnostics_slow_drops: number;
+		mcp_traffic_slow_drops: number;
+	};
+}
+
 export interface McpMaintainStep {
 	step_id: string;
 	started_at: string | null;
@@ -1419,6 +1478,7 @@ export interface McpMaintainJob {
 
 export interface McpServicesStreamCallbacks {
 	onSnapshot: (snapshot: McpServicesSnapshot) => void;
+	onTelemetry: (telemetry: McpServicesTelemetry) => void;
 	onOpen?: () => void;
 	onError?: (error: unknown) => void;
 }
@@ -1428,14 +1488,22 @@ export const getMcpServicesSnapshot = () =>
 
 export function openMcpServicesStream(callbacks: McpServicesStreamCallbacks): () => void {
 	const source = new EventSource('/api/mcp/services/stream');
-	const parse = (message: MessageEvent<string>) => {
+	const parseSnapshot = (message: MessageEvent<string>) => {
 		try {
 			callbacks.onSnapshot(JSON.parse(message.data) as McpServicesSnapshot);
 		} catch (error) {
 			callbacks.onError?.(error);
 		}
 	};
-	source.addEventListener('snapshot', (event) => parse(event as MessageEvent<string>));
+	const parseTelemetry = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onTelemetry(JSON.parse(message.data) as McpServicesTelemetry);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+	source.addEventListener('snapshot', (event) => parseSnapshot(event as MessageEvent<string>));
+	source.addEventListener('telemetry', (event) => parseTelemetry(event as MessageEvent<string>));
 	source.onopen = () => callbacks.onOpen?.();
 	source.onerror = (event) => callbacks.onError?.(event);
 	return () => source.close();

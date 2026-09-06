@@ -83,6 +83,34 @@ class McpDiagnosticsSchemaTests(unittest.TestCase):
 
 
 class McpDiagnosticsStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def test_summary_is_compact_and_keeps_latest_system_and_latency_aggregates(self):
+        store = McpDiagnosticsStore(max_latency_samples_per_edge=5, max_failures=4, max_system_samples=3)
+        await store.ingest([latency("summary-latency", 44), failure("summary-failure")])
+        await store.record_system_sample(
+            McpBackendMetricsSample(
+                timestamp_ms=BASE_TS + 100,
+                cpu_usage_percent=12.5,
+                cpu_count=8,
+                memory_total_bytes=1000,
+                memory_available_bytes=600,
+                disk_total_bytes=2000,
+                disk_used_bytes=500,
+                disk_free_bytes=1500,
+                gpu_status="unavailable",
+            )
+        )
+
+        summary = await store.summary()
+
+        self.assertNotIn("failures", summary)
+        self.assertNotIn("usage", summary)
+        self.assertEqual(summary["failure_count"], 1)
+        self.assertEqual(summary["latest_system"]["cpu_usage_percent"], 12.5)
+        self.assertEqual(
+            summary["latency"]["cptr-mcp-cptr-backend"]["health_p95_ms"], 44
+        )
+        self.assertEqual(summary["stream_health"]["failure_capacity"], 4)
+
     async def test_non_chatgpt_client_diagnostics_are_dropped(self):
         store = McpDiagnosticsStore()
         event = failure("diagnostic-foreign-client").model_copy(

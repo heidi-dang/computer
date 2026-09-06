@@ -84,6 +84,47 @@ def snapshot_kwargs():
 
 
 class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_services_stream_emits_one_initial_health_snapshot_then_compact_telemetry(self):
+        health = make_health()
+        fixed = await health.snapshot(user_id="admin-1", **snapshot_kwargs())
+        telemetry = {
+            "version": 1,
+            "generated_at_ms": 1234,
+            "runtime": {"requests": {"p95_ms": 10}},
+            "execution": {"commands": {"active": 0}},
+            "workers": {"total": 6, "healthy": 6},
+            "mcp": {"active_requests": 0},
+            "host": None,
+            "pressure": {"live_event_queue_percent": 0.0},
+        }
+        admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
+        request = route_request()
+        health_snapshot = AsyncMock(return_value=fixed)
+        telemetry_snapshot = AsyncMock(return_value=telemetry)
+
+        with (
+            patch.object(mcp_router, "require_admin", admin),
+            patch.object(health, "snapshot", new=health_snapshot),
+            patch.object(mcp_router, "mcp_services_health", health),
+            patch.object(
+                mcp_router.mcp_services_observability,
+                "snapshot",
+                new=telemetry_snapshot,
+            ),
+        ):
+            response = await mcp_router.stream_mcp_services(request)
+            iterator = response.body_iterator
+            retry = await anext(iterator)
+            health_event = await anext(iterator)
+            telemetry_event = await anext(iterator)
+            await iterator.aclose()
+
+        self.assertEqual(retry, "retry: 3000\n\n")
+        self.assertIn("event: snapshot", health_event)
+        self.assertIn("event: telemetry", telemetry_event)
+        self.assertEqual(health_snapshot.await_count, 1)
+        self.assertEqual(telemetry_snapshot.await_count, 1)
+
     async def test_snapshot_requires_admin_and_shape(self):
         health = make_health()
         maintain = McpServicesMaintainService(health=health)

@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🔌 **Services health API.** `GET /api/mcp/services/snapshot`, `GET /api/mcp/services/stream`, `POST /api/mcp/services/maintain`, and job status/event endpoints expose bounded, admin-only health aggregates without free-form remediation.
 - 📈 **Backend performance metrics and readiness checks.** Admins can inspect bounded request, database, event-loop, command-session, live-event, process-memory, file-descriptor, and SQLite WAL metrics; separate liveness and readiness endpoints make service supervision more reliable.
 - 🧪 **Performance regression contracts.** Tests now guard bounded directory traversal, concurrent batch reads, deduplicated search context reads, terminal chunk integrity, live-event batching, and command-session retention.
+- 📡 **Performance-bounded Services observability cockpit.** The admin Services view now receives compact runtime, command, worker, MCP, host-resource, and queue-pressure telemetry over its existing SSE connection, with a mobile-first iOS layout, safe-area handling, accessible touch targets, and progressive detail disclosure.
 
 ### Changed
 
@@ -21,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - 🗂️ **Direct-coding repository inspection does less filesystem work.** Non-recursive listing no longer recursively counts child files, recursive pagination stops at the requested page boundary, multi-file reads use bounded concurrency, and search context reads each source file once.
 - 🔐 **Control API keys use indexed lookup with bounded principal caching.** Existing JSON-stored keys are migrated automatically and remain mirrored for compatibility.
 - 🧱 **SQLite connections are tuned for concurrent CPTR workloads.** Foreign-key enforcement, bounded busy waits, WAL checkpointing, memory cache, mmap, and configurable synchronous durability are applied consistently.
+- ⚙️ **Monitoring work is tiered by cost.** Services uses compact telemetry at a faster cadence than full health probes, command monitoring is read-only, runtime process probes are cached, and expensive `ps`/GPU sampling is decimated while cheap `/proc` counters stay responsive.
 
 ### Fixed
 
