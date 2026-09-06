@@ -867,6 +867,20 @@ def apply_markdown_memory_batch(
             store(target, next_text)
             messages.append(f"added memory section to {_relative_to_root(target, root.root)}")
 
+        elif action == "set":
+            content = str(operation.get("content") or "").strip()
+            if not content:
+                return {"success": False, "error": f"{operation_name}: content is required"}
+            validation_error = memory_text_error(content)
+            if validation_error:
+                return {"success": False, "error": f"{operation_name}: {validation_error}"}
+            target = read_target(operation)
+            existing = load(target)
+            if existing:
+                _backup_to_trash(target, "set", root.root)
+            store(target, content.rstrip() + "\n")
+            messages.append(f"set memory file {_relative_to_root(target, root.root)}")
+
         elif action == "replace":
             content = str(operation.get("content") or "").strip()
             old_text = str(operation.get("old_text") or "").strip()
@@ -1346,6 +1360,18 @@ async def remember(
     scope: str,
     operations: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    # memory_extended historically emitted {"type": "set"}; normalize that legacy
+    # shape at the authoritative write boundary so managed and canonical stores agree.
+    operations = [
+        (
+            {**operation, "action": "set"}
+            if isinstance(operation, dict)
+            and not operation.get("action")
+            and operation.get("type") == "set"
+            else operation
+        )
+        for operation in operations
+    ]
     settings = await get_memory_settings()
     if not settings["enabled"]:
         result = {"success": False, "error": "memory writes are disabled"}
@@ -1374,6 +1400,7 @@ async def remember(
                 if not isinstance(operation, dict) or operation.get("action") not in {
                     "add",
                     "replace",
+                    "set",
                 }:
                     continue
                 content = str(operation.get("content") or "").strip()

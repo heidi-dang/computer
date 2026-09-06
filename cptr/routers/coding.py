@@ -35,6 +35,7 @@ from cptr.env import (
     COMMAND_INLINE_WAIT_MAX_SECONDS,
     DIRECT_CODING_IO_CONCURRENCY,
 )
+from cptr.memory.observations import observe_execution_outcome
 from cptr.models import ControlIdempotency, Workspace
 from cptr.services.control_auth import require_control_user
 from cptr.services.direct_coding_workers import (
@@ -978,6 +979,47 @@ async def _command_snapshot(
     return result
 
 
+async def _observe_completed_command_memory(
+    request: Request,
+    *,
+    user_id: str,
+    workspace_path: str,
+    command_id: str,
+    snapshot: dict[str, Any],
+) -> None:
+    """Best-effort promotion of one completed command outcome into persistent memory."""
+    if str(snapshot.get("status") or "").upper() != "COMPLETE":
+        return
+    session = get_command_session(request, command_id)
+    if session is None or session.get("workspace") != workspace_path:
+        # Recovered transcripts remain readable, but are not re-promoted after restart.
+        return
+    if bool(session.get("memory_observation_checked")):
+        return
+    command = str(session.get("memory_command") or session.get("command") or "").strip()
+    if not command:
+        session["memory_observation_checked"] = True
+        return
+    metadata = session.get("memory_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    try:
+        await observe_execution_outcome(
+            user_id=user_id,
+            workspace=workspace_path,
+            action=str(session.get("memory_action") or "command"),
+            command=command,
+            status=str(snapshot.get("status") or ""),
+            exit_code=snapshot.get("exit_code"),
+            output=str(snapshot.get("output") or ""),
+            metadata=metadata,
+        )
+    except Exception:
+        # Memory learning must never make an otherwise successful control action fail.
+        return
+    session["memory_observation_checked"] = True
+
+
 async def _bounded_tree(
     request: Request,
     *,
@@ -1453,14 +1495,31 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
     if match is None:
         raise HTTPException(status_code=422, detail=response)
     await _touch_worker(user_id, workspace_id, body.worker_id)
+    command_id = match.group(1)
+    session = get_command_session(request, command_id)
+    if session is not None and session.get("workspace") == str(root):
+        session["memory_action"] = "test"
+        session["memory_command"] = command
+        session["memory_metadata"] = {
+            "target": body.target,
+            "transport": "local-test",
+            "force_future_utility": True,
+        }
     snapshot = await _command_snapshot(
         request,
         workspace_path=str(root),
-        command_id=match.group(1),
+        command_id=command_id,
         wait_seconds=0,
     )
-    if body.wait_seconds > 0 and response.startswith(f"Task {match.group(1)}: running"):
+    if body.wait_seconds > 0 and response.startswith(f"Task {command_id}: running"):
         snapshot["timed_out"] = True
+    await _observe_completed_command_memory(
+        request,
+        user_id=user_id,
+        workspace_path=str(root),
+        command_id=command_id,
+        snapshot=snapshot,
+    )
     return {"target": body.target, **snapshot}
 
 
@@ -2063,9 +2122,13 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         if authoritative_id != command_id:
             stop_command_session(request, command_id, force=True)
             command_id = authoritative_id
+    session = get_command_session(request, command_id)
+    if session is not None and session.get("workspace") == str(root):
+        session["memory_action"] = "command"
+        session["memory_command"] = body.command
+        session["memory_metadata"] = {"transport": "local-command"}
     if body.measure_lifecycle:
         now = time.perf_counter()
-        session = get_command_session(request, command_id)
         if session is not None:
             timing = session.setdefault("lifecycle_timing_ms", {})
             timing["route_post_run_ms"] = round((now - phase_started) * 1000.0, 3)
@@ -2077,6 +2140,13 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     )
     if body.wait_seconds > 0 and response.startswith(f"Task {command_id}: running"):
         snapshot["timed_out"] = True
+    await _observe_completed_command_memory(
+        request,
+        user_id=user_id,
+        workspace_path=str(root),
+        command_id=command_id,
+        snapshot=snapshot,
+    )
     return snapshot
 
 
@@ -2103,7 +2173,7 @@ async def get_workspace_command(
             status_code=422,
             detail="offset, wait_seconds, and tail_bytes must be within their allowed range",
         )
-    return await _command_snapshot(
+    snapshot = await _command_snapshot(
         request,
         workspace_path=str(root),
         command_id=command_id,
@@ -2111,6 +2181,14 @@ async def get_workspace_command(
         wait_seconds=wait_seconds,
         tail_bytes=tail_bytes,
     )
+    await _observe_completed_command_memory(
+        request,
+        user_id=user_id,
+        workspace_path=str(root),
+        command_id=command_id,
+        snapshot=snapshot,
+    )
+    return snapshot
 
 
 @router.post("/workspaces/{workspace_id}/coding/commands/{command_id}/cancel")
@@ -2524,10 +2602,20 @@ async def start_ssh_command(request: Request, workspace_id: str, body: SshComman
         raise HTTPException(status_code=500, detail="SSH command session was not created")
     session["transport"] = "ssh"
     session["ssh_alias"] = canonical_alias
+    session["memory_action"] = "ssh"
+    session["memory_command"] = body.command
+    session["memory_metadata"] = {"transport": "ssh", "alias": canonical_alias}
     snapshot = await _command_snapshot(
         request,
         workspace_path=workspace.path,
         command_id=command_id,
+    )
+    await _observe_completed_command_memory(
+        request,
+        user_id=user_id,
+        workspace_path=workspace.path,
+        command_id=command_id,
+        snapshot=snapshot,
     )
     return {**snapshot, "workspace_id": workspace_id, "alias": canonical_alias}
 
@@ -2554,6 +2642,13 @@ async def get_ssh_command(
         command_id=command_id,
         offset=offset,
         wait_seconds=wait_seconds,
+    )
+    await _observe_completed_command_memory(
+        request,
+        user_id=user_id,
+        workspace_path=workspace.path,
+        command_id=command_id,
+        snapshot=snapshot,
     )
     return {
         **snapshot,

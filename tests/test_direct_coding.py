@@ -295,6 +295,45 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             __use_pty=False,
         )
 
+    async def test_completed_high_value_command_is_offered_to_memory_observation_once(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(command="npm test", cwd=".", wait_seconds=5)
+        session = {"workspace": "/tmp/cptr-direct-coding", "command": "npm test"}
+        snapshot = {
+            "command_id": "deadbeef",
+            "status": "COMPLETE",
+            "exit_code": 0,
+            "output": "tests pass",
+            "next_offset": 10,
+        }
+        observe = AsyncMock(return_value="job-1")
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: exited (code 0)"),
+            ),
+            patch("cptr.routers.coding.get_command_session", return_value=session),
+            patch("cptr.routers.coding._command_snapshot", new=AsyncMock(return_value=snapshot)),
+            patch("cptr.routers.coding.observe_execution_outcome", new=observe),
+        ):
+            result = await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        observe.assert_awaited_once_with(
+            user_id="user_1",
+            workspace="/tmp/cptr-direct-coding",
+            action="command",
+            command="npm test",
+            status="COMPLETE",
+            exit_code=0,
+            output="tests pass",
+            metadata={"transport": "local-command"},
+        )
+        self.assertTrue(session["memory_observation_checked"])
+
     async def test_direct_command_marks_initial_wait_timeout_when_process_is_still_running(self):
         request = SimpleNamespace()
         workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
