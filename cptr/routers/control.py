@@ -8,17 +8,20 @@ import json
 import os
 import re
 import time
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from cptr.memory.domain import RetrievalFeedback
 from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
-from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor
+from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor, ControlIdempotency
 from cptr.services.workspace_availability import is_workspace_available
+from cptr.routers.state import _resolve_request_workspace_path
 from cptr.services.agent_service import AgentService
 from cptr.services.control_auth import require_control_user
 from cptr.services.control_store import SqlSupervisorStore
@@ -26,7 +29,10 @@ from cptr.services.direct_coding_workers import DirectCodingWorkerError, resolve
 from cptr.services.supervisor import AutonomousSupervisor, MonitorState, MonitorStatus
 from cptr.services.supervisor_director import LocalSupervisorDirector, OpenAISupervisorDirector
 from cptr.utils.db import get_db
+from cptr.utils.git import init_repo, is_repo
+from cptr.utils.identity import identity_for_request
 from cptr.utils.redaction import redact_external, redact_sensitive
+from cptr.utils.runtime import FileError, Runtime
 
 router = APIRouter(prefix="/api/control/v1", tags=["control"])
 
@@ -403,6 +409,220 @@ async def get_runtime_metrics(request: Request):
         "mcp_stdio_sessions": len(stdio_manager._instances),
         "live_events": live_event_hub.stats(),
     }
+
+
+class WorkspaceCreateRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4000)
+    name: str | None = Field(default=None, min_length=1, max_length=160)
+    create_directory: bool = False
+    initialize_git: bool = False
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+def _workspace_create_idempotency_db_key(key: str) -> str:
+    return f"workspace-create:{key}"
+
+
+def _workspace_create_request_fingerprint(body: WorkspaceCreateRequest) -> str:
+    payload = {
+        "path": body.path,
+        "name": body.name,
+        "create_directory": body.create_directory,
+        "initialize_git": body.initialize_git,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _workspace_create_idempotency_conflict(code: str, message: str) -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={
+            "code": code,
+            "message": message,
+            "retriable": False,
+            "field": "idempotency_key",
+        },
+    )
+
+
+def _workspace_create_replay(record: Any, request_fingerprint: str) -> dict[str, Any]:
+    if record.resource_type != "workspace":
+        raise _workspace_create_idempotency_conflict(
+            "WORKSPACE_IDEMPOTENCY_KEY_COLLISION",
+            "workspace idempotency key is already owned by a different resource type",
+        )
+    response = dict(record.response or {})
+    if response.get("request_fingerprint") != request_fingerprint:
+        raise _workspace_create_idempotency_conflict(
+            "WORKSPACE_IDEMPOTENCY_REQUEST_MISMATCH",
+            "workspace idempotency key was already used with different request arguments",
+        )
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise _workspace_create_idempotency_conflict(
+            "WORKSPACE_IDEMPOTENCY_REPLAY_INVALID",
+            "workspace idempotency record cannot be replayed safely",
+        )
+    return dict(result)
+
+
+async def _workspace_create_idempotency_get(
+    user_id: str, key: str, request_fingerprint: str
+) -> dict[str, Any] | None:
+    durable_key = _workspace_create_idempotency_db_key(key)
+    async with await get_db() as db:
+        record = (
+            await db.execute(
+                select(ControlIdempotency).where(
+                    ControlIdempotency.user_id == user_id,
+                    ControlIdempotency.key == durable_key,
+                )
+            )
+        ).scalar_one_or_none()
+    if record is None:
+        return None
+    return _workspace_create_replay(record, request_fingerprint)
+
+
+async def _workspace_create_idempotency_put(
+    user_id: str,
+    key: str,
+    request_fingerprint: str,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    durable_key = _workspace_create_idempotency_db_key(key)
+    now_ms = int(time.time() * 1000)
+    async with await get_db() as db:
+        db.add(
+            ControlIdempotency(
+                user_id=user_id,
+                key=durable_key,
+                resource_type="workspace",
+                resource_id=str(result["workspace_id"]),
+                response={
+                    "request_fingerprint": request_fingerprint,
+                    "result": dict(result),
+                },
+                created_at=now_ms,
+            )
+        )
+        try:
+            await db.commit()
+            return result
+        except IntegrityError as exc:
+            await db.rollback()
+            existing = (
+                await db.execute(
+                    select(ControlIdempotency).where(
+                        ControlIdempotency.user_id == user_id,
+                        ControlIdempotency.key == durable_key,
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                raise
+            try:
+                return _workspace_create_replay(existing, request_fingerprint)
+            except HTTPException as conflict:
+                raise conflict from exc
+
+
+@router.post("/workspaces")
+async def create_workspace(request: Request, body: WorkspaceCreateRequest):
+    user_id = await _user(request, "coding:write")
+    request_fingerprint = _workspace_create_request_fingerprint(body)
+    if body.idempotency_key:
+        replay = await _workspace_create_idempotency_get(
+            user_id, body.idempotency_key, request_fingerprint
+        )
+        if replay is not None:
+            return replay
+    workspace_path = await _resolve_request_workspace_path(request, body.path)
+    created_directory = False
+
+    try:
+        stat = await Runtime.stat(request, workspace_path)
+    except FileError as exc:
+        if exc.status_code != 404:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        if not body.create_directory:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "WORKSPACE_DIRECTORY_NOT_FOUND",
+                    "message": "workspace directory does not exist; set create_directory=true to create it",
+                    "retriable": False,
+                    "field": "path",
+                },
+            ) from exc
+        try:
+            await Runtime.create_item(request, workspace_path, type="directory")
+            stat = await Runtime.stat(request, workspace_path)
+        except FileError as create_exc:
+            raise HTTPException(
+                status_code=create_exc.status_code,
+                detail=str(create_exc),
+            ) from create_exc
+        created_directory = True
+
+    if stat.get("type") != "directory":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "WORKSPACE_PATH_CONFLICT",
+                "message": "workspace path exists and is not a directory",
+                "retriable": False,
+                "field": "path",
+            },
+        )
+
+    existing = await Workspace.get_by_path(user_id, workspace_path)
+    identity = await identity_for_request(request)
+    git_repo = await is_repo(workspace_path, identity)
+    initialized_git = False
+    if body.initialize_git and not git_repo:
+        await init_repo(workspace_path, identity)
+        initialized_git = True
+        git_repo = await is_repo(workspace_path, identity)
+
+    restored_workspace = False
+    if existing is not None:
+        existing_data = dict(existing.data or {})
+        if existing_data.pop("_cptr_archived", False):
+            workspace = await Workspace.upsert(
+                user_id,
+                workspace_path,
+                existing.name or body.name or Path(workspace_path).name or workspace_path,
+                existing_data,
+            )
+            restored_workspace = True
+        else:
+            workspace = existing
+        created_workspace = False
+    else:
+        name = body.name or Path(workspace_path).name or workspace_path
+        workspace = await Workspace.upsert(user_id, workspace_path, name, {})
+        created_workspace = True
+
+    result = {
+        "workspace_id": workspace.id,
+        "name": workspace.name,
+        "available": True,
+        "is_git_repo": git_repo,
+        "created_workspace": created_workspace,
+        "restored_workspace": restored_workspace,
+        "created_directory": created_directory,
+        "initialized_git": initialized_git,
+    }
+    if body.idempotency_key:
+        return await _workspace_create_idempotency_put(
+            user_id,
+            body.idempotency_key,
+            request_fingerprint,
+            result,
+        )
+    return result
 
 
 @router.get("/workspaces")

@@ -67,6 +67,11 @@ class GitError(Exception):
         self.returncode = returncode
 
 
+async def init_repo(root: str, identity: ExecutionIdentity | None = None) -> None:
+    """Initialize a Git repository using the authorized execution identity."""
+    await _run("init", cwd=root, identity=identity)
+
+
 async def is_repo(root: str, identity: ExecutionIdentity | None = None) -> bool:
     """Check if directory is inside a git repo."""
     try:
