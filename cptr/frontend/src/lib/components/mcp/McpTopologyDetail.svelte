@@ -52,6 +52,14 @@
 		return 'Backend API RTT';
 	}
 
+	function failureIsRejection(failure: McpFailureState): boolean {
+		return failure.failureClass === 'request_rejected' || failure.failureClass === 'tool_failure';
+	}
+
+	function failureClassLabel(failure: McpFailureState): string {
+		return failure.failureClass.replaceAll('_', ' ');
+	}
+
 	async function saveAlias() {
 		if (submitting) return;
 		submitting = true;
@@ -183,7 +191,7 @@
 					<dd class="mt-1 tabular-nums">{latency.p50Ms} ms</dd>
 				</div>
 				<div>
-					<dt class="app-muted">P95</dt>
+					<dt class="app-muted">All P95</dt>
 					<dd class="mt-1 tabular-nums">{latency.p95Ms} ms</dd>
 				</div>
 				<div>
@@ -195,6 +203,12 @@
 					<dd class="mt-1 tabular-nums">{latency.sampleCount}</dd>
 				</div>
 			</dl>
+			<p class="mt-3 text-[0.65rem] app-muted">
+				Health P95 {latency.healthP95Ms} ms across {latency.healthSampleCount} health-eligible samples.
+				{#if latency.healthSampleCount < latency.sampleCount}
+					Intentional bounded waits remain visible in All P95 but are excluded from health classification.
+				{/if}
+			</p>
 		</div>
 	{/if}
 
@@ -232,9 +246,14 @@
 				{#each failures.slice(-5).reverse() as failure (failure.diagnosticId)}
 					<div class="app-surface rounded-lg border px-3 py-2 text-[0.68rem]">
 						<div class="flex items-center justify-between gap-2">
-							<span class="font-mono text-red-400">{failure.stage}</span>
+							<span class="font-mono {failureIsRejection(failure) ? 'text-amber-400' : 'text-red-400'}">
+								{failureClassLabel(failure)}
+							</span>
 							<span class="app-muted">{failure.httpStatus ?? failure.errorCode}</span>
 						</div>
+						<p class="mt-1 app-muted">
+							{failure.stage}{failure.toolName ? ` · ${failure.toolName}` : ''}
+						</p>
 						<p class="mt-1 leading-5">{failure.summary}</p>
 					</div>
 				{/each}

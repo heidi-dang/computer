@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from cptr.models import FactoryCycle, FactoryEvent, FactoryEvidence, FactoryGateResult, FactoryRun
@@ -88,68 +89,108 @@ class SqlFactoryStore:
             raise ValueError("mission must not be blank")
         if not criteria:
             raise ValueError("acceptance criteria must not be empty")
+        safe_policy = redact_sensitive(policy)
+        safe_budget = redact_sensitive(budget)
+        config_fingerprint = _config_fingerprint(
+            policy=policy,
+            budget=budget,
+            model_id=model_id,
+        )
 
-        async with self._session_factory() as db:
-            async with db.begin():
-                if idempotency_key:
-                    existing = (
-                        await db.execute(
-                            select(FactoryRun).where(
-                                FactoryRun.user_id == user_id,
-                                FactoryRun.idempotency_key == idempotency_key,
+        def validate_replay(existing: FactoryRun) -> FactoryRun:
+            if (
+                existing.workspace_id != workspace_id
+                or existing.mission != mission
+                or list(existing.acceptance_criteria or []) != criteria
+                or existing.model_id != model_id
+                or existing.policy != safe_policy
+                or existing.budget != safe_budget
+                or existing.config_fingerprint != config_fingerprint
+            ):
+                raise FactoryIdempotencyConflict(
+                    "factory run idempotency key was replayed with different mission/configuration"
+                )
+            return existing
+
+        try:
+            async with self._session_factory() as db:
+                async with db.begin():
+                    if idempotency_key:
+                        existing = (
+                            await db.execute(
+                                select(FactoryRun).where(
+                                    FactoryRun.user_id == user_id,
+                                    FactoryRun.idempotency_key == idempotency_key,
+                                )
                             )
-                        )
-                    ).scalar_one_or_none()
-                    if existing is not None:
-                        return existing
+                        ).scalar_one_or_none()
+                        if existing is not None:
+                            return validate_replay(existing)
 
-                now = _now_ms()
-                run = FactoryRun(
-                    id=_new_id("factory"),
-                    user_id=user_id,
-                    workspace_id=workspace_id,
-                    mission=mission,
-                    acceptance_criteria=criteria,
-                    model_id=model_id,
-                    state=FactoryState.MISSION.value,
-                    policy=redact_sensitive(policy),
-                    budget=redact_sensitive(budget),
-                    config_fingerprint=_config_fingerprint(
-                        policy=policy,
-                        budget=budget,
+                    now = _now_ms()
+                    run = FactoryRun(
+                        id=_new_id("factory"),
+                        user_id=user_id,
+                        workspace_id=workspace_id,
+                        mission=mission,
+                        acceptance_criteria=criteria,
                         model_id=model_id,
-                    ),
-                    idempotency_key=idempotency_key,
-                    created_at=now,
-                    updated_at=now,
-                )
-                db.add(run)
-                # The immutable run.created event has a foreign key to this
-                # newly-created run. Flush the parent first so SQLite FK
-                # enforcement cannot observe the event before its run row.
-                await db.flush()
-                payload, digest = _canonical_payload(
-                    {
-                        "workspace_id": workspace_id,
-                        "acceptance_criteria_count": len(criteria),
-                    }
-                )
-                db.add(
-                    FactoryEvent(
-                        id=_new_id("fev"),
-                        run_id=run.id,
-                        sequence=1,
-                        actor=FactoryActor.SYSTEM.value,
-                        event_type="run.created",
-                        from_state=None,
-                        to_state=FactoryState.MISSION.value,
-                        idempotency_key=(f"create:{idempotency_key}" if idempotency_key else None),
-                        payload_digest=digest,
-                        payload=payload,
+                        state=FactoryState.MISSION.value,
+                        policy=safe_policy,
+                        budget=safe_budget,
+                        config_fingerprint=config_fingerprint,
+                        idempotency_key=idempotency_key,
                         created_at=now,
+                        updated_at=now,
                     )
-                )
-            return run
+                    db.add(run)
+                    # The immutable run.created event has a foreign key to this
+                    # newly-created run. Flush the parent first so SQLite FK
+                    # enforcement cannot observe the event before its run row.
+                    await db.flush()
+                    payload, digest = _canonical_payload(
+                        {
+                            "workspace_id": workspace_id,
+                            "acceptance_criteria_count": len(criteria),
+                        }
+                    )
+                    db.add(
+                        FactoryEvent(
+                            id=_new_id("fev"),
+                            run_id=run.id,
+                            sequence=1,
+                            actor=FactoryActor.SYSTEM.value,
+                            event_type="run.created",
+                            from_state=None,
+                            to_state=FactoryState.MISSION.value,
+                            idempotency_key=(
+                                f"create:{idempotency_key}" if idempotency_key else None
+                            ),
+                            payload_digest=digest,
+                            payload=payload,
+                            created_at=now,
+                        )
+                    )
+                return run
+        except IntegrityError:
+            if not idempotency_key:
+                raise
+            # Two equal concurrent starts may both miss the initial lookup. The
+            # uniqueness constraint chooses one winner; the loser re-reads and
+            # applies the same replay-envelope validation instead of leaking a
+            # database error to the caller.
+            async with self._session_factory() as db:
+                existing = (
+                    await db.execute(
+                        select(FactoryRun).where(
+                            FactoryRun.user_id == user_id,
+                            FactoryRun.idempotency_key == idempotency_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+            if existing is None:
+                raise
+            return validate_replay(existing)
 
     async def get_run(self, run_id: str, *, user_id: str | None = None) -> FactoryRun | None:
         async with self._session_factory() as db:
@@ -822,6 +863,68 @@ class SqlFactoryStore:
             )
             return list(rows.scalars().all())
 
+    async def list_phase_evidence(
+        self,
+        run_id: str,
+        *,
+        cycle_id: str,
+        limit: int = 500,
+    ) -> list[FactoryEvidence]:
+        """Return the newest bounded evidence relevant to one active cycle, oldest-first."""
+        limit = max(1, min(int(limit), 500))
+        async with self._session_factory() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(FactoryEvidence)
+                        .where(
+                            FactoryEvidence.run_id == run_id,
+                            or_(
+                                FactoryEvidence.cycle_id.is_(None),
+                                FactoryEvidence.cycle_id == cycle_id,
+                            ),
+                        )
+                        .order_by(FactoryEvidence.created_at.desc(), FactoryEvidence.id.desc())
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            rows.reverse()
+            return rows
+
+    async def list_execution_task_ids(self, run_id: str, *, limit: int = 500) -> list[str]:
+        """Return newest durable AgentService task IDs owned by one Factory run."""
+        limit = max(1, min(int(limit), 500))
+        async with self._session_factory() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(FactoryEvidence)
+                        .where(
+                            FactoryEvidence.run_id == run_id,
+                            FactoryEvidence.kind.in_(
+                                ("factory_phase_task", "factory_implementation_task")
+                            ),
+                        )
+                        .order_by(FactoryEvidence.created_at.desc(), FactoryEvidence.id.desc())
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        task_ids: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            task_id = str(payload.get("task_id") or "").strip()
+            if task_id and task_id not in seen:
+                seen.add(task_id)
+                task_ids.append(task_id)
+        return task_ids
+
     async def list_evidence_page(
         self,
         run_id: str,
@@ -972,6 +1075,45 @@ class SqlFactoryStore:
                 .limit(limit)
             )
             return list(rows.scalars().all())
+
+    async def list_user_steering(
+        self,
+        run_id: str,
+        *,
+        limit: int = 20,
+        max_chars: int = 8_000,
+    ) -> tuple[str, ...]:
+        """Return bounded authenticated user steering, oldest-first, for phase-boundary use."""
+        limit = max(1, min(int(limit), 50))
+        max_chars = max(1, min(int(max_chars), 32_000))
+        async with self._session_factory() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(FactoryEvent)
+                        .where(
+                            FactoryEvent.run_id == run_id,
+                            FactoryEvent.event_type == "user.message",
+                        )
+                        .order_by(FactoryEvent.sequence.desc())
+                        .limit(limit)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        rows.reverse()
+        messages: list[str] = []
+        remaining = max_chars
+        for row in rows:
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            content = str(payload.get("content") or "").strip()
+            if not content or remaining <= 0:
+                continue
+            content = content[: min(2_000, remaining)]
+            messages.append(content)
+            remaining -= len(content) + 1
+        return tuple(messages)
 
     async def append_user_event(
         self,
@@ -1140,16 +1282,28 @@ class SqlFactoryStore:
         payload_digest: str | None = None,
     ) -> FactoryEvent:
         safe_payload, calculated_digest = _canonical_payload(payload)
+        # Acquire SQLite's write lock on the run row before reading MAX(sequence).
+        # The lock is held for this transaction, so concurrent event writers cannot
+        # allocate the same sequence. Deriving from durable history also self-heals
+        # fixtures or legacy rows that were inserted outside this helper.
+        lock_result = await db.execute(
+            update(FactoryRun)
+            .where(FactoryRun.id == run.id)
+            .values(updated_at=FactoryRun.updated_at)
+        )
+        if lock_result.rowcount != 1:
+            raise KeyError("factory run not found")
         sequence = (
             await db.execute(
                 select(func.max(FactoryEvent.sequence)).where(FactoryEvent.run_id == run.id)
             )
         ).scalar_one()
+        sequence = int(sequence or 0) + 1
         row = FactoryEvent(
             id=_new_id("fev"),
             run_id=run.id,
             cycle_id=cycle_id,
-            sequence=int(sequence or 0) + 1,
+            sequence=sequence,
             actor=actor.value,
             event_type=event_type,
             from_state=from_state.value if from_state else None,

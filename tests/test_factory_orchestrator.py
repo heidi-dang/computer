@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -67,6 +68,100 @@ class FactoryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         await self.engine.dispose()
+
+    async def test_user_messages_are_consumed_as_bounded_phase_boundary_steering(self):
+        observed_messages: list[tuple[str, ...]] = []
+
+        class SteeringHandler:
+            async def execute(self, context):
+                observed_messages.append(context.steering_messages)
+                return PhaseOutcome(
+                    next_state=FactoryState.RECOVERING,
+                    reason="steering consumed at phase boundary",
+                )
+
+        await self.store.append_user_event(
+            run_id=self.run.id,
+            event_type="user.message",
+            payload={"content": "Do not modify the frontend."},
+            idempotency_key="steering-1",
+        )
+        await self.store.append_user_event(
+            run_id=self.run.id,
+            event_type="user.message",
+            payload={"content": "Use only existing dependencies."},
+            idempotency_key="steering-2",
+        )
+        orchestrator = FactoryOrchestrator(
+            store=self.store,
+            handlers={FactoryState.MISSION: SteeringHandler()},
+            owner_token="steering-owner",
+            lease_ms=10_000,
+        )
+
+        observed = await orchestrator.run_once(self.run.id)
+
+        self.assertEqual(observed.state, FactoryState.RECOVERING.value)
+        self.assertEqual(
+            observed_messages,
+            [("Do not modify the frontend.", "Use only existing dependencies.")],
+        )
+
+    async def test_run_wall_time_budget_blocks_before_another_phase_executes(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="bounded run",
+            acceptance_criteria=["never exceed the configured wall-time budget"],
+            policy={},
+            budget={"max_wall_time_ms": 100},
+            model_id="configured-model",
+            idempotency_key="wall-time-budget-run",
+        )
+        handler = _Handler(
+            PhaseOutcome(next_state=FactoryState.RECOVERING, reason="should not execute")
+        )
+        orchestrator = FactoryOrchestrator(
+            store=self.store,
+            handlers={FactoryState.MISSION: handler},
+            owner_token="budget-owner",
+            lease_ms=10_000,
+            clock_ms=lambda: int(run.created_at) + 101,
+        )
+
+        observed = await orchestrator.run_once(run.id)
+
+        self.assertEqual(observed.state, FactoryState.BLOCKED.value)
+        self.assertEqual(handler.calls, 0)
+        events = await self.store.list_events(run.id, limit=20)
+        self.assertTrue(
+            any(
+                event.to_state == FactoryState.BLOCKED.value
+                and "wall-time budget exhausted" in str(event.payload.get("reason") or "")
+                for event in events
+            )
+        )
+
+    async def test_slow_phase_renews_run_lease_until_outcome_is_persisted(self):
+        class SlowHandler:
+            async def execute(self, _context):
+                await asyncio.sleep(0.45)
+                return PhaseOutcome(
+                    next_state=FactoryState.RECOVERING,
+                    reason="slow phase completed under renewed lease",
+                )
+
+        orchestrator = FactoryOrchestrator(
+            store=self.store,
+            handlers={FactoryState.MISSION: SlowHandler()},
+            owner_token="heartbeat-owner",
+            lease_ms=300,
+        )
+        with patch.object(self.store, "renew_run", wraps=self.store.renew_run) as renew:
+            observed = await orchestrator.run_once(self.run.id)
+
+        self.assertEqual(observed.state, FactoryState.RECOVERING.value)
+        self.assertGreaterEqual(renew.await_count, 1)
 
     async def test_complete_state_progression_executes_one_phase_action_per_run_once(self):
         next_state = {

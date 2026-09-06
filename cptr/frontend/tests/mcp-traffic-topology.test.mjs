@@ -195,17 +195,28 @@ test('diagnostics reducer hydrates bounded state and ignores stale incremental e
 	let state = diagnostics.hydrateMcpDiagnostics(snapshot);
 	assert.equal(state.sequence, 5);
 	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestMs, 25);
+	assert.equal(state.latency['cptr-mcp-cptr-backend'].healthP95Ms, 25);
+	assert.equal(state.latency['cptr-mcp-cptr-backend'].healthSampleCount, 2);
 	assert.equal(state.failures.length, 1);
+	assert.equal(state.failures[0].failureClass, 'backend_failure');
 	assert.equal(state.system.length, 1);
 
 	const stale = diagnostics.applyMcpDiagnosticsEvent(state, failure(5, 'failure-stale'));
 	assert.equal(stale, state);
-	state = diagnostics.applyMcpDiagnosticsEvent(state, failure(6, 'failure-002'));
+	const rejected = {
+		...failure(6, 'failure-002'),
+		http_status: 409,
+		error_code: 'AMBIGUOUS_EDIT',
+		failure_class: 'request_rejected'
+	};
+	state = diagnostics.applyMcpDiagnosticsEvent(state, rejected);
 	state = diagnostics.applyMcpDiagnosticsEvent(state, failure(7, 'failure-003'));
 	assert.deepEqual(
 		state.failures.map((item) => item.diagnosticId),
 		['failure-002', 'failure-003']
 	);
+	assert.equal(state.failures[0].failureClass, 'request_rejected');
+	assert.equal(state.failures[1].failureClass, 'backend_failure');
 	state = diagnostics.applyMcpDiagnosticsEvent(state, system(8, 200));
 	state = diagnostics.applyMcpDiagnosticsEvent(state, system(9, 300));
 	assert.deepEqual(
@@ -227,6 +238,7 @@ test('diagnostics reducer hydrates bounded state and ignores stale incremental e
 	});
 	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestMs, 55);
 	assert.equal(state.latency['cptr-mcp-cptr-backend'].latestStatus, 'error');
+	assert.equal(state.latency['cptr-mcp-cptr-backend'].health, 'healthy');
 });
 
 test('usage diagnostics hydrate bounded model state and project 60-second token/cost buckets', async () => {

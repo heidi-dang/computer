@@ -401,6 +401,7 @@ async def stream_factory_observability(
 
     async def _event_stream():
         previous_fingerprint: str | None = None
+        previous_marker: str | None = None
         previous_event_sequence = 0
         previous_progress: str | None = None
         interval_seconds = _bounded_env_float(
@@ -415,6 +416,21 @@ async def stream_factory_observability(
         while True:
             if await request.is_disconnected():
                 break
+            try:
+                marker = await factory_observability.stream_marker(
+                    user_id=admin.user_id,
+                    run_id=run_id,
+                )
+            except KeyError:
+                yield _factory_sse("factory_error", {"code": "FACTORY_RUN_NOT_FOUND"})
+                break
+            if previous_marker is not None and marker == previous_marker:
+                if loop.time() - last_emit_at >= keepalive_seconds:
+                    yield ": keepalive\n\n"
+                    last_emit_at = loop.time()
+                await asyncio.sleep(interval_seconds)
+                continue
+
             try:
                 snapshot = await factory_observability.snapshot(
                     user_id=admin.user_id,
@@ -487,6 +503,7 @@ async def stream_factory_observability(
                 yield ": keepalive\n\n"
                 last_emit_at = loop.time()
 
+            previous_marker = marker
             await asyncio.sleep(interval_seconds)
 
     return StreamingResponse(

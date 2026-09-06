@@ -82,6 +82,22 @@ def _schedule(request: Request, run_id: str) -> None:
         runner.schedule(run_id)
 
 
+async def _quiesce(request: Request, run_id: str, *, timeout_ms: int) -> bool:
+    runner = getattr(request.app.state, "factory_production_runner", None)
+    if runner is None:
+        raise FactoryControlConflict(
+            "factory execution controller is unavailable",
+            code="FACTORY_EXECUTION_CONTROLLER_UNAVAILABLE",
+        )
+    result = await runner.quiesce_run(run_id, timeout_ms=timeout_ms)
+    if not result.quiescent:
+        raise FactoryControlConflict(
+            "factory execution did not quiesce within the control bound",
+            code="FACTORY_EXECUTION_NOT_QUIESCENT",
+        )
+    return True
+
+
 def _public_error(exc: Exception) -> HTTPException:
     if isinstance(exc, FactoryControlNotFound):
         return HTTPException(status_code=404, detail="factory run not found")
@@ -185,6 +201,11 @@ async def message_factory_run(request: Request, run_id: str, body: FactoryMessag
 async def pause_factory_run(request: Request, run_id: str, body: FactoryControlRequest):
     user_id = await _user(request, "autonomous:run")
     try:
+        await _quiesce(
+            request,
+            run_id,
+            timeout_ms=min(15_000, max(100, int(TASK_CANCELLATION_TIMEOUT_SECONDS * 1000))),
+        )
         run = await _service(request).pause(
             user_id=user_id,
             run_id=run_id,
@@ -232,16 +253,19 @@ async def approve_factory_run(request: Request, run_id: str, body: FactoryApprov
 @factory_router.post("/runs/{run_id}/stop")
 async def stop_factory_run(request: Request, run_id: str, body: FactoryStopRequest):
     user_id = await _user(request, "autonomous:run")
+    timeout_ms = (
+        body.timeout_ms
+        if body.timeout_ms is not None
+        else min(15_000, max(100, int(TASK_CANCELLATION_TIMEOUT_SECONDS * 1000)))
+    )
     try:
+        execution_quiescent = await _quiesce(request, run_id, timeout_ms=timeout_ms)
         run = await _service(request).stop(
             user_id=user_id,
             run_id=run_id,
             idempotency_key=body.idempotency_key,
-            timeout_ms=(
-                body.timeout_ms
-                if body.timeout_ms is not None
-                else max(100, int(TASK_CANCELLATION_TIMEOUT_SECONDS * 1000))
-            ),
+            timeout_ms=timeout_ms,
+            execution_quiescent=execution_quiescent,
         )
     except Exception as exc:
         raise _public_error(exc) from exc

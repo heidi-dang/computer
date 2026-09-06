@@ -414,6 +414,65 @@ class FactoryObservabilityService:
     def __init__(self, *, session_factory: async_sessionmaker | None = None) -> None:
         self._session_factory = session_factory or get_session_factory()
 
+    async def stream_marker(self, *, user_id: str, run_id: str | None = None) -> str:
+        """Return a cheap marker for any persisted fact that can change the dashboard snapshot."""
+        async with self._session_factory() as db:
+            run_count, latest_run_update = (
+                await db.execute(
+                    select(
+                        func.count(FactoryRun.id),
+                        func.coalesce(func.max(FactoryRun.updated_at), 0),
+                    ).where(FactoryRun.user_id == user_id)
+                )
+            ).one()
+            run_query = select(FactoryRun).where(FactoryRun.user_id == user_id)
+            if run_id is not None:
+                run_query = run_query.where(FactoryRun.id == run_id)
+            else:
+                run_query = run_query.order_by(FactoryRun.updated_at.desc(), FactoryRun.id.desc())
+            selected = (await db.execute(run_query.limit(1))).scalar_one_or_none()
+            if selected is None:
+                if run_id is not None:
+                    raise KeyError("factory run not found")
+                return f"none:{int(run_count or 0)}:{int(latest_run_update or 0)}"
+
+            rid = selected.id
+
+            def max_scalar(model, column):
+                return (
+                    select(func.coalesce(func.max(column), 0))
+                    .where(model.run_id == rid)
+                    .scalar_subquery()
+                )
+
+            marker_row = (
+                await db.execute(
+                    select(
+                        max_scalar(FactoryEvent, FactoryEvent.sequence),
+                        max_scalar(FactoryCycle, FactoryCycle.updated_at),
+                        max_scalar(FactoryEvidence, FactoryEvidence.created_at),
+                        max_scalar(FactoryGateResult, FactoryGateResult.updated_at),
+                        max_scalar(FactoryWorkerAssignment, FactoryWorkerAssignment.updated_at),
+                        max_scalar(FactoryReasoningCall, FactoryReasoningCall.created_at),
+                        max_scalar(FactoryApproval, FactoryApproval.updated_at),
+                        max_scalar(FactoryMetricProjection, FactoryMetricProjection.updated_at),
+                        max_scalar(FactoryCapabilityOutcome, FactoryCapabilityOutcome.created_at),
+                        max_scalar(FactoryCommitIntent, FactoryCommitIntent.updated_at),
+                        max_scalar(FactoryCiRun, FactoryCiRun.updated_at),
+                    )
+                )
+            ).one()
+        parts = (
+            selected.id,
+            selected.state,
+            selected.current_cycle_id or "",
+            str(int(selected.updated_at)),
+            str(int(run_count or 0)),
+            str(int(latest_run_update or 0)),
+            *(str(int(value or 0)) for value in marker_row),
+        )
+        return ":".join(parts)
+
     async def activity_since(
         self,
         *,

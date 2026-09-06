@@ -13,6 +13,7 @@ import json
 import time
 import uuid
 from collections.abc import Sequence
+from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import select
@@ -197,6 +198,34 @@ class FactoryControlService:
         model_id: str | None,
         idempotency_key: str | None,
     ) -> FactoryRun:
+        implementation_required = bool(policy.get("implementation_required", True))
+        if implementation_required and not str(model_id or "").strip():
+            raise ValueError("factory implementation requires an explicit model_id")
+
+        # Compile the machine-verification/CI contract before creating durable
+        # state. Invalid missions fail immediately instead of consuming several
+        # Factory phases before discovering that Victory can never be reached.
+        from cptr.services.factory_production import _ci_policy, verification_specs
+
+        preflight = SimpleNamespace(
+            policy=policy,
+            acceptance_criteria=tuple(acceptance_criteria),
+        )
+        verification_specs(preflight)
+        _ci_policy(preflight)
+        for key in ("max_cycles", "max_wall_time_ms", "max_repair_attempts_per_signature"):
+            raw = budget.get(key)
+            if raw is None and key == "max_cycles":
+                raw = policy.get(key)
+            if raw is None:
+                continue
+            try:
+                parsed = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"factory budget {key} must be a positive integer") from exc
+            if parsed <= 0:
+                raise ValueError(f"factory budget {key} must be a positive integer")
+
         return await self._store.create_run(
             user_id=user_id,
             workspace_id=workspace_id,
@@ -590,6 +619,7 @@ class FactoryControlService:
         run_id: str,
         idempotency_key: str,
         timeout_ms: int,
+        execution_quiescent: bool = False,
     ) -> FactoryRun:
         run = await self._owned_run(user_id, run_id)
         state = FactoryState(run.state)
@@ -599,12 +629,13 @@ class FactoryControlService:
             raise FactoryControlConflict(
                 "terminal factory run cannot be stopped", code="FACTORY_TERMINAL"
             )
-        result = await self._workers.cancel_run(run, timeout_ms=timeout_ms)
-        if not result.quiescent:
-            raise FactoryControlConflict(
-                "owned factory execution did not quiesce within the cancellation bound",
-                code="FACTORY_CANCELLATION_NOT_QUIESCENT",
-            )
+        if not execution_quiescent:
+            result = await self._workers.cancel_run(run, timeout_ms=timeout_ms)
+            if not result.quiescent:
+                raise FactoryControlConflict(
+                    "owned factory execution did not quiesce within the cancellation bound",
+                    code="FACTORY_CANCELLATION_NOT_QUIESCENT",
+                )
         return await self._store.transition(
             run.id,
             to_state=FactoryState.CANCELLED,

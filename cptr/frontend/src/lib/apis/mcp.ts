@@ -202,6 +202,13 @@ export type McpFailureStage =
 	| 'cptr_backend'
 	| 'activity_delivery'
 	| 'traffic_delivery';
+export type McpFailureClass =
+	| 'request_rejected'
+	| 'backend_failure'
+	| 'transport_failure'
+	| 'tool_failure'
+	| 'internal_failure'
+	| 'telemetry_failure';
 
 export interface McpLatencySample {
 	kind: 'latency';
@@ -214,6 +221,12 @@ export interface McpLatencySample {
 	metric_type: McpLatencyMetric;
 	duration_ms: number;
 	status: 'ok' | 'error';
+	tool_name?: string | null;
+	operation_class?: 'immediate' | 'bounded_wait' | 'long_operation';
+	requested_wait_ms?: number | null;
+	health_eligible?: boolean;
+	setup_kind?: 'request_adapter' | 'stateful_setup' | 'stateless_setup' | null;
+	setup_cached?: boolean | null;
 }
 
 export interface McpLatencyAggregate {
@@ -224,8 +237,11 @@ export interface McpLatencyAggregate {
 	p95_ms: number;
 	max_ms: number;
 	sample_count: number;
+	health_p95_ms: number;
+	health_sample_count: number;
 	last_updated_ms: number;
 	latest_status: 'ok' | 'error';
+	latest_health_status: 'ok' | 'error';
 	health: 'healthy' | 'degraded' | 'error';
 }
 
@@ -240,6 +256,7 @@ export interface McpFailureDiagnostic {
 	method: string | null;
 	tool_name: string | null;
 	stage: McpFailureStage;
+	failure_class?: McpFailureClass | null;
 	error_code: string;
 	http_status: number | null;
 	retryable: boolean | null;

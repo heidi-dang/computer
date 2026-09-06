@@ -95,6 +95,34 @@ class McpDiagnosticsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, {"accepted": 0, "duplicates": 0, "dropped": 1})
         self.assertEqual(snapshot["failures"], [])
 
+    async def test_failure_class_distinguishes_rejections_from_backend_and_transport_failures(self):
+        store = McpDiagnosticsStore(max_failures=4)
+        rejected = failure("failure-rejected").model_copy(
+            update={
+                "http_status": 409,
+                "error_code": "AMBIGUOUS_EDIT",
+                "retryable": True,
+                "failure_class": None,
+            }
+        )
+        backend = failure("failure-backend").model_copy(
+            update={"http_status": 503, "failure_class": None}
+        )
+        transport = failure("failure-transport").model_copy(
+            update={
+                "http_status": None,
+                "error_code": "computer_api_unavailable",
+                "failure_class": None,
+            }
+        )
+
+        await store.ingest([rejected, backend, transport])
+        stored = (await store.snapshot())["failures"]
+        self.assertEqual(
+            [item["failure_class"] for item in stored],
+            ["request_rejected", "backend_failure", "transport_failure"],
+        )
+
     async def test_latency_snapshot_uses_nearest_rank_percentiles_and_health(self):
         store = McpDiagnosticsStore(
             max_latency_samples_per_edge=5,
@@ -119,6 +147,28 @@ class McpDiagnosticsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(aggregate["max_ms"], 100)
         self.assertEqual(aggregate["sample_count"], 5)
         self.assertEqual(aggregate["metric_type"], "backend_api_rtt")
+
+    async def test_fast_failed_request_does_not_turn_latency_health_into_error(self):
+        store = McpDiagnosticsStore(backend_rtt_degraded_ms=1000)
+        await store.ingest(
+            [
+                McpLatencySample(
+                    event_id="latency-rejected-001",
+                    timestamp_ms=BASE_TS,
+                    edge_id="cptr-mcp-cptr-backend",
+                    metric_type="backend_api_rtt",
+                    duration_ms=44,
+                    status="error",
+                    tool_name="cptr_code_apply_edits",
+                    health_eligible=True,
+                )
+            ]
+        )
+        aggregate = (await store.snapshot())["latency"]["cptr-mcp-cptr-backend"]
+        self.assertEqual(aggregate["latest_status"], "error")
+        self.assertEqual(aggregate["latest_health_status"], "error")
+        self.assertEqual(aggregate["health_p95_ms"], 44)
+        self.assertEqual(aggregate["health"], "healthy")
 
     async def test_intentional_wait_samples_do_not_degrade_transport_health(self):
         store = McpDiagnosticsStore(observed_degraded_ms=100)
@@ -153,6 +203,7 @@ class McpDiagnosticsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(aggregate["p95_ms"], 25_000)
         self.assertEqual(aggregate["health_p95_ms"], 50)
         self.assertEqual(aggregate["health_sample_count"], 1)
+        self.assertEqual(aggregate["latest_health_status"], "ok")
         self.assertEqual(aggregate["health"], "healthy")
 
     async def test_adapter_setup_breakdown_tracks_stateless_pool_hits(self):

@@ -212,14 +212,23 @@ class CycleCompletePhaseHandler:
     """Close a bounded run or start another audit cycle according to run policy."""
 
     async def execute(self, context: PhaseContext) -> PhaseOutcome:
+        budget = context.run.budget if isinstance(context.run.budget, dict) else {}
+        policy = context.run.policy if isinstance(context.run.policy, dict) else {}
         configured = (
-            context.run.policy.get("max_cycles") if isinstance(context.run.policy, dict) else None
+            budget.get("max_cycles") if "max_cycles" in budget else policy.get("max_cycles")
         )
         try:
             max_cycles = int(configured) if configured is not None else 1
         except (TypeError, ValueError):
-            max_cycles = 1
-        max_cycles = max(1, max_cycles)
+            return PhaseOutcome(
+                next_state=FactoryState.BLOCKED,
+                reason="configured max_cycles budget is invalid; fail closed",
+            )
+        if max_cycles <= 0:
+            return PhaseOutcome(
+                next_state=FactoryState.BLOCKED,
+                reason="configured max_cycles budget must be positive; fail closed",
+            )
         if int(context.cycle.ordinal) >= max_cycles:
             return PhaseOutcome(
                 next_state=FactoryState.COMPLETE,

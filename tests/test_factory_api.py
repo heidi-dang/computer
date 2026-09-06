@@ -8,11 +8,15 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from cptr.models import Base, FactoryApproval
 from cptr.routers.factory import (
     FactoryApprovalRequest,
+    FactoryControlRequest,
     FactoryMessageRequest,
     FactoryRunStartRequest,
+    FactoryStopRequest,
     approve_factory_run,
     factory_router,
+    pause_factory_run,
     start_factory_run,
+    stop_factory_run,
 )
 from cptr.services.factory_control import (
     FactoryControlConflict,
@@ -21,7 +25,7 @@ from cptr.services.factory_control import (
 )
 from cptr.services.factory_domain import FactoryActor, FactoryState
 from cptr.services.factory_gates import EvidenceAuthority
-from cptr.services.factory_store import SqlFactoryStore
+from cptr.services.factory_store import FactoryIdempotencyConflict, SqlFactoryStore
 from cptr.services.factory_workers import WorkerQuiescenceResult
 
 
@@ -64,34 +68,112 @@ class FactoryApiTests(unittest.IsolatedAsyncioTestCase):
             workspace_id=workspace_id,
             mission="implement the requested factory mission",
             acceptance_criteria=("all required machine gates pass",),
-            policy={"max_cycles": 1},
+            policy={
+                "max_cycles": 1,
+                "verification_targets": [
+                    {
+                        "gate_id": "api-acceptance",
+                        "phase": "full",
+                        "target": "python_pytest",
+                        "test_path": "tests/test_factory_api.py",
+                        "category": "broader_tests",
+                        "acceptance_ids": [1],
+                    }
+                ],
+            },
             budget={"max_repair_attempts_per_signature": 3},
             model_id="configured-model",
             idempotency_key=key,
         )
 
-    async def test_start_is_user_scoped_idempotent_and_preserves_original_immutable_payload(self):
+    async def test_start_is_user_scoped_and_idempotent_only_for_the_same_request(self):
         first = await self._start()
         replay = await self._start()
         self.assertEqual(first.id, replay.id)
 
-        changed_replay = await self.service.start(
-            user_id="user-1",
-            workspace_id="workspace-1",
-            mission="different mission under same key",
-            acceptance_criteria=("different criterion",),
-            policy={"max_cycles": 99},
-            budget={"max_repair_attempts_per_signature": 99},
-            model_id="other-model",
-            idempotency_key="start-1",
-        )
-        self.assertEqual(changed_replay.id, first.id)
-        self.assertEqual(changed_replay.mission, "implement the requested factory mission")
-        self.assertEqual(changed_replay.acceptance_criteria, ["all required machine gates pass"])
-        self.assertEqual(changed_replay.model_id, "configured-model")
+        with self.assertRaises(FactoryIdempotencyConflict):
+            await self.service.start(
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="different mission under same key",
+                acceptance_criteria=("different criterion",),
+                policy={
+                    "max_cycles": 99,
+                    "verification_targets": [
+                        {
+                            "gate_id": "api-acceptance",
+                            "phase": "full",
+                            "target": "python_pytest",
+                            "test_path": "tests/test_factory_api.py",
+                            "category": "broader_tests",
+                            "acceptance_ids": [1],
+                        }
+                    ],
+                },
+                budget={"max_repair_attempts_per_signature": 99},
+                model_id="other-model",
+                idempotency_key="start-1",
+            )
 
         other_user = await self._start(user_id="user-2", key="start-1")
         self.assertNotEqual(first.id, other_user.id)
+
+    async def test_start_preflight_rejects_unverifiable_or_unexecutable_missions(self):
+        with self.assertRaisesRegex(ValueError, "verification.*cover"):
+            await self.service.start(
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="missing verification contract",
+                acceptance_criteria=("criterion must be machine verified",),
+                policy={"implementation_required": False},
+                budget={},
+                model_id=None,
+                idempotency_key="invalid-verification-start",
+            )
+
+        with self.assertRaisesRegex(ValueError, "explicit model_id"):
+            await self.service.start(
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="implementation without a model",
+                acceptance_criteria=("criterion",),
+                policy={
+                    "implementation_required": True,
+                    "verification_targets": [
+                        {
+                            "gate_id": "acceptance",
+                            "phase": "full",
+                            "target": "python_pytest",
+                            "acceptance_ids": [1],
+                        }
+                    ],
+                },
+                budget={},
+                model_id=None,
+                idempotency_key="missing-model-start",
+            )
+
+        with self.assertRaisesRegex(ValueError, "max_wall_time_ms"):
+            await self.service.start(
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="invalid budget",
+                acceptance_criteria=("criterion",),
+                policy={
+                    "implementation_required": False,
+                    "verification_targets": [
+                        {
+                            "gate_id": "acceptance",
+                            "phase": "full",
+                            "target": "python_pytest",
+                            "acceptance_ids": [1],
+                        }
+                    ],
+                },
+                budget={"max_wall_time_ms": 0},
+                model_id=None,
+                idempotency_key="invalid-budget-start",
+            )
 
     async def test_status_events_and_evidence_are_owner_scoped_cursor_paginated_and_bounded(self):
         run = await self._start()
@@ -469,6 +551,65 @@ class FactoryApiTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await approve_factory_run(request, "factory-1", approval_body)
         self.assertEqual(result["approval"]["approval_id"], "approval-1")
+
+    async def test_router_quiesces_production_execution_before_pause_and_stop_state_changes(self):
+        order: list[str] = []
+
+        async def quiesce(_run_id, *, timeout_ms):
+            order.append(f"quiesce:{timeout_ms}")
+            return SimpleNamespace(quiescent=True)
+
+        async def pause(**_kwargs):
+            order.append("pause")
+            return SimpleNamespace(id="factory-1", state=FactoryState.PAUSED.value)
+
+        async def stop(**_kwargs):
+            order.append("stop")
+            return SimpleNamespace(id="factory-1", state=FactoryState.CANCELLED.value)
+
+        runner = SimpleNamespace(quiesce_run=AsyncMock(side_effect=quiesce))
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(factory_production_runner=runner))
+        )
+        service = SimpleNamespace(
+            pause=AsyncMock(side_effect=pause),
+            stop=AsyncMock(side_effect=stop),
+        )
+        with (
+            patch("cptr.routers.factory._user", new=AsyncMock(return_value="user-1")),
+            patch("cptr.routers.factory._service", return_value=service),
+        ):
+            paused = await pause_factory_run(
+                request,
+                "factory-1",
+                FactoryControlRequest(idempotency_key="pause-router"),
+            )
+            stopped = await stop_factory_run(
+                request,
+                "factory-1",
+                FactoryStopRequest(idempotency_key="stop-router", timeout_ms=1200),
+            )
+
+        self.assertEqual(paused["state"], FactoryState.PAUSED.value)
+        self.assertEqual(stopped["state"], FactoryState.CANCELLED.value)
+        self.assertEqual(order[0].split(":", 1)[0], "quiesce")
+        self.assertEqual(order[1:], ["pause", "quiesce:1200", "stop"])
+        self.assertTrue(service.stop.await_args.kwargs["execution_quiescent"])
+
+    async def test_router_fails_closed_when_execution_controller_is_unavailable(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        with patch("cptr.routers.factory._user", new=AsyncMock(return_value="user-1")):
+            with self.assertRaises(HTTPException) as caught:
+                await pause_factory_run(
+                    request,
+                    "factory-1",
+                    FactoryControlRequest(idempotency_key="pause-without-runner"),
+                )
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertEqual(
+            caught.exception.detail["code"],
+            "FACTORY_EXECUTION_CONTROLLER_UNAVAILABLE",
+        )
 
     async def test_router_maps_owner_safe_service_errors_without_leaking_other_run_details(self):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
