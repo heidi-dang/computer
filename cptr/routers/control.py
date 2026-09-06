@@ -8,12 +8,14 @@ import json
 import os
 import re
 import time
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
+from cptr.memory.mcp_adapter import MemoryMcpAdapter
+from cptr.memory.service import MemoryUnavailableError
 from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.agent_service import AgentService
@@ -199,6 +201,21 @@ class ApprovalRequest(BaseModel):
     approval_id: str = Field(min_length=1, max_length=200)
     approved: bool
     note: str | None = Field(default=None, max_length=50_000)
+
+
+class MemoryReadRequest(BaseModel):
+    """Bounded, read-only persistent memory request for authenticated control clients."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["search", "inspect", "timeline", "health"]
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=200)
+    query: str | None = Field(default=None, min_length=1, max_length=12_000)
+    memory_id: str | None = Field(default=None, min_length=1, max_length=200)
+    at_ms: int | None = Field(default=None, ge=0)
+    known_at_ms: int | None = Field(default=None, ge=0)
+    limit: int = Field(default=8, ge=1, le=20)
+    include_historical: bool = False
 
 
 def _monitor_summary(monitor: MonitorState) -> dict[str, Any]:
@@ -407,6 +424,164 @@ async def list_workspaces(request: Request, include_unavailable: bool = False):
             }
         )
     return {"workspaces": rows}
+
+
+def _public_memory_record(value: Any, *, text_limit: int = 20_000) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    allowed = (
+        "memory_id",
+        "scope",
+        "kind",
+        "canonical_text",
+        "status",
+        "trust_level",
+        "confidence_ppm",
+        "importance_ppm",
+        "valid_from_ms",
+        "valid_until_ms",
+        "observed_at_ms",
+        "superseded_at_ms",
+        "superseded_by_id",
+        "parent_memory_id",
+        "branch_id",
+        "verified_at_ms",
+        "verification_expires_at_ms",
+        "created_at_ms",
+        "updated_at_ms",
+    )
+    result = {key: value.get(key) for key in allowed if key in value}
+    text = str(result.get("canonical_text") or "")
+    if len(text) > text_limit:
+        result["canonical_text"] = text[: max(0, text_limit - 1)].rstrip() + "…"
+        result["text_truncated"] = True
+    return result
+
+
+@router.post("/memory/read")
+async def read_memory(request: Request, body: MemoryReadRequest):
+    """Read owner/workspace-scoped persistent knowledge without exposing mutation capability."""
+    user_id = await _user(request, "memory:read")
+    workspace_path = ""
+    if body.workspace_id:
+        workspace = await _ensure_workspace(user_id, body.workspace_id)
+        workspace_path = str(workspace.path or "")
+    adapter = MemoryMcpAdapter(
+        user_id=user_id,
+        workspace=workspace_path,
+        allow_mutations=False,
+    )
+
+    try:
+        if body.action == "search":
+            query = str(body.query or "").strip()
+            if not query:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "MEMORY_QUERY_REQUIRED", "message": "query is required for memory search", "retriable": False, "field": "query"},
+                )
+            raw = await adapter.call_tool(
+                "memory.search",
+                {
+                    "query": query,
+                    "limit": body.limit,
+                    "include_historical": body.include_historical,
+                },
+            )
+            results = []
+            for item in list(raw.get("results") or [])[: body.limit]:
+                if not isinstance(item, dict):
+                    continue
+                shaped = {
+                    key: item.get(key)
+                    for key in (
+                        "memory_id",
+                        "scope",
+                        "kind",
+                        "score",
+                        "reason",
+                        "confidence",
+                        "trust_level",
+                        "verification_stale",
+                    )
+                    if key in item
+                }
+                text = str(item.get("text") or "")
+                shaped["text"] = text[:4_000] + ("…" if len(text) > 4_000 else "")
+                results.append(shaped)
+            context_chars = sum(len(str(item.get("text") or "")) for item in results)
+            try:
+                await adapter.service.record_event(
+                    user_id=user_id,
+                    workspace=workspace_path,
+                    event_type="recall",
+                    reason="retrieved by ChatGPT MCP persistent-memory bridge",
+                    trust_level="verified_system_fact",
+                    confidence_ppm=1_000_000,
+                    payload={
+                        "items": [
+                            {
+                                "node_id": str(item.get("memory_id") or ""),
+                                "scope": str(item.get("scope") or ""),
+                                "path": "canonical",
+                                "heading": str(item.get("kind") or "memory"),
+                                "memory_id": str(item.get("memory_id") or ""),
+                                "reason": str(item.get("reason") or "memory search"),
+                            }
+                            for item in results
+                            if item.get("memory_id")
+                        ][:50],
+                        "context_chars": context_chars,
+                        "item_count": len(results),
+                    },
+                )
+            except Exception:
+                pass
+            result = {"results": results, "count": len(results)}
+        elif body.action == "inspect":
+            memory_id = str(body.memory_id or "").strip()
+            if not memory_id:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "MEMORY_ID_REQUIRED", "message": "memory_id is required for memory inspection", "retriable": False, "field": "memory_id"},
+                )
+            result = _public_memory_record(await adapter.call_tool("memory.inspect", {"memory_id": memory_id}))
+        elif body.action == "timeline":
+            if body.at_ms is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"code": "MEMORY_TIME_REQUIRED", "message": "at_ms is required for memory timeline reads", "retriable": False, "field": "at_ms"},
+                )
+            raw = await adapter.call_tool(
+                "memory.timeline",
+                {
+                    "at_ms": body.at_ms,
+                    **({"known_at_ms": body.known_at_ms} if body.known_at_ms is not None else {}),
+                },
+            )
+            result = {
+                "at_ms": raw.get("at_ms"),
+                "known_at_ms": raw.get("known_at_ms"),
+                "records": [
+                    _public_memory_record(item)
+                    for item in list(raw.get("records") or [])[: body.limit]
+                    if isinstance(item, dict)
+                ],
+            }
+        else:
+            result = await adapter.call_tool("memory.health", {})
+    except HTTPException:
+        raise
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail={"code": "MEMORY_NOT_FOUND", "message": "memory not found", "retriable": False}) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail={"code": "MEMORY_READ_FORBIDDEN", "message": str(exc), "retriable": False}) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail={"code": "MEMORY_READ_INVALID", "message": str(exc), "retriable": False}) from exc
+    except MemoryUnavailableError as exc:
+        raise HTTPException(status_code=503, detail={"code": "MEMORY_UNAVAILABLE", "message": "persistent memory is temporarily unavailable", "retriable": True}) from exc
+
+    return {"action": body.action, "workspace_id": body.workspace_id, "result": result}
 
 
 @router.get("/models")
