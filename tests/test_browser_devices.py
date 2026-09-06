@@ -247,6 +247,7 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         store = BrowserDeviceStore()
         session = SimpleNamespace(
             id="brs_1",
+            user_id="user_1",
             state="AGENT_CONTROL",
             closed_at=None,
             updated_at=1,
@@ -269,6 +270,10 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         with (
             patch("cptr.services.browser_devices.get_db", new=AsyncMock(return_value=db)),
             patch("cptr.services.browser_devices._now_ms", return_value=999),
+            patch(
+                "cptr.services.browser_devices.action_trace_store.append_for_entity",
+                new=AsyncMock(return_value=True),
+            ) as trace_cleanup,
         ):
             changed = await store.disconnect_device_sessions(device_id="bdv_1")
 
@@ -281,6 +286,16 @@ class BrowserDeviceStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(lease.expires_at)
         self.assertEqual(lease.updated_at, 999)
         db.commit.assert_awaited_once()
+        trace_cleanup.assert_awaited_once_with(
+            owner_id="user_1",
+            entity_type="browser",
+            entity_id="brs_1",
+            layer="cleanup",
+            name="browser.socket_disconnect.cleanup",
+            status="cancelled",
+            timestamp_ms=999,
+            dedupe_key="browser:brs_1:socket-disconnect-cleanup",
+        )
 
     async def test_transfer_rejects_stale_epoch(self):
         store = BrowserDeviceStore()

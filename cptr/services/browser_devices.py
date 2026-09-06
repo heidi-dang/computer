@@ -12,6 +12,7 @@ from typing import Any, Literal
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from cptr.services.action_traces import action_trace_store
 from cptr.models import (
     BrowserDevice,
     BrowserDeviceEvent,
@@ -379,6 +380,22 @@ class BrowserDeviceStore:
                 session.closed_at = now
                 session.updated_at = now
             await db.commit()
+            for session in sessions:
+                owner_id = getattr(session, "user_id", None)
+                if isinstance(owner_id, str) and owner_id:
+                    try:
+                        await action_trace_store.append_for_entity(
+                            owner_id=owner_id,
+                            entity_type="browser",
+                            entity_id=str(session.id),
+                            layer="cleanup",
+                            name="browser.socket_disconnect.cleanup",
+                            status="cancelled",
+                            timestamp_ms=now,
+                            dedupe_key=f"browser:{session.id}:socket-disconnect-cleanup",
+                        )
+                    except Exception:
+                        pass
             return len(sessions)
 
     async def disconnect_stale_sessions(self) -> int:
@@ -415,6 +432,22 @@ class BrowserDeviceStore:
                 session.closed_at = now
                 session.updated_at = now
             await db.commit()
+            for session in sessions:
+                owner_id = getattr(session, "user_id", None)
+                if isinstance(owner_id, str) and owner_id:
+                    try:
+                        await action_trace_store.append_for_entity(
+                            owner_id=owner_id,
+                            entity_type="browser",
+                            entity_id=str(session.id),
+                            layer="cleanup",
+                            name="browser.restart_reconcile.cleanup",
+                            status="cancelled",
+                            timestamp_ms=now,
+                            dedupe_key=f"browser:{session.id}:restart-reconcile-cleanup",
+                        )
+                    except Exception:
+                        pass
             return len(sessions)
 
     async def assert_mutation(
@@ -482,7 +515,9 @@ class BrowserDeviceStore:
         async with await get_db() as db:
             device_total = int(
                 await db.scalar(
-                    select(func.count()).select_from(BrowserDevice).where(BrowserDevice.user_id == user_id)
+                    select(func.count())
+                    .select_from(BrowserDevice)
+                    .where(BrowserDevice.user_id == user_id)
                 )
                 or 0
             )

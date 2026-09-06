@@ -453,6 +453,33 @@ class CommandSessionAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CommandSessionRetentionTests(unittest.TestCase):
+    def test_passive_stats_never_reconcile_or_mutate_stale_sessions(self):
+        registry = CommandSessionRegistry()
+        registry.register(
+            "stale",
+            {
+                "done": False,
+                "created_at": 1.0,
+                "proc": SimpleNamespace(returncode=0),
+                "output": bytearray(b"abc"),
+            },
+        )
+
+        with (
+            patch.object(registry, "reconcile", side_effect=AssertionError("passive telemetry reconciled")),
+            patch.object(
+                registry,
+                "reconcile_launch_reservations",
+                side_effect=AssertionError("passive telemetry reconciled reservations"),
+            ),
+        ):
+            stats = registry.passive_stats()
+
+        self.assertFalse(registry.sessions["stale"]["done"])
+        self.assertEqual(stats["active"], 0)
+        self.assertEqual(stats["exited_unreconciled"], 1)
+        self.assertEqual(stats["retained_output_bytes"], 3)
+
     def test_launch_reservation_context_releases_capacity_on_arbitrary_exception(self):
         registry = CommandSessionRegistry()
         with self.assertRaisesRegex(RuntimeError, "boom"):

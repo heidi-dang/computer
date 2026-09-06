@@ -2,9 +2,10 @@
 	import McpConsole from '$lib/components/mcp/McpConsole.svelte';
 	import McpDarkFactory from '$lib/components/mcp/McpDarkFactory.svelte';
 	import McpMemory from '$lib/components/mcp/McpMemory.svelte';
+	import McpServices from '$lib/components/mcp/McpServices.svelte';
 	import McpTopology from '$lib/components/mcp/McpTopology.svelte';
 
-	type McpView = 'topology' | 'console' | 'factory' | 'memory';
+	type McpView = 'topology' | 'console' | 'factory' | 'memory' | 'services';
 	let view = $state<McpView>('topology');
 	let focusRequestId = $state<string | null>(null);
 	let focusCorrelationId = $state<string | null>(null);
@@ -117,6 +118,17 @@
 				>
 					Memory
 				</button>
+				<button
+					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
+					'services'
+						? 'app-interactive-active'
+						: 'app-muted'}"
+					role="tab"
+					aria-selected={view === 'services'}
+					onclick={() => (view = 'services')}
+				>
+					Services
+				</button>
 			</div>
 		</div>
 	</header>
@@ -128,8 +140,10 @@
 			<McpConsole {focusRequestId} {focusCorrelationId} />
 		{:else if view === 'factory'}
 			<McpDarkFactory />
-		{:else}
+		{:else if view === 'memory'}
 			<McpMemory />
+		{:else}
+			<McpServices />
 		{/if}
 	</div>
 </div>

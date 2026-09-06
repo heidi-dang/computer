@@ -8,6 +8,26 @@ from cptr.utils.browser.proxy import BrowserProxyManager
 
 
 class RuntimeProcessMetricsTests(unittest.TestCase):
+    def test_process_probe_is_cached_between_fast_dashboard_snapshots(self):
+        metrics = RuntimeMetrics(process_sample_interval_seconds=5)
+        with (
+            patch(
+                "cptr.services.runtime_metrics._process_snapshot",
+                side_effect=[
+                    {"rss_bytes": 100, "open_fds": 10, "cpu_seconds": 1.0},
+                    {"rss_bytes": 200, "open_fds": 20, "cpu_seconds": 2.0},
+                ],
+            ) as process_snapshot,
+            patch("cptr.services.runtime_metrics.time.monotonic", side_effect=[100.0, 101.0, 106.0]),
+        ):
+            first = metrics.snapshot()["process"]
+            cached = metrics.snapshot()["process"]
+            refreshed = metrics.snapshot()["process"]
+
+        self.assertEqual(first, cached)
+        self.assertEqual(refreshed["open_fds"], 20)
+        self.assertEqual(process_snapshot.call_count, 2)
+
     def test_snapshot_exposes_monotonic_process_cpu_seconds(self):
         metrics = RuntimeMetrics()
         first = metrics.snapshot()["process"]

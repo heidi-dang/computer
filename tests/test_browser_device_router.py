@@ -304,7 +304,13 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("active session", raised.exception.detail)
 
     async def test_open_session_acquires_agent_epoch_and_confirms_attach(self):
-        request = SimpleNamespace()
+        request = SimpleNamespace(
+            headers={
+                "x-cptr-trace-id": "trace-browser-open",
+                "x-cptr-request-id": "request-browser-open",
+                "x-cptr-tool-name": "cptr_user_chrome",
+            }
+        )
         session = SimpleNamespace(id="brs_1", device_id="bdv_1", tab_id=7, surface_id="surf_1")
         acquired = {
             "device_id": "bdv_1",
@@ -319,6 +325,18 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")
             ),
+            patch(
+                "cptr.routers.browser_device.action_trace_store.resolve_entity",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "cptr.routers.browser_device.action_trace_store.link_entity",
+                new=AsyncMock(return_value=True),
+            ) as trace_link,
+            patch(
+                "cptr.routers.browser_device.action_trace_store.append",
+                new=AsyncMock(return_value=True),
+            ) as trace_append,
             patch(
                 "cptr.routers.browser_device.browser_device_store.open_session",
                 new=AsyncMock(return_value=session),
@@ -362,6 +380,16 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["payload"]["action"], "attach")
         self.assertEqual(message["payload"]["expected_epoch"], 9)
         self.assertEqual(message["payload"]["args"], {"tab_id": 7})
+        trace_link.assert_awaited_once_with(
+            owner_id="user_1",
+            trace_id="trace-browser-open",
+            entity_type="browser",
+            entity_id="brs_1",
+        )
+        self.assertEqual(trace_append.await_args_list[0].kwargs["name"], "browser.session.opened")
+        self.assertEqual(
+            trace_append.await_args_list[-1].kwargs["name"], "browser.session.attached"
+        )
 
     async def test_open_session_does_not_report_ready_when_attach_fails(self):
         request = SimpleNamespace()
@@ -659,17 +687,21 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch(
                 "cptr.routers.browser_device.browser_device_store.assert_mutation",
-                new=AsyncMock(side_effect=PermissionError("browser mutation rejected by lease ownership")),
+                new=AsyncMock(
+                    side_effect=PermissionError("browser mutation rejected by lease ownership")
+                ),
             ) as assert_mutation,
             patch(
                 "cptr.routers.browser_device.browser_device_store.transfer_lease",
                 new=AsyncMock(return_value=result),
             ) as transfer,
             patch(
-                "cptr.routers.browser_device.browser_device_store.append_device_event", new=AsyncMock()
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(),
             ) as append_event,
             patch(
-                "cptr.routers.browser_device.browser_device_connections.send_control", new=AsyncMock()
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(),
             ) as send,
             patch(
                 "cptr.routers.browser_device.browser_visual_frames.clear", new=AsyncMock()
@@ -1090,6 +1122,80 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["payload"]["action"], "click")
         self.assertEqual(message["payload"]["args"], {"ref": "ref_1"})
         self.assertEqual(result["result"]["type"], "browser.command.completed")
+
+    async def test_repeated_browser_actions_keep_distinct_trace_stages_by_command_id(self):
+        request = SimpleNamespace(
+            headers={
+                "x-cptr-trace-id": "trace-browser-actions",
+                "x-cptr-request-id": "request-browser-actions",
+                "x-cptr-tool-name": "cptr_user_chrome",
+            }
+        )
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="AGENT_CONTROL")
+        with (
+            patch(
+                "cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.get_session",
+                new=AsyncMock(return_value=session),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.assert_mutation",
+                new=AsyncMock(),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.session_lease",
+                new=AsyncMock(return_value={"owner": "agent", "epoch": 9}),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=12)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_command_results.reserve",
+                new=AsyncMock(),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_command_results.wait",
+                new=AsyncMock(
+                    side_effect=[
+                        {"type": "browser.command.completed", "command_id": "cmd_1", "payload": {}},
+                        {"type": "browser.command.completed", "command_id": "cmd_2", "payload": {}},
+                    ]
+                ),
+            ),
+            patch(
+                "cptr.routers.browser_device.action_trace_store.resolve_entity",
+                new=AsyncMock(return_value="trace-browser-actions"),
+            ),
+            patch(
+                "cptr.routers.browser_device.action_trace_store.append",
+                new=AsyncMock(return_value=True),
+            ) as trace_append,
+        ):
+            for command_id in ("cmd_1", "cmd_2"):
+                await send_browser_command(
+                    request,
+                    "brs_1",
+                    SendCommandBody(
+                        command_id=command_id,
+                        action="click",
+                        expected_epoch=9,
+                        payload={"ref": "ref_1"},
+                    ),
+                )
+
+        self.assertEqual(trace_append.await_count, 2)
+        dedupe_keys = [call.kwargs["dedupe_key"] for call in trace_append.await_args_list]
+        self.assertEqual(
+            dedupe_keys,
+            ["browser:brs_1:command:cmd_1", "browser:brs_1:command:cmd_2"],
+        )
 
     async def test_read_only_agent_command_omits_null_expected_epoch(self):
         request = SimpleNamespace()
