@@ -6,6 +6,7 @@ Replaces the old watch.py with a single multiplexed event stream.
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import platform
@@ -105,7 +106,7 @@ _watch_registry_lock = asyncio.Lock()
 
 
 async def _subscribe_to_path(path: str) -> tuple[str, asyncio.Queue[list[str]]]:
-    """Subscribe this connection to a shared filesystem watch."""
+    """Subscribe this connection to one bounded, non-recursive directory watch."""
     resolved = str(Path(path).resolve())
     queue: asyncio.Queue[list[str]] = asyncio.Queue(maxsize=32)
 
@@ -115,7 +116,10 @@ async def _subscribe_to_path(path: str) -> tuple[str, asyncio.Queue[list[str]]]:
             observer = _create_observer()
             observer.daemon = True
             handler = _ChangeCollector()
-            watch = observer.schedule(handler, resolved, recursive=True)
+            # The file browser only needs the directory currently displayed. A
+            # recursive watch on a home/workspace root can consume hundreds of
+            # thousands of inotify watch descriptors and exhaust process FDs.
+            watch = observer.schedule(handler, resolved, recursive=False)
             observer.start()
             entry = _WatchEntry(observer, handler, watch, set())
             _watch_registry[resolved] = entry
@@ -126,25 +130,31 @@ async def _subscribe_to_path(path: str) -> tuple[str, asyncio.Queue[list[str]]]:
 
 async def _unsubscribe_from_path(path: str, queue: asyncio.Queue[list[str]]) -> None:
     """Remove a filesystem watch subscription and stop idle observers."""
+    entry: _WatchEntry | None = None
     async with _watch_registry_lock:
-        entry = _watch_registry.get(path)
-        if entry is None:
+        current = _watch_registry.get(path)
+        if current is None:
             return
 
-        entry.subscribers.discard(queue)
-        if entry.subscribers:
+        current.subscribers.discard(queue)
+        if current.subscribers:
             return
 
-        _watch_registry.pop(path, None)
-        try:
-            entry.observer.unschedule(entry.watch)
-        except Exception:
-            pass
-        try:
-            entry.observer.stop()
-            entry.observer.join(timeout=2)
-        except Exception:
-            pass
+        entry = _watch_registry.pop(path, None)
+
+    if entry is None:
+        return
+    try:
+        entry.observer.unschedule(entry.watch)
+    except Exception:
+        pass
+    try:
+        entry.observer.stop()
+        # watchdog joins synchronously; never hold the asyncio event loop or
+        # registry lock while waiting for its worker thread to terminate.
+        await asyncio.to_thread(entry.observer.join, 2)
+    except Exception:
+        pass
 
 
 async def _dispatch_fs_changes() -> None:
@@ -179,30 +189,74 @@ async def _ensure_fs_dispatcher() -> None:
         _fs_dispatch_task = asyncio.create_task(_dispatch_fs_changes())
 
 
+def _watch_error_code(exc: Exception) -> tuple[str, bool]:
+    """Map watcher failures to a stable client error contract."""
+    if isinstance(exc, OSError) and exc.errno in {errno.ENOSPC, errno.EMFILE}:
+        return "WATCH_LIMIT", False
+    return "WATCH_FAILED", True
+
+
+async def _report_watch_error(ws: WebSocket, path: str, exc: Exception) -> None:
+    code, retryable = _watch_error_code(exc)
+    logger.warning("Failed to watch %s: %s", path, exc)
+    try:
+        await ws.send_json(
+            {
+                "type": "fs_watch_error",
+                "code": code,
+                "path": path,
+                "retryable": retryable,
+            }
+        )
+    except Exception:
+        pass
+
+
 async def _fs_watcher_loop(ws: WebSocket, initial_path: str, path_holder: dict) -> None:
-    """Watch filesystem and push fs_change events."""
+    """Watch filesystem without allowing watcher failure to kill the events socket."""
     target = str(Path(initial_path).resolve())
     path_holder["current"] = target
+    current_path: str | None = None
+    queue: asyncio.Queue[list[str]] | None = None
+    failed_path: str | None = None
 
-    try:
-        await _ensure_fs_dispatcher()
-        current_path, queue = await _subscribe_to_path(target)
-    except Exception as e:
-        logger.warning(f"Failed to watch {target}: {e}")
-        return
+    await _ensure_fs_dispatcher()
+
+    async def subscribe(path: str) -> bool:
+        nonlocal current_path, queue, failed_path
+        try:
+            current_path, queue = await _subscribe_to_path(path)
+            failed_path = None
+            path_holder["current"] = current_path
+            return True
+        except Exception as exc:
+            failed_path = path
+            current_path = None
+            queue = None
+            path_holder["current"] = path
+            await _report_watch_error(ws, path, exc)
+            return False
+
+    await subscribe(target)
 
     try:
         while True:
-            # Check if path changed (from receive loop)
-            new_path = path_holder.get("pending")
+            # Changing path explicitly resets the per-path circuit. A failed
+            # path is not retried just because the unified WebSocket remains live.
+            new_path = path_holder.pop("pending", None)
             if new_path:
-                del path_holder["pending"]
                 resolved = str(Path(new_path).resolve())
                 if resolved != path_holder["current"] and Path(resolved).is_dir():
-                    await _unsubscribe_from_path(current_path, queue)
-                    current_path, queue = await _subscribe_to_path(resolved)
-                    path_holder["current"] = resolved
-                    logger.info(f"FS watch path changed to {resolved}")
+                    if current_path is not None and queue is not None:
+                        await _unsubscribe_from_path(current_path, queue)
+                        current_path = None
+                        queue = None
+                    if resolved != failed_path and await subscribe(resolved):
+                        logger.info("FS watch path changed to %s", resolved)
+
+            if queue is None:
+                await asyncio.sleep(0.25)
+                continue
 
             try:
                 paths = await asyncio.wait_for(queue.get(), timeout=1.0)
@@ -214,7 +268,8 @@ async def _fs_watcher_loop(ws: WebSocket, initial_path: str, path_holder: dict) 
             except Exception:
                 break
     finally:
-        await _unsubscribe_from_path(current_path, queue)
+        if current_path is not None and queue is not None:
+            await _unsubscribe_from_path(current_path, queue)
 
 
 # ── Port scanning ─────────────────────────────────────────────────
@@ -395,8 +450,37 @@ async def _scan_ports_darwin() -> list[dict]:
         return []
 
 
+def _linux_socket_pid_map() -> dict[int, int]:
+    """Build socket-inode -> PID once for an entire Linux port scan."""
+    result: dict[int, int] = {}
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            pid = int(entry)
+            try:
+                fd_dir = f"/proc/{entry}/fd"
+                for fd in os.listdir(fd_dir):
+                    try:
+                        link = os.readlink(f"{fd_dir}/{fd}")
+                    except (OSError, ValueError):
+                        continue
+                    if not link.startswith("socket:[") or not link.endswith("]"):
+                        continue
+                    try:
+                        inode = int(link[8:-1])
+                    except ValueError:
+                        continue
+                    result.setdefault(inode, pid)
+            except (OSError, PermissionError):
+                continue
+    except Exception:
+        pass
+    return result
+
+
 async def _scan_ports_linux() -> list[dict]:
-    """Scan listening ports on Linux using /proc/net/tcp."""
+    """Scan Linux listening ports with one /proc FD traversal per scan."""
     ports = []
     try:
 
@@ -404,46 +488,31 @@ async def _scan_ports_linux() -> list[dict]:
             with open("/proc/net/tcp") as f:
                 return f.readlines()[1:]  # skip header
 
-        lines = await asyncio.to_thread(_read_proc_net)
+        lines, pid_by_inode = await asyncio.gather(
+            asyncio.to_thread(_read_proc_net),
+            asyncio.to_thread(_linux_socket_pid_map),
+        )
+        process_names: dict[int, str] = {}
         for line in lines:
             parts = line.split()
-            if parts[3] == "0A":  # LISTEN state
-                local = parts[1]
-                port = int(local.split(":")[1], 16)
-                inode = int(parts[9])
-                # Find PID for this inode
-                pid = await _inode_to_pid(inode)
-                process = await _get_process_name(pid) if pid else "unknown"
-                ports.append({"port": port, "pid": pid or 0, "process": process})
+            if parts[3] != "0A":  # LISTEN state
+                continue
+            local = parts[1]
+            port = int(local.split(":")[1], 16)
+            inode = int(parts[9])
+            pid = pid_by_inode.get(inode, 0)
+            if pid and pid not in process_names:
+                process_names[pid] = await _get_process_name(pid)
+            ports.append(
+                {
+                    "port": port,
+                    "pid": pid,
+                    "process": process_names.get(pid, "unknown"),
+                }
+            )
     except Exception as e:
         logger.warning(f"Port scan failed: {e}")
     return ports
-
-
-async def _inode_to_pid(inode: int) -> Optional[int]:
-    """Map a socket inode to a PID on Linux."""
-
-    def _scan():
-        try:
-            for entry in os.listdir("/proc"):
-                if not entry.isdigit():
-                    continue
-                try:
-                    fd_dir = f"/proc/{entry}/fd"
-                    for fd in os.listdir(fd_dir):
-                        try:
-                            link = os.readlink(f"{fd_dir}/{fd}")
-                            if f"socket:[{inode}]" in link:
-                                return int(entry)
-                        except (OSError, ValueError):
-                            continue
-                except (OSError, PermissionError):
-                    continue
-        except Exception:
-            pass
-        return None
-
-    return await asyncio.to_thread(_scan)
 
 
 async def _scan_ports_windows() -> list[dict]:
@@ -527,49 +596,110 @@ async def _scan_ports() -> list[dict]:
     return filtered
 
 
-async def _port_scanner_loop(ws: WebSocket) -> None:
-    """Periodically scan ports and push add/remove events."""
-    known: dict[int, dict] = {}  # port -> info
+_PORT_SCAN_INTERVAL_SECONDS = 3.0
+_port_subscribers: set[asyncio.Queue[dict]] = set()
+_port_subscribers_lock = asyncio.Lock()
+_port_monitor_task: asyncio.Task | None = None
+_port_snapshot: dict[int, dict] = {}
 
-    while True:
-        await asyncio.sleep(3)
 
+def _port_added_event(info: dict) -> dict:
+    return {
+        "type": "port_added",
+        "port": info["port"],
+        "pid": info["pid"],
+        "process": info["process"],
+        "session_id": info.get("session_id"),
+    }
+
+
+def _fanout_port_events(events: list[dict], subscribers: list[asyncio.Queue[dict]]) -> None:
+    for event in events:
+        for queue in subscribers:
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                logger.debug("Dropped port event for slow subscriber")
+
+
+async def _port_monitor_loop() -> None:
+    """Scan ports once per interval and fan out deltas to all WebSockets."""
+    global _port_snapshot
+    try:
+        while True:
+            await asyncio.sleep(_PORT_SCAN_INTERVAL_SECONDS)
+            try:
+                current_ports = {p["port"]: p for p in await _scan_ports()}
+            except Exception as e:
+                logger.warning("Port scan error: %s", e)
+                continue
+
+            async with _port_subscribers_lock:
+                previous = _port_snapshot
+                pending_events = [
+                    _port_added_event(info)
+                    for port, info in current_ports.items()
+                    if port not in previous
+                ]
+                pending_events.extend(
+                    {"type": "port_removed", "port": port}
+                    for port in previous
+                    if port not in current_ports
+                )
+                # Snapshot publication and subscriber capture are atomic: a new
+                # subscriber either receives these deltas or replays the new snapshot.
+                _port_snapshot = current_ports
+                subscribers = list(_port_subscribers)
+
+            _fanout_port_events(pending_events, subscribers)
+    except asyncio.CancelledError:
+        raise
+
+
+async def _subscribe_port_events() -> asyncio.Queue[dict]:
+    """Subscribe to the singleton port monitor and replay its current snapshot."""
+    global _port_monitor_task
+    queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=64)
+    async with _port_subscribers_lock:
+        _port_subscribers.add(queue)
+        snapshot = list(_port_snapshot.values())
+        if _port_monitor_task is None or _port_monitor_task.done():
+            _port_monitor_task = asyncio.create_task(_port_monitor_loop())
+    for info in snapshot:
+        queue.put_nowait(_port_added_event(info))
+    return queue
+
+
+async def _unsubscribe_port_events(queue: asyncio.Queue[dict]) -> None:
+    """Detach a client and stop the shared monitor when the last client leaves."""
+    global _port_monitor_task, _port_snapshot
+    task: asyncio.Task | None = None
+    async with _port_subscribers_lock:
+        _port_subscribers.discard(queue)
+        if not _port_subscribers and _port_monitor_task is not None:
+            task = _port_monitor_task
+            _port_monitor_task = None
+            _port_snapshot = {}
+    if task is not None:
+        task.cancel()
         try:
-            current_ports = {p["port"]: p for p in await _scan_ports()}
-        except Exception as e:
-            logger.warning(f"Port scan error: {e}")
-            continue
+            await task
+        except asyncio.CancelledError:
+            pass
 
-        # Detect new ports
-        for port, info in current_ports.items():
-            if port not in known:
-                try:
-                    await ws.send_json(
-                        {
-                            "type": "port_added",
-                            "port": info["port"],
-                            "pid": info["pid"],
-                            "process": info["process"],
-                            "session_id": info.get("session_id"),
-                        }
-                    )
-                except Exception:
-                    return
 
-        # Detect removed ports
-        for port in list(known.keys()):
-            if port not in current_ports:
-                try:
-                    await ws.send_json(
-                        {
-                            "type": "port_removed",
-                            "port": port,
-                        }
-                    )
-                except Exception:
-                    return
-
-        known = current_ports
+async def _port_scanner_loop(ws: WebSocket) -> None:
+    """Forward events from the singleton backend port monitor to one client."""
+    queue = await _subscribe_port_events()
+    try:
+        while True:
+            event = await queue.get()
+            try:
+                await ws.send_json(event)
+            except Exception:
+                return
+    finally:
+        await _unsubscribe_port_events(queue)
 
 
 # ── Receive loop ──────────────────────────────────────────────────
@@ -599,6 +729,7 @@ async def events_ws(
 
     Pushes:
       - {"type": "fs_change", "paths": [...]}
+      - {"type": "fs_watch_error", "code": "...", "path": "...", "retryable": bool}
       - {"type": "port_added", "port": N, "pid": N, "process": "...", "session_id": "..." | null}
       - {"type": "port_removed", "port": N}
 

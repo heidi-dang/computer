@@ -18,6 +18,42 @@ export interface PortInfo {
 let ws: WebSocket | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let currentWatchPath: string | null = null;
+let reconnectAttempt = 0;
+let blockedWatchPath: string | null = null;
+let watchCircuitOpenUntil = 0;
+
+const RECONNECT_BASE_MS = 2_000;
+const RECONNECT_MAX_MS = 60_000;
+const WATCH_CIRCUIT_COOLDOWN_MS = 60_000;
+
+function clearWatchCircuitForPath(path: string) {
+	if (blockedWatchPath && blockedWatchPath !== path) {
+		blockedWatchPath = null;
+		watchCircuitOpenUntil = 0;
+	}
+}
+
+function scheduleReconnect() {
+	if (reconnectTimer || !currentWatchPath) return;
+
+	const exponent = Math.min(reconnectAttempt, 5);
+	const backoff = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** exponent);
+	const jitter = Math.floor(backoff * 0.2 * Math.random());
+	let delay = backoff + jitter;
+
+	if (blockedWatchPath === currentWatchPath) {
+		delay = Math.max(delay, watchCircuitOpenUntil - Date.now());
+	}
+
+	reconnectAttempt++;
+	reconnectTimer = setTimeout(
+		() => {
+			reconnectTimer = null;
+			if (currentWatchPath) connect(currentWatchPath);
+		},
+		Math.max(delay, 0)
+	);
+}
 
 // ── FS events ────────────────────────────────────────────────────
 let _fsTick = $state(0);
@@ -29,6 +65,7 @@ let _newPorts = $state<PortInfo[]>([]);
 let _dismissedPorts = new Set<number>();
 
 function connect(watchPath: string) {
+	clearWatchCircuitForPath(watchPath);
 	currentWatchPath = watchPath;
 
 	if (ws && ws.readyState <= WebSocket.OPEN) {
@@ -48,9 +85,19 @@ function connect(watchPath: string) {
 		try {
 			const msg = JSON.parse(event.data);
 
+			reconnectAttempt = 0;
 			if (msg.type === 'fs_change') {
 				_fsChangedPaths = msg.paths ?? [];
 				_fsTick++;
+				if (blockedWatchPath === currentWatchPath) {
+					blockedWatchPath = null;
+					watchCircuitOpenUntil = 0;
+				}
+			} else if (msg.type === 'fs_watch_error') {
+				if (msg.retryable === false && typeof msg.path === 'string') {
+					blockedWatchPath = msg.path;
+					watchCircuitOpenUntil = Date.now() + WATCH_CIRCUIT_COOLDOWN_MS;
+				}
 			} else if (msg.type === 'port_added') {
 				const info: PortInfo = {
 					port: msg.port,
@@ -74,10 +121,11 @@ function connect(watchPath: string) {
 
 	ws.onclose = () => {
 		ws = null;
-		if (reconnectTimer) clearTimeout(reconnectTimer);
-		reconnectTimer = setTimeout(() => {
-			if (currentWatchPath) connect(currentWatchPath);
-		}, 2000);
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = null;
+		}
+		scheduleReconnect();
 	};
 
 	ws.onerror = () => {
@@ -96,9 +144,13 @@ function disconnect() {
 		ws = null;
 	}
 	currentWatchPath = null;
+	reconnectAttempt = 0;
+	blockedWatchPath = null;
+	watchCircuitOpenUntil = 0;
 }
 
 function watchPath(path: string) {
+	clearWatchCircuitForPath(path);
 	currentWatchPath = path;
 	if (ws && ws.readyState === WebSocket.OPEN) {
 		ws.send(JSON.stringify({ type: 'watch_path', path }));
