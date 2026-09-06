@@ -1,3 +1,5 @@
+import sys
+
 import click
 import uvicorn
 
@@ -36,19 +38,18 @@ def run(host: str, port: int, reload: bool, open_browser: bool, headless: bool):
     import os
     import secrets
 
-    display_host = "localhost" if host == "0.0.0.0" else host
-
     token = secrets.token_hex(32)
     os.environ["CPTR_STARTUP_TOKEN"] = token
     os.environ["CPTR_PORT"] = str(port)
-    url = f"http://{display_host}:{port}/?token={token}"
+    dashboard_url, bootstrap_url = startup_dashboard_urls(host=host, port=port, token=token)
+    output_url = bootstrap_url if should_reveal_startup_token(sys.stdout) else dashboard_url
 
-    print(f"\n  ➜  {url}\n")
+    print(f"\n  ➜  {output_url}\n")
     if should_open_dashboard(open_browser=open_browser, headless=headless):
         import threading
         import webbrowser
 
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+        threading.Timer(1.5, lambda: webbrowser.open(bootstrap_url)).start()
     uvicorn.run(
         "cptr.app:application",
         host=host,
@@ -56,6 +57,19 @@ def run(host: str, port: int, reload: bool, open_browser: bool, headless: bool):
         reload=reload,
         timeout_graceful_shutdown=SERVER_GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
     )
+
+
+def startup_dashboard_urls(*, host: str, port: int, token: str) -> tuple[str, str]:
+    """Return safe display and secret-bearing first-time bootstrap URLs."""
+    display_host = "localhost" if host == "0.0.0.0" else host
+    dashboard_url = f"http://{display_host}:{port}/"
+    return dashboard_url, f"{dashboard_url}?token={token}"
+
+
+def should_reveal_startup_token(stream: object) -> bool:
+    """Reveal the one-time setup URL only to a directly attached interactive terminal."""
+    isatty = getattr(stream, "isatty", None)
+    return bool(callable(isatty) and isatty())
 
 
 def should_open_dashboard(*, open_browser: bool, headless: bool) -> bool:
