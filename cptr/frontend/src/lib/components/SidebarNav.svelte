@@ -51,14 +51,15 @@
 			>
 		</a>
 	</div>
-	<div class="px-1.5 shrink-0">
-		<a
-			href="/mcp"
-			class="touch-target app-interactive flex items-center gap-2 w-full min-h-8 px-2.5 rounded-xl text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100 no-underline"
-			onclick={openMcp}
-		>
-			<Icon name="plug" size={14} />
-			<span class="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">MCP</span>
-		</a>
-	</div>
 {/if}
+
+<div class="px-1.5 shrink-0">
+	<a
+		href="/mcp"
+		class="touch-target app-interactive flex items-center gap-2 w-full min-h-8 px-2.5 rounded-xl text-xs text-gray-500 hover:text-gray-700 dark:hover:text-gray-300 transition-colors duration-100 no-underline"
+		onclick={openMcp}
+	>
+		<Icon name="plug" size={14} />
+		<span class="flex-1 text-left overflow-hidden text-ellipsis whitespace-nowrap">MCP</span>
+	</a>
+</div>

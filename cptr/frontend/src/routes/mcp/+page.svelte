@@ -21,7 +21,7 @@
 	<title>MCP / Computer</title>
 </svelte:head>
 
-<div class="app-theme flex h-full flex-col overflow-hidden">
+<div class="app-theme flex h-full min-h-0 w-full flex-col overflow-hidden">
 	<header class="app-surface shrink-0 border-b px-2 py-2 sm:px-4 sm:py-2.5">
 		<div class="flex min-w-0 flex-wrap items-center gap-2 sm:flex-nowrap">
 			<a
