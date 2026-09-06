@@ -149,6 +149,44 @@ class McpServicesApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(job_payload["system_status"], "STABLE")
             self.assertEqual(job_payload["pass_count"], 1)
 
+    async def test_plugin_refresh_advisory_is_action_required_with_healthy_post_band(self):
+        health = make_health()
+        health.identity_cache.set(
+            PluginIdentity(
+                version=EXPECTED_CONTRACT_VERSION,
+                contract_version=EXPECTED_CONTRACT_VERSION,
+                tool_count=EXPECTED_TOOL_COUNT,
+                refresh_required=True,
+                source="test",
+            )
+        )
+        maintain = McpServicesMaintainService(health=health)
+        fixed = await health.snapshot(user_id="admin-1", **snapshot_kwargs())
+        plugin = next(item for item in fixed["services"] if item["id"] == "plugin")
+        self.assertEqual(plugin["band"], "healthy")
+        self.assertEqual(fixed["aggregate"], "healthy")
+
+        with patch.object(health, "snapshot", new=AsyncMock(return_value=fixed)):
+            job = await maintain.start(
+                service_id="plugin",
+                owner_id="admin-1",
+                idempotency_key="host-refresh-advisory",
+            )
+            final = None
+            for _ in range(50):
+                final = maintain.get_job(job.job_id, owner_id="admin-1")
+                if final and final.status not in ("queued", "running"):
+                    break
+                await asyncio.sleep(0.02)
+
+        self.assertIsNotNone(final)
+        assert final is not None
+        self.assertEqual(final.status, "partial")
+        self.assertEqual(final.system_status, "ACTION_REQUIRED")
+        self.assertEqual(final.post_band, "healthy")
+        self.assertEqual(final.post_aggregate, "healthy")
+        self.assertEqual(final.pass_count, 1)
+
     async def test_maintain_rejects_unknown_service_id(self):
         admin = Mock(return_value=SimpleNamespace(user_id="admin-1"))
         with patch.object(mcp_router, "require_admin", admin):

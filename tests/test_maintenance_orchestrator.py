@@ -49,6 +49,26 @@ class MaintenanceOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(snapshots.await_count, 2)
 
+    async def test_healthy_final_state_can_require_external_action(self):
+        orchestrator = MaintenanceOrchestrator(max_passes=1)
+        repair = AsyncMock(return_value=True)
+        snapshots = AsyncMock(
+            return_value={
+                "aggregate": "healthy",
+                "services": [{"id": "plugin", "band": "healthy"}],
+            }
+        )
+
+        result = await orchestrator.stabilize(
+            service_id="plugin",
+            repair_fn=repair,
+            snapshot_fn=snapshots,
+            action_required_fn=lambda: True,
+        )
+
+        self.assertEqual(result.system_status, "ACTION_REQUIRED")
+        self.assertEqual(result.final_band, "healthy")
+
     async def test_moderate_final_state_can_require_external_action(self):
         orchestrator = MaintenanceOrchestrator(max_passes=1)
         repair = AsyncMock(return_value=True)

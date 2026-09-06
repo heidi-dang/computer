@@ -68,7 +68,7 @@ class BandScoringTests(unittest.TestCase):
         probes = probe_plugin_identity(PluginIdentity())
         self.assertEqual(band_from_probes(probes), "unhealthy")
 
-    def test_plugin_contract_match_and_refresh_moderate(self):
+    def test_plugin_contract_match_and_refresh_is_healthy_advisory(self):
         identity = PluginIdentity(
             version="1.4.5",
             contract_version=EXPECTED_CONTRACT_VERSION,
@@ -77,7 +77,11 @@ class BandScoringTests(unittest.TestCase):
             source="test",
         )
         probes = probe_plugin_identity(identity)
-        self.assertEqual(band_from_probes(probes), "moderate")
+        refresh_probe = next(p for p in probes if p.id == "plugin.refresh_required")
+        self.assertTrue(refresh_probe.ok)
+        self.assertEqual(refresh_probe.band_hint, "healthy")
+        self.assertTrue(refresh_probe.value)
+        self.assertEqual(band_from_probes(probes), "healthy")
 
     def test_plugin_contract_drift_unhealthy(self):
         identity = PluginIdentity(

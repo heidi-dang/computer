@@ -81,8 +81,9 @@ class MaintenanceOrchestrator:
             snapshot = await snapshot_fn()
             final_band = _service_band(snapshot, service_id)
             if final_band == "healthy":
+                action_required = bool(action_required_fn and action_required_fn())
                 return StabilizeResult(
-                    system_status="STABLE",
+                    system_status="ACTION_REQUIRED" if action_required else "STABLE",
                     final_band=final_band,
                     pass_count=pass_count,
                     repaired_targets=tuple(repaired),

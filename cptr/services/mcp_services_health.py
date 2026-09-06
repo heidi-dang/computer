@@ -460,10 +460,10 @@ def probe_plugin_identity(
         probes.append(
             ProbeResult(
                 id="plugin.refresh_required",
-                ok=False,
+                ok=True,
                 critical=False,
-                band_hint="moderate",
-                detail="ChatGPT frozen tool snapshot refresh required",
+                band_hint="healthy",
+                detail="ChatGPT frozen tool snapshot refresh required (operator action)",
                 value=True,
             )
         )

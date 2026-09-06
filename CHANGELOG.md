@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- 🩺 **Plugin host-refresh advisories no longer degrade runtime health.** A current plugin manifest with matching contract/tool count stays healthy even when ChatGPT must refresh its frozen action snapshot; **Stabilize All** reports `ACTION_REQUIRED` with a healthy post-band instead of leaving global Services permanently moderate.
 - 🧹 **Completed command sessions no longer accumulate indefinitely.** Finished sessions expire by TTL and a hard retained-session cap, while active child process groups are terminated and drained during shutdown.
 - 🛡️ **Linux child commands receive best-effort parent-death termination.** Unexpected CPTR process loss is less likely to leave orphan command groups behind.
 
