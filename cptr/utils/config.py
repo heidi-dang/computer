@@ -368,6 +368,26 @@ def get_auth_mode() -> AuthMode:
     return AuthMode.PASSWORD  # Default
 
 
+def _trusted_sources(config: dict | None = None) -> tuple[str, ...]:
+    effective = config if config is not None else load_config()
+    auth_cfg = effective.get("auth", {})
+    raw = auth_cfg.get("trusted_sources", [])
+    if not isinstance(raw, list):
+        return ()
+    return tuple(value.strip() for value in raw if isinstance(value, str) and value.strip())
+
+
+def validate_auth_configuration(config: dict | None = None) -> None:
+    """Fail closed on trusted-header deployments without an explicit trusted proxy list."""
+    effective = config if config is not None else load_config()
+    if effective.get("auth", {}).get("mode", "") != AuthMode.TRUSTED_HEADER.value:
+        return
+    if not _trusted_sources(effective):
+        raise RuntimeError(
+            "trusted_header authentication requires auth.trusted_sources with at least one explicit proxy address"
+        )
+
+
 def check_access(
     client_host: str,
     jwt_token: str | None,
@@ -386,9 +406,8 @@ def check_access(
     # Trusted Header Authentication
     if mode == AuthMode.TRUSTED_HEADER:
         config = load_config()
-        auth_cfg = config.get("auth", {})
-        trusted_sources = auth_cfg.get("trusted_sources", [])
-        if trusted_sources and client_host not in trusted_sources:
+        trusted_sources = _trusted_sources(config)
+        if not trusted_sources or client_host not in trusted_sources:
             return None
         if remote_user_header:
             return AuthResult(username=remote_user_header)

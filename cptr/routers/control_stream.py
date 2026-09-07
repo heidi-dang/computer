@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -16,6 +17,7 @@ from cptr.services.live_events import LiveEventEnvelope, command_target_key, liv
 from cptr.utils.redaction import redact_external_text
 
 router = APIRouter(prefix="/api/control/v1", tags=["control-live"])
+STREAM_HEARTBEAT_SECONDS = 15.0
 TERMINAL_STATUSES = {
     "COMPLETE",
     "COMPLETE_WITH_TOOL_ERRORS",
@@ -83,23 +85,32 @@ async def _stream(
     ):
         return
     iterator = live_event_hub.subscribe(target_key, after_sequence=after_sequence).__aiter__()
+    pending: asyncio.Task[LiveEventEnvelope] | None = asyncio.create_task(iterator.__anext__())
     try:
         while True:
             if await request.is_disconnected():
                 return
-            try:
-                event = await asyncio.wait_for(iterator.__anext__(), timeout=15)
-            except asyncio.TimeoutError:
+            assert pending is not None
+            done, _ = await asyncio.wait({pending}, timeout=STREAM_HEARTBEAT_SECONDS)
+            if not done:
                 yield ": heartbeat\n\n"
                 continue
+            try:
+                event = pending.result()
             except StopAsyncIteration:
                 return
+            pending = None
 
             yield _sse(event=_event_name(event), event_id=str(event.sequence), data=event.to_dict())
             status = str(event.payload.get("status", "")).upper()
             if status in TERMINAL_STATUSES or event.event_type.endswith(".terminal"):
                 return
+            pending = asyncio.create_task(iterator.__anext__())
     finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+            with suppress(asyncio.CancelledError, StopAsyncIteration):
+                await pending
         await iterator.aclose()
 
 

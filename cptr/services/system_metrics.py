@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import time
 from dataclasses import dataclass
+from time import monotonic as _monotonic
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -576,7 +577,7 @@ class BackendMetricsSampler:
             self._task = asyncio.create_task(self._run(), name="mcp-backend-metrics")
 
     async def sample_once(self) -> McpBackendMetricsSample:
-        now = time.monotonic()
+        now = _monotonic()
         include_expensive = now >= self._next_expensive_sample_at
         try:
             counters = await asyncio.to_thread(

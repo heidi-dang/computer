@@ -51,6 +51,37 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('"sequence":1', event)
             await iterator.aclose()
 
+    async def test_idle_stream_survives_multiple_heartbeats_then_receives_event(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+        with (
+            patch.object(control_stream, "live_event_hub", hub),
+            patch.object(control_stream, "STREAM_HEARTBEAT_SECONDS", 0.01),
+        ):
+            iterator = control_stream._stream(
+                request,
+                target_key="task:idle",
+                snapshot={"target": "task", "snapshot": {"status": "RUNNING"}},
+                after_sequence=0,
+            ).__aiter__()
+            snapshot = await iterator.__anext__()
+            self.assertIn('"status":"RUNNING"', snapshot)
+            heartbeat_one = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+            heartbeat_two = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+            self.assertEqual(heartbeat_one, ": heartbeat\n\n")
+            self.assertEqual(heartbeat_two, ": heartbeat\n\n")
+
+            await hub.publish(
+                user_id="user-1",
+                target_key="task:idle",
+                task_id="idle",
+                event_type="shell.stdout",
+                payload={"text": "after-idle"},
+            )
+            event = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+            self.assertIn("after-idle", event)
+            await iterator.aclose()
+
     async def test_terminal_snapshot_closes_without_polling(self):
         request = SimpleNamespace(
             headers={},

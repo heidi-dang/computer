@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from cptr.utils.agents.attachments import PreparedAgentAttachments
+from cptr.utils.agents.environment import agent_env
 from cptr.utils.agents.events import (
     AgentDone,
     AgentError,
@@ -24,7 +25,7 @@ from cptr.utils.agents.events import (
     AgentToolUpdate,
 )
 from cptr.utils.agents.prompts import turn_prompt_text
-from cptr.utils.identity import env_for, preexec_for
+from cptr.utils.identity import preexec_for
 from cptr.utils.processes import terminate_process_group
 
 
@@ -79,11 +80,7 @@ async def _opencode_server(profile: dict[str, Any], workspace: str, identity=Non
         yield server_url, None
         return
 
-    env = (
-        env_for(identity, workspace or os.getcwd())
-        if identity and identity.is_pam
-        else os.environ.copy()
-    )
+    env = agent_env(profile, identity, workspace or os.getcwd())
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     port = _free_port()
