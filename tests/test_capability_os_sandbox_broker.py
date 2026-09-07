@@ -5,6 +5,7 @@ import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cptr.services.capability_os.sandbox_broker import (
     BrokerProtocolError,
@@ -36,6 +37,25 @@ class CapabilityOsSandboxBrokerTests(unittest.IsolatedAsyncioTestCase):
                 profile="python",
                 command=["/bin/sh"],
             )
+
+    def test_client_resolves_default_group_only_at_socket_verification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "broker.sock"
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server.bind(str(path))
+            os.chmod(path, 0o660)
+            try:
+                st = path.stat()
+                with patch(
+                    "cptr.services.capability_os.sandbox_broker.grp.getgrnam",
+                    side_effect=KeyError("cptr"),
+                ):
+                    client = SandboxBrokerClient(socket_path=path, expected_uid=st.st_uid)
+                    self.assertIsNone(client.expected_gid)
+                    with self.assertRaisesRegex(BrokerProtocolError, "required cptr group does not exist"):
+                        client._verify_socket()
+            finally:
+                server.close()
 
     async def test_client_verifies_socket_metadata_and_round_trips_bounded_frame(self):
         with tempfile.TemporaryDirectory() as tmp:

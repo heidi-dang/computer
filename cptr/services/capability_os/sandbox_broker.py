@@ -174,18 +174,21 @@ class SandboxBrokerClient:
     ) -> None:
         self.socket_path = Path(socket_path)
         self.expected_uid = int(expected_uid)
-        if expected_gid is None:
-            try:
-                expected_gid = grp.getgrnam("cptr").gr_gid
-            except KeyError as exc:
-                raise BrokerProtocolError("required cptr group does not exist") from exc
-        self.expected_gid = int(expected_gid)
+        self.expected_gid = None if expected_gid is None else int(expected_gid)
         self.max_frame_bytes = int(max_frame_bytes)
         self.connect_timeout_seconds = float(connect_timeout_seconds)
         if not 1024 <= self.max_frame_bytes <= 1024 * 1024:
             raise ValueError("broker frame bound must be between 1 KiB and 1 MiB")
         if not 0.1 <= self.connect_timeout_seconds <= 30:
             raise ValueError("broker connect timeout is outside permitted bounds")
+
+    def _resolve_expected_gid(self) -> int:
+        if self.expected_gid is not None:
+            return self.expected_gid
+        try:
+            return int(grp.getgrnam("cptr").gr_gid)
+        except KeyError as exc:
+            raise BrokerProtocolError("required cptr group does not exist") from exc
 
     def _verify_socket(self) -> None:
         try:
@@ -196,7 +199,8 @@ class SandboxBrokerClient:
             raise BrokerProtocolError("sandbox broker endpoint is not a Unix socket")
         if stat.S_IMODE(st.st_mode) != 0o660:
             raise BrokerProtocolError("sandbox broker socket mode must be exactly 0660")
-        if st.st_uid != self.expected_uid or st.st_gid != self.expected_gid:
+        expected_gid = self._resolve_expected_gid()
+        if st.st_uid != self.expected_uid or st.st_gid != expected_gid:
             raise BrokerProtocolError("sandbox broker socket ownership mismatch")
 
     @staticmethod
