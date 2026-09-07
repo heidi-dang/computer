@@ -124,7 +124,9 @@ def _service(request: Request) -> CapabilityOsControlService:
     service = getattr(request.app.state, "capability_os_control_service", None)
     if service is not None:
         return service
-    clock = lambda: int(time.time() * 1000)
+    def clock() -> int:
+        return int(time.time() * 1000)
+
     store = SqlCapabilityOsStore()
     authority = AuthorityBroker(
         store=store,
