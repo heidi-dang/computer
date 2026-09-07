@@ -60,6 +60,21 @@ jobs:
           CPTR_DATA_DIR: ${{ runner.temp }}/cptr-ci-${{ matrix.python-version }}
         run: uv run --frozen python -m pytest -q
 
+  backend-gate:
+    # main branch protection intentionally requires this stable context name.
+    # Keep the Python-version detail on the matrix jobs while aggregating them
+    # behind one durable required check instead of weakening branch protection.
+    name: Backend verification
+    needs: backend
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all backend matrix jobs
+        env:
+          BACKEND_RESULT: ${{ needs.backend.result }}
+        run: test "$BACKEND_RESULT" = "success"
+
   frontend:
     name: Frontend production build
     runs-on: ubuntu-latest
