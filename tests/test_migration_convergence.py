@@ -58,7 +58,7 @@ class MigrationConvergenceTests(unittest.TestCase):
 
     def test_merged_history_has_one_head_and_supports_fresh_and_both_legacy_lineages(self):
         script = ScriptDirectory.from_config(self._config(Path("unused.db")))
-        self.assertEqual(script.get_heads(), ["0030"])
+        self.assertEqual(script.get_heads(), ["0032"])
 
         browser_tables = [
             Base.metadata.tables[name]
@@ -75,7 +75,7 @@ class MigrationConvergenceTests(unittest.TestCase):
 
             fresh = root / "fresh.db"
             command.upgrade(self._config(fresh), "head")
-            self.assertEqual(self._version(fresh), "0030")
+            self.assertEqual(self._version(fresh), "0032")
             self.assertTrue(
                 {
                     "factory_runs",
@@ -87,6 +87,10 @@ class MigrationConvergenceTests(unittest.TestCase):
                     "memory_conflicts",
                     "memory_procedure_profiles",
                     "memory_failure_profiles",
+                    "capability_os_artifacts",
+                    "capability_os_leases",
+                    "capability_os_evidence",
+                    "capability_os_mcp_mounts",
                 }
                 <= self._tables(fresh)
             )
@@ -94,14 +98,24 @@ class MigrationConvergenceTests(unittest.TestCase):
             self.assertTrue(
                 {"observed_at_ms", "superseded_at_ms"} <= self._columns(fresh, "memory_records")
             )
+            self.assertTrue(
+                {"sequence", "previous_digest"}
+                <= self._columns(fresh, "capability_os_evidence")
+            )
 
             factory = root / "factory.db"
             command.upgrade(self._config(factory), "0025")
             self.assertNotIn("browser_devices", self._tables(factory))
             command.upgrade(self._config(factory), "head")
-            self.assertEqual(self._version(factory), "0030")
+            self.assertEqual(self._version(factory), "0032")
             self.assertTrue(
-                {"browser_devices", "memory_fabric_events", "memory_records"}
+                {
+                    "browser_devices",
+                    "memory_fabric_events",
+                    "memory_records",
+                    "capability_os_artifacts",
+                    "capability_os_leases",
+                }
                 <= self._tables(factory)
             )
 
@@ -118,7 +132,7 @@ class MigrationConvergenceTests(unittest.TestCase):
             self.assertIn("browser_devices", self._tables(legacy_main))
 
             command.upgrade(self._config(legacy_main), "head")
-            self.assertEqual(self._version(legacy_main), "0030")
+            self.assertEqual(self._version(legacy_main), "0032")
             self.assertTrue(
                 {
                     "factory_runs",
@@ -131,6 +145,10 @@ class MigrationConvergenceTests(unittest.TestCase):
                     "memory_lexical_documents",
                     "memory_conflicts",
                     "memory_procedure_profiles",
+                    "capability_os_artifacts",
+                    "capability_os_leases",
+                    "capability_os_evidence",
+                    "capability_os_mcp_mounts",
                 }
                 <= self._tables(legacy_main)
             )

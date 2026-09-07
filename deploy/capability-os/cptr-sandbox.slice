@@ -1,0 +1,10 @@
+[Unit]
+Description=CPTR Capability OS Sandbox Slice
+
+[Slice]
+# Force systemd to enable the cpu controller through cgroup-v2 ancestors so
+# runsc never needs broad writable access to the host cgroup hierarchy.
+CPUWeight=100
+IOAccounting=yes
+MemoryAccounting=yes
+TasksAccounting=yes

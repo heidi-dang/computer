@@ -50,6 +50,9 @@ test('McpServices renders aggregate bands, probes, and maintain controls', async
 	assert.match(component, /Why this band/);
 	assert.match(component, /jobRunning/);
 	assert.match(component, /disabled=\{jobRunning\}/);
+	assert.match(component, /error instanceof ApiError && error\.status === 404/);
+	assert.match(component, /maintainJob = null/);
+	assert.match(component, /interrupted by a backend restart/);
 	assert.match(component, /streamStatus === 'live'/);
 	assert.match(component, /reconnecting/);
 

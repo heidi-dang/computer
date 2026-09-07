@@ -19,6 +19,7 @@ from cptr.routers import (
     browser_router,
     browser_extended_router,
     browser_device_router,
+    capability_os_router,
     chat_router,
     chat_extended_router,
     coding_router,
@@ -436,6 +437,7 @@ app.include_router(bridge_router)
 app.include_router(browser_router)
 app.include_router(browser_extended_router)
 app.include_router(browser_device_router)
+app.include_router(capability_os_router)
 app.include_router(webhook_router)
 app.include_router(chat_router)
 app.include_router(chat_extended_router)

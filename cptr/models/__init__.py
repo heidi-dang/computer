@@ -17,6 +17,12 @@ from cptr.models.chats import (
     is_pending_subagent_result_message,
     is_subagent_result_message,
 )
+from cptr.models.capability_os import (
+    CapabilityOsArtifact,
+    CapabilityOsEvidence,
+    CapabilityOsLease,
+    CapabilityOsMcpMount,
+)
 from cptr.models.config import Config
 from cptr.models.control import (
     AutonomousApproval,
@@ -90,6 +96,10 @@ __all__ = [
     "BrowserSession",
     "Chat",
     "ChatMessage",
+    "CapabilityOsArtifact",
+    "CapabilityOsEvidence",
+    "CapabilityOsLease",
+    "CapabilityOsMcpMount",
     "Config",
     "ControlApiKey",
     "ControlIdempotency",
