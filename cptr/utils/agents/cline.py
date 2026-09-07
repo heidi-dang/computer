@@ -14,6 +14,7 @@ from cptr.utils.agents.acp import (
     acp_tool_from_update,
 )
 from cptr.utils.agents.attachments import PreparedAgentAttachments
+from cptr.utils.agents.environment import agent_env
 from cptr.utils.agents.events import (
     AgentDone,
     AgentError,
@@ -22,7 +23,7 @@ from cptr.utils.agents.events import (
     AgentToolUpdate,
 )
 from cptr.utils.agents.prompts import turn_prompt_text
-from cptr.utils.identity import env_for, preexec_for
+from cptr.utils.identity import preexec_for
 
 
 def _auto_approve(chat_params: dict[str, Any]) -> bool:
@@ -43,7 +44,7 @@ async def run_cline_agent(
     attachments: PreparedAgentAttachments,
     identity=None,
 ) -> AsyncIterator[AgentEvent]:
-    env = env_for(identity, workspace) if identity and identity.is_pam else os.environ.copy()
+    env = agent_env(profile, identity, workspace)
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
 

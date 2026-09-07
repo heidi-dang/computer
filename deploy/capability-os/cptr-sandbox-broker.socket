@@ -1,0 +1,13 @@
+[Unit]
+Description=CPTR Capability OS Sandbox Broker Socket
+
+[Socket]
+ListenStream=/run/cptr-sandbox-broker.sock
+SocketUser=root
+SocketGroup=cptr
+SocketMode=0660
+RemoveOnStop=true
+Service=cptr-sandbox-broker.service
+
+[Install]
+WantedBy=sockets.target

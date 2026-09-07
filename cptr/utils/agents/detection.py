@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 
+from cptr.utils.agents.environment import agent_env
 from cptr.utils.agents.models import (
     default_agent_profiles,
     get_raw_agent_profiles,
@@ -328,7 +329,7 @@ def _claude_models_for_version(version: str | None) -> list[str]:
 async def _probe_codex_models(command: str, profile: dict[str, Any]) -> list[str] | None:
     from cptr.utils.agents.codex import CodexAppServer
 
-    env = os.environ.copy()
+    env = agent_env(profile, None, os.getcwd())
     if profile.get("home"):
         env["CODEX_HOME"] = os.path.expanduser(str(profile["home"]))
 
@@ -363,7 +364,7 @@ async def _probe_codex_models(command: str, profile: dict[str, Any]) -> list[str
 async def _probe_pi_models(command: str, profile: dict[str, Any]) -> list[str] | None:
     from cptr.utils.agents.pi import PiRpcClient
 
-    env = os.environ.copy()
+    env = agent_env(profile, None, os.getcwd())
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     client = PiRpcClient(command, os.getcwd(), env)
@@ -386,7 +387,7 @@ async def _probe_pi_models(command: str, profile: dict[str, Any]) -> list[str] |
 
 
 async def _probe_cursor_about(command: str, profile: dict[str, Any]) -> dict[str, Any]:
-    env = os.environ.copy()
+    env = agent_env(profile, None, os.getcwd())
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     code, text = await _run_probe([command, "about", "--format", "json"], timeout=8, env=env)
@@ -439,7 +440,7 @@ async def _probe_cursor_about(command: str, profile: dict[str, Any]) -> dict[str
 async def _probe_cursor_models(command: str, profile: dict[str, Any]) -> list[str] | None:
     from cptr.utils.agents.acp import AcpClient
 
-    env = os.environ.copy()
+    env = agent_env(profile, None, os.getcwd())
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     args = []
@@ -474,7 +475,7 @@ async def _probe_cursor_models(command: str, profile: dict[str, Any]) -> list[st
 async def _probe_grok_models(command: str, profile: dict[str, Any]) -> list[str] | None:
     from cptr.utils.agents.acp import AcpClient, acp_models_from_setup
 
-    env = os.environ.copy()
+    env = agent_env(profile, None, os.getcwd())
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     env["GROK_OAUTH2_REFERRER"] = "cptr"
@@ -496,7 +497,7 @@ async def _probe_grok_models(command: str, profile: dict[str, Any]) -> list[str]
 
 
 async def _probe_opencode_models(command: str, profile: dict[str, Any]) -> list[str] | None:
-    env = os.environ.copy()
+    env = agent_env(profile, None, os.getcwd())
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     server_url = str(profile.get("server_url") or "").strip()
@@ -570,7 +571,7 @@ async def _probe_acp_models(
 ) -> list[str] | None:
     from cptr.utils.agents.acp import AcpClient, acp_models_from_setup
 
-    env = os.environ.copy()
+    env = agent_env(profile, None, os.getcwd())
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     client = AcpClient(

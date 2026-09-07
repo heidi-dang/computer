@@ -1,0 +1,19 @@
+# CPTR gVisor runtime profile for Ubuntu AppArmor user-namespace mediation.
+#
+# Ubuntu transitions an unconfined process that creates an unprivileged user
+# namespace into the generic unprivileged_userns profile. runsc re-executes
+# itself for the gofer, which is incompatible with that automatic transition
+# when the broker also uses NoNewPrivileges. Give only the immutable runsc
+# executable an explicit userns-capable label, following Ubuntu's packaged
+# runc profile pattern. Systemd capability, mount, cgroup, filesystem and
+# network restrictions remain the broker's primary host boundary.
+
+abi <abi/5.0>,
+include <tunables/global>
+
+profile cptr-runsc /usr/bin/runsc flags=(unconfined) {
+  userns,
+  @{exec_path} mr,
+
+  include if exists <local/cptr-runsc>
+}

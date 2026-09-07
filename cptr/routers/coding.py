@@ -1,9 +1,12 @@
-"""Scoped, workspace-confined direct-coding Control API.
+"""Scoped direct-coding Control API for an owned workspace.
 
-This API is intentionally separate from CPTR's agent loop. It lets a trusted
-MCP adapter expose a small set of coding primitives to an LLM while CPTR still
-enforces bearer scopes, workspace ownership, identity-aware runtime access, and
-bounded command-session management.
+File primitives are workspace-confined. The generic command endpoint is
+intentionally trusted host-shell execution: its regex classifiers are
+misuse/authorization guards, not filesystem or network confinement. This
+endpoint does not provide enforceable isolation and must not be treated as an
+untrusted or multi-user code sandbox. CPTR still enforces bearer scopes,
+workspace ownership, identity-aware runtime access, and bounded command-session
+management on this trusted-host path.
 """
 
 from __future__ import annotations
@@ -13,7 +16,6 @@ import hashlib
 import difflib
 import ipaddress
 import json
-import os
 import re
 import shlex
 import shutil
@@ -32,6 +34,7 @@ from sqlalchemy.exc import IntegrityError
 from cptr.env import (
     COMMAND_IDEMPOTENCY_CACHE_MAX_ENTRIES,
     COMMAND_IDEMPOTENCY_CACHE_TTL_SECONDS,
+    COMMAND_IDEMPOTENCY_RESERVATION_TTL_SECONDS,
     COMMAND_INLINE_WAIT_MAX_SECONDS,
     DIRECT_CODING_IO_CONCURRENCY,
 )
@@ -499,6 +502,25 @@ def _command_idempotency_db_key(workspace_id: str, key: str) -> str:
     return f"direct-command:{workspace_id}:{key}"
 
 
+def _command_request_fingerprint(body: CommandRequest, relative_cwd: str) -> str:
+    payload = {
+        "command": body.command,
+        "cwd": relative_cwd,
+        "allow_network": body.allow_network,
+        "pty": body.pty,
+        "rows": body.rows if body.pty else None,
+        "cols": body.cols if body.pty else None,
+        "stdin": body.stdin,
+    }
+    return _sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def _command_idempotency_fingerprint(record: ControlIdempotency) -> str | None:
+    response = record.response if isinstance(record.response, dict) else {}
+    value = response.get("fingerprint")
+    return str(value) if isinstance(value, str) and value else None
+
+
 async def _command_idempotency_get(user_id: str, workspace_id: str, key: str) -> str | None:
     cached = _command_idempotency_memory_get(user_id, workspace_id, key)
     if cached is not None:
@@ -517,15 +539,20 @@ async def _command_idempotency_get(user_id: str, workspace_id: str, key: str) ->
     if record is None:
         return None
     if record.resource_type != "direct_command":
-        raise HTTPException(status_code=409, detail="command idempotency key collision")
+        return None
     command_id = str(record.resource_id)
     _command_idempotency_memory_put(user_id, workspace_id, key, command_id)
     return command_id
 
 
-async def _command_idempotency_put(
-    user_id: str, workspace_id: str, key: str, command_id: str
-) -> str:
+async def _command_idempotency_reserve(
+    user_id: str,
+    workspace_id: str,
+    key: str,
+    fingerprint: str,
+    command_id: str,
+) -> tuple[Literal["reserved", "existing"], str]:
+    """Atomically own an idempotency key before any command side effect can start."""
     durable_key = _command_idempotency_db_key(workspace_id, key)
     now_ms = int(time.time() * 1000)
     async with await get_db() as db:
@@ -533,18 +560,21 @@ async def _command_idempotency_put(
             ControlIdempotency(
                 user_id=user_id,
                 key=durable_key,
-                resource_type="direct_command",
+                resource_type="direct_command_reservation",
                 resource_id=command_id,
-                response={"workspace_id": workspace_id, "command_id": command_id},
+                response={
+                    "workspace_id": workspace_id,
+                    "command_id": command_id,
+                    "fingerprint": fingerprint,
+                    "state": "reserved",
+                },
                 created_at=now_ms,
             )
         )
         try:
-            # The route already performed the replay lookup before launching.
-            # Optimistically persist the common fresh-key path and consult the
-            # unique (user_id, key) winner only when a concurrent request raced us.
             await db.commit()
-        except IntegrityError as exc:
+            return "reserved", command_id
+        except IntegrityError:
             await db.rollback()
             existing = (
                 await db.execute(
@@ -556,14 +586,158 @@ async def _command_idempotency_put(
             ).scalar_one_or_none()
             if existing is None:
                 raise
-            if existing.resource_type != "direct_command":
+            if existing.resource_type not in {
+                "direct_command_reservation",
+                "direct_command",
+            }:
+                raise HTTPException(status_code=409, detail="command idempotency key collision")
+            existing_fingerprint = _command_idempotency_fingerprint(existing)
+            if existing_fingerprint != fingerprint:
                 raise HTTPException(
-                    status_code=409, detail="command idempotency key collision"
-                ) from exc
-            command_id = str(existing.resource_id)
+                    status_code=409,
+                    detail={
+                        "code": "IDEMPOTENCY_KEY_REUSED",
+                        "message": "idempotency key is already bound to a different command request",
+                        "retriable": False,
+                        "field": "idempotency_key",
+                    },
+                )
+            if existing.resource_type == "direct_command_reservation":
+                created_at = int(existing.created_at or 0)
+                age_ms = max(0, now_ms - created_at)
+                if age_ms >= COMMAND_IDEMPOTENCY_RESERVATION_TTL_SECONDS * 1000:
+                    await db.delete(existing)
+                    await db.commit()
+                    return await _command_idempotency_reserve(
+                        user_id,
+                        workspace_id,
+                        key,
+                        fingerprint,
+                        command_id,
+                    )
+            existing_id = str(existing.resource_id)
+            if existing.resource_type == "direct_command":
+                _command_idempotency_memory_put(user_id, workspace_id, key, existing_id)
+            return "existing", existing_id
 
+
+async def _command_idempotency_commit(
+    user_id: str,
+    workspace_id: str,
+    key: str,
+    fingerprint: str,
+    command_id: str,
+) -> None:
+    """Convert the pre-launch reservation into a durable at-most-once command record."""
+    durable_key = _command_idempotency_db_key(workspace_id, key)
+    async with await get_db() as db:
+        record = (
+            await db.execute(
+                select(ControlIdempotency).where(
+                    ControlIdempotency.user_id == user_id,
+                    ControlIdempotency.key == durable_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if record is None:
+            raise HTTPException(status_code=409, detail="command idempotency reservation was lost")
+        if str(record.resource_id) != command_id or _command_idempotency_fingerprint(record) != fingerprint:
+            raise HTTPException(status_code=409, detail="command idempotency reservation changed")
+        if record.resource_type == "direct_command":
+            _command_idempotency_memory_put(user_id, workspace_id, key, command_id)
+            return
+        if record.resource_type != "direct_command_reservation":
+            raise HTTPException(status_code=409, detail="command idempotency key collision")
+        record.resource_type = "direct_command"
+        record.response = {
+            "workspace_id": workspace_id,
+            "command_id": command_id,
+            "fingerprint": fingerprint,
+            "state": "started",
+        }
+        await db.commit()
     _command_idempotency_memory_put(user_id, workspace_id, key, command_id)
-    return command_id
+
+
+async def _command_idempotency_release_unlaunched(
+    user_id: str,
+    workspace_id: str,
+    key: str,
+    fingerprint: str,
+    command_id: str,
+) -> None:
+    """Release only a reservation proven to have no pre-spawn transcript checkpoint."""
+    durable_key = _command_idempotency_db_key(workspace_id, key)
+    async with await get_db() as db:
+        record = (
+            await db.execute(
+                select(ControlIdempotency).where(
+                    ControlIdempotency.user_id == user_id,
+                    ControlIdempotency.key == durable_key,
+                )
+            )
+        ).scalar_one_or_none()
+        if (
+            record is not None
+            and record.resource_type == "direct_command_reservation"
+            and str(record.resource_id) == command_id
+            and _command_idempotency_fingerprint(record) == fingerprint
+        ):
+            await db.delete(record)
+            await db.commit()
+
+
+async def _prepare_command_reservation_transcript(
+    request: Request,
+    *,
+    workspace_path: str,
+    command_id: str,
+    body: CommandRequest,
+) -> Path:
+    """Persist the no-side-effect checkpoint that makes a reserved launch recoverable."""
+    log_path = Path(workspace_path).resolve() / ".cptr" / "task_logs" / f"{command_id}.jsonl"
+    if log_path.exists():
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "COMMAND_TRANSCRIPT_EXISTS",
+                "message": "reserved command transcript already exists",
+                "retriable": False,
+                "command_id": command_id,
+            },
+        )
+    await Runtime.write_file(
+        request,
+        str(log_path),
+        json.dumps(
+            {
+                "type": "reserved",
+                "command": body.command,
+                "ts": time.time(),
+                "pty": body.pty,
+                "rows": body.rows,
+                "cols": body.cols,
+            }
+        )
+        + "\n",
+    )
+    return log_path
+
+
+async def _command_idempotency_put(
+    user_id: str, workspace_id: str, key: str, command_id: str
+) -> str:
+    """Compatibility helper for tests/legacy callers that already own a completed command id."""
+    fingerprint = _sha256(f"legacy:{command_id}")
+    state, winner = await _command_idempotency_reserve(
+        user_id, workspace_id, key, fingerprint, command_id
+    )
+    if state == "reserved":
+        await _command_idempotency_commit(
+            user_id, workspace_id, key, fingerprint, command_id
+        )
+        return command_id
+    return winner
 
 
 def _bounded_diff(old: str, new: str, path: str) -> tuple[str, bool]:
@@ -799,7 +973,7 @@ def _parse_recovered_command_log(
             if not isinstance(entry, dict):
                 continue
             entry_type = str(entry.get("type") or "")
-            if entry_type == "start":
+            if entry_type in {"reserved", "start"}:
                 command = str(entry.get("command") or command)
                 created_at = float(entry.get("ts") or created_at or 0.0)
                 pty_mode = bool(entry.get("pty", pty_mode))
@@ -2052,31 +2226,81 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         lifecycle_timing["root_validation_ms"] = round((now - phase_started) * 1000.0, 3)
         phase_started = now
     idempotency_workspace = f"{workspace_id}:{body.worker_id or '-'}"
-    if body.idempotency_key:
-        existing_id = await _command_idempotency_get(
-            user_id, idempotency_workspace, body.idempotency_key
-        )
-        if existing_id:
-            try:
-                return await _command_snapshot(
-                    request,
-                    workspace_path=str(root),
-                    command_id=existing_id,
-                )
-            except HTTPException as exc:
-                if exc.status_code != 404:
-                    raise
-                raise HTTPException(
-                    status_code=409,
-                    detail="durable command checkpoint exists but its transcript is unavailable",
-                ) from exc
     scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
     if body.allow_network and "command:external" not in scopes:
         raise HTTPException(
             status_code=403,
             detail="external commands require the command:external scope",
         )
+
+    idempotency_fingerprint: str | None = None
+    preallocated_command_id: str | None = None
+    if body.idempotency_key:
+        idempotency_fingerprint = _command_request_fingerprint(body, relative_cwd)
+        candidate_id = uuid.uuid4().hex[:8]
+        reservation_state, reserved_id = await _command_idempotency_reserve(
+            user_id,
+            idempotency_workspace,
+            body.idempotency_key,
+            idempotency_fingerprint,
+            candidate_id,
+        )
+        if reservation_state == "existing":
+            try:
+                snapshot = await _command_snapshot(
+                    request,
+                    workspace_path=str(root),
+                    command_id=reserved_id,
+                )
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "IDEMPOTENCY_IN_PROGRESS",
+                        "message": "an identical command request owns this idempotency key but has not reached its durable pre-launch checkpoint",
+                        "retriable": True,
+                        "command_id": reserved_id,
+                    },
+                ) from exc
+            await _command_idempotency_commit(
+                user_id,
+                idempotency_workspace,
+                body.idempotency_key,
+                idempotency_fingerprint,
+                reserved_id,
+            )
+            return snapshot
+        preallocated_command_id = reserved_id
+        try:
+            await _prepare_command_reservation_transcript(
+                request,
+                workspace_path=str(root),
+                command_id=reserved_id,
+                body=body,
+            )
+        except FileError as exc:
+            await _command_idempotency_release_unlaunched(
+                user_id,
+                idempotency_workspace,
+                body.idempotency_key,
+                idempotency_fingerprint,
+                reserved_id,
+            )
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        await _command_idempotency_commit(
+            user_id,
+            idempotency_workspace,
+            body.idempotency_key,
+            idempotency_fingerprint,
+            reserved_id,
+        )
+
     run_options: dict[str, Any] = {}
+    if preallocated_command_id is not None:
+        run_options["__command_session_id"] = preallocated_command_id
+        run_options["__command_transcript_prepared"] = True
     if body.pty:
         run_options.update({"__rows": body.rows, "__cols": body.cols})
     if body.stdin is not None:
@@ -2106,6 +2330,9 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     if match is None:
         raise HTTPException(status_code=422, detail=response)
     command_id = match.group(1)
+    if preallocated_command_id is not None and command_id != preallocated_command_id:
+        stop_command_session(request, command_id, force=True)
+        raise HTTPException(status_code=500, detail="command id did not match its durable reservation")
     if body.measure_lifecycle:
         now = time.perf_counter()
         session = get_command_session(request, command_id)
@@ -2115,13 +2342,6 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
             timing["route_to_command_id_ms"] = round((now - measurement_started) * 1000.0, 3)
         phase_started = now
     await _touch_worker(user_id, workspace_id, body.worker_id)
-    if body.idempotency_key:
-        authoritative_id = await _command_idempotency_put(
-            user_id, idempotency_workspace, body.idempotency_key, command_id
-        )
-        if authoritative_id != command_id:
-            stop_command_session(request, command_id, force=True)
-            command_id = authoritative_id
     session = get_command_session(request, command_id)
     if session is not None and session.get("workspace") == str(root):
         session["memory_action"] = "command"
@@ -2306,12 +2526,8 @@ async def start_workspace_lsp(
     )
     try:
         identity = await identity_for_context(context)
-        if identity.is_pam:
-            process_env = env_for(identity, lsp_root, {"PAGER": "cat", "GIT_PAGER": "cat"})
-            process_preexec = preexec_for(identity)
-        else:
-            process_env = {**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"}
-            process_preexec = None
+        process_env = env_for(identity, lsp_root, {"PAGER": "cat", "GIT_PAGER": "cat"})
+        process_preexec = preexec_for(identity) if identity.is_pam else None
         result = await lsp_manager.start(
             server_id=body.server_id,
             root=lsp_root,

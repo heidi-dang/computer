@@ -231,6 +231,7 @@ class CommandSessionAdmissionTests(unittest.IsolatedAsyncioTestCase):
                     "cptr.utils.tools.asyncio.create_subprocess_shell",
                     new=AsyncMock(side_effect=RuntimeError("spawn failed")),
                 ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
             ):
                 result = await run_command(
                     "ignored",
@@ -261,6 +262,7 @@ class CommandSessionAdmissionTests(unittest.IsolatedAsyncioTestCase):
                     "cptr.utils.tools.asyncio.create_subprocess_shell",
                     new=AsyncMock(side_effect=asyncio.CancelledError()),
                 ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
             ):
                 with self.assertRaises(asyncio.CancelledError):
                     await run_command(
@@ -280,20 +282,17 @@ class CommandSessionAdmissionTests(unittest.IsolatedAsyncioTestCase):
             command_session_registry.launch_reservation_count("pool-cancelled-spawn"), 0
         )
 
-    async def test_unexpected_setup_failure_releases_reservation_and_kills_spawned_process(self):
+    async def test_transcript_setup_failure_releases_reservation_without_spawning(self):
         identity = SimpleNamespace(is_pam=False, app_user_id="pool-setup-failure")
         request = SimpleNamespace()
-        fake_proc = SimpleNamespace(pid=12345, returncode=None)
+        spawn = AsyncMock(return_value=SimpleNamespace(pid=12345, returncode=None))
         with tempfile.TemporaryDirectory() as workspace_root:
             with (
                 patch(
                     "cptr.utils.tools.identity_for_context",
                     new=AsyncMock(return_value=identity),
                 ),
-                patch(
-                    "cptr.utils.tools.asyncio.create_subprocess_shell",
-                    new=AsyncMock(return_value=fake_proc),
-                ),
+                patch("cptr.utils.tools.asyncio.create_subprocess_shell", new=spawn),
                 patch(
                     "cptr.utils.tools.Runtime.write_file",
                     new=AsyncMock(side_effect=RuntimeError("unexpected setup failure")),
@@ -315,6 +314,47 @@ class CommandSessionAdmissionTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "Error: unexpected setup failure")
         self.assertEqual(command_session_registry.launch_reservation_count("pool-setup-failure"), 0)
+        spawn.assert_not_awaited()
+        kill.assert_not_called()
+
+    async def test_post_spawn_registration_failure_releases_reservation_and_kills_process(self):
+        identity = SimpleNamespace(is_pam=False, app_user_id="pool-post-spawn-failure")
+        request = SimpleNamespace()
+        fake_proc = SimpleNamespace(pid=12345, returncode=None)
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context",
+                    new=AsyncMock(return_value=identity),
+                ),
+                patch(
+                    "cptr.utils.tools.asyncio.create_subprocess_shell",
+                    new=AsyncMock(return_value=fake_proc),
+                ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch(
+                    "cptr.services.action_traces.trace_context_from_request",
+                    side_effect=RuntimeError("post-spawn registration failure"),
+                ),
+                patch("cptr.utils.tools._kill_process_group") as kill,
+            ):
+                result = await run_command(
+                    "ignored",
+                    ".",
+                    0,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws-pool",
+                        "request": request,
+                        "user_id": "pool-post-spawn-failure",
+                    },
+                    __use_pty=False,
+                )
+
+        self.assertEqual(result, "Error: post-spawn registration failure")
+        self.assertEqual(
+            command_session_registry.launch_reservation_count("pool-post-spawn-failure"), 0
+        )
         kill.assert_called_once_with(12345, force=True)
 
     async def test_cancelled_post_registration_setup_stops_unreturned_process(self):

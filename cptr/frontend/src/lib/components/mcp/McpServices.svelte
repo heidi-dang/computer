@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import { ApiError } from '$lib/apis';
 	import {
 		getMcpActionTrace,
 		getMcpServicesMaintainJob,
@@ -230,6 +231,16 @@
 				await loadSnapshot();
 			}
 		} catch (error) {
+			if (error instanceof ApiError && error.status === 404) {
+				// Maintain jobs are in-memory. If the backend restarts while the page is open,
+				// the old job id disappears. Drop the stale client-side running state so the
+				// operator is not permanently locked out of Stabilize All.
+				if (maintainJob?.job_id === jobId) maintainJob = null;
+				maintainError = 'Previous maintenance job was interrupted by a backend restart.';
+				maintainBusy = false;
+				await loadSnapshot();
+				return;
+			}
 			maintainError = error instanceof Error ? error.message : 'Failed to load maintain job';
 			maintainBusy = false;
 		}
@@ -254,6 +265,13 @@
 			maintainBusy = false;
 			await loadSnapshot();
 		} catch (error) {
+			if (error instanceof ApiError && error.status === 404) {
+				maintainJob = null;
+				maintainError = 'Maintenance was interrupted by a backend restart. You can run it again.';
+				maintainBusy = false;
+				await loadSnapshot();
+				return;
+			}
 			maintainError = error instanceof Error ? error.message : 'Maintain failed';
 			maintainBusy = false;
 		}

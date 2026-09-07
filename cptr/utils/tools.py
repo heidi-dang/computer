@@ -1498,7 +1498,7 @@ async def _search_rg(
         *args,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
-        env=env_for(identity, full) if identity.is_pam else None,
+        env=env_for(identity, full),
         preexec_fn=preexec_for(identity) if identity.is_pam else None,
     )
     stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
@@ -2072,6 +2072,8 @@ async def run_command(
     __rows: int = 24,
     __cols: int = 80,
     __stdin: str | None = None,
+    __command_session_id: str | None = None,
+    __command_transcript_prepared: bool = False,
 ) -> str:
     """Run a shell command. Returns a task_id for status checks and input.
     :param command: The shell command to execute.
@@ -2109,12 +2111,8 @@ async def run_command(
     if not work_dir.is_dir():
         return f"Error: not a directory: {cwd}"
 
-    if identity.is_pam:
-        env = env_for(identity, work_dir, {"PAGER": "cat", "GIT_PAGER": "cat"})
-        preexec = preexec_for(identity)
-    else:
-        env = {**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"}
-        preexec = None
+    env = env_for(identity, work_dir, {"PAGER": "cat", "GIT_PAGER": "cat"})
+    preexec = preexec_for(identity) if identity.is_pam else None
     if measure_lifecycle:
         lifecycle_timing["process_preflight_ms"] = round(
             (time.perf_counter() - phase_started) * 1000.0, 3
@@ -2133,7 +2131,41 @@ async def run_command(
             lifecycle_timing["capacity_reservation_ms"] = round(
                 (time.perf_counter() - reservation_started) * 1000.0, 3
             )
+        command_session_id = __command_session_id or uuid.uuid4().hex[:8]
+        if re.fullmatch(r"[0-9a-f]{8}", command_session_id) is None:
+            return "Error: invalid preallocated command session id"
+        if command_session_id in command_sessions:
+            return "Error: command session id already exists"
+        log_path = Path(workspace) / ".cptr" / "task_logs" / f"{command_session_id}.jsonl"
+        if request is None:
+            return "Error: request context unavailable"
+        if __command_transcript_prepared:
+            if not log_path.exists():
+                return "Error: prepared command transcript is unavailable"
+        elif log_path.exists():
+            return "Error: durable command transcript already exists"
         try:
+            if not __command_transcript_prepared:
+                transcript_started = time.perf_counter()
+                await Runtime.write_file(
+                    request,
+                    str(log_path),
+                    json.dumps(
+                        {
+                            "type": "reserved",
+                            "command": command,
+                            "ts": time.time(),
+                            "pty": bool(_PTY_AVAILABLE and __use_pty),
+                            "rows": __rows,
+                            "cols": __cols,
+                        }
+                    )
+                    + "\n",
+                )
+                if measure_lifecycle:
+                    lifecycle_timing["transcript_init_ms"] = round(
+                        (time.perf_counter() - transcript_started) * 1000.0, 3
+                    )
             spawn_started = time.perf_counter()
             if _PTY_AVAILABLE and __use_pty:
                 if __argv is None:
@@ -2179,18 +2211,6 @@ async def run_command(
             if measure_lifecycle:
                 lifecycle_timing["spawn_ms"] = round(
                     (time.perf_counter() - spawn_started) * 1000.0, 3
-                )
-
-            command_session_id = uuid.uuid4().hex[:8]
-            log_path = Path(workspace) / ".cptr" / "task_logs" / f"{command_session_id}.jsonl"
-            if request is None:
-                _abort_unregistered_command(proc, master_fd)
-                return "Error: request context unavailable"
-            transcript_started = time.perf_counter()
-            await Runtime.write_file(request, str(log_path), "")
-            if measure_lifecycle:
-                lifecycle_timing["transcript_init_ms"] = round(
-                    (time.perf_counter() - transcript_started) * 1000.0, 3
                 )
 
             registration_started = time.perf_counter()

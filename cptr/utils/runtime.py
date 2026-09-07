@@ -181,6 +181,41 @@ class Runtime:
         return await _file(await _request_identity(request), _write_file, path, content)
 
     @staticmethod
+    async def stat_as(identity: ExecutionIdentity, path: str) -> dict[str, Any]:
+        """Run a bounded stat operation under an already server-resolved execution identity."""
+        return await _file(identity, _stat, path)
+
+    @staticmethod
+    async def list_tree_entries_as(
+        identity: ExecutionIdentity,
+        path: str,
+        recursive: bool = False,
+        offset: int = 0,
+        limit: int = 500,
+    ) -> dict[str, Any]:
+        """List a bounded tree without depending on an HTTP Request object."""
+        return await _file(identity, _list_tree_entries, path, recursive, offset, limit)
+
+    @staticmethod
+    async def read_text_file_as(
+        identity: ExecutionIdentity, path: str, max_bytes: int
+    ) -> dict[str, Any]:
+        """Read bounded text under a server-resolved identity for native Capability OS actions."""
+        return await _file(identity, _read_text_file, path, max_bytes)
+
+    @staticmethod
+    async def read_file_as(identity: ExecutionIdentity, path: str) -> dict[str, Any]:
+        """Read one file under an already server-resolved execution identity."""
+        return await _file(identity, _read_file, path)
+
+    @staticmethod
+    async def write_file_as(
+        identity: ExecutionIdentity, path: str, content: str | bytes
+    ) -> dict[str, Any]:
+        """Write one bounded file under an already server-resolved execution identity."""
+        return await _file(identity, _write_file, path, content)
+
+    @staticmethod
     async def file_matches(
         request: Request,
         query: str,

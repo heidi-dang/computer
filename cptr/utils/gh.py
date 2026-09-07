@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import shutil
 import time
@@ -12,7 +11,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from cptr.utils.identity import ExecutionIdentity, env_for, preexec_for
+from cptr.utils.agents.environment import github_cli_env
+from cptr.utils.identity import ExecutionIdentity, preexec_for
 
 
 class GhError(Exception):
@@ -55,8 +55,12 @@ async def run_gh(
     if not gh:
         raise GhError("GitHub CLI is not installed")
     work_dir = cwd or identity.home
-    env = env_for(identity, work_dir) if identity.is_pam else os.environ.copy()
-    env["GH_PROMPT_DISABLED"] = "1"
+    env = github_cli_env(
+        identity,
+        work_dir,
+        include_token_auth=True,
+        extra={"GH_PROMPT_DISABLED": "1"},
+    )
     proc = await asyncio.create_subprocess_exec(
         gh,
         *args,
@@ -140,7 +144,7 @@ async def start_login(
     if not gh:
         raise GhError("GitHub CLI is not installed")
     work_dir = identity.home
-    env = env_for(identity, work_dir) if identity.is_pam else os.environ.copy()
+    env = github_cli_env(identity, work_dir, include_token_auth=False)
     proc = await asyncio.create_subprocess_exec(
         gh,
         "auth",

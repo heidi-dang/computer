@@ -286,24 +286,16 @@ class SessionManager:
         else:
             shell = identity.shell if identity.is_pam else os.environ.get("SHELL", "/bin/sh")
 
-        if identity.is_pam:
-            env = env_for(
-                identity,
-                work_dir,
-                {
-                    "TERM": "xterm-256color",
-                    "COLORTERM": "truecolor",
-                    "COLUMNS": str(cols),
-                    "LINES": str(rows),
-                },
-            )
-        else:
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
-            env["COLORTERM"] = "truecolor"
-            env["COLUMNS"] = str(cols)
-            env["LINES"] = str(rows)
-            env["PWD"] = work_dir
+        env = env_for(
+            identity,
+            work_dir,
+            {
+                "TERM": "xterm-256color",
+                "COLORTERM": "truecolor",
+                "COLUMNS": str(cols),
+                "LINES": str(rows),
+            },
+        )
 
         if IS_WINDOWS:
             session = _create_windows(session_id, identity, shell, work_dir, env, rows, cols)

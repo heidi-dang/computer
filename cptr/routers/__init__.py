@@ -11,6 +11,7 @@ from cptr.routers.bridge import webhook_router
 from cptr.routers.browser import router as browser_router
 from cptr.routers.browser_extended import router as browser_extended_router
 from cptr.routers.browser_device import router as browser_device_router
+from cptr.routers.capability_os import router as capability_os_router
 from cptr.routers.chat import router as chat_router
 from cptr.routers.chat_extended import router as chat_extended_router
 from cptr.routers.coding import router as coding_router
@@ -50,6 +51,7 @@ __all__ = [
     "browser_router",
     "browser_extended_router",
     "browser_device_router",
+    "capability_os_router",
     "chat_router",
     "chat_extended_router",
     "coding_router",

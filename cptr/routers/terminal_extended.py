@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from cptr.utils.config import check_access
+from cptr.utils.identity import env_for, identity_for_user_id, preexec_for
 
 log = logging.getLogger(__name__)
 
@@ -50,22 +52,25 @@ class ResizeRequest(BaseModel):
 @router.post("/exec")
 async def exec_command(request: Request, body: ExecRequest):
     """Run a one-shot shell command and return stdout/stderr/exit-code (no pty)."""
-    _get_user(request)
+    user_id = _get_user(request)
     if not body.command or not body.command.strip():
         raise HTTPException(400, "command is required")
     timeout = min(max(body.timeout or 30.0, 1.0), 300.0)  # cap at 5 min
 
-    import os
-
-    env = {**os.environ, **(body.env or {})}
+    identity = await identity_for_user_id(user_id)
+    work_dir = body.cwd or str(Path.cwd())
+    env = env_for(identity, work_dir, body.env)
+    preexec = preexec_for(identity) if identity.is_pam else None
+    process_options = {"preexec_fn": preexec} if preexec is not None else {}
 
     try:
         proc = await asyncio.create_subprocess_shell(
             body.command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=body.cwd,
+            cwd=work_dir,
             env=env,
+            **process_options,
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
