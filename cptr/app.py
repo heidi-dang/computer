@@ -467,6 +467,7 @@ app.include_router(workbench_router)
 
 
 # Health / operational metrics
+@app.get("/health", include_in_schema=False)
 @app.get("/api/health")
 @app.get("/api/health/live")
 async def health():
