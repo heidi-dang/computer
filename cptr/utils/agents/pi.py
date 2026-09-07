@@ -11,6 +11,7 @@ from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from cptr.utils.agents.attachments import PreparedAgentAttachments
+from cptr.utils.agents.environment import agent_env
 from cptr.utils.agents.events import (
     AgentDone,
     AgentError,
@@ -20,7 +21,7 @@ from cptr.utils.agents.events import (
     AgentToolOutputDelta,
     AgentToolUpdate,
 )
-from cptr.utils.identity import env_for, preexec_for
+from cptr.utils.identity import preexec_for
 from cptr.utils.processes import terminate_process_group
 
 
@@ -264,7 +265,7 @@ async def run_pi_agent(
     attachments: PreparedAgentAttachments,
     identity=None,
 ) -> AsyncIterator[AgentEvent]:
-    env = env_for(identity, workspace) if identity and identity.is_pam else os.environ.copy()
+    env = agent_env(profile, identity, workspace)
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
     client = PiRpcClient(

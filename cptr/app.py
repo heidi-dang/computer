@@ -48,7 +48,7 @@ from cptr.routers import (
     workspace_extended_router,
     workbench_router,
 )
-from cptr.utils.config import check_access, load_config
+from cptr.utils.config import check_access, load_config, validate_auth_configuration
 from cptr.utils.db import init_db
 
 START_TIME = time.time()
@@ -68,6 +68,7 @@ async def lifespan(app: FastAPI):
     truststore.inject_into_ssl()
     _logging.getLogger(__name__).info("truststore: using system certificate store")
 
+    validate_auth_configuration()
     await init_db()
 
     # Browser device sockets are process-local. Any durable session left open

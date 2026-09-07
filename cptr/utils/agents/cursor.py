@@ -8,6 +8,7 @@ from contextlib import suppress
 from typing import Any, AsyncIterator
 
 from cptr.utils.agents.attachments import PreparedAgentAttachments
+from cptr.utils.agents.environment import agent_env
 from cptr.utils.agents.acp import (
     AcpClient,
     acp_event_stream,
@@ -22,7 +23,7 @@ from cptr.utils.agents.events import (
     AgentToolUpdate,
 )
 from cptr.utils.agents.prompts import turn_prompt_text
-from cptr.utils.identity import env_for, preexec_for
+from cptr.utils.identity import preexec_for
 
 
 CURSOR_CAPABILITIES = {"_meta": {"parameterizedModelPicker": True}}
@@ -46,7 +47,7 @@ async def run_cursor_agent(
     attachments: PreparedAgentAttachments,
     identity=None,
 ) -> AsyncIterator[AgentEvent]:
-    env = env_for(identity, workspace) if identity and identity.is_pam else os.environ.copy()
+    env = agent_env(profile, identity, workspace)
     if profile.get("home"):
         env["HOME"] = os.path.expanduser(str(profile["home"]))
 

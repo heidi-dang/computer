@@ -174,7 +174,7 @@ class SystemMetricsSamplerTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("cptr.services.system_metrics.collect_backend_counters", side_effect=collect),
-            patch("cptr.services.system_metrics.time.monotonic", side_effect=[100.0, 101.0]),
+            patch("cptr.services.system_metrics._monotonic", side_effect=[100.0, 101.0]),
         ):
             await sampler.sample_once()
             await sampler.sample_once()

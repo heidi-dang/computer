@@ -15,7 +15,16 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from enum import StrEnum
+try:
+    from enum import StrEnum
+except ImportError:  # Python 3.10 compatibility
+    from enum import Enum
+
+    class StrEnum(str, Enum):
+        """Minimal stdlib StrEnum-compatible fallback for Python 3.10."""
+
+        __str__ = str.__str__
+
 from typing import Any, Protocol
 
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS

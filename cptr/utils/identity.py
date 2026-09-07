@@ -18,6 +18,26 @@ from cptr.utils.config import AuthMode, AuthResult, get_auth_mode
 
 IS_WINDOWS = platform.system() == "Windows"
 
+_SAFE_EXECUTION_ENV_KEYS = {
+    "COLORTERM",
+    "LANG",
+    "LANGUAGE",
+    "LC_ALL",
+    "NO_COLOR",
+    "SSL_CERT_DIR",
+    "SSL_CERT_FILE",
+    "TZ",
+}
+_SAFE_WINDOWS_ENV_KEYS = {
+    "COMSPEC",
+    "PATHEXT",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "WINDIR",
+}
+
 
 class IdentityUnavailable(RuntimeError):
     """Raised when an authenticated request cannot be mapped to an OS identity."""
@@ -148,24 +168,54 @@ async def internal_request_for_user(app, user_id: str | None) -> Request:
 
 
 def env_for(
-    identity: ExecutionIdentity,
+    identity: ExecutionIdentity | None,
     cwd: str | Path,
     extra: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    env = os.environ.copy()
+    """Build a minimal child environment instead of copying service credentials.
+
+    Parent variables are inherited only when they are explicitly classified as
+    execution-safe. Callers that need an additional capability must pass it in
+    ``extra`` so the grant is visible at the process-launch site.  Internal
+    probes that do not yet have an authenticated identity use the current OS
+    identity, but still receive this same sanitized environment.
+    """
+    identity = identity or _current_identity()
+    inherited_keys = set(_SAFE_EXECUTION_ENV_KEYS)
+    inherited_keys.update(key for key in os.environ if key.startswith("LC_"))
+    if IS_WINDOWS:
+        inherited_keys.update(_SAFE_WINDOWS_ENV_KEYS)
+    env = {
+        key: value
+        for key in inherited_keys
+        if (value := os.environ.get(key)) is not None
+    }
+    cwd_value = str(cwd)
+    username = str(
+        getattr(identity, "username", None)
+        or getattr(identity, "app_user_id", None)
+        or "user"
+    )
+    home = str(getattr(identity, "home", None) or cwd_value)
+    shell = str(
+        getattr(identity, "shell", None)
+        or os.environ.get("SHELL")
+        or os.environ.get("COMSPEC")
+        or "/bin/sh"
+    )
     env.update(
         {
-            "HOME": identity.home,
-            "USER": identity.username,
-            "LOGNAME": identity.username,
-            "SHELL": identity.shell,
-            "PWD": str(cwd),
-            "PATH": env.get("PATH") or "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            "TERM": env.get("TERM") or "xterm-256color",
+            "HOME": home,
+            "USER": username,
+            "LOGNAME": username,
+            "SHELL": shell,
+            "PWD": cwd_value,
+            "PATH": os.environ.get("PATH") or "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            "TERM": os.environ.get("TERM") or "xterm-256color",
         }
     )
     if extra:
-        env.update(extra)
+        env.update({str(key): str(value) for key, value in extra.items()})
     return env
 
 

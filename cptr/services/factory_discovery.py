@@ -548,7 +548,7 @@ class FactoryDiscovery:
                     ),
                     timeout=remaining_ms / 1000,
                 )
-            except TimeoutError as exc:
+            except asyncio.TimeoutError as exc:
                 raise DiscoveryBudgetExceeded("runtime budget exceeded") from exc
             except DiscoveryBudgetExceeded:
                 raise
@@ -605,7 +605,7 @@ class FactoryDiscovery:
                 ),
                 timeout=budget.max_runtime_ms / 1000,
             )
-        except TimeoutError as exc:
+        except asyncio.TimeoutError as exc:
             raise DiscoveryBudgetExceeded("artifact fetch runtime budget exceeded") from exc
         if not isinstance(content, bytes):
             raise TypeError("artifact fetcher must return bytes")

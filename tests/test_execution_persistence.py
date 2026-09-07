@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import subprocess
@@ -8,7 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.env import (
@@ -20,13 +23,15 @@ from cptr.env import (
     COMMAND_SESSION_TTL_SECONDS,
     LIVE_EVENT_MAX_REPLAY_EVENTS,
 )
-from cptr.models import Base, User
+from cptr.models import Base, ControlIdempotency, User
 from cptr.routers.coding import (
     CommandRequest,
     TestTargetRequest as CodingTestTargetRequest,
     _COMMAND_IDEMPOTENCY,
+    _command_idempotency_commit,
     _command_idempotency_get,
-    _command_idempotency_put,
+    _command_idempotency_reserve,
+    _command_request_fingerprint,
     start_workspace_command,
 )
 
@@ -89,7 +94,9 @@ class ExecutionPersistenceConfigurationTests(unittest.TestCase):
 
 class DurableCommandIdempotencyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        self.db_dir = tempfile.TemporaryDirectory()
+        db_path = Path(self.db_dir.name) / "idempotency.db"
+        self.engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
         async with self.engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
         self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
@@ -101,30 +108,71 @@ class DurableCommandIdempotencyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         _COMMAND_IDEMPOTENCY.clear()
         await self.engine.dispose()
+        self.db_dir.cleanup()
 
     async def _db(self):
         return self.sessions()
 
     async def test_command_idempotency_survives_memory_cache_loss(self):
+        fingerprint = "f" * 64
         with patch("cptr.routers.coding.get_db", new=AsyncMock(side_effect=self._db)):
-            winner = await _command_idempotency_put(
-                "user-1", "workspace-1:-", "stable-key", "deadbeef"
+            state, winner = await _command_idempotency_reserve(
+                "user-1", "workspace-1:-", "stable-key", fingerprint, "deadbeef"
             )
-            self.assertEqual(winner, "deadbeef")
+            self.assertEqual((state, winner), ("reserved", "deadbeef"))
+            await _command_idempotency_commit(
+                "user-1", "workspace-1:-", "stable-key", fingerprint, "deadbeef"
+            )
             _COMMAND_IDEMPOTENCY.clear()
             recovered = await _command_idempotency_get("user-1", "workspace-1:-", "stable-key")
         self.assertEqual(recovered, "deadbeef")
 
-    async def test_command_idempotency_put_resolves_unique_race_to_existing_winner(self):
+    async def test_concurrent_same_request_reservation_has_single_owner(self):
+        fingerprint = "a" * 64
         with patch("cptr.routers.coding.get_db", new=AsyncMock(side_effect=self._db)):
-            first = await _command_idempotency_put(
-                "user-1", "workspace-1:-", "race-key", "deadbeef"
+            results = await asyncio.gather(
+                _command_idempotency_reserve(
+                    "user-1", "workspace-1:-", "race-key", fingerprint, "deadbeef"
+                ),
+                _command_idempotency_reserve(
+                    "user-1", "workspace-1:-", "race-key", fingerprint, "cafebabe"
+                ),
             )
-            raced = await _command_idempotency_put(
-                "user-1", "workspace-1:-", "race-key", "cafebabe"
+        self.assertEqual(sum(state == "reserved" for state, _ in results), 1)
+        self.assertEqual(sum(state == "existing" for state, _ in results), 1)
+        winners = {winner for _, winner in results}
+        self.assertEqual(len(winners), 1)
+
+    async def test_same_key_with_different_fingerprint_conflicts(self):
+        with patch("cptr.routers.coding.get_db", new=AsyncMock(side_effect=self._db)):
+            await _command_idempotency_reserve(
+                "user-1", "workspace-1:-", "conflict-key", "a" * 64, "deadbeef"
             )
-        self.assertEqual(first, "deadbeef")
-        self.assertEqual(raced, "deadbeef")
+            with self.assertRaises(HTTPException) as raised:
+                await _command_idempotency_reserve(
+                    "user-1", "workspace-1:-", "conflict-key", "b" * 64, "cafebabe"
+                )
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.detail["code"], "IDEMPOTENCY_KEY_REUSED")
+
+    async def test_stale_unlaunched_reservation_can_be_reclaimed(self):
+        fingerprint = "c" * 64
+        with patch("cptr.routers.coding.get_db", new=AsyncMock(side_effect=self._db)):
+            await _command_idempotency_reserve(
+                "user-1", "workspace-1:-", "stale-key", fingerprint, "deadbeef"
+            )
+            async with self.sessions() as db:
+                record = (
+                    await db.execute(
+                        select(ControlIdempotency).where(ControlIdempotency.user_id == "user-1")
+                    )
+                ).scalar_one()
+                record.created_at = 0
+                await db.commit()
+            state, winner = await _command_idempotency_reserve(
+                "user-1", "workspace-1:-", "stale-key", fingerprint, "cafebabe"
+            )
+        self.assertEqual((state, winner), ("reserved", "cafebabe"))
 
     async def test_replayed_start_returns_original_durable_transcript_without_reexecution(self):
         with tempfile.TemporaryDirectory() as workspace_root:
@@ -178,8 +226,14 @@ class DurableCommandIdempotencyTests(unittest.IsolatedAsyncioTestCase):
                 wait_seconds=0,
                 idempotency_key="stable-key",
             )
+            fingerprint = _command_request_fingerprint(body, ".")
             with patch("cptr.routers.coding.get_db", new=AsyncMock(side_effect=self._db)):
-                await _command_idempotency_put("user-1", "workspace-1:-", "stable-key", "deadbeef")
+                await _command_idempotency_reserve(
+                    "user-1", "workspace-1:-", "stable-key", fingerprint, "deadbeef"
+                )
+                await _command_idempotency_commit(
+                    "user-1", "workspace-1:-", "stable-key", fingerprint, "deadbeef"
+                )
                 _COMMAND_IDEMPOTENCY.clear()
                 with (
                     patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
@@ -199,6 +253,49 @@ class DurableCommandIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "COMPLETE")
         self.assertEqual(result["output"], "verified\n")
         self.assertTrue(result["recovered"])
+
+    async def test_simultaneous_route_requests_execute_side_effect_once(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        run_ids: list[str] = []
+
+        async def fake_run_command(*args, **kwargs):
+            command_id = kwargs["__command_session_id"]
+            self.assertTrue(kwargs["__command_transcript_prepared"])
+            run_ids.append(command_id)
+            entered.set()
+            await release.wait()
+            return f"Task {command_id}: running\nCommand: {args[0]}\nnext_offset: 0\n---\n"
+
+        with tempfile.TemporaryDirectory() as workspace_root:
+            workspace = SimpleNamespace(path=workspace_root, user_id="user-1")
+            request = SimpleNamespace(state=SimpleNamespace(control_scopes=set()))
+            body = CommandRequest(
+                command="python -c 'print(1)'",
+                wait_seconds=0,
+                idempotency_key="simultaneous-key",
+            )
+            with (
+                patch("cptr.routers.coding.get_db", new=AsyncMock(side_effect=self._db)),
+                patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
+                patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+                patch(
+                    "cptr.routers.coding._coding_root",
+                    new=AsyncMock(return_value=Path(workspace_root)),
+                ),
+                patch("cptr.routers.coding._touch_worker", new=AsyncMock()),
+                patch("cptr.routers.coding._observe_completed_command_memory", new=AsyncMock()),
+                patch("cptr.routers.coding.run_command", new=AsyncMock(side_effect=fake_run_command)),
+            ):
+                first_task = asyncio.create_task(start_workspace_command(request, "workspace-1", body))
+                await asyncio.wait_for(entered.wait(), timeout=2)
+                second = await start_workspace_command(request, "workspace-1", body)
+                release.set()
+                first = await asyncio.wait_for(first_task, timeout=2)
+
+        self.assertEqual(len(run_ids), 1)
+        self.assertEqual(first["command_id"], run_ids[0])
+        self.assertEqual(second["command_id"], run_ids[0])
 
 
 if __name__ == "__main__":
