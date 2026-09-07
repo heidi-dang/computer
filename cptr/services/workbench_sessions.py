@@ -199,7 +199,13 @@ class WorkbenchSessionStore:
                 session.active_workspace_id = None
             if sessions:
                 await db.commit()
-            return len(sessions)
+            session_ids = [session.id for session in sessions]
+        if session_ids:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            for session_id in session_ids:
+                await revoke_task_authority(session_id, now_ms=current)
+        return len(session_ids)
 
     async def append_event(
         self,
@@ -308,7 +314,12 @@ class WorkbenchSessionStore:
                 )
             await db.commit()
             await db.refresh(event)
-            return _event_dict(event)
+            result = _event_dict(event)
+        if target_type is None and normalized_state in _TERMINAL_TARGET_STATES:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            await revoke_task_authority(session_id, now_ms=now)
+        return result
 
     async def events(
         self, *, owner_id: str, session_id: str, after_sequence: int = 0, limit: int = 100
@@ -475,7 +486,11 @@ class WorkbenchSessionStore:
             session.updated_at = now
             await db.commit()
             await db.refresh(session)
-            return _session_dict(session)
+            result = _session_dict(session)
+        from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+        await revoke_task_authority(session_id, now_ms=now)
+        return result
 
     async def request_delete(self, *, owner_id: str, session_id: str) -> dict[str, Any] | None:
         now = _now_ms()
@@ -532,7 +547,10 @@ class WorkbenchSessionStore:
             session.delete_confirmation_hash = None
             session.delete_confirmation_expires_at = None
             await db.commit()
-            return {"session_id": session_id, "status": "DELETED", "deleted_at": now}
+        from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+        await revoke_task_authority(session_id, now_ms=now)
+        return {"session_id": session_id, "status": "DELETED", "deleted_at": now}
 
 
 workbench_session_store = WorkbenchSessionStore()
@@ -550,6 +568,13 @@ async def workbench_session_reaper_loop() -> None:
         await workbench_session_store.archive_stale(
             idle_seconds=WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
         )
+        # Capability OS authority has the same owner-scoped task identities as
+        # Workbench/Factory/Control. Reconcile it here on startup and every
+        # reaper interval so a crash between a task-state commit and cleanup
+        # cannot leave durable authority behind.
+        from cptr.services.capability_os.lifecycle import reconcile_inactive_task_authority
+
+        await reconcile_inactive_task_authority()
         heartbeat_worker("workbench_reaper", success=True)
         await heartbeat_sleep(
             "workbench_reaper", WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS

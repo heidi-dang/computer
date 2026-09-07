@@ -67,8 +67,19 @@ class McpRegistryDiscoveryProvider:
                     packages = (
                         entry.get("packages") if isinstance(entry.get("packages"), list) else []
                     )
+                remotes = raw.get("remotes")
+                if not isinstance(remotes, list):
+                    remotes = entry.get("remotes") if isinstance(entry.get("remotes"), list) else []
+                safe_remotes = [item for item in (self._safe_remote(remote) for remote in remotes[:20]) if item]
                 package_source, expected_digest = self._artifact_source(packages)
-                source_uri = package_source or origin_uri
+                permissions = ["network:http"]
+                if packages:
+                    permissions.append("process:execute")
+                capabilities = ["mcp-server", "tool-provider"]
+                if safe_remotes:
+                    capabilities.append("remote-mcp")
+                if packages:
+                    capabilities.append("packaged-mcp")
                 candidates.append(
                     DiscoveryCandidate.create(
                         provider=self.name,
@@ -76,17 +87,18 @@ class McpRegistryDiscoveryProvider:
                         name=name,
                         version=version or None,
                         origin_uri=origin_uri,
-                        source_uri=source_uri,
+                        source_uri=package_source,
                         pinned_version_or_commit=(
                             version if version and version.lower() != "latest" else None
                         ),
                         expected_digest=expected_digest,
-                        capabilities=("mcp-server", "tool-provider"),
-                        permissions=("network:http", "process:execute"),
+                        capabilities=capabilities,
+                        permissions=permissions,
                         metadata={
                             "description": raw.get("description"),
                             "status": raw.get("status"),
                             "packages": [self._safe_package(package) for package in packages[:20]],
+                            "remotes": safe_remotes,
                         },
                     )
                 )
@@ -109,6 +121,16 @@ class McpRegistryDiscoveryProvider:
             )
             return identifier, verified_digest
         return None, None
+
+    @staticmethod
+    def _safe_remote(remote: object) -> dict:
+        if not isinstance(remote, dict):
+            return {}
+        url = str(remote.get("url") or "").strip()
+        transport_type = str(remote.get("type") or "").strip().lower()
+        if not url.startswith("https://") or transport_type != "streamable-http":
+            return {}
+        return {"url": url, "type": transport_type}
 
     @staticmethod
     def _safe_package(package: object) -> dict:

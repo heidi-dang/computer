@@ -6,6 +6,16 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models import Base
+from cptr.services.capability_os.authority import AuthorityBroker, LeaseRequest, TaskAuthorityPolicy
+from cptr.services.capability_os.contracts import (
+    ArtifactKind,
+    ArtifactOrigin,
+    ArtifactOwner,
+    ArtifactState,
+    CapabilityRequest,
+    create_artifact,
+)
+from cptr.services.capability_os.store import SqlCapabilityOsStore
 from cptr.services.factory_domain import FactoryActor, FactoryState, InvalidFactoryTransition
 from cptr.services.factory_gates import (
     EvidenceAuthority,
@@ -326,6 +336,95 @@ class FactoryPersistenceTests(unittest.IsolatedAsyncioTestCase):
                 lease_ms=1000,
             )
         )
+
+    async def test_waiting_and_terminal_factory_transitions_revoke_capability_authority(self):
+        run = await self._create_run("capability-lifecycle")
+        capability_store = SqlCapabilityOsStore(session_factory=self.sessions)
+        authority = AuthorityBroker(store=capability_store, clock_ms=lambda: 1_000_000)
+        permission = CapabilityRequest("mcp.invoke", "mcp:server/*")
+        artifact1 = create_artifact(
+            artifact_id="mcp.factory-server-1",
+            version="1",
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.GENERATED,
+            origin=ArtifactOrigin.MCP,
+            spec={"serverId": "server", "transport": "streamable-http"},
+            created_at="2026-09-07T12:00:00Z",
+            user_id="user-1",
+            task_origin=run.id,
+            state=ArtifactState.QUALIFIED,
+        )
+        await capability_store.persist_artifact(artifact1)
+        lease = await authority.issue(
+            LeaseRequest(
+                task_id=run.id,
+                workload_id="mcp:server",
+                artifact_digest=artifact1.metadata.content_digest,
+                permissions=(permission,),
+                runtime_profile="remote-mcp",
+                requested_lease_ms=30_000,
+            ),
+            policy=TaskAuthorityPolicy(allowed=(permission,), max_lease_ms=30_000),
+        )
+        mount = await capability_store.create_mcp_mount(
+            task_id=run.id,
+            server_id="server",
+            version="1",
+            digest=lease.artifact_digest,
+            lease_id=lease.lease_id,
+            projected_tools=("inspect",),
+            transport_kind="streamable-http",
+            now_ms=1_000_000,
+        )
+        self.assertEqual(len(await capability_store.list_active_leases(run.id, now_ms=1_000_000)), 1)
+        self.assertEqual(len(await capability_store.list_active_mounts(run.id)), 1)
+
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.RECOVERING,
+            actor=FactoryActor.SYSTEM,
+            reason="recovery boundary",
+            idempotency_key="capability-recovering",
+        )
+        self.assertEqual(await capability_store.list_active_leases(run.id, now_ms=1_000_001), [])
+        self.assertEqual(await capability_store.list_active_mounts(run.id), [])
+        released = await capability_store.get_mcp_mount(mount.mount_id)
+        self.assertEqual(released.state, "released")
+
+        artifact2 = create_artifact(
+            artifact_id="mcp.factory-server-2",
+            version="1",
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.GENERATED,
+            origin=ArtifactOrigin.MCP,
+            spec={"serverId": "server-2", "transport": "streamable-http"},
+            created_at="2026-09-07T12:00:01Z",
+            user_id="user-1",
+            task_origin=run.id,
+            state=ArtifactState.QUALIFIED,
+        )
+        await capability_store.persist_artifact(artifact2)
+        lease2 = await authority.issue(
+            LeaseRequest(
+                task_id=run.id,
+                workload_id="mcp:server-2",
+                artifact_digest=artifact2.metadata.content_digest,
+                permissions=(permission,),
+                runtime_profile="remote-mcp",
+                requested_lease_ms=30_000,
+            ),
+            policy=TaskAuthorityPolicy(allowed=(permission,), max_lease_ms=30_000),
+        )
+        await self.store.transition(
+            run.id,
+            to_state=FactoryState.BLOCKED,
+            actor=FactoryActor.SYSTEM,
+            reason="terminal blocker",
+            idempotency_key="capability-blocked",
+        )
+        self.assertEqual(await capability_store.list_active_leases(run.id, now_ms=1_000_002), [])
+        stored_lease = await capability_store.get_lease(lease2.lease_id)
+        self.assertEqual(stored_lease.status, "revoked")
 
     async def test_recoverable_runs_exclude_terminal_states(self):
         active = await self._create_run("recover-active")

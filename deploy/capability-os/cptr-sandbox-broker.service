@@ -1,0 +1,48 @@
+[Unit]
+Description=CPTR Capability OS Sandbox Broker
+Requires=cptr-sandbox-broker.socket
+After=cptr-sandbox-broker.socket
+
+[Service]
+Type=simple
+User=root
+Group=cptr
+ExecStart=/usr/local/libexec/cptr-sandbox-broker.pyz
+Slice=cptr-sandbox.slice
+Environment=CPTR_SANDBOX_PEER_USER=cptr
+Environment=CPTR_SANDBOX_PEER_GROUP=cptr
+Environment=CPTR_SANDBOX_RUNTIME_USER=cptr
+Environment=CPTR_SANDBOX_RUNTIME_GROUP=cptr
+Environment=CPTR_SANDBOX_SPOOL_ROOT=/var/lib/cptr/data/capability-os/blobs
+Environment=CPTR_SANDBOX_STATE_ROOT=/run/cptr-sandbox
+Environment=CPTR_SANDBOX_RUNSC=/usr/bin/runsc
+Environment=CPTR_SANDBOX_SYSTEMD_SLICE=cptr-sandbox.slice
+Environment=CPTR_SANDBOX_EGRESS_PROXY_READY=false
+EnvironmentFile=-/etc/cptr/capability-os-sandbox.conf
+RuntimeDirectory=cptr-sandbox
+RuntimeDirectoryMode=0710
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+# The broker never manipulates cgroupfs directly. Rootless runsc uses
+# --ignore-cgroups and each execution is wrapped in a bounded transient
+# systemd unit inside cptr-sandbox.slice.
+ProtectControlGroups=true
+
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+AmbientCapabilities=
+ReadOnlyPaths=-/var/lib/cptr/data/capability-os/blobs
+ReadWritePaths=/run/cptr-sandbox
+UMask=0077
+Restart=on-failure
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

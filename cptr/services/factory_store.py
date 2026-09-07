@@ -625,6 +625,18 @@ class SqlFactoryStore:
                         raise FactoryIdempotencyConflict(
                             "factory transition idempotency key was replayed with different intent"
                         )
+                    if FactoryState(run.state) in {
+                        FactoryState.PAUSED,
+                        FactoryState.APPROVAL_REQUIRED,
+                        FactoryState.RECOVERING,
+                    } or is_terminal_factory_state(FactoryState(run.state)):
+                        from cptr.services.capability_os.lifecycle import revoke_task_authority
+                        from cptr.services.capability_os.store import SqlCapabilityOsStore
+
+                        await revoke_task_authority(
+                            run.id,
+                            store=SqlCapabilityOsStore(session_factory=self._session_factory),
+                        )
                     return run
 
                 current = FactoryState(run.state)
@@ -700,6 +712,18 @@ class SqlFactoryStore:
                     idempotency_key=idempotency_key,
                     payload=intent_payload,
                     payload_digest=intent_digest,
+                )
+            if to_state in {
+                FactoryState.PAUSED,
+                FactoryState.APPROVAL_REQUIRED,
+                FactoryState.RECOVERING,
+            } or is_terminal_factory_state(to_state):
+                from cptr.services.capability_os.lifecycle import revoke_task_authority
+                from cptr.services.capability_os.store import SqlCapabilityOsStore
+
+                await revoke_task_authority(
+                    run.id,
+                    store=SqlCapabilityOsStore(session_factory=self._session_factory),
                 )
             return run
 

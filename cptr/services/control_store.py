@@ -578,6 +578,18 @@ class ControlTaskStore:
         async with await get_db() as db:
             await db.execute(update(ControlTask).where(ControlTask.id == task_id).values(**values))
             await db.commit()
+        if str(values.get("status") or "").upper() in {
+            "COMPLETE",
+            "COMPLETE_WITH_TOOL_ERRORS",
+            "FAILED",
+            "CANCELLED",
+            "REJECTED",
+            "CANCEL_REQUESTED",
+            "REVIEW_REQUIRED",
+        }:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            await revoke_task_authority(task_id)
 
     async def transition_terminal(
         self,
@@ -614,7 +626,12 @@ class ControlTaskStore:
                 .values(**values)
             )
             await db.commit()
-            return result.rowcount == 1
+            won = result.rowcount == 1
+        if won:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            await revoke_task_authority(task_id)
+        return won
 
     async def refine_complete_with_tool_errors(self, task_id: str, *, updated_at: int) -> bool:
         """Atomically refine a persisted COMPLETE task when durable tool evidence contradicts clean success."""
@@ -665,7 +682,12 @@ class ControlTaskStore:
                 )
             )
             await db.commit()
-            return result.rowcount == 1
+            won = result.rowcount == 1
+        if won:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            await revoke_task_authority(task_id)
+        return won
 
     async def decide_review(
         self,
@@ -700,7 +722,12 @@ class ControlTaskStore:
                 )
             )
             await db.commit()
-            return result.rowcount == 1
+            won = result.rowcount == 1
+        if won:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            await revoke_task_authority(task_id)
+        return won
 
     async def record_changes_requested(
         self,
@@ -753,7 +780,12 @@ class ControlTaskStore:
                 .values(status="CANCEL_REQUESTED", updated_at=requested_at)
             )
             await db.commit()
-            return result.rowcount == 1
+            won = result.rowcount == 1
+        if won:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            await revoke_task_authority(task_id)
+        return won
 
     async def finalize_cancel(self, task_id: str, *, cancelled_at: int, updated_at: int) -> bool:
         """Commit cancellation only after owned execution is quiescent."""
@@ -772,7 +804,12 @@ class ControlTaskStore:
                 )
             )
             await db.commit()
-            return result.rowcount == 1
+            won = result.rowcount == 1
+        if won:
+            from cptr.services.capability_os.lifecycle import revoke_task_authority
+
+            await revoke_task_authority(task_id)
+        return won
 
     async def invalidate_messages_for_task(self, task_id: str, *, now: int) -> int:
         """Invalidate queued steering before a cancelled task can drain it."""
