@@ -567,7 +567,6 @@ class FdxIntelligenceService:
                 str(options.get("max_matches") or 50),
                 "--format",
                 "json",
-                "--no-tee",
             ]
             if options.get("fixed_strings"):
                 argv.append("--fixed-strings")

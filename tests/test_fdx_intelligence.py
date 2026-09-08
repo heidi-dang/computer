@@ -368,11 +368,13 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         args = FdxIntelligenceService._daemon_args("impact", {"paths": ["src"]})
         self.assertEqual(args["depth"], 1)
 
-    def test_grep_cli_forces_no_tee_for_read_only_gateway_contract(self):
+    def test_grep_cli_uses_only_supported_read_only_flags(self):
         argv = FdxIntelligenceService._cli_argv(
             "grep", {"query": "needle", "path": "src", "max_matches": 1}
         )
-        self.assertIn("--no-tee", argv)
+        self.assertNotIn("--no-tee", argv)
+        self.assertIn("--format", argv)
+        self.assertIn("json", argv)
 
     async def test_degraded_assurance_preserves_data_and_recommends_fallback(self):
         with tempfile.TemporaryDirectory() as temp:
