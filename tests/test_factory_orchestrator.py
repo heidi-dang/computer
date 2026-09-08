@@ -163,6 +163,48 @@ class FactoryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed.state, FactoryState.RECOVERING.value)
         self.assertGreaterEqual(renew.await_count, 1)
 
+    async def test_phase_heartbeat_refreshes_aged_claim_before_handler_starts(self):
+        clock = [1_250]
+        claimed = await self.store.claim_run(
+            self.run.id,
+            lease_token="aged-claim-owner",
+            now_ms=1_000,
+            lease_ms=300,
+        )
+        self.assertTrue(claimed)
+        cycle = await self.store.create_cycle(
+            self.run.id,
+            base_revision=None,
+            base_fingerprint=None,
+            idempotency_key="aged-claim-cycle",
+        )
+
+        class SlowHandler:
+            async def execute(self, _context):
+                clock[0] = 1_350
+                await asyncio.sleep(0.11)
+                return PhaseOutcome(
+                    next_state=FactoryState.RECOVERING,
+                    reason="aged claim was refreshed before phase execution",
+                )
+
+        orchestrator = FactoryOrchestrator(
+            store=self.store,
+            handlers={FactoryState.MISSION: SlowHandler()},
+            owner_token="aged-claim-owner",
+            lease_ms=300,
+            clock_ms=lambda: clock[0],
+        )
+        outcome = await orchestrator._execute_handler_with_lease_heartbeat(
+            self.run.id,
+            SlowHandler(),
+            PhaseContext(run=self.run, cycle=cycle, evidence=(), gates=()),
+        )
+
+        self.assertEqual(outcome.next_state, FactoryState.RECOVERING)
+        persisted = await self.store.get_run(self.run.id)
+        self.assertGreaterEqual(int(persisted.lease_expires_at or 0), 1_650)
+
     async def test_complete_state_progression_executes_one_phase_action_per_run_once(self):
         next_state = {
             FactoryState.MISSION: FactoryState.RECOVERING,

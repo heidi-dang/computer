@@ -16,9 +16,16 @@ from cptr.services.capability_os.evolution import (
     ExperimentComparison,
     PromotionDecision,
 )
+from cptr.services.capability_os.evolution_engine import (
+    EvolutionExperimentEngine,
+    ExperimentArmName,
+    ExperimentContext,
+    ExperimentMode,
+)
 from cptr.services.capability_os.forge import CreateToolRequest, ToolForge
 from cptr.services.capability_os.generated_executor import ProjectedGeneratedToolExecutor
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpFabric, McpQualification
+from cptr.services.capability_os.mcp_oauth import McpOAuthService
 from cptr.services.capability_os.mcp_remote import McpAcquisitionService, ProjectedMcpActionExecutor
 from cptr.services.capability_os.policy import DenyAllAuthorityPolicyProvider
 from cptr.services.capability_os.resolver import CapabilityResolver, ResolutionGoal
@@ -125,10 +132,12 @@ class CapabilityOsControlService:
                  authority: AuthorityBroker, resolver: CapabilityResolver, forge: ToolForge,
                  compiler: CapabilityCompiler, evidence: EvidenceService, evolution: EvolutionGate,
                  runtime: RuntimeBroker, fabric: McpFabric, action_executor=None, mcp_connector=None,
-                 mcp_acquisition: McpAcquisitionService | None = None, credential_broker=None,
+                 mcp_acquisition: McpAcquisitionService | None = None,
+                 mcp_oauth: McpOAuthService | None = None, credential_broker=None,
                  skill_activator: SkillMcpActivator | None = None,
                  skill_forge: SkillForge | None = None,
                  skill_evaluator: SkillEvaluator | None = None,
+                 evolution_engine: EvolutionExperimentEngine | None = None,
                  evolution_approval_verifier=None,
                  policy_provider=None, clock_ms=lambda: int(time.time() * 1000)):
         self.store, self.tasks, self.authority, self.resolver = store, tasks, authority, resolver
@@ -136,10 +145,16 @@ class CapabilityOsControlService:
         self.runtime, self.fabric = runtime, fabric
         self.action_executor, self.mcp_connector = action_executor, mcp_connector
         self.mcp_acquisition = mcp_acquisition
+        self.mcp_oauth = mcp_oauth
         self.credential_broker = credential_broker
         self.skill_activator = skill_activator
         self.skill_forge = skill_forge or SkillForge(store=store, clock_ms=clock_ms)
         self.skill_evaluator = skill_evaluator or SkillEvaluator()
+        self.evolution_engine = evolution_engine or EvolutionExperimentEngine(
+            store=store,
+            evidence=evidence,
+            gate=evolution,
+        )
         self.evolution_approval_verifier = evolution_approval_verifier
         self.policy_provider = policy_provider or DenyAllAuthorityPolicyProvider()
         self.clock_ms = clock_ms
@@ -163,7 +178,22 @@ class CapabilityOsControlService:
 
     async def inspect(self, *, user_id, task_id, artifact_digest=None, limit=50):
         task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
-        artifact = _artifact(await self._visible(user_id, task_id, artifact_digest)) if artifact_digest else None
+        artifact_row = await self._visible(user_id, task_id, artifact_digest) if artifact_digest else None
+        artifact = _artifact(artifact_row) if artifact_row is not None else None
+        artifact_reputation = None
+        if (
+            artifact_row is not None
+            and artifact_row.kind == ArtifactKind.MCP_ADAPTER.value
+            and self.mcp_acquisition is not None
+        ):
+            server_id = str((artifact_row.spec or {}).get("serverId") or "").strip()
+            if server_id:
+                artifact_reputation = (
+                    await self.mcp_acquisition.reputation_snapshot(
+                        user_id=user_id,
+                        server_id=server_id,
+                    )
+                ).to_api()
         rows = await self.store.list_artifacts(user_id=user_id, include_global=True, limit=max(1, min(int(limit), 100)))
         leases = await self.store.list_active_leases(task_id, now_ms=int(self.clock_ms()))
         mounts = await self.store.list_active_mounts(task_id)
@@ -173,7 +203,8 @@ class CapabilityOsControlService:
             row for row in rows
             if row.state != ArtifactState.EPHEMERAL.value or row.task_origin == task_id
         ]
-        return {"task": _task(task), "artifact": artifact, "artifacts": [_artifact(r) for r in visible_rows],
+        return {"task": _task(task), "artifact": artifact, "artifactReputation": artifact_reputation,
+                "artifacts": [_artifact(r) for r in visible_rows],
                 "activeLeases": [{"leaseId": r.lease_id, "artifactDigest": r.artifact_digest,
                                   "permissions": list(r.permissions or []), "runtimeProfile": r.runtime_profile,
                                   "expiresAtMs": int(r.expires_at_ms)} for r in leases],
@@ -198,6 +229,60 @@ class CapabilityOsControlService:
 
     async def forge(self, *, user_id, task_id, operation, payload):
         operation = operation.strip().lower()
+        if operation == "skill-export":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            if set(payload) - {"contentDigest"}:
+                raise ValueError("skill-export accepts only contentDigest")
+            digest = str(payload.get("contentDigest") or "").strip()
+            row = await self._visible(user_id, task_id, digest)
+            if row.kind != ArtifactKind.SKILL.value:
+                raise ValueError("skill-export requires a Skill artifact")
+            exported = await self.skill_forge.export_bundle(digest)
+            evidence = await self.evidence.record(
+                task_id=task_id,
+                kind="skill.export",
+                producer_identity="capability-os-control",
+                claims={
+                    "bundleDigest": exported["bundleDigest"],
+                    "sourceContentDigest": digest,
+                    "format": "cptr.io/skill-bundle/v1",
+                },
+                artifact_digest=digest,
+            )
+            return {
+                "task": _task(task),
+                **exported,
+                "evidenceId": evidence.evidence_id,
+            }
+        if operation == "skill-import":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            if set(payload) - {"bundle"}:
+                raise ValueError("skill-import accepts only bundle")
+            bundle = payload.get("bundle")
+            if not isinstance(bundle, dict):
+                raise ValueError("skill-import requires a bundle object")
+            artifact, bundle_digest, source_content_digest = await self.skill_forge.import_bundle(
+                bundle=dict(bundle),
+                task_id=task_id,
+                user_id=user_id,
+            )
+            evidence = await self.evidence.record(
+                task_id=task_id,
+                kind="skill.import",
+                producer_identity="capability-os-control",
+                claims={
+                    "bundleDigest": bundle_digest,
+                    "sourceContentDigest": source_content_digest,
+                    "format": "cptr.io/skill-bundle/v1",
+                },
+                artifact_digest=artifact.metadata.content_digest,
+            )
+            return {
+                "task": _task(task),
+                "artifact": artifact.to_dict(),
+                "bundleDigest": bundle_digest,
+                "evidenceId": evidence.evidence_id,
+            }
         if operation == "skill-create":
             task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
             genome_payload = payload.get("genome")
@@ -329,6 +414,39 @@ class CapabilityOsControlService:
             if row.kind != ArtifactKind.TOOL.value:
                 raise ValueError("Tool Forge inspect requires a Tool artifact")
             return {"task": _task(task), "artifact": _artifact(row)}
+        if operation == "supply-chain":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            if set(payload) - {"contentDigest", "documentDigest"}:
+                raise ValueError("Tool Forge supply-chain accepts only contentDigest and documentDigest")
+            digest = str(payload.get("contentDigest") or "").strip()
+            document_digest = str(payload.get("documentDigest") or "").strip()
+            row = await self._visible(user_id, task_id, digest, mutable=True)
+            if row.kind != ArtifactKind.TOOL.value:
+                raise ValueError("Tool Forge supply-chain requires a Tool artifact")
+            if not document_digest.startswith("sha256:"):
+                raise ValueError("Tool Forge supply-chain requires a documentDigest")
+            evidence_rows = await self.store.list_artifact_evidence(digest, limit=1000)
+            trusted = False
+            for evidence in evidence_rows:
+                if evidence.kind != "tool.build" or evidence.producer_identity != "capability-os-control":
+                    continue
+                supply_chain = (evidence.claims or {}).get("supplyChain")
+                if not isinstance(supply_chain, dict):
+                    continue
+                if any(
+                    isinstance(ref, dict) and str(ref.get("digest") or "") == document_digest
+                    for ref in supply_chain.values()
+                ):
+                    trusted = True
+                    break
+            if not trusted:
+                raise KeyError("Tool Forge supply-chain document not found")
+            return {
+                "task": _task(task),
+                "artifactDigest": digest,
+                "documentDigest": document_digest,
+                "document": self.forge_impl.get_supply_chain_document(document_digest),
+            }
         task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
         digest = str(payload.get("contentDigest") or "")
         row = await self._visible(user_id, task_id, digest, mutable=True)
@@ -370,7 +488,7 @@ class CapabilityOsControlService:
                     task_id=task_id, kind="tool.build", producer_identity="capability-os-control",
                     claims={"toolId": row.artifact_id, "sourceDigest": row.source_digest,
                             "buildArtifactDigest": build.artifact_digest, "runtimeClass": build.runtime_class,
-                            "attestation": build.attestation},
+                            "attestation": build.attestation, "supplyChain": build.supply_chain},
                     run_id=build.build_id, artifact_digest=digest, lease_id=lease.lease_id,
                 )
                 return {"task": _task(task), "build": asdict(build),
@@ -530,6 +648,7 @@ class CapabilityOsControlService:
                 connector=self.mcp_connector,
                 packaged_invoke=self._invoke_packaged_mcp,
                 credential_broker=self.credential_broker,
+                evidence=self.evidence,
             )
         try:
             result = await CapabilityVm(executor=executor, evidence=self.evidence, clock_ms=self.clock_ms).execute(
@@ -553,6 +672,53 @@ class CapabilityOsControlService:
                 if inspect.isawaitable(result):
                     await result
             return {"task": _task(task), "released": await self.fabric.release(mount_id, task_id=task_id)}
+
+        if operation in {"oauth-start", "oauth-status", "oauth-revoke"}:
+            if self.mcp_oauth is None:
+                raise CapabilityOsUnavailable("Capability OS MCP OAuth service is not configured")
+            if operation == "oauth-status":
+                if set(payload) - {"flowId"}:
+                    raise ValueError("MCP OAuth status accepts only flowId")
+                flow_id = str(payload.get("flowId") or "").strip()
+                if not flow_id:
+                    raise ValueError("MCP OAuth status requires flowId")
+                return {
+                    "task": _task(task),
+                    "oauth": await self.mcp_oauth.status(
+                        user_id=user_id,
+                        task_id=task_id,
+                        flow_id=flow_id,
+                    ),
+                }
+            if set(payload) - {"artifactDigest"}:
+                raise ValueError(f"MCP {operation} accepts only artifactDigest")
+            digest = str(payload.get("artifactDigest") or "").strip()
+            if not digest:
+                raise ValueError(f"MCP {operation} requires artifactDigest")
+            if operation == "oauth-start":
+                task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
+                started = await self.mcp_oauth.start(
+                    user_id=user_id,
+                    task_id=task_id,
+                    artifact_digest=digest,
+                )
+                return {"task": _task(task), "oauth": started.to_api()}
+            row = await self._visible(user_id, task_id, digest, mutable=True)
+            if row.kind != ArtifactKind.MCP_ADAPTER.value:
+                raise ValueError("MCP OAuth revoke requires an MCP adapter")
+            auth = (row.spec or {}).get("authentication")
+            if not isinstance(auth, dict) or auth.get("source") != "oauth2":
+                raise ValueError("MCP adapter is not backed by OAuth")
+            logical_name = str(auth.get("logicalName") or "").strip()
+            if not logical_name:
+                raise ValueError("MCP OAuth adapter credential identity is incomplete")
+            return {
+                "task": _task(task),
+                "revoked": await self.mcp_oauth.revoke(
+                    user_id=user_id,
+                    logical_name=logical_name,
+                ),
+            }
 
         gp = payload.get("goal")
         if not isinstance(gp, dict):
@@ -766,12 +932,248 @@ class CapabilityOsControlService:
                 "qualificationEvidenceId": qualification_evidence_id,
                 "automaticLease": automatic}
 
+    async def _reflect_experiment(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        task,
+        artifact_digest: str | None,
+        experiment: dict,
+        promotion_target_state: str | None,
+        owner_approval_id: str | None,
+    ):
+        operation = str(experiment.get("operation") or "").strip().lower()
+        if not operation:
+            raise ValueError("experiment operation is required")
+        allowed_fields = {
+            "create": {
+                "operation",
+                "changeClass",
+                "mode",
+                "hypothesis",
+                "controlArtifactDigest",
+                "context",
+                "minRunsPerArm",
+            },
+            "observe": {
+                "operation",
+                "experimentId",
+                "arm",
+                "sourceEvidenceId",
+            },
+            "evaluate": {"operation", "experimentId"},
+            "status": {"operation", "experimentId"},
+            "cancel": {"operation", "experimentId", "reason"},
+            "promote": {"operation", "experimentId"},
+        }
+        if operation not in allowed_fields:
+            raise ValueError("unsupported evolution experiment operation")
+        unknown = set(experiment) - allowed_fields[operation]
+        if unknown:
+            raise ValueError(f"unknown evolution experiment field: {sorted(unknown)[0]}")
+
+        if operation == "create":
+            if artifact_digest is None:
+                raise ValueError("experiment create requires artifactDigest")
+            candidate = await self._visible(user_id, task_id, artifact_digest, mutable=True)
+            if ArtifactState(candidate.state) not in {ArtifactState.QUALIFIED, ArtifactState.LEARNED}:
+                raise ValueError("experiment candidate must already be qualified or learned")
+            control_digest = str(experiment.get("controlArtifactDigest") or "").strip()
+            if not control_digest:
+                raise ValueError("experiment create requires controlArtifactDigest")
+            if control_digest == artifact_digest:
+                raise ValueError("experiment control and candidate artifacts must differ")
+            control = await self._visible(user_id, task_id, control_digest)
+            if ArtifactState(control.state) not in {
+                ArtifactState.QUALIFIED,
+                ArtifactState.LEARNED,
+                ArtifactState.CERTIFIED,
+                ArtifactState.CORE,
+            }:
+                raise ValueError("experiment control artifact is not qualified")
+            plan, evidence_id = await self.evolution_engine.create(
+                task_id=task_id,
+                change_class=ChangeClass(str(experiment.get("changeClass") or "internal")),
+                mode=ExperimentMode(str(experiment.get("mode") or "shadow")),
+                hypothesis=str(experiment.get("hypothesis") or ""),
+                control_artifact_digest=control_digest,
+                candidate_artifact_digest=artifact_digest,
+                context=ExperimentContext.from_dict(experiment.get("context")),
+                min_runs_per_arm=(
+                    int(experiment["minRunsPerArm"])
+                    if experiment.get("minRunsPerArm") is not None
+                    else None
+                ),
+            )
+            return {
+                "task": _task(task),
+                "experiment": plan.to_api(),
+                "experimentEvidenceId": evidence_id,
+            }
+
+        experiment_id = str(experiment.get("experimentId") or "").strip()
+        if not experiment_id:
+            raise ValueError("experimentId is required")
+        if operation == "status":
+            return {
+                "task": _task(task),
+                "experiment": await self.evolution_engine.status(
+                    task_id=task_id,
+                    experiment_id=experiment_id,
+                ),
+            }
+        if operation == "observe":
+            observation = await self.evolution_engine.observe(
+                task_id=task_id,
+                experiment_id=experiment_id,
+                arm=ExperimentArmName(str(experiment.get("arm") or "")),
+                source_evidence_id=str(experiment.get("sourceEvidenceId") or ""),
+            )
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "observationEvidenceId": observation.evidence_id,
+            }
+        if operation == "evaluate":
+            evaluation = await self.evolution_engine.evaluate(
+                task_id=task_id,
+                experiment_id=experiment_id,
+            )
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "evaluation": evaluation.to_api(),
+                "promoted": False,
+            }
+        if operation == "cancel":
+            evidence_id = await self.evolution_engine.cancel(
+                task_id=task_id,
+                experiment_id=experiment_id,
+                reason=str(experiment.get("reason") or ""),
+            )
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "cancelEvidenceId": evidence_id,
+                "cancelled": True,
+            }
+
+        plan, evaluation, _rows = await self.evolution_engine.latest_evaluation(
+            task_id=task_id,
+            experiment_id=experiment_id,
+        )
+        candidate = await self._visible(
+            user_id,
+            task_id,
+            plan.candidate_artifact_digest,
+            mutable=True,
+        )
+        if artifact_digest is not None and artifact_digest != plan.candidate_artifact_digest:
+            raise ValueError("experiment promotion artifactDigest does not match candidate")
+        if promotion_target_state is None:
+            raise ValueError("experiment promotion requires promotionTargetState")
+        target = ArtifactState(str(promotion_target_state))
+        current = ArtifactState(candidate.state)
+        allowed = {
+            ArtifactState.QUALIFIED: {ArtifactState.LEARNED, ArtifactState.CERTIFIED},
+            ArtifactState.LEARNED: {ArtifactState.CERTIFIED},
+        }
+        if target not in allowed.get(current, set()):
+            raise ValueError("invalid evolution promotion transition")
+
+        approved = evaluation.decision is PromotionDecision.PROMOTE
+        owner_approval_verified = False
+        if evaluation.decision is PromotionDecision.OWNER_APPROVAL_REQUIRED:
+            if owner_approval_id and self.evolution_approval_verifier is not None:
+                verified = self.evolution_approval_verifier(
+                    owner_approval_id,
+                    {
+                        "userId": user_id,
+                        "taskId": task_id,
+                        "artifactDigest": plan.candidate_artifact_digest,
+                        "changeClass": plan.change_class.value,
+                        "targetState": target.value,
+                        "evaluationEvidenceId": evaluation.evaluation_evidence_id,
+                        "experimentId": experiment_id,
+                    },
+                )
+                if inspect.isawaitable(verified):
+                    verified = await verified
+                owner_approval_verified = verified is True
+                approved = owner_approval_verified
+        if not approved:
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "promotionDecision": evaluation.decision.value,
+                "evaluationEvidenceId": evaluation.evaluation_evidence_id,
+                "promoted": False,
+            }
+        intent_evidence_id = await self.evolution_engine.record_promotion_intent(
+            task_id=task_id,
+            experiment_id=experiment_id,
+            evaluation=evaluation,
+            from_state=current.value,
+            target_state=target.value,
+            owner_approval_verified=owner_approval_verified,
+        )
+        updated = await self.store.compare_and_set_artifact_state(
+            plan.candidate_artifact_digest,
+            expected_state=current.value,
+            state=target.value,
+        )
+        if not updated:
+            raise RuntimeError("evolution promotion candidate changed concurrently; reevaluation is required")
+        try:
+            promotion_evidence_id = await self.evolution_engine.record_promotion(
+                task_id=task_id,
+                experiment_id=experiment_id,
+                evaluation=evaluation,
+                intent_evidence_id=intent_evidence_id,
+                from_state=current.value,
+                target_state=target.value,
+                owner_approval_verified=owner_approval_verified,
+            )
+        except Exception:
+            rolled_back = await self.store.compare_and_set_artifact_state(
+                plan.candidate_artifact_digest,
+                expected_state=target.value,
+                state=current.value,
+            )
+            if not rolled_back:
+                raise RuntimeError(
+                    "evolution promotion evidence failed and state rollback could not be verified"
+                )
+            raise
+        return {
+            "task": _task(task),
+            "experimentId": experiment_id,
+            "promotionDecision": evaluation.decision.value,
+            "evaluationEvidenceId": evaluation.evaluation_evidence_id,
+            "promotionEvidenceId": promotion_evidence_id,
+            "artifactState": target.value,
+            "promoted": True,
+        }
+
     async def reflect(self, *, user_id, task_id, kind, claims, artifact_digest=None, lease_id=None,
                       comparison=None, change_class=None, promotion_target_state=None,
-                      owner_approval_id=None):
+                      owner_approval_id=None, experiment=None):
         task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
         if artifact_digest is not None:
             await self._visible(user_id, task_id, artifact_digest)
+        if experiment is not None:
+            if not isinstance(experiment, dict):
+                raise ValueError("experiment must be an object")
+            return await self._reflect_experiment(
+                user_id=user_id,
+                task_id=task_id,
+                task=task,
+                artifact_digest=artifact_digest,
+                experiment=dict(experiment),
+                promotion_target_state=promotion_target_state,
+                owner_approval_id=owner_approval_id,
+            )
         row = await self.evidence.record(task_id=task_id, kind=kind,
                                          producer_identity=f"capability-os-client:{user_id}",
                                          claims=dict(claims), artifact_digest=artifact_digest, lease_id=lease_id)
@@ -813,65 +1215,10 @@ class CapabilityOsControlService:
             result["evaluationEvidenceId"] = evaluation.evidence_id
 
             if promotion_target_state is not None:
-                if artifact_digest is None:
-                    raise ValueError("artifact promotion requires artifactDigest")
-                target = ArtifactState(str(promotion_target_state))
-                if target not in {
-                    ArtifactState.QUALIFIED,
-                    ArtifactState.LEARNED,
-                    ArtifactState.CERTIFIED,
-                }:
-                    raise ValueError("unsupported evolution promotion target state")
-                artifact_row = await self._visible(user_id, task_id, artifact_digest, mutable=True)
-                current = ArtifactState(artifact_row.state)
-                allowed = {
-                    # Qualification is artifact-specific (for example Tool Forge
-                    # requires a successful isolated build attestation). Generic
-                    # evolution may only advance an already-qualified artifact.
-                    ArtifactState.QUALIFIED: {ArtifactState.LEARNED, ArtifactState.CERTIFIED},
-                    ArtifactState.LEARNED: {ArtifactState.CERTIFIED},
-                }
-                if target not in allowed.get(current, set()):
-                    raise ValueError("invalid evolution promotion transition")
-
-                approved = decision is PromotionDecision.PROMOTE
-                if decision is PromotionDecision.OWNER_APPROVAL_REQUIRED:
-                    if not owner_approval_id or self.evolution_approval_verifier is None:
-                        approved = False
-                    else:
-                        verified = self.evolution_approval_verifier(
-                            owner_approval_id,
-                            {
-                                "userId": user_id,
-                                "taskId": task_id,
-                                "artifactDigest": artifact_digest,
-                                "changeClass": change.value,
-                                "targetState": target.value,
-                                "evaluationEvidenceId": evaluation.evidence_id,
-                            },
-                        )
-                        if inspect.isawaitable(verified):
-                            verified = await verified
-                        approved = verified is True
-                if approved:
-                    promotion = await self.evidence.record(
-                        task_id=task_id,
-                        kind="evolution.promotion",
-                        producer_identity="capability-os-control",
-                        claims={
-                            "changeClass": change.value,
-                            "decision": decision.value,
-                            "evaluationEvidenceId": evaluation.evidence_id,
-                            "fromState": current.value,
-                            "targetState": target.value,
-                            "ownerApprovalVerified": decision is PromotionDecision.OWNER_APPROVAL_REQUIRED,
-                        },
-                        artifact_digest=artifact_digest,
-                    )
-                    await self.store.set_artifact_state(artifact_digest, state=target.value)
-                    result["promoted"] = True
-                    result["promotionEvidenceId"] = promotion.evidence_id
-                    result["artifactState"] = target.value
-                else:
-                    result["promoted"] = False
+                # Legacy aggregate comparisons are caller-supplied compatibility
+                # input. They remain useful for diagnostics, but are not trusted
+                # promotion evidence. State changes require the durable experiment
+                # lifecycle above, which binds server-produced per-run outcomes.
+                result["promoted"] = False
+                result["promotionBlocked"] = "durable-experiment-required"
         return result

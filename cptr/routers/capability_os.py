@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from cptr.env import (
@@ -20,12 +21,22 @@ from cptr.env import (
 from cptr.services.capability_os.authority import AuthorityBroker, AuthorityDenied
 from cptr.services.capability_os.compiler import CapabilityCompileError, CapabilityCompiler
 from cptr.services.capability_os.control import CapabilityOsControlService, CapabilityOsUnavailable
-from cptr.services.capability_os.credential_broker import ConfigCredentialProvider, CredentialBroker
+from cptr.services.capability_os.credential_broker import (
+    CompositeCredentialProvider,
+    ConfigCredentialProvider,
+    CredentialBroker,
+)
 from cptr.services.capability_os.contracts import CapabilityRequest
 from cptr.services.capability_os.evidence import EvidenceService, EvidenceViolation
 from cptr.services.capability_os.evolution import EvolutionGate
 from cptr.services.capability_os.forge import ContentAddressedBlobStore, ToolForge
 from cptr.services.capability_os.mcp_fabric import McpFabric
+from cptr.services.capability_os.mcp_oauth import (
+    ConfigRemoteMcpOAuthProfileProvider,
+    McpOAuthCredentialProvider,
+    McpOAuthError,
+    McpOAuthService,
+)
 from cptr.services.capability_os.mcp_package import McpbPackagePreparer
 from cptr.services.capability_os.mcp_remote import (
     ConfigRemoteMcpAuthProvider,
@@ -48,8 +59,10 @@ from cptr.services.capability_os.tasks import CapabilityTaskCoordinator, Capabil
 from cptr.services.control_auth import require_control_user
 from cptr.services.factory_discovery import FactoryDiscovery, QuarantineCache, SafeHttpArtifactFetcher
 from cptr.services.factory_discovery_providers.mcp_registry import McpRegistryDiscoveryProvider
+from cptr.services.telemetry import telemetry
 
 capability_os_router = APIRouter(prefix="/api/control/v1/capability-os", tags=["control", "capability-os"])
+mcp_oauth_callback_router = APIRouter(tags=["capability-os", "mcp-oauth"])
 router = capability_os_router
 
 
@@ -82,6 +95,7 @@ class ReflectRequest(BaseModel):
     artifact_digest: str | None = Field(default=None, max_length=200)
     lease_id: str | None = Field(default=None, max_length=200)
     comparison: dict[str, Any] | None = None
+    experiment: dict[str, Any] | None = None
     change_class: str | None = Field(default=None, max_length=80)
     promotion_target_state: str | None = Field(default=None, max_length=80)
     owner_approval_id: str | None = Field(default=None, max_length=200)
@@ -89,6 +103,16 @@ class ReflectRequest(BaseModel):
 
 async def _user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
+
+
+def _span(operation: str):
+    return telemetry.span(
+        f"cptr.capability_os.{operation}",
+        attributes={
+            "cptr.operation": operation,
+            "cptr.component": "capability-os",
+        },
+    )
 
 
 def _default_tool_builder() -> BrokerToolBuilder:
@@ -103,9 +127,11 @@ def _default_tool_runner() -> BrokerToolRunner:
     )
 
 
-def _default_credential_broker(*, clock_ms=None, lease_validator=None) -> CredentialBroker:
+def _default_credential_broker(
+    *, provider=None, clock_ms=None, lease_validator=None
+) -> CredentialBroker:
     return CredentialBroker(
-        provider=ConfigCredentialProvider(),
+        provider=provider or ConfigCredentialProvider(),
         clock_ms=clock_ms or (lambda: int(time.time() * 1000)),
         lease_validator=lease_validator,
     )
@@ -151,6 +177,18 @@ def _service(request: Request) -> CapabilityOsControlService:
     action_executor = getattr(request.app.state, "capability_os_action_executor", None)
     if action_executor is None:
         action_executor = NativeActionExecutor(clock_ms=clock)
+    oauth_profiles = getattr(
+        request.app.state, "capability_os_mcp_oauth_profile_provider", None
+    )
+    if oauth_profiles is None:
+        oauth_profiles = ConfigRemoteMcpOAuthProfileProvider()
+    mcp_oauth = getattr(request.app.state, "capability_os_mcp_oauth", None)
+    if mcp_oauth is None:
+        mcp_oauth = McpOAuthService(
+            artifacts=store,
+            profiles=oauth_profiles,
+            clock_ms=clock,
+        )
     credential_broker = getattr(request.app.state, "capability_os_credential_broker", None)
     if credential_broker is None:
         async def validate_credential_lease(lease):
@@ -171,6 +209,12 @@ def _service(request: Request) -> CapabilityOsControlService:
             return True
 
         credential_broker = _default_credential_broker(
+            provider=CompositeCredentialProvider(
+                (
+                    ConfigCredentialProvider(),
+                    McpOAuthCredentialProvider(mcp_oauth),
+                )
+            ),
             clock_ms=clock,
             lease_validator=validate_credential_lease,
         )
@@ -210,6 +254,7 @@ def _service(request: Request) -> CapabilityOsControlService:
             package_runner=tool_runner,
             package_resources=package_resources,
             auth_provider=ConfigRemoteMcpAuthProvider(),
+            oauth_profile_provider=oauth_profiles,
             credential_broker=credential_broker,
             clock_ms=clock,
         )
@@ -229,6 +274,7 @@ def _service(request: Request) -> CapabilityOsControlService:
         action_executor=action_executor,
         mcp_connector=mcp_connector,
         mcp_acquisition=mcp_acquisition,
+        mcp_oauth=mcp_oauth,
         credential_broker=credential_broker,
         skill_activator=skill_activator,
         evolution_approval_verifier=getattr(
@@ -250,7 +296,10 @@ def _error(exc: Exception) -> HTTPException:
         return HTTPException(403, {"code": "CAPABILITY_OS_AUTHORITY_DENIED", "message": str(exc)})
     if isinstance(exc, (CapabilityOsUnavailable, RuntimeUnavailable)):
         return HTTPException(503, {"code": "CAPABILITY_OS_RUNTIME_UNAVAILABLE", "message": str(exc)})
-    if isinstance(exc, (CapabilityCompileError, EvidenceViolation, ValueError, TypeError)):
+    if isinstance(
+        exc,
+        (CapabilityCompileError, EvidenceViolation, McpOAuthError, ValueError, TypeError),
+    ):
         return HTTPException(422, {"code": "CAPABILITY_OS_INVALID_REQUEST", "message": str(exc)})
     return HTTPException(500, {"code": "CAPABILITY_OS_FAILED", "message": "Capability OS operation failed"})
 
@@ -259,14 +308,47 @@ def _reqs(values: list[dict[str, Any]]) -> tuple[CapabilityRequest, ...]:
     return tuple(CapabilityRequest.from_dict(item) for item in values)
 
 
+@mcp_oauth_callback_router.get("/api/oauth/mcp/callback", include_in_schema=False)
+async def complete_mcp_oauth_callback(
+    request: Request,
+    state: str = Query(min_length=16, max_length=512),
+    code: str | None = Query(default=None, max_length=8192),
+    issuer: str | None = Query(default=None, alias="iss", max_length=4096),
+    error: str | None = Query(default=None, max_length=256),
+):
+    headers = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        service = _service(request)
+        if service.mcp_oauth is None:
+            raise McpOAuthError("MCP OAuth service is unavailable")
+        await service.mcp_oauth.complete_callback(
+            state=state,
+            code=code,
+            issuer=issuer,
+            error=error,
+        )
+    except Exception:
+        return PlainTextResponse(
+            "MCP OAuth authorization failed. Return to ChatGPT and retry.",
+            status_code=400,
+            headers=headers,
+        )
+    return PlainTextResponse(
+        "MCP OAuth authorization complete. You can return to ChatGPT.",
+        status_code=200,
+        headers=headers,
+    )
+
+
 @capability_os_router.get("/inspect")
 async def inspect_capability_os(request: Request, task_id: str = Query(min_length=1, max_length=200),
                                 artifact_digest: str | None = Query(default=None, max_length=200),
                                 limit: int = Query(default=50, ge=1, le=100)):
     user_id = await _user(request, "capability:read")
     try:
-        return await _service(request).inspect(user_id=user_id, task_id=task_id,
-                                               artifact_digest=artifact_digest, limit=limit)
+        with _span("inspect"):
+            return await _service(request).inspect(user_id=user_id, task_id=task_id,
+                                                   artifact_digest=artifact_digest, limit=limit)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -275,9 +357,10 @@ async def inspect_capability_os(request: Request, task_id: str = Query(min_lengt
 async def resolve_capability_os(request: Request, body: ResolveRequest):
     user_id = await _user(request, "capability:read")
     try:
-        return await _service(request).resolve(user_id=user_id, task_id=body.task_id,
-                                               required=_reqs(body.required), optional=_reqs(body.optional),
-                                               forbidden=_reqs(body.forbidden))
+        with _span("resolve"):
+            return await _service(request).resolve(user_id=user_id, task_id=body.task_id,
+                                                   required=_reqs(body.required), optional=_reqs(body.optional),
+                                                   forbidden=_reqs(body.forbidden))
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -286,8 +369,9 @@ async def resolve_capability_os(request: Request, body: ResolveRequest):
 async def forge_capability_os(request: Request, body: OperationRequest):
     user_id = await _user(request, "capability:write")
     try:
-        return await _service(request).forge(user_id=user_id, task_id=body.task_id,
-                                             operation=body.operation, payload=body.payload)
+        with _span("forge"):
+            return await _service(request).forge(user_id=user_id, task_id=body.task_id,
+                                                 operation=body.operation, payload=body.payload)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -296,9 +380,10 @@ async def forge_capability_os(request: Request, body: OperationRequest):
 async def execute_capability_os(request: Request, body: ExecuteRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        return await _service(request).execute(user_id=user_id, task_id=body.task_id,
-                                               capability_digest=body.capability_digest, lease_id=body.lease_id,
-                                               spec=body.spec, inputs=body.inputs, approval_id=body.approval_id)
+        with _span("execute"):
+            return await _service(request).execute(user_id=user_id, task_id=body.task_id,
+                                                   capability_digest=body.capability_digest, lease_id=body.lease_id,
+                                                   spec=body.spec, inputs=body.inputs, approval_id=body.approval_id)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -307,8 +392,9 @@ async def execute_capability_os(request: Request, body: ExecuteRequest):
 async def acquire_capability_os(request: Request, body: OperationRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        return await _service(request).acquire(user_id=user_id, task_id=body.task_id,
-                                               operation=body.operation, payload=body.payload)
+        with _span("acquire"):
+            return await _service(request).acquire(user_id=user_id, task_id=body.task_id,
+                                                   operation=body.operation, payload=body.payload)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -317,11 +403,13 @@ async def acquire_capability_os(request: Request, body: OperationRequest):
 async def reflect_capability_os(request: Request, body: ReflectRequest):
     user_id = await _user(request, "capability:write")
     try:
-        return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
-                                               claims=body.claims, artifact_digest=body.artifact_digest,
-                                               lease_id=body.lease_id, comparison=body.comparison,
-                                               change_class=body.change_class,
-                                               promotion_target_state=body.promotion_target_state,
-                                               owner_approval_id=body.owner_approval_id)
+        with _span("reflect"):
+            return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
+                                                   claims=body.claims, artifact_digest=body.artifact_digest,
+                                                   lease_id=body.lease_id, comparison=body.comparison,
+                                                   experiment=body.experiment,
+                                                   change_class=body.change_class,
+                                                   promotion_target_state=body.promotion_target_state,
+                                                   owner_approval_id=body.owner_approval_id)
     except Exception as exc:
         raise _error(exc) from exc

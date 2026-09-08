@@ -20,6 +20,7 @@ from cptr.services.capability_os.contracts import (
     CapabilityRequest,
     CptrArtifact,
     create_artifact,
+    digest_payload,
 )
 from cptr.services.capability_os.store import SqlCapabilityOsStore
 
@@ -488,6 +489,45 @@ class SkillMcpActivator:
         )
 
 
+_PORTABLE_SKILL_FORBIDDEN_KEYS = frozenset(
+    {
+        "permissions",
+        "permission",
+        "credentials",
+        "credential",
+        "secret",
+        "secrets",
+        "authorization",
+        "authentication",
+        "network",
+        "runtime",
+        "lease",
+        "leaseid",
+        "approvalid",
+        "headers",
+        "bearer",
+        "token",
+        "mountid",
+        "mountids",
+        "serverid",
+    }
+)
+
+
+def _validate_portable_skill_payload(value: Any, *, depth: int = 0) -> None:
+    if depth > 12:
+        raise ValueError("portable Skill bundle nesting exceeds limit")
+    if isinstance(value, dict):
+        for raw_key, item in value.items():
+            key = str(raw_key).replace("_", "").replace("-", "").lower()
+            if key in _PORTABLE_SKILL_FORBIDDEN_KEYS:
+                raise ValueError(f"portable Skill bundle contains authority field: {raw_key}")
+            _validate_portable_skill_payload(item, depth=depth + 1)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _validate_portable_skill_payload(item, depth=depth + 1)
+
+
 class SkillForge:
     def __init__(self, *, store: SqlCapabilityOsStore, clock_ms) -> None:
         self._store = store
@@ -526,6 +566,64 @@ class SkillForge:
         )
         await self._store.persist_artifact(artifact)
         return artifact
+
+    async def export_bundle(self, content_digest: str) -> dict[str, Any]:
+        row = await self._store.get_artifact(content_digest)
+        if row is None or row.kind != ArtifactKind.SKILL.value:
+            raise KeyError("skill artifact not found")
+        genome = SkillGenome.from_spec(dict(row.spec or {}))
+        bundle = {
+            "apiVersion": "cptr.io/skill-bundle/v1",
+            "kind": "SkillGenome",
+            "metadata": {
+                "id": row.artifact_id,
+                "version": row.version,
+                "sourceContentDigest": row.content_digest,
+            },
+            "spec": genome.to_spec(),
+        }
+        _validate_portable_skill_payload(bundle)
+        return {"bundle": bundle, "bundleDigest": digest_payload(bundle)}
+
+    async def import_bundle(
+        self,
+        *,
+        bundle: dict[str, Any],
+        task_id: str,
+        user_id: str,
+    ) -> tuple[CptrArtifact[Any], str, str | None]:
+        if not isinstance(bundle, dict):
+            raise TypeError("portable Skill bundle must be an object")
+        if set(bundle) != {"apiVersion", "kind", "metadata", "spec"}:
+            raise ValueError("portable Skill bundle has an invalid top-level shape")
+        if bundle.get("apiVersion") != "cptr.io/skill-bundle/v1" or bundle.get("kind") != "SkillGenome":
+            raise ValueError("unsupported portable Skill bundle version")
+        metadata = bundle.get("metadata")
+        spec = bundle.get("spec")
+        if not isinstance(metadata, dict) or not isinstance(spec, dict):
+            raise ValueError("portable Skill bundle metadata/spec must be objects")
+        if set(metadata) - {"id", "version", "sourceContentDigest"}:
+            raise ValueError("portable Skill bundle metadata contains unknown fields")
+        _validate_portable_skill_payload(bundle)
+        genome = SkillGenome.from_spec(spec)
+        bundle_digest = digest_payload(bundle)
+        source_content_digest = str(metadata.get("sourceContentDigest") or "").strip() or None
+        if source_content_digest is not None and not source_content_digest.startswith("sha256:"):
+            raise ValueError("portable Skill sourceContentDigest is invalid")
+        artifact = create_artifact(
+            artifact_id=str(metadata.get("id") or ""),
+            version=str(metadata.get("version") or ""),
+            kind=ArtifactKind.SKILL,
+            owner=ArtifactOwner.USER,
+            origin=ArtifactOrigin.IMPORTED,
+            spec=genome.to_spec(),
+            created_at=self._created_at(),
+            user_id=user_id,
+            task_origin=task_id,
+            source_digest=bundle_digest,
+        )
+        await self._store.persist_artifact(artifact)
+        return artifact, bundle_digest, source_content_digest
 
     async def mutate(
         self,

@@ -2,6 +2,7 @@ import unittest
 
 from cptr.services.capability_os.authority import CapabilityLease
 from cptr.services.capability_os.credential_broker import (
+    CompositeCredentialProvider,
     ConfigCredentialProvider,
     CredentialBroker,
     CredentialDenied,
@@ -39,6 +40,49 @@ def _lease(*, lease_id="lease-1", task_id="task-1", names=("github-production",)
         expires_at_ms=expires,
         status="active",
     )
+
+
+class CompositeCredentialProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_routes_exactly_one_provider_and_rejects_ambiguous_sources(self):
+        class Provider:
+            def __init__(self, name, *, allowed):
+                self.name = name
+                self.allowed = allowed
+                self.fetches = []
+
+            async def allows(self, *, logical_name, consumer):
+                return self.allowed and logical_name == "oauth-token" and consumer == "mcp.remote:test"
+
+            async def fetch(self, *, logical_name, task_id, lease_id, consumer):
+                self.fetches.append((logical_name, task_id, lease_id, consumer))
+                return self.name
+
+        first = Provider("first-secret", allowed=True)
+        second = Provider("second-secret", allowed=False)
+        composite = CompositeCredentialProvider((first, second))
+        self.assertTrue(
+            await composite.allows(logical_name="oauth-token", consumer="mcp.remote:test")
+        )
+        self.assertEqual(
+            await composite.fetch(
+                logical_name="oauth-token",
+                task_id="task-1",
+                lease_id="lease-1",
+                consumer="mcp.remote:test",
+            ),
+            "first-secret",
+        )
+        self.assertEqual(len(first.fetches), 1)
+        self.assertEqual(second.fetches, [])
+
+        ambiguous = CompositeCredentialProvider(
+            (Provider("a", allowed=True), Provider("b", allowed=True))
+        )
+        with self.assertRaisesRegex(CredentialDenied, "ambiguous"):
+            await ambiguous.allows(
+                logical_name="oauth-token",
+                consumer="mcp.remote:test",
+            )
 
 
 class ConfigCredentialProviderTests(unittest.IsolatedAsyncioTestCase):

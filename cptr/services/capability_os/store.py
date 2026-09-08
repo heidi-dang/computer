@@ -151,6 +151,25 @@ class SqlCapabilityOsStore:
             await db.commit()
             return bool(result.rowcount)
 
+    async def compare_and_set_artifact_state(
+        self,
+        content_digest: str,
+        *,
+        expected_state: str,
+        state: str,
+    ) -> bool:
+        async with self._session_factory() as db:
+            result = await db.execute(
+                update(CapabilityOsArtifact)
+                .where(
+                    CapabilityOsArtifact.content_digest == content_digest,
+                    CapabilityOsArtifact.state == expected_state,
+                )
+                .values(state=state)
+            )
+            await db.commit()
+            return bool(result.rowcount)
+
     async def artifact_exists(self, content_digest: str) -> bool:
         async with self._session_factory() as db:
             return (
@@ -397,6 +416,39 @@ class SqlCapabilityOsStore:
         async with self._session_factory() as db:
             return await db.get(CapabilityOsEvidence, evidence_id)
 
+    async def list_evidence_for_artifacts(
+        self,
+        artifact_digests: tuple[str, ...],
+        *,
+        kinds: tuple[str, ...] = (),
+        producer_identity: str | None = None,
+        limit: int = 5_000,
+    ) -> list[CapabilityOsEvidence]:
+        digests = tuple(dict.fromkeys(str(item).strip() for item in artifact_digests if str(item).strip()))
+        if not digests:
+            return []
+        if len(digests) > 1_000:
+            raise ValueError("artifact evidence query exceeds digest bound")
+        limit = max(1, min(int(limit), 10_000))
+        async with self._session_factory() as db:
+            query = select(CapabilityOsEvidence).where(
+                CapabilityOsEvidence.artifact_digest.in_(digests)
+            )
+            if kinds:
+                query = query.where(CapabilityOsEvidence.kind.in_(tuple(kinds)))
+            if producer_identity is not None:
+                query = query.where(CapabilityOsEvidence.producer_identity == producer_identity)
+            return list(
+                (
+                    await db.scalars(
+                        query.order_by(
+                            CapabilityOsEvidence.created_at_ms,
+                            CapabilityOsEvidence.evidence_id,
+                        ).limit(limit)
+                    )
+                ).all()
+            )
+
     async def list_evidence(self, task_id: str, *, limit: int = 100) -> list[CapabilityOsEvidence]:
         limit = max(1, min(int(limit), 500))
         async with self._session_factory() as db:
@@ -406,6 +458,58 @@ class SqlCapabilityOsStore:
                         select(CapabilityOsEvidence)
                         .where(CapabilityOsEvidence.task_id == task_id)
                         .order_by(CapabilityOsEvidence.sequence, CapabilityOsEvidence.evidence_id)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+
+    async def list_evidence_for_run(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[CapabilityOsEvidence]:
+        task_id = str(task_id).strip()
+        run_id = str(run_id).strip()
+        if not task_id or not run_id:
+            raise ValueError("task_id and run_id must not be blank")
+        limit = max(1, min(int(limit), 2500))
+        async with self._session_factory() as db:
+            return list(
+                (
+                    await db.scalars(
+                        select(CapabilityOsEvidence)
+                        .where(
+                            CapabilityOsEvidence.task_id == task_id,
+                            CapabilityOsEvidence.run_id == run_id,
+                        )
+                        .order_by(CapabilityOsEvidence.sequence, CapabilityOsEvidence.evidence_id)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+
+    async def list_artifact_evidence(
+        self,
+        artifact_digest: str,
+        *,
+        limit: int = 200,
+    ) -> list[CapabilityOsEvidence]:
+        artifact_digest = str(artifact_digest).strip()
+        if not artifact_digest:
+            raise ValueError("artifact_digest must not be blank")
+        limit = max(1, min(int(limit), 1000))
+        async with self._session_factory() as db:
+            return list(
+                (
+                    await db.scalars(
+                        select(CapabilityOsEvidence)
+                        .where(CapabilityOsEvidence.artifact_digest == artifact_digest)
+                        .order_by(
+                            CapabilityOsEvidence.created_at_ms.desc(),
+                            CapabilityOsEvidence.evidence_id.desc(),
+                        )
                         .limit(limit)
                     )
                 ).all()

@@ -227,7 +227,12 @@ CAPABILITY_OS_BUILD_MAX_OUTPUT_BYTES = max(
     64 * 1024, _env_int("CPTR_CAPABILITY_OS_BUILD_MAX_OUTPUT_BYTES", 4 * 1024 * 1024)
 )
 
-# ── Runtime metrics ─────────────────────────────────────────
+# ── Runtime metrics / OpenTelemetry ─────────────────────────
+# OpenTelemetry is explicitly opt-in. Exporter endpoints/headers use the
+# standard OTEL_* environment consumed by the OpenTelemetry SDK and are never
+# copied into CPTR logs, evidence, or API responses.
+OTEL_ENABLED = _env_bool("CPTR_OTEL_ENABLED", "false")
+OTEL_SERVICE_NAME = os.environ.get("CPTR_OTEL_SERVICE_NAME", "cptr").strip() or "cptr"
 METRICS_SAMPLE_WINDOW = max(128, _env_int("CPTR_METRICS_SAMPLE_WINDOW", 2_048))
 METRICS_PROCESS_SAMPLE_INTERVAL_MS = max(
     1_000,

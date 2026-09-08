@@ -176,6 +176,48 @@ class DenyCredentialProvider:
         return None
 
 
+class CompositeCredentialProvider:
+    """Route one logical credential to exactly one server-owned provider."""
+
+    def __init__(self, providers: tuple[CredentialProvider, ...]) -> None:
+        if not providers or len(providers) > 16:
+            raise ValueError("composite credential provider requires 1-16 providers")
+        self._providers = tuple(providers)
+
+    async def _matching(self, *, logical_name: str, consumer: str) -> list[CredentialProvider]:
+        matches: list[CredentialProvider] = []
+        for provider in self._providers:
+            authorizer = getattr(provider, "allows", None)
+            if not callable(authorizer):
+                continue
+            allowed = authorizer(logical_name=logical_name, consumer=consumer)
+            if inspect.isawaitable(allowed):
+                allowed = await allowed
+            if allowed is True:
+                matches.append(provider)
+        if len(matches) > 1:
+            raise CredentialDenied("logical credential source is ambiguous")
+        return matches
+
+    async def allows(self, *, logical_name: str, consumer: str) -> bool:
+        return len(
+            await self._matching(logical_name=logical_name, consumer=consumer)
+        ) == 1
+
+    async def fetch(
+        self, *, logical_name: str, task_id: str, lease_id: str, consumer: str
+    ) -> str | bytes | None:
+        matches = await self._matching(logical_name=logical_name, consumer=consumer)
+        if not matches:
+            return None
+        return await matches[0].fetch(
+            logical_name=logical_name,
+            task_id=task_id,
+            lease_id=lease_id,
+            consumer=consumer,
+        )
+
+
 @dataclass(frozen=True)
 class CredentialHandle:
     handle_id: str
