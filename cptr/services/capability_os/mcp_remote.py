@@ -505,6 +505,7 @@ class McpAcquisitionService:
         package_runner: Any = None,
         package_resources: dict[str, Any] | None = None,
         auth_provider: ConfigRemoteMcpAuthProvider | None = None,
+        oauth_profile_provider: Any = None,
         credential_broker: CredentialBroker | None = None,
         reputation: McpReputationService | None = None,
         clock_ms=lambda: int(time.time() * 1000),
@@ -515,6 +516,7 @@ class McpAcquisitionService:
         self._discovery = discovery
         self._connector = connector
         self._auth_provider = auth_provider
+        self._oauth_profile_provider = oauth_profile_provider
         self._credential_broker = credential_broker
         self._reputation = reputation or McpReputationService(store=store)
         self._package_preparer = package_preparer
@@ -686,6 +688,18 @@ class McpAcquisitionService:
                             if self._auth_provider is not None
                             else None
                         )
+                        oauth_profile = (
+                            await self._oauth_profile_provider.find(
+                                server_id=discovered.name,
+                                remote_url=normalized_url,
+                            )
+                            if self._oauth_profile_provider is not None
+                            else None
+                        )
+                        if auth_binding is not None and oauth_profile is not None:
+                            raise RemoteMcpError(
+                                "remote MCP has ambiguous bearer and OAuth authentication"
+                            )
                     except Exception as exc:
                         results.append(
                             AcquiredMcpAdapter(
@@ -742,6 +756,53 @@ class McpAcquisitionService:
                                 state=row.state,
                                 eligible=False,
                                 reasons=("remote-authentication-required",),
+                                projected_match=(),
+                            )
+                        )
+                        continue
+                    if oauth_profile is not None:
+                        permission = self._permission(discovered.name)
+                        spec = {
+                            "serverId": discovered.name,
+                            "acquisitionTaskId": task_id,
+                            "registryStableId": discovered.stable_id,
+                            "registryIdentity": discovered.identity,
+                            "remote": {"url": normalized_url, "transport": "streamable-http"},
+                            "authentication": {
+                                "mechanism": "oauth2",
+                                "logicalName": str(oauth_profile.profile_id),
+                                "source": "operator-profile",
+                            },
+                            "permissions": [permission.to_dict()],
+                            "qualification": {
+                                "state": "oauth-required",
+                                "identity": "registry+endpoint-validation",
+                                "auth": "server-owned-oauth2",
+                                "sandbox": "remote-no-local-execution",
+                            },
+                        }
+                        artifact = create_artifact(
+                            artifact_id=f"mcp.adapter.{hashlib.sha256((discovered.name + normalized_url).encode()).hexdigest()[:24]}",
+                            version=discovered.version or "unversioned",
+                            kind=ArtifactKind.MCP_ADAPTER,
+                            owner=ArtifactOwner.EXTERNAL,
+                            origin=ArtifactOrigin.MCP,
+                            spec=spec,
+                            created_at=self._created_at(int(self._clock_ms())),
+                            user_id=user_id,
+                            task_origin=task_id,
+                            source_digest=digest_payload(discovered.to_dict()),
+                            state=ArtifactState.EPHEMERAL,
+                        )
+                        row = await self._store.persist_artifact(artifact)
+                        results.append(
+                            AcquiredMcpAdapter(
+                                artifact_digest=row.content_digest,
+                                server_id=discovered.name,
+                                version=row.version,
+                                state=row.state,
+                                eligible=False,
+                                reasons=("remote-oauth-authorization-required",),
                                 projected_match=(),
                             )
                         )

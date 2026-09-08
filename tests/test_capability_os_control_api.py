@@ -137,6 +137,95 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_acquire_exposes_oauth_lifecycle_as_suboperations_without_seventh_primitive(self):
+        class Started:
+            def to_api(self):
+                return {
+                    "flowId": "flow-1",
+                    "artifactDigest": "sha256:" + "a" * 64,
+                    "authorizationUrl": "https://auth.example/authorize?state=redacted",
+                    "status": "pending",
+                    "expiresAtMs": 1_600_000,
+                }
+
+        class OAuth:
+            def __init__(self):
+                self.calls = []
+
+            async def start(self, *, user_id, task_id, artifact_digest):
+                self.calls.append(("start", user_id, task_id, artifact_digest))
+                return Started()
+
+            async def status(self, *, user_id, task_id, flow_id):
+                self.calls.append(("status", user_id, task_id, flow_id))
+                return {"flowId": flow_id, "status": "complete"}
+
+            async def revoke(self, *, user_id, logical_name):
+                self.calls.append(("revoke", user_id, logical_name))
+                return True
+
+        oauth = OAuth()
+        self.service.mcp_oauth = oauth
+        started = await self.service.acquire(
+            user_id="user-1",
+            task_id="task-1",
+            operation="oauth-start",
+            payload={"artifactDigest": "sha256:" + "1" * 64},
+        )
+        self.assertEqual(started["oauth"]["status"], "pending")
+        status = await self.service.acquire(
+            user_id="user-1",
+            task_id="task-1",
+            operation="oauth-status",
+            payload={"flowId": "flow-1"},
+        )
+        self.assertEqual(status["oauth"]["status"], "complete")
+
+        artifact = create_artifact(
+            artifact_id="mcp.adapter.oauth",
+            version="1",
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.EXTERNAL,
+            origin=ArtifactOrigin.MCP,
+            spec={
+                "serverId": "io.example/oauth",
+                "remote": {"url": "https://mcp.example/mcp", "transport": "streamable-http"},
+                "authentication": {
+                    "mechanism": "bearer",
+                    "logicalName": "mcp.oauth:user-bound",
+                    "consumer": "mcp.remote:https://mcp.example/mcp",
+                    "source": "oauth2",
+                },
+            },
+            created_at="2026-09-08T10:00:00Z",
+            user_id="user-1",
+            task_origin="task-1",
+            state=ArtifactState.EPHEMERAL,
+        )
+        await self.store.persist_artifact(artifact)
+        revoked = await self.service.acquire(
+            user_id="user-1",
+            task_id="task-1",
+            operation="oauth-revoke",
+            payload={"artifactDigest": artifact.metadata.content_digest},
+        )
+        self.assertTrue(revoked["revoked"])
+        self.assertEqual(
+            oauth.calls,
+            [
+                ("start", "user-1", "task-1", "sha256:" + "1" * 64),
+                ("status", "user-1", "task-1", "flow-1"),
+                ("revoke", "user-1", "mcp.oauth:user-bound"),
+            ],
+        )
+        with self.assertRaisesRegex(ValueError, "accepts only flowId"):
+            await self.service.acquire(
+                user_id="user-1",
+                task_id="task-1",
+                operation="oauth-status",
+                payload={"flowId": "flow-1", "credential": "caller-value"},
+            )
+
     async def test_forge_inspect_resolve_and_reflect_form_a_safe_control_plane(self):
         forged = await self.service.forge(
             user_id="user-1",

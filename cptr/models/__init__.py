@@ -22,6 +22,8 @@ from cptr.models.capability_os import (
     CapabilityOsEvidence,
     CapabilityOsLease,
     CapabilityOsMcpMount,
+    CapabilityOsMcpOAuthCredential,
+    CapabilityOsMcpOAuthFlow,
 )
 from cptr.models.config import Config
 from cptr.models.control import (
@@ -101,6 +103,8 @@ __all__ = [
     "CapabilityOsEvidence",
     "CapabilityOsLease",
     "CapabilityOsMcpMount",
+    "CapabilityOsMcpOAuthCredential",
+    "CapabilityOsMcpOAuthFlow",
     "Config",
     "ControlApiKey",
     "ControlIdempotency",

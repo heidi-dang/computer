@@ -114,6 +114,72 @@ class CapabilityOsEvidence(Base):
     )
 
 
+class CapabilityOsMcpOAuthFlow(Base):
+    __tablename__ = "capability_os_mcp_oauth_flows"
+
+    flow_id = Column(Text, primary_key=True, default=lambda: _id("mcp_oauth"))
+    user_id = Column(Text, nullable=False)
+    task_id = Column(Text, nullable=False)
+    artifact_digest = Column(Text, nullable=False)
+    derived_artifact_digest = Column(Text, nullable=False)
+    server_id = Column(Text, nullable=False)
+    remote_url = Column(Text, nullable=False)
+    profile_id = Column(Text, nullable=False)
+    logical_name = Column(Text, nullable=False)
+    redirect_uri = Column(Text, nullable=False)
+    state_hash = Column(Text, nullable=False)
+    code_verifier_encrypted = Column(Text, nullable=False)
+    client_info_encrypted = Column(Text, nullable=False)
+    protected_resource_metadata = Column(JSON, nullable=True)
+    oauth_metadata = Column(JSON, nullable=True)
+    scope = Column(Text, nullable=True)
+    status = Column(Text, nullable=False)
+    created_at_ms = Column(BigInteger, nullable=False)
+    expires_at_ms = Column(BigInteger, nullable=False)
+    completed_at_ms = Column(BigInteger, nullable=True)
+    error_code = Column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("state_hash", name="uq_capability_os_mcp_oauth_state_hash"),
+        Index("ix_capability_os_mcp_oauth_flow_user_status", "user_id", "status"),
+        Index("ix_capability_os_mcp_oauth_flow_expiry", "status", "expires_at_ms"),
+    )
+
+
+class CapabilityOsMcpOAuthCredential(Base):
+    __tablename__ = "capability_os_mcp_oauth_credentials"
+
+    logical_name = Column(Text, primary_key=True)
+    user_id = Column(Text, nullable=False)
+    profile_id = Column(Text, nullable=False)
+    server_id = Column(Text, nullable=False)
+    remote_url = Column(Text, nullable=False)
+    consumer = Column(Text, nullable=False)
+    access_token_encrypted = Column(Text, nullable=False)
+    refresh_token_encrypted = Column(Text, nullable=True)
+    token_type = Column(Text, nullable=False)
+    scope = Column(Text, nullable=True)
+    expires_at_ms = Column(BigInteger, nullable=True)
+    client_info_encrypted = Column(Text, nullable=False)
+    protected_resource_metadata = Column(JSON, nullable=True)
+    oauth_metadata = Column(JSON, nullable=True)
+    redirect_uri = Column(Text, nullable=False)
+    updated_at_ms = Column(BigInteger, nullable=False)
+    revoked_at_ms = Column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id",
+            "profile_id",
+            "server_id",
+            "remote_url",
+            name="uq_capability_os_mcp_oauth_user_profile_remote",
+        ),
+        Index("ix_capability_os_mcp_oauth_credential_user", "user_id", "profile_id"),
+        Index("ix_capability_os_mcp_oauth_credential_remote", "server_id", "remote_url"),
+    )
+
+
 class CapabilityOsMcpMount(Base):
     __tablename__ = "capability_os_mcp_mounts"
 

@@ -25,6 +25,7 @@ from cptr.services.capability_os.evolution_engine import (
 from cptr.services.capability_os.forge import CreateToolRequest, ToolForge
 from cptr.services.capability_os.generated_executor import ProjectedGeneratedToolExecutor
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpFabric, McpQualification
+from cptr.services.capability_os.mcp_oauth import McpOAuthService
 from cptr.services.capability_os.mcp_remote import McpAcquisitionService, ProjectedMcpActionExecutor
 from cptr.services.capability_os.policy import DenyAllAuthorityPolicyProvider
 from cptr.services.capability_os.resolver import CapabilityResolver, ResolutionGoal
@@ -131,7 +132,8 @@ class CapabilityOsControlService:
                  authority: AuthorityBroker, resolver: CapabilityResolver, forge: ToolForge,
                  compiler: CapabilityCompiler, evidence: EvidenceService, evolution: EvolutionGate,
                  runtime: RuntimeBroker, fabric: McpFabric, action_executor=None, mcp_connector=None,
-                 mcp_acquisition: McpAcquisitionService | None = None, credential_broker=None,
+                 mcp_acquisition: McpAcquisitionService | None = None,
+                 mcp_oauth: McpOAuthService | None = None, credential_broker=None,
                  skill_activator: SkillMcpActivator | None = None,
                  skill_forge: SkillForge | None = None,
                  skill_evaluator: SkillEvaluator | None = None,
@@ -143,6 +145,7 @@ class CapabilityOsControlService:
         self.runtime, self.fabric = runtime, fabric
         self.action_executor, self.mcp_connector = action_executor, mcp_connector
         self.mcp_acquisition = mcp_acquisition
+        self.mcp_oauth = mcp_oauth
         self.credential_broker = credential_broker
         self.skill_activator = skill_activator
         self.skill_forge = skill_forge or SkillForge(store=store, clock_ms=clock_ms)
@@ -669,6 +672,53 @@ class CapabilityOsControlService:
                 if inspect.isawaitable(result):
                     await result
             return {"task": _task(task), "released": await self.fabric.release(mount_id, task_id=task_id)}
+
+        if operation in {"oauth-start", "oauth-status", "oauth-revoke"}:
+            if self.mcp_oauth is None:
+                raise CapabilityOsUnavailable("Capability OS MCP OAuth service is not configured")
+            if operation == "oauth-status":
+                if set(payload) - {"flowId"}:
+                    raise ValueError("MCP OAuth status accepts only flowId")
+                flow_id = str(payload.get("flowId") or "").strip()
+                if not flow_id:
+                    raise ValueError("MCP OAuth status requires flowId")
+                return {
+                    "task": _task(task),
+                    "oauth": await self.mcp_oauth.status(
+                        user_id=user_id,
+                        task_id=task_id,
+                        flow_id=flow_id,
+                    ),
+                }
+            if set(payload) - {"artifactDigest"}:
+                raise ValueError(f"MCP {operation} accepts only artifactDigest")
+            digest = str(payload.get("artifactDigest") or "").strip()
+            if not digest:
+                raise ValueError(f"MCP {operation} requires artifactDigest")
+            if operation == "oauth-start":
+                task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
+                started = await self.mcp_oauth.start(
+                    user_id=user_id,
+                    task_id=task_id,
+                    artifact_digest=digest,
+                )
+                return {"task": _task(task), "oauth": started.to_api()}
+            row = await self._visible(user_id, task_id, digest, mutable=True)
+            if row.kind != ArtifactKind.MCP_ADAPTER.value:
+                raise ValueError("MCP OAuth revoke requires an MCP adapter")
+            auth = (row.spec or {}).get("authentication")
+            if not isinstance(auth, dict) or auth.get("source") != "oauth2":
+                raise ValueError("MCP adapter is not backed by OAuth")
+            logical_name = str(auth.get("logicalName") or "").strip()
+            if not logical_name:
+                raise ValueError("MCP OAuth adapter credential identity is incomplete")
+            return {
+                "task": _task(task),
+                "revoked": await self.mcp_oauth.revoke(
+                    user_id=user_id,
+                    logical_name=logical_name,
+                ),
+            }
 
         gp = payload.get("goal")
         if not isinstance(gp, dict):

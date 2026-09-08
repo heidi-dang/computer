@@ -90,6 +90,20 @@ class _NoProbeConnector:
         raise AssertionError(f"credential-required discovery must not probe {remote_url}")
 
 
+class _OAuthProfiles:
+    def __init__(self, *, profile_id: str = "oauth-profile") -> None:
+        self.profile_id = profile_id
+
+    async def find(self, *, server_id: str, remote_url: str):
+        if server_id != SERVER_ID or remote_url != REMOTE_URL:
+            return None
+        return type(
+            "Profile",
+            (),
+            {"profile_id": self.profile_id},
+        )()
+
+
 class _BaseExecutor:
     async def invoke(self, *, action_ref, version, inputs, lease, timeout_ms):
         del version, inputs, lease, timeout_ms
@@ -231,6 +245,56 @@ class CapabilityOsRemoteMcpAuthTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.credential_provider.fetches), 1)
         with self.assertRaises(RemoteMcpError):
             await connector.probe(REMOTE_URL, credential_name=LOGICAL_NAME)
+
+    async def test_oauth_discovery_is_server_owned_and_defers_live_probe(self):
+        acquisition = McpAcquisitionService(
+            store=self.store,
+            fabric=self.fabric,
+            discovery=FactoryDiscovery(providers=(_RegistryProvider(),)),
+            connector=_NoProbeConnector(),
+            oauth_profile_provider=_OAuthProfiles(),
+            credential_broker=self.credential_broker,
+            clock_ms=self.clock,
+        )
+        result = await acquisition.discover_and_qualify(
+            user_id="user-1",
+            task_id="task-1",
+            goal=_goal(),
+            query="logs",
+        )
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0].eligible)
+        self.assertEqual(result[0].reasons, ("remote-oauth-authorization-required",))
+        row = await self.store.get_artifact(result[0].artifact_digest)
+        self.assertEqual(row.state, ArtifactState.EPHEMERAL.value)
+        self.assertEqual(row.spec["authentication"]["mechanism"], "oauth2")
+        self.assertEqual(row.spec["authentication"]["logicalName"], "oauth-profile")
+        self.assertEqual(row.spec["authentication"]["source"], "operator-profile")
+        self.assertNotIn("consumer", row.spec["authentication"])
+        self.assertNotIn("token", row.spec["authentication"])
+        self.assertNotIn("headers", row.spec)
+
+    async def test_bearer_and_oauth_configuration_for_same_remote_fails_closed(self):
+        acquisition = McpAcquisitionService(
+            store=self.store,
+            fabric=self.fabric,
+            discovery=FactoryDiscovery(providers=(_RegistryProvider(),)),
+            connector=_NoProbeConnector(),
+            auth_provider=ConfigRemoteMcpAuthProvider(config_getter=_auth_config),
+            oauth_profile_provider=_OAuthProfiles(),
+            credential_broker=self.credential_broker,
+            clock_ms=self.clock,
+        )
+        result = await acquisition.discover_and_qualify(
+            user_id="user-1",
+            task_id="task-1",
+            goal=_goal(),
+            query="logs",
+        )
+        self.assertEqual(len(result), 1)
+        self.assertFalse(result[0].eligible)
+        self.assertEqual(result[0].artifact_digest, "")
+        self.assertEqual(result[0].reasons, ("remote-validation:RemoteMcpError",))
 
     async def test_authenticated_remote_discovery_defers_live_probe_until_credential_lease(self):
         acquisition = McpAcquisitionService(
