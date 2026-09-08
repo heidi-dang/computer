@@ -23,7 +23,13 @@ from cptr.services.capability_os.mcp_remote import McpAcquisitionService, Projec
 from cptr.services.capability_os.policy import DenyAllAuthorityPolicyProvider
 from cptr.services.capability_os.resolver import CapabilityResolver, ResolutionGoal
 from cptr.services.capability_os.runtime import RuntimeBroker
-from cptr.services.capability_os.skill_forge import SkillMcpActivator
+from cptr.services.capability_os.skill_forge import (
+    SkillEvaluationArm,
+    SkillEvaluator,
+    SkillForge,
+    SkillGenome,
+    SkillMcpActivator,
+)
 from cptr.services.capability_os.store import SqlCapabilityOsStore
 from cptr.services.capability_os.tasks import CapabilityTaskCoordinator
 from cptr.services.capability_os.vm import CapabilityVm
@@ -63,6 +69,24 @@ def _candidate(item):
             "score": item.score}
 
 
+def _skill_arm(p):
+    if not isinstance(p, dict):
+        raise ValueError("skill evaluation arm must be an object")
+    return SkillEvaluationArm(
+        runs=int(p.get("runs") or 0),
+        successes=int(p.get("successes") or 0),
+        regressions=int(p.get("regressions") or 0),
+        policy_violations=int(p.get("policyViolations") or 0),
+        model_id=str(p.get("modelId") or ""),
+        reasoning_effort=str(p.get("reasoningEffort") or ""),
+        tool_permission_fingerprint=str(p.get("toolPermissionFingerprint") or ""),
+        resource_budget_fingerprint=str(p.get("resourceBudgetFingerprint") or ""),
+        task_distribution_fingerprint=str(p.get("taskDistributionFingerprint") or ""),
+        mean_tokens=float(p.get("meanTokens") or 0.0),
+        mean_tool_calls=float(p.get("meanToolCalls") or 0.0),
+    )
+
+
 def _goal(task_id, p):
     return AcquisitionGoal(task_id=task_id, goal=str(p.get("goal") or ""),
                            required=tuple(map(str, p.get("required") or ())),
@@ -74,7 +98,10 @@ def _goal(task_id, p):
 def _capability_spec(p):
     nodes = tuple(DagNode(id=str(n.get("id") or ""), action_ref=str(n.get("actionRef") or ""),
                           version=str(n.get("version") or ""), input_bindings=dict(n.get("inputBindings") or {}),
-                          output_schema=dict(n.get("outputSchema") or {}), permissions=_requests(n.get("permissions") or ()),
+                          output_schema=dict(n.get("outputSchema") or {}),
+                          preconditions=tuple(n.get("preconditions") or ()),
+                          postconditions=tuple(n.get("postconditions") or ()),
+                          permissions=_requests(n.get("permissions") or ()),
                           timeout_ms=int(n.get("timeoutMs") or 30000),
                           retry=RetryPolicy(max_attempts=int((n.get("retry") or {}).get("maxAttempts") or 1),
                                             only_if_idempotent=bool((n.get("retry") or {}).get("onlyIfIdempotent", True)),
@@ -100,6 +127,8 @@ class CapabilityOsControlService:
                  runtime: RuntimeBroker, fabric: McpFabric, action_executor=None, mcp_connector=None,
                  mcp_acquisition: McpAcquisitionService | None = None, credential_broker=None,
                  skill_activator: SkillMcpActivator | None = None,
+                 skill_forge: SkillForge | None = None,
+                 skill_evaluator: SkillEvaluator | None = None,
                  evolution_approval_verifier=None,
                  policy_provider=None, clock_ms=lambda: int(time.time() * 1000)):
         self.store, self.tasks, self.authority, self.resolver = store, tasks, authority, resolver
@@ -109,6 +138,8 @@ class CapabilityOsControlService:
         self.mcp_acquisition = mcp_acquisition
         self.credential_broker = credential_broker
         self.skill_activator = skill_activator
+        self.skill_forge = skill_forge or SkillForge(store=store, clock_ms=clock_ms)
+        self.skill_evaluator = skill_evaluator or SkillEvaluator()
         self.evolution_approval_verifier = evolution_approval_verifier
         self.policy_provider = policy_provider or DenyAllAuthorityPolicyProvider()
         self.clock_ms = clock_ms
@@ -167,6 +198,83 @@ class CapabilityOsControlService:
 
     async def forge(self, *, user_id, task_id, operation, payload):
         operation = operation.strip().lower()
+        if operation == "skill-create":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            genome_payload = payload.get("genome")
+            if not isinstance(genome_payload, dict):
+                raise ValueError("skill-create requires a genome object")
+            artifact = await self.skill_forge.create(
+                skill_id=str(payload.get("skillId") or ""),
+                version=str(payload.get("version") or ""),
+                task_id=task_id,
+                genome=SkillGenome.from_spec(genome_payload),
+                user_id=user_id,
+            )
+            return {"task": _task(task), "artifact": artifact.to_dict()}
+        if operation == "skill-mutate":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            digest = str(payload.get("contentDigest") or "").strip()
+            row = await self._visible(user_id, task_id, digest, mutable=True)
+            if row.kind != ArtifactKind.SKILL.value:
+                raise ValueError("skill-mutate requires a Skill artifact")
+            changes = payload.get("changes")
+            if not isinstance(changes, dict):
+                raise ValueError("skill-mutate requires a changes object")
+            artifact = await self.skill_forge.mutate(
+                digest,
+                version=str(payload.get("version") or ""),
+                operator=str(payload.get("operator") or ""),
+                changes=changes,
+            )
+            return {"task": _task(task), "artifact": artifact.to_dict()}
+        if operation in {"skill-evaluate", "skill-promote"}:
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            digest = str(payload.get("contentDigest") or "").strip()
+            row = await self._visible(user_id, task_id, digest, mutable=True)
+            if row.kind != ArtifactKind.SKILL.value:
+                raise ValueError("skill evaluation requires a Skill artifact")
+            evaluation = self.skill_evaluator.compare(
+                baseline=_skill_arm(payload.get("baseline")),
+                candidate=_skill_arm(payload.get("candidate")),
+            )
+            evidence = await self.evidence.record(
+                task_id=task_id,
+                kind="skill.evaluation",
+                producer_identity="capability-os-control",
+                claims={
+                    "promotable": evaluation.promotable,
+                    "reason": evaluation.reason,
+                    "successDelta": evaluation.success_delta,
+                    "tokenDelta": evaluation.token_delta,
+                    "toolCallDelta": evaluation.tool_call_delta,
+                },
+                artifact_digest=digest,
+            )
+            result = {
+                "task": _task(task),
+                "evaluation": asdict(evaluation),
+                "evidenceId": evidence.evidence_id,
+                "promoted": False,
+            }
+            if operation == "skill-promote" and evaluation.promotable:
+                await self.skill_forge.promote(digest, evaluation=evaluation)
+                updated = await self._visible(user_id, task_id, digest, mutable=True)
+                promotion = await self.evidence.record(
+                    task_id=task_id,
+                    kind="skill.promotion",
+                    producer_identity="capability-os-control",
+                    claims={
+                        "evaluationEvidenceId": evidence.evidence_id,
+                        "targetState": updated.state,
+                    },
+                    artifact_digest=digest,
+                )
+                result.update({
+                    "promoted": True,
+                    "artifactState": updated.state,
+                    "promotionEvidenceId": promotion.evidence_id,
+                })
+            return result
         if operation == "activate-skill-mcp":
             task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
             if self.skill_activator is None:
@@ -214,9 +322,32 @@ class CapabilityOsControlService:
                 resources=dict(payload.get("resources") or {}), deterministic=payload.get("deterministic"),
                 idempotent=payload.get("idempotent"), reversibility=str(payload.get("reversibility") or "unknown")))
             return {"task": _task(task), "artifact": draft.artifact.to_dict(), "sourceDigest": draft.source_digest}
+        if operation == "inspect":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            digest = str(payload.get("contentDigest") or "").strip()
+            row = await self._visible(user_id, task_id, digest, mutable=True)
+            if row.kind != ArtifactKind.TOOL.value:
+                raise ValueError("Tool Forge inspect requires a Tool artifact")
+            return {"task": _task(task), "artifact": _artifact(row)}
         task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
         digest = str(payload.get("contentDigest") or "")
         row = await self._visible(user_id, task_id, digest, mutable=True)
+        if row.kind != ArtifactKind.TOOL.value:
+            raise ValueError("Tool Forge operation requires a Tool artifact")
+        if operation == "modify":
+            draft = await self.forge_impl.modify(
+                digest,
+                version=str(payload.get("version") or ""),
+                files={str(k): str(v) for k, v in dict(payload.get("files") or {}).items()},
+            )
+            return {"task": _task(task), "artifact": draft.artifact.to_dict(), "sourceDigest": draft.source_digest}
+        if operation == "fork":
+            draft = await self.forge_impl.fork(
+                digest,
+                tool_id=str(payload.get("toolId") or ""),
+                version=str(payload.get("version") or ""),
+            )
+            return {"task": _task(task), "artifact": draft.artifact.to_dict(), "sourceDigest": draft.source_digest}
         if operation == "build":
             resources = dict(row.spec.get("resources") or {})
             lease, automatic = await self._lease(

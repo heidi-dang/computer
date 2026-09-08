@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from dataclasses import replace
 
@@ -205,6 +206,152 @@ class CapabilityOsVmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.completed_nodes, ("first",))
         self.assertEqual(result.compensated_nodes, ("first",))
         self.assertEqual([call[0] for call in executor.calls], ["tool:first", "tool:second", "tool:undo-first"])
+
+    async def test_vm_enforces_input_schema_before_any_action(self):
+        executor = _Executor()
+        vm = CapabilityVm(executor=executor, evidence=self.evidence, clock_ms=lambda: 1_000_001)
+        spec = replace(
+            self._compiled().spec,
+            inputs_schema={
+                "type": "object",
+                "required": ["target"],
+                "properties": {"target": {"type": "string"}},
+                "additionalProperties": False,
+            },
+        )
+        compiled = CapabilityCompiler().compile(spec)
+        with self.assertRaisesRegex(CapabilityVmError, "missing required property"):
+            await vm.execute(
+                task_id="task-1",
+                capability_digest=self.digest,
+                compiled=compiled,
+                lease=self.lease,
+                inputs={},
+            )
+        self.assertEqual(executor.calls, [])
+
+    async def test_vm_enforces_preconditions_and_compensates_failed_output_contract(self):
+        executor = _Executor()
+        vm = CapabilityVm(executor=executor, evidence=self.evidence, clock_ms=lambda: 1_000_001)
+        spec = replace(
+            self._compiled().spec,
+            preconditions=({"path": "inputs.target", "op": "eq", "value": "repo:cptr"},),
+            nodes=(
+                replace(
+                    self._compiled().spec.nodes[0],
+                    output_schema={
+                        "type": "object",
+                        "required": ["verified"],
+                        "properties": {"verified": {"const": True}},
+                    },
+                ),
+                self._compiled().spec.nodes[1],
+            ),
+        )
+        compiled = CapabilityCompiler().compile(spec)
+        with self.assertRaisesRegex(CapabilityVmError, "precondition"):
+            await vm.execute(
+                task_id="task-1",
+                capability_digest=self.digest,
+                compiled=compiled,
+                lease=self.lease,
+                inputs={"target": "wrong"},
+            )
+        self.assertEqual(executor.calls, [])
+
+        result = await vm.execute(
+            task_id="task-1",
+            capability_digest=self.digest,
+            compiled=compiled,
+            lease=self.lease,
+            inputs={"target": "repo:cptr"},
+        )
+        self.assertEqual(result.status, "rolled_back")
+        self.assertEqual(result.completed_nodes, ("write",))
+        self.assertEqual([call[0] for call in executor.calls], ["tool:write", "tool:undo-write"])
+
+    async def test_vm_runs_independent_ready_nodes_concurrently_and_preserves_deterministic_results(self):
+        active = 0
+        peak = 0
+
+        class ParallelExecutor:
+            async def invoke(inner_self, *, action_ref, version, inputs, lease, timeout_ms):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                await asyncio.sleep(0.02)
+                active -= 1
+                return ActionResult(output={"action": action_ref})
+
+        permission = CapabilityRequest("filesystem.read", "repo:cptr/**")
+        compiled = CapabilityCompiler().compile(
+            CapabilitySpec(
+                capability_id="workflow.parallel",
+                version="1",
+                inputs_schema={},
+                preconditions=(),
+                effects=(permission,),
+                nodes=(
+                    DagNode(id="a", action_ref="tool:a", version="1", permissions=(permission,)),
+                    DagNode(id="b", action_ref="tool:b", version="1", permissions=(permission,)),
+                ),
+                edges=(),
+                verifiers=(),
+                rollback_mode="partial",
+                permissions=(permission,),
+                deadline_ms=1_000,
+                max_parallelism=2,
+                risk_class="read",
+            )
+        )
+        vm = CapabilityVm(
+            executor=ParallelExecutor(), evidence=self.evidence, clock_ms=lambda: 1_000_001
+        )
+        result = await vm.execute(
+            task_id="task-1",
+            capability_digest=self.digest,
+            compiled=compiled,
+            lease=self.lease,
+            inputs={},
+        )
+        self.assertEqual(peak, 2)
+        self.assertEqual(result.completed_nodes, ("a", "b"))
+        self.assertEqual(tuple(result.outputs), ("a", "b"))
+
+    async def test_vm_enforces_global_deadline(self):
+        class SlowExecutor:
+            async def invoke(inner_self, *, action_ref, version, inputs, lease, timeout_ms):
+                await asyncio.sleep(0.05)
+                return ActionResult(output={"action": action_ref})
+
+        permission = CapabilityRequest("filesystem.read", "repo:cptr/**")
+        compiled = CapabilityCompiler().compile(
+            CapabilitySpec(
+                capability_id="workflow.deadline",
+                version="1",
+                inputs_schema={},
+                preconditions=(),
+                effects=(permission,),
+                nodes=(DagNode(id="slow", action_ref="tool:slow", version="1", permissions=(permission,)),),
+                edges=(),
+                verifiers=(),
+                rollback_mode="partial",
+                permissions=(permission,),
+                deadline_ms=5,
+                max_parallelism=1,
+                risk_class="read",
+            )
+        )
+        vm = CapabilityVm(executor=SlowExecutor(), evidence=self.evidence, clock_ms=lambda: 1_000_001)
+        result = await vm.execute(
+            task_id="task-1",
+            capability_digest=self.digest,
+            compiled=compiled,
+            lease=self.lease,
+            inputs={},
+        )
+        self.assertEqual(result.status, "failed")
+        self.assertIn("timeout", result.error.lower())
 
     async def test_vm_rejects_caller_only_approval_without_approved_lease(self):
         executor = _Executor()

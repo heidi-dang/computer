@@ -31,6 +31,8 @@ class DagNode:
     version: str
     input_bindings: dict[str, Any] = field(default_factory=dict)
     output_schema: dict[str, Any] = field(default_factory=dict)
+    preconditions: tuple[Any, ...] = ()
+    postconditions: tuple[Any, ...] = ()
     permissions: tuple[CapabilityRequest, ...] = ()
     timeout_ms: int = 30_000
     retry: RetryPolicy = field(default_factory=RetryPolicy)
