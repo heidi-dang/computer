@@ -175,6 +175,126 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         rows = await self.store.list_evidence("task-1")
         self.assertEqual(rows[0].kind, "capability.observation")
 
+    async def test_forge_exposes_full_tool_lifecycle_without_widening_authority(self):
+        created = await self.service.forge(
+            user_id="user-1",
+            task_id="task-1",
+            operation="create",
+            payload={
+                "toolId": "tool.lifecycle",
+                "version": "1",
+                "runtimeClass": "gvisor",
+                "entrypoint": "main.py",
+                "files": {"main.py": "print('v1')\n"},
+                "requestedCapabilities": [
+                    {"action": "filesystem.read", "resource": "repo:cptr/**"}
+                ],
+            },
+        )
+        digest = created["artifact"]["metadata"]["contentDigest"]
+        inspected = await self.service.forge(
+            user_id="user-1",
+            task_id="task-1",
+            operation="inspect",
+            payload={"contentDigest": digest},
+        )
+        self.assertEqual(inspected["artifact"]["metadata"]["contentDigest"], digest)
+
+        modified = await self.service.forge(
+            user_id="user-1",
+            task_id="task-1",
+            operation="modify",
+            payload={
+                "contentDigest": digest,
+                "version": "2",
+                "files": {"main.py": "print('v2')\n"},
+            },
+        )
+        self.assertEqual(modified["artifact"]["metadata"]["parent"], "tool.lifecycle@1#" + digest)
+        self.assertNotEqual(modified["sourceDigest"], created["sourceDigest"])
+
+        forked = await self.service.forge(
+            user_id="user-1",
+            task_id="task-1",
+            operation="fork",
+            payload={"contentDigest": digest, "toolId": "tool.lifecycle.fork", "version": "1"},
+        )
+        self.assertEqual(forked["artifact"]["metadata"]["id"], "tool.lifecycle.fork")
+        self.assertEqual(forked["artifact"]["metadata"]["parent"], "tool.lifecycle@1#" + digest)
+        self.assertEqual(await self.store.list_active_leases("task-1", now_ms=self.clock()), [])
+
+    async def test_skill_genome_create_mutate_and_matched_evidence_promotion_are_server_owned(self):
+        genome = {
+            "objective": "Diagnose lifecycle inconsistencies",
+            "assumptions": ["state is server authoritative"],
+            "decompositionStrategy": ["inspect evidence", "compare lifecycle"],
+            "decisionRules": ["prefer verified state"],
+            "evidencePolicy": ["require machine evidence"],
+            "toolSelectionHeuristics": ["prefer read-only inspection"],
+            "stoppingConditions": ["invariant established"],
+            "failureRecovery": ["collect more evidence"],
+            "verificationRequirements": ["cross-check state"],
+            "outputContract": "Return verified diagnosis",
+            "activation": {"domains": ["cptr"], "taskPatterns": ["debug lifecycle"]},
+            "context": {"resources": [], "maxInjectedTokens": 2000},
+            "evaluation": {
+                "benchmarkSuite": "capability-os-holdout",
+                "primaryMetric": "verifier-pass-rate",
+                "guardrailMetrics": ["policy-violations"],
+            },
+        }
+        created = await self.service.forge(
+            user_id="user-1", task_id="task-1", operation="skill-create",
+            payload={"skillId": "skill.lifecycle", "version": "1", "genome": genome},
+        )
+        digest = created["artifact"]["metadata"]["contentDigest"]
+        self.assertEqual(created["artifact"]["kind"], ArtifactKind.SKILL.value)
+
+        mutated = await self.service.forge(
+            user_id="user-1", task_id="task-1", operation="skill-mutate",
+            payload={
+                "contentDigest": digest,
+                "version": "2",
+                "operator": "simplify",
+                "changes": {"decision_rules": ["prefer direct machine evidence"]},
+            },
+        )
+        self.assertEqual(mutated["artifact"]["metadata"]["parent"], "skill.lifecycle@1#" + digest)
+
+        common = {
+            "modelId": "gpt-5.6-sol",
+            "reasoningEffort": "high",
+            "toolPermissionFingerprint": "perm-v1",
+            "resourceBudgetFingerprint": "budget-v1",
+            "taskDistributionFingerprint": "holdout-v1",
+            "meanTokens": 1000,
+            "meanToolCalls": 4,
+        }
+        result = await self.service.forge(
+            user_id="user-1", task_id="task-1", operation="skill-promote",
+            payload={
+                "contentDigest": digest,
+                "baseline": {**common, "runs": 10, "successes": 7, "regressions": 0, "policyViolations": 0},
+                "candidate": {**common, "runs": 10, "successes": 9, "regressions": 0, "policyViolations": 0,
+                              "meanTokens": 900, "meanToolCalls": 3},
+            },
+        )
+        self.assertTrue(result["promoted"])
+        self.assertEqual(result["artifactState"], ArtifactState.QUALIFIED.value)
+        evidence = await self.store.list_evidence("task-1")
+        self.assertTrue({"skill.evaluation", "skill.promotion"} <= {row.kind for row in evidence})
+
+        with self.assertRaisesRegex(ValueError, "not matched on model_id"):
+            await self.service.forge(
+                user_id="user-1", task_id="task-1", operation="skill-evaluate",
+                payload={
+                    "contentDigest": mutated["artifact"]["metadata"]["contentDigest"],
+                    "baseline": {**common, "runs": 10, "successes": 8, "regressions": 0, "policyViolations": 0},
+                    "candidate": {**common, "modelId": "other-model", "runs": 10, "successes": 10,
+                                  "regressions": 0, "policyViolations": 0},
+                },
+            )
+
     async def test_forge_build_uses_server_isolation_lease_records_evidence_and_revokes(self):
         calls = []
         async def builder(*, runtime_class, artifact, lease):

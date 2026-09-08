@@ -14,6 +14,11 @@ from typing import Any, Protocol
 from cptr.services.capability_os.authority import CapabilityLease, permission_covers
 from cptr.services.capability_os.compiler import CompiledCapability, DagNode
 from cptr.services.capability_os.evidence import EvidenceService
+from cptr.services.capability_os.validation import (
+    ContractValidationError,
+    evaluate_predicates,
+    validate_schema,
+)
 
 
 class CapabilityVmError(RuntimeError):
@@ -100,7 +105,11 @@ class CapabilityVm:
         node: DagNode,
         lease: CapabilityLease,
         inputs: dict[str, Any],
+        timeout_ms: int | None = None,
     ) -> ActionResult:
+        effective_timeout_ms = min(node.timeout_ms, int(timeout_ms or node.timeout_ms))
+        if effective_timeout_ms <= 0:
+            raise CapabilityVmError(f"node {node.id} has no remaining execution time")
         attempts = max(1, node.retry.max_attempts)
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
@@ -111,9 +120,9 @@ class CapabilityVm:
                         version=node.version,
                         inputs=inputs,
                         lease=lease,
-                        timeout_ms=node.timeout_ms,
+                        timeout_ms=effective_timeout_ms,
                     ),
-                    timeout=node.timeout_ms / 1000,
+                    timeout=effective_timeout_ms / 1000,
                 )
             except asyncio.TimeoutError:
                 last_error = CapabilityVmError(f"node {node.id} exceeded its timeout")
@@ -154,62 +163,149 @@ class CapabilityVm:
         if not isinstance(inputs, dict):
             raise CapabilityVmError("capability inputs must be an object")
 
+        try:
+            validate_schema(inputs, compiled.spec.inputs_schema)
+            evaluate_predicates(
+                compiled.spec.preconditions,
+                context={"inputs": inputs, "nodeOutputs": {}},
+                label="capability precondition",
+            )
+        except ContractValidationError as exc:
+            raise CapabilityVmError(str(exc)) from exc
+
         nodes = {node.id: node for node in compiled.spec.nodes}
+        dependencies: dict[str, set[str]] = {node_id: set() for node_id in nodes}
+        for edge in compiled.spec.edges:
+            dependencies[edge.target].add(edge.source)
         completed: list[str] = []
+        completed_set: set[str] = set()
         compensated: list[str] = []
         outputs: dict[str, Any] = {}
         evidence_ids: list[str] = []
         failed_node: str | None = None
         failure_text: str | None = None
+        pending = set(nodes)
+        loop = asyncio.get_running_loop()
+        deadline_at = loop.time() + (compiled.spec.deadline_ms / 1000)
 
-        for node_id in compiled.topological_order:
-            node = nodes[node_id]
-            node_inputs = {
-                **inputs,
-                "nodeOutputs": dict(outputs),
-                **dict(node.input_bindings),
-            }
-            try:
-                result = await self._invoke_node(node=node, lease=lease, inputs=node_inputs)
-                if node_id in compiled.spec.verifiers and result.verification_passed is not True:
-                    raise CapabilityVmError(f"verifier node {node_id} did not pass")
-            except Exception as exc:
-                failed_node = node_id
-                failure_text = f"{exc.__class__.__name__}: {exc}"
-                failure = await self._evidence.record(
+        while pending and failed_node is None:
+            ready = sorted(
+                node_id for node_id in pending
+                if dependencies[node_id].issubset(completed_set)
+            )
+            if not ready:
+                raise CapabilityVmError("compiled DAG made no execution progress")
+            batch = ready[: compiled.spec.max_parallelism]
+            snapshot_outputs = dict(outputs)
+            remaining_ms = int((deadline_at - loop.time()) * 1000)
+            if remaining_ms <= 0:
+                failed_node = batch[0]
+                failure_text = "CapabilityVmError: capability deadline exceeded"
+                batch_results: list[ActionResult | BaseException] = [
+                    CapabilityVmError("capability deadline exceeded")
+                ]
+                batch = batch[:1]
+            else:
+                coroutines = []
+                for node_id in batch:
+                    node = nodes[node_id]
+                    node_inputs = {
+                        **inputs,
+                        "nodeOutputs": snapshot_outputs,
+                        **dict(node.input_bindings),
+                    }
+                    try:
+                        evaluate_predicates(
+                            node.preconditions,
+                            context={"inputs": inputs, "nodeOutputs": snapshot_outputs},
+                            label=f"node {node_id} precondition",
+                        )
+                    except ContractValidationError as exc:
+                        async def failed_precondition(error=exc):
+                            raise CapabilityVmError(str(error)) from error
+                        coroutines.append(failed_precondition())
+                    else:
+                        coroutines.append(
+                            self._invoke_node(
+                                node=node,
+                                lease=lease,
+                                inputs=node_inputs,
+                                timeout_ms=remaining_ms,
+                            )
+                        )
+                batch_results = list(await asyncio.gather(*coroutines, return_exceptions=True))
+
+            for node_id, raw_result in zip(batch, batch_results, strict=True):
+                node = nodes[node_id]
+                result: ActionResult | None = None
+                error: BaseException | None = raw_result if isinstance(raw_result, BaseException) else None
+                if error is None:
+                    result = raw_result
+                    try:
+                        if node_id in compiled.spec.verifiers and result.verification_passed is not True:
+                            raise CapabilityVmError(f"verifier node {node_id} did not pass")
+                        validate_schema(result.output, node.output_schema)
+                        evaluate_predicates(
+                            node.postconditions,
+                            context={
+                                "inputs": inputs,
+                                "nodeOutputs": snapshot_outputs,
+                                "result": result.output,
+                            },
+                            label=f"node {node_id} postcondition",
+                        )
+                    except (CapabilityVmError, ContractValidationError) as exc:
+                        error = exc
+
+                if error is not None:
+                    # If the external action returned but its verifier/schema/postcondition
+                    # failed, the side effect still happened. Track it as completed so the
+                    # declared compensation path can undo it instead of pretending it never ran.
+                    if result is not None:
+                        outputs[node_id] = result.output
+                        completed.append(node_id)
+                        completed_set.add(node_id)
+                    if failed_node is None:
+                        failed_node = node_id
+                        failure_text = f"{error.__class__.__name__}: {error}"
+                    failure = await self._evidence.record(
+                        task_id=task_id,
+                        kind="capability.node.failure",
+                        producer_identity="capability-vm",
+                        claims={
+                            "capabilityId": compiled.spec.capability_id,
+                            "nodeId": node_id,
+                            "actionRef": node.action_ref,
+                            "status": "failed",
+                            "errorType": error.__class__.__name__,
+                        },
+                        artifact_digest=capability_digest,
+                        lease_id=lease.lease_id,
+                    )
+                    evidence_ids.append(failure.evidence_id)
+                    pending.discard(node_id)
+                    continue
+
+                assert result is not None
+                outputs[node_id] = result.output
+                completed.append(node_id)
+                completed_set.add(node_id)
+                pending.discard(node_id)
+                evidence = await self._evidence.record(
                     task_id=task_id,
-                    kind="capability.node.failure",
+                    kind="capability.node",
                     producer_identity="capability-vm",
                     claims={
                         "capabilityId": compiled.spec.capability_id,
                         "nodeId": node_id,
                         "actionRef": node.action_ref,
-                        "status": "failed",
-                        "errorType": exc.__class__.__name__,
+                        "status": "pass",
+                        **self._result_evidence_claims(result),
                     },
                     artifact_digest=capability_digest,
                     lease_id=lease.lease_id,
                 )
-                evidence_ids.append(failure.evidence_id)
-                break
-
-            outputs[node_id] = result.output
-            completed.append(node_id)
-            evidence = await self._evidence.record(
-                task_id=task_id,
-                kind="capability.node",
-                producer_identity="capability-vm",
-                claims={
-                    "capabilityId": compiled.spec.capability_id,
-                    "nodeId": node_id,
-                    "actionRef": node.action_ref,
-                    "status": "pass",
-                    **self._result_evidence_claims(result),
-                },
-                artifact_digest=capability_digest,
-                lease_id=lease.lease_id,
-            )
-            evidence_ids.append(evidence.evidence_id)
+                evidence_ids.append(evidence.evidence_id)
 
         if failed_node is None:
             status = "verified" if compiled.spec.verifiers else "complete"
