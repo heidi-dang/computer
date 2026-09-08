@@ -26,6 +26,7 @@ from cptr.services.capability_os.evidence import EvidenceService, EvidenceViolat
 from cptr.services.capability_os.evolution import EvolutionGate
 from cptr.services.capability_os.forge import ContentAddressedBlobStore, ToolForge
 from cptr.services.capability_os.mcp_fabric import McpFabric
+from cptr.services.capability_os.mcp_package import McpbPackagePreparer
 from cptr.services.capability_os.mcp_remote import McpAcquisitionService, StreamableHttpMcpConnector
 from cptr.services.capability_os.native_executor import NativeActionExecutor
 from cptr.services.capability_os.policy import (
@@ -181,8 +182,17 @@ def _service(request: Request) -> CapabilityOsControlService:
     mcp_connector = getattr(request.app.state, "capability_os_mcp_connector", None)
     if mcp_connector is None:
         mcp_connector = StreamableHttpMcpConnector()
+    blobs = ContentAddressedBlobStore(DATA_DIR / "capability-os" / "blobs")
     mcp_acquisition = getattr(request.app.state, "capability_os_mcp_acquisition", None)
     if mcp_acquisition is None:
+        package_resources = {
+            "cpuMillis": CAPABILITY_OS_BUILD_MAX_CPU_MILLIS,
+            "memoryMiB": CAPABILITY_OS_BUILD_MAX_MEMORY_MIB,
+            "diskMiB": CAPABILITY_OS_BUILD_MAX_DISK_MIB,
+            "pids": CAPABILITY_OS_BUILD_MAX_PIDS,
+            "wallTimeMs": CAPABILITY_OS_BUILD_MAX_WALL_TIME_MS,
+            "maxOutputBytes": CAPABILITY_OS_BUILD_MAX_OUTPUT_BYTES,
+        }
         mcp_acquisition = McpAcquisitionService(
             store=store,
             fabric=fabric,
@@ -192,6 +202,9 @@ def _service(request: Request) -> CapabilityOsControlService:
                 quarantine_cache=QuarantineCache(DATA_DIR / "capability-os" / "mcp-quarantine"),
             ),
             connector=mcp_connector,
+            package_preparer=McpbPackagePreparer(blobs=blobs),
+            package_runner=tool_runner,
+            package_resources=package_resources,
             clock_ms=clock,
         )
     service = CapabilityOsControlService(
@@ -199,7 +212,7 @@ def _service(request: Request) -> CapabilityOsControlService:
         tasks=CapabilityTaskCoordinator(),
         authority=authority,
         resolver=CapabilityResolver(store=store),
-        forge=ToolForge(store=store, blobs=ContentAddressedBlobStore(DATA_DIR / "capability-os" / "blobs"),
+        forge=ToolForge(store=store, blobs=blobs,
                         runtime=runtime, builder=tool_builder, runner=tool_runner,
                         clock_ms=clock),
         compiler=CapabilityCompiler(),

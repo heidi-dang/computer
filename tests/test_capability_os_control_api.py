@@ -21,6 +21,7 @@ from cptr.services.capability_os.evidence import EvidenceService
 from cptr.services.capability_os.evolution import EvolutionGate
 from cptr.services.capability_os.forge import ContentAddressedBlobStore, ToolForge
 from cptr.services.capability_os.mcp_fabric import McpFabric
+from cptr.services.capability_os.mcp_remote import McpAcquisitionService
 from cptr.services.capability_os.policy import (
     CompositeAuthorityPolicyProvider,
     SafeIsolationAuthorityPolicyProvider,
@@ -33,6 +34,7 @@ from cptr.services.capability_os.skill_forge import SkillMcpActivation
 from cptr.services.capability_os.store import SqlCapabilityOsStore
 from cptr.services.capability_os.tasks import CapabilityTaskContext
 from cptr.services.capability_os.vm import ActionResult
+from cptr.services.factory_discovery import FactoryDiscovery
 
 
 class _Tasks:
@@ -611,6 +613,141 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         node = next(row for row in evidence if row.kind == "capability.node")
         self.assertNotIn("output", node.claims)
         self.assertTrue(node.claims["outputDigest"].startswith("sha256:"))
+
+    async def test_packaged_mcp_mount_requires_gvisor_qualification_evidence_and_revokes_temp_lease(self):
+        resources = {
+            "cpuMillis": 1000,
+            "memoryMiB": 128,
+            "diskMiB": 64,
+            "pids": 8,
+            "wallTimeMs": 5000,
+            "maxOutputBytes": 65536,
+        }
+        permission = CapabilityRequest("mcp.invoke", "mcp:io.example/package-logs/*")
+        bundle_digest = "sha256:" + "a" * 64
+        quarantined = create_artifact(
+            artifact_id="mcp.adapter.package-logs",
+            version="1.0.0",
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.EXTERNAL,
+            origin=ArtifactOrigin.MCP,
+            spec={
+                "serverId": "io.example/package-logs",
+                "acquisitionTaskId": "task-1",
+                "package": {
+                    "registryType": "mcpb",
+                    "transport": "stdio-gvisor",
+                    "sha256": "b" * 64,
+                    "bundleDigest": bundle_digest,
+                    "manifestDigest": "sha256:" + "c" * 64,
+                    "manifestVersion": "0.4",
+                    "packageName": "io.example/package-logs",
+                    "serverEntrypoint": "server/main.py",
+                    "executable": False,
+                },
+                "runtime": {
+                    "class": "gvisor",
+                    "language": "python",
+                    "entrypoint": "__cptr_mcp_bridge.py",
+                },
+                "resources": resources,
+                "permissions": [permission.to_dict()],
+                "qualification": {"state": "quarantined"},
+            },
+            created_at="2026-09-08T00:00:00Z",
+            user_id="user-1",
+            task_origin="task-1",
+            source_digest=bundle_digest,
+            state=ArtifactState.EPHEMERAL,
+        )
+        await self.store.persist_artifact(quarantined)
+
+        runtime_leases = []
+
+        async def package_runner(*, runtime_class, artifact, lease, inputs, timeout_ms):
+            runtime_leases.append(lease)
+            self.assertEqual(runtime_class.value, "gvisor")
+            self.assertEqual(inputs["mode"], "probe")
+            self.assertEqual(dict(lease.network)["outbound"], "deny")
+            return ActionResult(
+                output={
+                    "ok": True,
+                    "protocolVersion": "2025-06-18",
+                    "serverInfo": {"name": "package-logs", "version": "1.0.0"},
+                    "tools": [{"name": "resource.logs", "inputSchema": {"type": "object"}}],
+                },
+                verification_passed=True,
+                metadata={
+                    "attestation": {
+                        "runtimeClass": "gvisor",
+                        "network": "deny",
+                        "sourceDigest": bundle_digest,
+                    }
+                },
+            )
+
+        acquisition = McpAcquisitionService(
+            store=self.store,
+            fabric=self.service.fabric,
+            discovery=FactoryDiscovery(providers=()),
+            connector=object(),
+            package_runner=package_runner,
+            package_resources=resources,
+            clock_ms=self.clock,
+        )
+        self.service.mcp_acquisition = acquisition
+        self.service.mcp_connector = object()
+        self.service.policy_provider = CompositeAuthorityPolicyProvider((
+            SafeIsolationAuthorityPolicyProvider(
+                max_cpu_millis=2000,
+                max_memory_mib=256,
+                max_disk_mib=128,
+                max_pids=32,
+                max_wall_time_ms=30000,
+                max_output_bytes=1048576,
+            ),
+            StandingAuthorityPolicyProvider((
+                StandingAuthorityRule(
+                    policy=TaskAuthorityPolicy(allowed=(permission,), max_lease_ms=5000),
+                    user_id="user-1",
+                    workspace_id="ws-1",
+                    workload_pattern="mcp:*",
+                ),
+            )),
+        ))
+
+        result = await self.service.acquire(
+            user_id="user-1",
+            task_id="task-1",
+            operation="mount",
+            payload={
+                "goal": {
+                    "goal": "read logs",
+                    "required": ["resource.logs"],
+                    "optional": [],
+                    "forbidden": ["resource.delete"],
+                    "dataClassification": "private",
+                },
+                "artifactDigest": quarantined.metadata.content_digest,
+            },
+        )
+
+        self.assertEqual(result["mount"]["transportKind"], "stdio-gvisor")
+        self.assertEqual(result["mount"]["projectedTools"], ["resource.logs"])
+        self.assertTrue(result["qualificationEvidenceId"].startswith("cevidence_"))
+        self.assertEqual(len(runtime_leases), 1)
+        active = await self.store.list_active_leases("task-1", now_ms=self.clock())
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].runtime_profile, "remote-mcp")
+        self.assertEqual(active[0].lease_id, result["mount"]["leaseId"])
+        evidence = await self.store.list_evidence("task-1")
+        qualification = next(row for row in evidence if row.kind == "mcp.package.qualification")
+        self.assertEqual(qualification.artifact_digest, quarantined.metadata.content_digest)
+        self.assertEqual(qualification.claims["qualifiedArtifactDigest"], result["mount"]["digest"])
+        self.assertEqual(qualification.claims["transport"], "stdio-gvisor")
+        qualified = await self.store.get_artifact(result["mount"]["digest"])
+        self.assertEqual(qualified.state, ArtifactState.QUALIFIED.value)
+        self.assertTrue(qualified.spec["package"]["executable"])
 
     async def test_side_effecting_operations_fail_closed_without_runtime_adapters(self):
         with self.assertRaises(CapabilityOsUnavailable):

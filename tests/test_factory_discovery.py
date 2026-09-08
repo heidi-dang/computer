@@ -313,7 +313,7 @@ class DiscoveryProviderTests(unittest.IsolatedAsyncioTestCase):
                                 "repository": {"url": "https://github.com/example/filesystem"},
                                 "packages": [
                                     {
-                                        "registryType": "remote",
+                                        "registryType": "mcpb",
                                         "identifier": artifact_url,
                                         "version": "2.0.1",
                                         "fileSha256": "f" * 64,
@@ -383,7 +383,7 @@ class DiscoveryProviderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await fetcher.fetch(_candidate(), max_bytes=1024, timeout_ms=1000)
 
-    async def test_safe_http_artifact_fetcher_refuses_redirects(self):
+    async def test_safe_http_artifact_fetcher_revalidates_each_redirect_target(self):
         def handler(_request: httpx.Request) -> httpx.Response:
             return httpx.Response(302, headers={"Location": "https://elsewhere.example/artifact"})
 
@@ -391,8 +391,45 @@ class DiscoveryProviderTests(unittest.IsolatedAsyncioTestCase):
             allowed_hosts=("example.invalid",),
             transport=httpx.MockTransport(handler),
         )
-        with self.assertRaises(httpx.HTTPStatusError):
+        with self.assertRaises(ValueError):
             await fetcher.fetch(_candidate(), max_bytes=1024, timeout_ms=1000)
+
+    async def test_safe_http_artifact_fetcher_follows_bounded_allowed_redirects(self):
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            if request.url.host == "github.com":
+                return httpx.Response(
+                    302,
+                    headers={
+                        "Location": "https://release-assets.githubusercontent.com/release/package.mcpb"
+                    },
+                )
+            return httpx.Response(200, content=b"mcpb")
+
+        candidate = DiscoveryCandidate.create(
+            provider="mcp_registry",
+            candidate_type="mcp_server",
+            name="package",
+            version="1.0.0",
+            origin_uri="https://registry.modelcontextprotocol.io/package",
+            source_uri="https://github.com/example/releases/download/v1/package.mcpb",
+            pinned_version_or_commit="1.0.0",
+        )
+        fetcher = SafeHttpArtifactFetcher(
+            allowed_hosts=("github.com", "release-assets.githubusercontent.com"),
+            transport=httpx.MockTransport(handler),
+        )
+
+        self.assertEqual(await fetcher.fetch(candidate, max_bytes=32, timeout_ms=1000), b"mcpb")
+        self.assertEqual(
+            seen,
+            [
+                "https://github.com/example/releases/download/v1/package.mcpb",
+                "https://release-assets.githubusercontent.com/release/package.mcpb",
+            ],
+        )
 
     async def test_pypi_provider_returns_exact_sdist_version_and_digest(self):
         source_url = "https://files.pythonhosted.org/packages/factory-skill-3.4.5.tar.gz"

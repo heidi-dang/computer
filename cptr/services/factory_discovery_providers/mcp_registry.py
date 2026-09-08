@@ -106,12 +106,19 @@ class McpRegistryDiscoveryProvider:
 
     @staticmethod
     def _artifact_source(packages: list) -> tuple[str | None, str | None]:
-        """Return a source URL and only the SHA-256 published for that same item."""
+        """Return only directly downloadable MCPB bytes and their published SHA-256.
+
+        Registry-backed npm/PyPI/OCI/NuGet packages require package installation
+        or another runtime manager and therefore never become fetchable artifacts
+        through the network-disabled Capability OS path.
+        """
         for package in packages:
             if not isinstance(package, dict):
                 continue
+            if str(package.get("registryType") or "").strip().lower() != "mcpb":
+                continue
             identifier = str(package.get("identifier") or "").strip()
-            if not identifier.startswith(("https://", "http://")):
+            if not identifier.startswith("https://"):
                 continue
             digest = str(package.get("fileSha256") or "").strip().lower()
             verified_digest = (
@@ -138,6 +145,13 @@ class McpRegistryDiscoveryProvider:
             return {}
         return {
             key: package.get(key)
-            for key in ("registryType", "identifier", "version", "transport", "fileSha256")
+            for key in (
+                "registryType",
+                "identifier",
+                "version",
+                "runtimeHint",
+                "transport",
+                "fileSha256",
+            )
             if package.get(key) is not None
         }

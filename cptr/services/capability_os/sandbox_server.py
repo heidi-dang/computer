@@ -13,7 +13,13 @@ from typing import Any
 
 from cptr.services.capability_os.runtime_identity import trusted_runsc_release
 from cptr.services.capability_os.gvisor_dispatcher import GvisorDispatcher, RootfsIdentity
-from cptr.services.capability_os.sandbox_broker import BrokerProtocolError, SandboxRequest
+from cptr.services.capability_os.sandbox_broker import (
+    BROKER_PROTOCOL_CURRENT,
+    BROKER_PROTOCOL_V1,
+    BROKER_PROTOCOL_V2,
+    BrokerProtocolError,
+    SandboxRequest,
+)
 from cptr.services.capability_os.sandbox_daemon import BundleStore, SandboxBrokerEngine, SandboxRuntimeUnavailable
 
 MAX_FRAME_BYTES = 64 * 1024
@@ -181,7 +187,11 @@ def main() -> int:
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
     if args.self_test:
-        print(json.dumps({"brokerProtocol": "cptr-sandbox/1", "executionSource": "standalone-zipapp"}, sort_keys=True))
+        print(json.dumps({
+            "brokerProtocol": BROKER_PROTOCOL_CURRENT,
+            "supportedBrokerProtocols": [BROKER_PROTOCOL_V1, BROKER_PROTOCOL_V2],
+            "executionSource": "standalone-zipapp",
+        }, sort_keys=True))
         return 0
     engine = _engine_from_env()
     listener = _systemd_listener()

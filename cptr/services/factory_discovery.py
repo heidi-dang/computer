@@ -19,7 +19,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Protocol
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -256,7 +256,11 @@ class ArtifactFetcher(Protocol):
 _DEFAULT_ARTIFACT_HOSTS = (
     "codeload.github.com",
     "files.pythonhosted.org",
+    "github.com",
+    "gitlab.com",
+    "objects.githubusercontent.com",
     "pypi.org",
+    "release-assets.githubusercontent.com",
     "registry.modelcontextprotocol.io",
     "registry.npmjs.org",
 )
@@ -278,15 +282,19 @@ class SafeHttpArtifactFetcher:
         allowed_hosts: Iterable[str] = (),
         timeout_seconds: float = 30.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        max_redirects: int = 3,
     ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
+        if not 0 <= int(max_redirects) <= 5:
+            raise ValueError("artifact redirect bound must be between 0 and 5")
         configured_hosts = tuple(allowed_hosts) or _DEFAULT_ARTIFACT_HOSTS
         self._allowed_hosts = tuple(
             sorted({host.strip().lower().rstrip(".") for host in configured_hosts if host.strip()})
         )
         self._timeout_seconds = float(timeout_seconds)
         self._transport = transport
+        self._max_redirects = int(max_redirects)
 
     @staticmethod
     def _is_public_ip(value: str) -> bool:
@@ -353,29 +361,45 @@ class SafeHttpArtifactFetcher:
             raise ValueError("candidate has no artifact source URI")
         url = await self._validate_source(candidate.source_uri)
         timeout = min(self._timeout_seconds, timeout_ms / 1000)
+        deadline = time.monotonic() + timeout
         chunks: list[bytes] = []
         total = 0
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(timeout),
             follow_redirects=False,
             transport=self._transport,
+            trust_env=False,
             headers={"User-Agent": "cptr-dark-factory", "Accept": "*/*"},
         ) as client:
-            async with client.stream("GET", url) as response:
-                response.raise_for_status()
-                declared = response.headers.get("content-length")
-                if declared:
-                    try:
-                        if int(declared) > max_bytes:
+            for redirect_count in range(self._max_redirects + 1):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise DiscoveryBudgetExceeded("artifact fetch runtime budget exceeded")
+                async with client.stream("GET", url, timeout=httpx.Timeout(remaining)) as response:
+                    if response.status_code in {301, 302, 303, 307, 308}:
+                        if redirect_count >= self._max_redirects:
+                            raise ValueError("artifact redirect limit exceeded")
+                        location = response.headers.get("location")
+                        if not location:
+                            raise ValueError("artifact redirect is missing Location")
+                        redirected = urljoin(url, location)
+                        url = await self._validate_source(redirected)
+                        continue
+                    response.raise_for_status()
+                    declared = response.headers.get("content-length")
+                    if declared:
+                        try:
+                            if int(declared) > max_bytes:
+                                raise DiscoveryBudgetExceeded("artifact exceeds byte budget")
+                        except ValueError:
+                            pass
+                    async for chunk in response.aiter_bytes():
+                        total += len(chunk)
+                        if total > max_bytes:
                             raise DiscoveryBudgetExceeded("artifact exceeds byte budget")
-                    except ValueError:
-                        pass
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise DiscoveryBudgetExceeded("artifact exceeds byte budget")
-                    chunks.append(chunk)
-        return b"".join(chunks)
+                        chunks.append(chunk)
+                    return b"".join(chunks)
+        raise ValueError("artifact redirect resolution failed")
 
 
 @dataclass(frozen=True)
