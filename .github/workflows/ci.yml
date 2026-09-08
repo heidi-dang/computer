@@ -18,6 +18,8 @@ jobs:
     needs: frontend
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      EXPECTED_PYTHON: ${{ matrix.python-version }}
     strategy:
       fail-fast: false
       matrix:
@@ -42,10 +44,21 @@ jobs:
       - name: Install frozen backend environment
         run: |
           python -m pip install --disable-pip-version-check uv==0.12.10
-          uv sync --frozen --all-extras --group dev --python python
+          PYTHON_BIN="$(python -c 'import sys; print(sys.executable)')"
+          uv sync --frozen --all-extras --group dev --python "$PYTHON_BIN"
+          .venv/bin/python - <<'PY'
+          import os
+          import sys
+
+          expected = os.environ["EXPECTED_PYTHON"]
+          actual = f"{sys.version_info.major}.{sys.version_info.minor}"
+          if actual != expected:
+              raise SystemExit(f"backend matrix interpreter drift: expected {expected}, got {actual}")
+          print(f"Backend matrix interpreter verified: Python {actual}")
+          PY
 
       - name: Ruff
-        run: uv run --frozen python -m ruff check cptr tests
+        run: .venv/bin/python -m ruff check cptr tests
 
       - name: Diff integrity
         run: git diff --check HEAD^ HEAD
@@ -53,12 +66,12 @@ jobs:
       - name: Initialize isolated CPTR database
         env:
           CPTR_DATA_DIR: ${{ runner.temp }}/cptr-ci-${{ matrix.python-version }}
-        run: uv run --frozen python -c "import asyncio; from cptr.utils.db import init_db; asyncio.run(init_db())"
+        run: .venv/bin/python -c "import asyncio; from cptr.utils.db import init_db; asyncio.run(init_db())"
 
       - name: Python suite
         env:
           CPTR_DATA_DIR: ${{ runner.temp }}/cptr-ci-${{ matrix.python-version }}
-        run: uv run --frozen python -m pytest -q
+        run: .venv/bin/python -m pytest -q
 
   backend-gate:
     # main branch protection intentionally requires this stable context name.
