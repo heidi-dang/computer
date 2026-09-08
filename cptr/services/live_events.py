@@ -20,7 +20,7 @@ from cptr.env import (
     LIVE_EVENT_RETENTION_CLEANUP_INTERVAL,
     LIVE_EVENT_WRITE_BATCH_SIZE,
 )
-from cptr.models import ControlLiveEvent
+from cptr.models import AutonomousMonitor, Chat, ControlLiveEvent, ControlTask
 from cptr.services.workbench_sessions import workbench_session_store
 from cptr.utils.db import get_db
 from cptr.utils.redaction import redact_external, redact_sensitive
@@ -28,7 +28,22 @@ from cptr.utils.redaction import redact_external, redact_sensitive
 MAX_EVENT_PAYLOAD_CHARS = 12_000
 MAX_TERMINAL_CHUNK_CHARS = 8_192
 MAX_REPLAY_EVENTS = LIVE_EVENT_MAX_REPLAY_EVENTS
+MAX_WORKBENCH_ROUTE_CACHE_ENTRIES = 4_096
 logger = logging.getLogger(__name__)
+_task_workbench_route_cache: dict[tuple[str, str], tuple[str, str]] = {}
+_monitor_workbench_route_cache: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def _remember_workbench_route(
+    cache: dict[tuple[str, str], tuple[str, str]],
+    key: tuple[str, str],
+    route: tuple[str, str],
+) -> None:
+    """Retain only positive immutable routes and cap process memory."""
+    cache[key] = route
+    while len(cache) > MAX_WORKBENCH_ROUTE_CACHE_ENTRIES:
+        oldest = next(iter(cache))
+        cache.pop(oldest, None)
 
 _SAFE_SGR_RE = re.compile(r"^\x1b\[[0-9;]*m$")
 _STOP_WRITER = object()
@@ -648,6 +663,78 @@ class LiveEventHub:
 live_event_hub = LiveEventHub()
 
 
+def workbench_target_key(session_id: str) -> str:
+    return f"workbench:{session_id}"
+
+
+def _projected_target(event: LiveEventEnvelope, workspace_id: str | None = None) -> dict[str, str]:
+    target_type, _, remainder = event.target_key.partition(":")
+    if target_type == "command":
+        embedded_workspace, separator, command_id = remainder.partition(":")
+        if not separator or not command_id:
+            raise ValueError("invalid command live target key")
+        return {
+            "type": "command",
+            "id": command_id,
+            "workspace_id": workspace_id or embedded_workspace,
+        }
+    if target_type not in {"task", "monitor"} or not remainder:
+        raise ValueError("unsupported live target key")
+    target = {"type": target_type, "id": remainder}
+    if workspace_id:
+        target["workspace_id"] = workspace_id
+    return target
+
+
+async def project_live_event_to_workbench(
+    *,
+    hub: LiveEventHub,
+    event: LiveEventEnvelope,
+    workbench_session_id: str,
+    workspace_id: str | None = None,
+) -> LiveEventEnvelope:
+    """Mirror one already-sanitized target event into its Workbench stream."""
+    session_id = str(workbench_session_id or "").strip()
+    if not session_id:
+        raise ValueError("workbench_session_id is required")
+    return await hub.publish(
+        user_id=event.user_id,
+        target_key=workbench_target_key(session_id),
+        task_id=event.task_id,
+        monitor_id=event.monitor_id,
+        worker_task_id=event.worker_task_id,
+        event_type=event.event_type,
+        payload={
+            "target": _projected_target(event, workspace_id),
+            "payload": event.payload,
+            "source_sequence": event.sequence,
+            "source_event_id": event.event_id,
+        },
+    )
+
+
+async def _task_workbench_route(task_id: str, user_id: str) -> tuple[str, str] | None:
+    key = (str(user_id), str(task_id))
+    cached = _task_workbench_route_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        async with await get_db() as db:
+            task = await db.get(ControlTask, task_id)
+        if task is None or str(task.user_id) != str(user_id):
+            return None
+        chat = await Chat.get_by_id(task.chat_id)
+        meta = chat.meta if chat and isinstance(chat.meta, dict) else {}
+        session_id = str(meta.get("workbench_session_id") or "").strip()
+        route = (session_id, str(task.workspace_id)) if session_id else None
+        if route is not None:
+            _remember_workbench_route(_task_workbench_route_cache, key, route)
+        return route
+    except Exception:
+        logger.debug("task Workbench route resolution unavailable", exc_info=True)
+        return None
+
+
 async def publish_task_event(
     *,
     user_id: str,
@@ -655,8 +742,15 @@ async def publish_task_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
     worker_task_id: str | None = None,
+    workbench_session_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> LiveEventEnvelope:
-    return await live_event_hub.publish(
+    if not workbench_session_id:
+        route = await _task_workbench_route(task_id, user_id)
+        if route is not None:
+            workbench_session_id, resolved_workspace_id = route
+            workspace_id = workspace_id or resolved_workspace_id
+    event = await live_event_hub.publish(
         user_id=user_id,
         target_key=f"task:{task_id}",
         task_id=task_id,
@@ -664,6 +758,14 @@ async def publish_task_event(
         event_type=event_type,
         payload=payload,
     )
+    if workbench_session_id:
+        await project_live_event_to_workbench(
+            hub=live_event_hub,
+            event=event,
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
+        )
+    return event
 
 
 async def safe_publish_task_event(**kwargs: Any) -> LiveEventEnvelope | None:
@@ -727,6 +829,7 @@ async def publish_terminal_event(
     payload: dict[str, Any] | None = None,
     worker_task_id: str | None = None,
     workspace_id: str | None = None,
+    workbench_session_id: str | None = None,
 ) -> LiveEventEnvelope:
     if target_type == "task":
         return await publish_task_event(
@@ -735,26 +838,39 @@ async def publish_terminal_event(
             event_type=event_type,
             payload=payload,
             worker_task_id=worker_task_id,
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
         )
-    if target_type == "monitor":
+    elif target_type == "monitor":
         return await publish_monitor_event(
             user_id=user_id,
             monitor_id=target_id,
             event_type=event_type,
             payload=payload,
             task_id=worker_task_id,
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
         )
-    if target_type == "command":
+    elif target_type == "command":
         if not workspace_id:
             raise ValueError("workspace_id is required for a command live target")
-        return await publish_command_event(
+        event = await publish_command_event(
             user_id=user_id,
             workspace_id=workspace_id,
             command_id=target_id,
             event_type=event_type,
             payload=payload,
         )
-    raise ValueError("unsupported live terminal target")
+    else:
+        raise ValueError("unsupported live terminal target")
+    if workbench_session_id:
+        await project_live_event_to_workbench(
+            hub=live_event_hub,
+            event=event,
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
+        )
+    return event
 
 
 async def safe_publish_terminal_event(**kwargs: Any) -> LiveEventEnvelope | None:
@@ -765,6 +881,27 @@ async def safe_publish_terminal_event(**kwargs: Any) -> LiveEventEnvelope | None
         return None
 
 
+async def _monitor_workbench_route(monitor_id: str, user_id: str) -> tuple[str, str] | None:
+    key = (str(user_id), str(monitor_id))
+    cached = _monitor_workbench_route_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        async with await get_db() as db:
+            monitor = await db.get(AutonomousMonitor, monitor_id)
+        if monitor is None or str(monitor.user_id) != str(user_id):
+            return None
+        state = monitor.director_state if isinstance(monitor.director_state, dict) else {}
+        session_id = str(state.get("workbench_session_id") or "").strip()
+        route = (session_id, str(monitor.workspace_id)) if session_id else None
+        if route is not None:
+            _remember_workbench_route(_monitor_workbench_route_cache, key, route)
+        return route
+    except Exception:
+        logger.debug("monitor Workbench route resolution unavailable", exc_info=True)
+        return None
+
+
 async def publish_monitor_event(
     *,
     user_id: str,
@@ -772,8 +909,15 @@ async def publish_monitor_event(
     event_type: str,
     payload: dict[str, Any] | None = None,
     task_id: str | None = None,
+    workbench_session_id: str | None = None,
+    workspace_id: str | None = None,
 ) -> LiveEventEnvelope:
-    return await live_event_hub.publish(
+    if not workbench_session_id:
+        route = await _monitor_workbench_route(monitor_id, user_id)
+        if route is not None:
+            workbench_session_id, resolved_workspace_id = route
+            workspace_id = workspace_id or resolved_workspace_id
+    event = await live_event_hub.publish(
         user_id=user_id,
         target_key=f"monitor:{monitor_id}",
         monitor_id=monitor_id,
@@ -781,6 +925,14 @@ async def publish_monitor_event(
         event_type=event_type,
         payload=payload,
     )
+    if workbench_session_id:
+        await project_live_event_to_workbench(
+            hub=live_event_hub,
+            event=event,
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
+        )
+    return event
 
 
 async def safe_publish_monitor_event(**kwargs: Any) -> LiveEventEnvelope | None:
