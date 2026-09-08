@@ -347,8 +347,40 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][0:2], ("build", "gvisor"))
         self.assertEqual(calls[0][3]["outbound"], "deny")
         self.assertEqual(await self.store.list_active_leases("task-1", now_ms=self.clock()), [])
+        supply_chain = built["build"]["supply_chain"]
+        self.assertEqual(supply_chain["sbom"]["specVersion"], "SPDX-2.3")
+        self.assertEqual(
+            supply_chain["provenance"]["predicateType"],
+            "https://slsa.dev/provenance/v1",
+        )
+        sbom = await self.service.forge(
+            user_id="user-1", task_id="task-1", operation="supply-chain",
+            payload={
+                "contentDigest": digest,
+                "documentDigest": supply_chain["sbom"]["digest"],
+            },
+        )
+        self.assertEqual(sbom["document"]["spdxVersion"], "SPDX-2.3")
+        provenance = await self.service.forge(
+            user_id="user-1", task_id="task-1", operation="supply-chain",
+            payload={
+                "contentDigest": digest,
+                "documentDigest": supply_chain["provenance"]["digest"],
+            },
+        )
+        self.assertEqual(
+            provenance["document"]["predicateType"],
+            "https://slsa.dev/provenance/v1",
+        )
+        with self.assertRaisesRegex(KeyError, "supply-chain document not found"):
+            await self.service.forge(
+                user_id="user-1", task_id="task-1", operation="supply-chain",
+                payload={"contentDigest": digest, "documentDigest": "sha256:" + "f" * 64},
+            )
         evidence = await self.store.list_evidence("task-1")
         self.assertEqual({item.kind for item in evidence}, {"tool.build"})
+        build_evidence = next(item for item in evidence if item.kind == "tool.build")
+        self.assertEqual(build_evidence.claims["supplyChain"], supply_chain)
         promoted = await self.service.forge(
             user_id="user-1", task_id="task-1", operation="persist",
             payload={"contentDigest": digest, "targetState": ArtifactState.QUALIFIED.value,

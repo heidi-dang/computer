@@ -341,6 +341,39 @@ class CapabilityOsControlService:
             if row.kind != ArtifactKind.TOOL.value:
                 raise ValueError("Tool Forge inspect requires a Tool artifact")
             return {"task": _task(task), "artifact": _artifact(row)}
+        if operation == "supply-chain":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            if set(payload) - {"contentDigest", "documentDigest"}:
+                raise ValueError("Tool Forge supply-chain accepts only contentDigest and documentDigest")
+            digest = str(payload.get("contentDigest") or "").strip()
+            document_digest = str(payload.get("documentDigest") or "").strip()
+            row = await self._visible(user_id, task_id, digest, mutable=True)
+            if row.kind != ArtifactKind.TOOL.value:
+                raise ValueError("Tool Forge supply-chain requires a Tool artifact")
+            if not document_digest.startswith("sha256:"):
+                raise ValueError("Tool Forge supply-chain requires a documentDigest")
+            evidence_rows = await self.store.list_artifact_evidence(digest, limit=1000)
+            trusted = False
+            for evidence in evidence_rows:
+                if evidence.kind != "tool.build" or evidence.producer_identity != "capability-os-control":
+                    continue
+                supply_chain = (evidence.claims or {}).get("supplyChain")
+                if not isinstance(supply_chain, dict):
+                    continue
+                if any(
+                    isinstance(ref, dict) and str(ref.get("digest") or "") == document_digest
+                    for ref in supply_chain.values()
+                ):
+                    trusted = True
+                    break
+            if not trusted:
+                raise KeyError("Tool Forge supply-chain document not found")
+            return {
+                "task": _task(task),
+                "artifactDigest": digest,
+                "documentDigest": document_digest,
+                "document": self.forge_impl.get_supply_chain_document(document_digest),
+            }
         task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
         digest = str(payload.get("contentDigest") or "")
         row = await self._visible(user_id, task_id, digest, mutable=True)
@@ -382,7 +415,7 @@ class CapabilityOsControlService:
                     task_id=task_id, kind="tool.build", producer_identity="capability-os-control",
                     claims={"toolId": row.artifact_id, "sourceDigest": row.source_digest,
                             "buildArtifactDigest": build.artifact_digest, "runtimeClass": build.runtime_class,
-                            "attestation": build.attestation},
+                            "attestation": build.attestation, "supplyChain": build.supply_chain},
                     run_id=build.build_id, artifact_digest=digest, lease_id=lease.lease_id,
                 )
                 return {"task": _task(task), "build": asdict(build),

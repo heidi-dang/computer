@@ -48,6 +48,7 @@ from cptr.services.capability_os.tasks import CapabilityTaskCoordinator, Capabil
 from cptr.services.control_auth import require_control_user
 from cptr.services.factory_discovery import FactoryDiscovery, QuarantineCache, SafeHttpArtifactFetcher
 from cptr.services.factory_discovery_providers.mcp_registry import McpRegistryDiscoveryProvider
+from cptr.services.telemetry import telemetry
 
 capability_os_router = APIRouter(prefix="/api/control/v1/capability-os", tags=["control", "capability-os"])
 router = capability_os_router
@@ -90,6 +91,16 @@ class ReflectRequest(BaseModel):
 
 async def _user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
+
+
+def _span(operation: str):
+    return telemetry.span(
+        f"cptr.capability_os.{operation}",
+        attributes={
+            "cptr.operation": operation,
+            "cptr.component": "capability-os",
+        },
+    )
 
 
 def _default_tool_builder() -> BrokerToolBuilder:
@@ -266,8 +277,9 @@ async def inspect_capability_os(request: Request, task_id: str = Query(min_lengt
                                 limit: int = Query(default=50, ge=1, le=100)):
     user_id = await _user(request, "capability:read")
     try:
-        return await _service(request).inspect(user_id=user_id, task_id=task_id,
-                                               artifact_digest=artifact_digest, limit=limit)
+        with _span("inspect"):
+            return await _service(request).inspect(user_id=user_id, task_id=task_id,
+                                                   artifact_digest=artifact_digest, limit=limit)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -276,9 +288,10 @@ async def inspect_capability_os(request: Request, task_id: str = Query(min_lengt
 async def resolve_capability_os(request: Request, body: ResolveRequest):
     user_id = await _user(request, "capability:read")
     try:
-        return await _service(request).resolve(user_id=user_id, task_id=body.task_id,
-                                               required=_reqs(body.required), optional=_reqs(body.optional),
-                                               forbidden=_reqs(body.forbidden))
+        with _span("resolve"):
+            return await _service(request).resolve(user_id=user_id, task_id=body.task_id,
+                                                   required=_reqs(body.required), optional=_reqs(body.optional),
+                                                   forbidden=_reqs(body.forbidden))
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -287,8 +300,9 @@ async def resolve_capability_os(request: Request, body: ResolveRequest):
 async def forge_capability_os(request: Request, body: OperationRequest):
     user_id = await _user(request, "capability:write")
     try:
-        return await _service(request).forge(user_id=user_id, task_id=body.task_id,
-                                             operation=body.operation, payload=body.payload)
+        with _span("forge"):
+            return await _service(request).forge(user_id=user_id, task_id=body.task_id,
+                                                 operation=body.operation, payload=body.payload)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -297,9 +311,10 @@ async def forge_capability_os(request: Request, body: OperationRequest):
 async def execute_capability_os(request: Request, body: ExecuteRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        return await _service(request).execute(user_id=user_id, task_id=body.task_id,
-                                               capability_digest=body.capability_digest, lease_id=body.lease_id,
-                                               spec=body.spec, inputs=body.inputs, approval_id=body.approval_id)
+        with _span("execute"):
+            return await _service(request).execute(user_id=user_id, task_id=body.task_id,
+                                                   capability_digest=body.capability_digest, lease_id=body.lease_id,
+                                                   spec=body.spec, inputs=body.inputs, approval_id=body.approval_id)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -308,8 +323,9 @@ async def execute_capability_os(request: Request, body: ExecuteRequest):
 async def acquire_capability_os(request: Request, body: OperationRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        return await _service(request).acquire(user_id=user_id, task_id=body.task_id,
-                                               operation=body.operation, payload=body.payload)
+        with _span("acquire"):
+            return await _service(request).acquire(user_id=user_id, task_id=body.task_id,
+                                                   operation=body.operation, payload=body.payload)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -318,12 +334,13 @@ async def acquire_capability_os(request: Request, body: OperationRequest):
 async def reflect_capability_os(request: Request, body: ReflectRequest):
     user_id = await _user(request, "capability:write")
     try:
-        return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
-                                               claims=body.claims, artifact_digest=body.artifact_digest,
-                                               lease_id=body.lease_id, comparison=body.comparison,
-                                               experiment=body.experiment,
-                                               change_class=body.change_class,
-                                               promotion_target_state=body.promotion_target_state,
-                                               owner_approval_id=body.owner_approval_id)
+        with _span("reflect"):
+            return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
+                                                   claims=body.claims, artifact_digest=body.artifact_digest,
+                                                   lease_id=body.lease_id, comparison=body.comparison,
+                                                   experiment=body.experiment,
+                                                   change_class=body.change_class,
+                                                   promotion_target_state=body.promotion_target_state,
+                                                   owner_approval_id=body.owner_approval_id)
     except Exception as exc:
         raise _error(exc) from exc
