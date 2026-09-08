@@ -529,6 +529,7 @@ class CapabilityOsControlService:
                 authority=self.authority,
                 connector=self.mcp_connector,
                 packaged_invoke=self._invoke_packaged_mcp,
+                credential_broker=self.credential_broker,
             )
         try:
             result = await CapabilityVm(executor=executor, evidence=self.evidence, clock_ms=self.clock_ms).execute(
@@ -642,25 +643,122 @@ class CapabilityOsControlService:
             finally:
                 if package_automatic:
                     await self._revoke_lease(package_lease.lease_id)
-        candidate, remote_url = await self.mcp_acquisition.require_mount_candidate(row, goal=goal)
-        qualification = self.fabric.qualify(candidate)
-        q = {"eligible": qualification.eligible, "reasons": list(qualification.reasons),
-             "utilityScore": self.fabric.utility_score(candidate) if qualification.eligible else None}
-        lease, automatic = await self._lease(
-            task=task, artifact_digest=candidate.digest, workload_id=f"mcp:{candidate.server_id}",
-            permissions=candidate.permissions, runtime_profile="remote-mcp",
-            lease_id=payload.get("leaseId"), approval_id=payload.get("approvalId"),
-            network_destinations=((remote_url,) if remote_url else ()))
-        try:
-            mount = await self.fabric.mount(
-                goal=goal,
-                qualification=McpQualification(candidate=candidate, eligible=True, reasons=()),
-                lease=lease,
+        if (
+            row.state == ArtifactState.EPHEMERAL.value
+            and self.mcp_acquisition.is_authenticated_remote(row)
+        ):
+            remote_url, logical_name, _consumer = self.mcp_acquisition.remote_auth_details(row)
+            server_id = str((row.spec or {}).get("serverId") or "").strip()
+            permissions = _requests((row.spec or {}).get("permissions") or ())
+            qualification_lease, qualification_automatic = await self._lease(
+                task=task,
+                artifact_digest=row.content_digest,
+                workload_id=f"mcp-qualify:{server_id}",
+                permissions=permissions,
+                runtime_profile="remote-mcp",
+                approval_id=payload.get("approvalId"),
+                network_destinations=(remote_url,),
+                credential_names=(logical_name,),
             )
-        except Exception:
-            if automatic:
-                await self._revoke_lease(lease.lease_id)
-            raise
+            try:
+                authenticated = await self.mcp_acquisition.qualify_authenticated_remote(
+                    row,
+                    goal=goal,
+                    lease=qualification_lease,
+                )
+                evidence = await self.evidence.record(
+                    task_id=task_id,
+                    kind="mcp.remote.qualification",
+                    producer_identity="capability-os-control",
+                    claims={
+                        "quarantinedArtifactDigest": row.content_digest,
+                        "qualifiedArtifactDigest": authenticated.artifact_digest,
+                        "protocolVersion": authenticated.observation.protocol_version,
+                        "serverName": authenticated.observation.server_name,
+                        "serverVersion": authenticated.observation.server_version,
+                        "projectedMatch": list(authenticated.projected_match),
+                        "transport": "streamable-http",
+                        "authentication": "credential-brokered-bearer",
+                    },
+                    artifact_digest=row.content_digest,
+                    lease_id=qualification_lease.lease_id,
+                )
+                qualification_evidence_id = evidence.evidence_id
+                updated = await self.store.set_artifact_state(
+                    authenticated.artifact_digest,
+                    state=ArtifactState.QUALIFIED.value,
+                )
+                if not updated:
+                    raise RuntimeError("authenticated remote MCP qualification artifact disappeared")
+                row = await self._visible(
+                    user_id,
+                    task_id,
+                    authenticated.artifact_digest,
+                    mutable=True,
+                )
+            finally:
+                if qualification_automatic:
+                    await self._revoke_lease(qualification_lease.lease_id)
+
+        authenticated_remote = self.mcp_acquisition.is_authenticated_remote(row)
+        if authenticated_remote:
+            remote_url, logical_name, _consumer = self.mcp_acquisition.remote_auth_details(row)
+            server_id = str((row.spec or {}).get("serverId") or "").strip()
+            permissions = _requests((row.spec or {}).get("permissions") or ())
+            lease, automatic = await self._lease(
+                task=task,
+                artifact_digest=row.content_digest,
+                workload_id=f"mcp:{server_id}",
+                permissions=permissions,
+                runtime_profile="remote-mcp",
+                lease_id=payload.get("leaseId"),
+                approval_id=payload.get("approvalId"),
+                network_destinations=(remote_url,),
+                credential_names=(logical_name,),
+            )
+            try:
+                candidate, remote_url = await self.mcp_acquisition.require_mount_candidate(
+                    row,
+                    goal=goal,
+                    lease=lease,
+                )
+                qualification = self.fabric.qualify(candidate)
+                q = {
+                    "eligible": qualification.eligible,
+                    "reasons": list(qualification.reasons),
+                    "utilityScore": (
+                        self.fabric.utility_score(candidate) if qualification.eligible else None
+                    ),
+                }
+                mount = await self.fabric.mount(
+                    goal=goal,
+                    qualification=McpQualification(candidate=candidate, eligible=True, reasons=()),
+                    lease=lease,
+                )
+            except Exception:
+                if automatic:
+                    await self._revoke_lease(lease.lease_id)
+                raise
+        else:
+            candidate, remote_url = await self.mcp_acquisition.require_mount_candidate(row, goal=goal)
+            qualification = self.fabric.qualify(candidate)
+            q = {"eligible": qualification.eligible, "reasons": list(qualification.reasons),
+                 "utilityScore": self.fabric.utility_score(candidate) if qualification.eligible else None}
+            lease, automatic = await self._lease(
+                task=task, artifact_digest=candidate.digest, workload_id=f"mcp:{candidate.server_id}",
+                permissions=candidate.permissions, runtime_profile="remote-mcp",
+                lease_id=payload.get("leaseId"), approval_id=payload.get("approvalId"),
+                network_destinations=((remote_url,) if remote_url else ()))
+            try:
+                mount = await self.fabric.mount(
+                    goal=goal,
+                    qualification=McpQualification(candidate=candidate, eligible=True, reasons=()),
+                    lease=lease,
+                )
+            except Exception:
+                if automatic:
+                    await self._revoke_lease(lease.lease_id)
+                raise
         return {"task": _task(task), "qualification": q,
                 "mount": {"mountId": mount.mount_id, "serverId": mount.server_id, "version": mount.version,
                           "digest": mount.digest, "state": mount.state.value, "leaseId": mount.lease_id,

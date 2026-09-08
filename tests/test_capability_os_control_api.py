@@ -16,12 +16,18 @@ from cptr.services.capability_os.contracts import (
     ArtifactState,
     CapabilityRequest,
     create_artifact,
+    digest_payload,
 )
+from cptr.services.capability_os.credential_broker import CredentialBroker
 from cptr.services.capability_os.evidence import EvidenceService
 from cptr.services.capability_os.evolution import EvolutionGate
 from cptr.services.capability_os.forge import ContentAddressedBlobStore, ToolForge
 from cptr.services.capability_os.mcp_fabric import McpFabric
-from cptr.services.capability_os.mcp_remote import McpAcquisitionService
+from cptr.services.capability_os.mcp_remote import (
+    McpAcquisitionService,
+    RemoteMcpObservation,
+    RemoteMcpTool,
+)
 from cptr.services.capability_os.policy import (
     CompositeAuthorityPolicyProvider,
     SafeIsolationAuthorityPolicyProvider,
@@ -868,6 +874,139 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         qualified = await self.store.get_artifact(result["mount"]["digest"])
         self.assertEqual(qualified.state, ArtifactState.QUALIFIED.value)
         self.assertTrue(qualified.spec["package"]["executable"])
+
+    async def test_authenticated_remote_mcp_mount_uses_server_credential_authority_and_evidence(self):
+        remote_url = "https://mcp.example.test/mcp"
+        logical_name = "mcp.oauth.logs"
+        server_id = "io.example/logs"
+        permission = CapabilityRequest("mcp.invoke", f"mcp:{server_id}/*")
+        observation = RemoteMcpObservation(
+            remote_url=remote_url,
+            protocol_version="2025-06-18",
+            server_name="example-logs",
+            server_version="2.1.0",
+            tools=(
+                RemoteMcpTool("resource.logs", digest_payload({"type": "object"})),
+            ),
+        )
+
+        class Connector:
+            def __init__(self):
+                self.probes = []
+
+            async def probe(
+                self,
+                remote_url,
+                *,
+                credential_broker=None,
+                credential_lease=None,
+                credential_name=None,
+            ):
+                self.probes.append(
+                    (remote_url, credential_broker, credential_lease, credential_name)
+                )
+                return observation
+
+            async def release(self, **_kwargs):
+                return None
+
+        connector = Connector()
+        credential_broker = CredentialBroker(clock_ms=self.clock)
+        quarantined = create_artifact(
+            artifact_id="mcp.adapter.auth-logs",
+            version="2.1.0",
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.EXTERNAL,
+            origin=ArtifactOrigin.MCP,
+            spec={
+                "serverId": server_id,
+                "acquisitionTaskId": "task-1",
+                "remote": {"url": remote_url, "transport": "streamable-http"},
+                "authentication": {
+                    "mechanism": "bearer",
+                    "logicalName": logical_name,
+                    "consumer": f"mcp.remote:{remote_url}",
+                },
+                "permissions": [permission.to_dict()],
+                "qualification": {
+                    "state": "credential-required",
+                    "identity": "registry+endpoint-validation",
+                    "auth": "server-owned-logical-credential",
+                },
+            },
+            created_at="2026-09-08T04:00:00Z",
+            user_id="user-1",
+            task_origin="task-1",
+            source_digest="sha256:" + "d" * 64,
+            state=ArtifactState.EPHEMERAL,
+        )
+        await self.store.persist_artifact(quarantined)
+        acquisition = McpAcquisitionService(
+            store=self.store,
+            fabric=self.service.fabric,
+            discovery=FactoryDiscovery(providers=()),
+            connector=connector,
+            credential_broker=credential_broker,
+            clock_ms=self.clock,
+        )
+        self.service.mcp_acquisition = acquisition
+        self.service.mcp_connector = connector
+        self.service.credential_broker = credential_broker
+        self.service.policy_provider = StandingAuthorityPolicyProvider((
+            StandingAuthorityRule(
+                policy=TaskAuthorityPolicy(
+                    allowed=(permission,),
+                    max_lease_ms=10_000,
+                    outbound_network="allow-list",
+                    network_destinations=(remote_url,),
+                    credential_names=(logical_name,),
+                ),
+                user_id="user-1",
+                workspace_id="ws-1",
+                workload_pattern="mcp*",
+            ),
+        ))
+
+        result = await self.service.acquire(
+            user_id="user-1",
+            task_id="task-1",
+            operation="mount",
+            payload={
+                "goal": {
+                    "goal": "read logs",
+                    "required": ["resource.logs"],
+                    "optional": [],
+                    "forbidden": ["resource.delete"],
+                    "dataClassification": "private",
+                },
+                "artifactDigest": quarantined.metadata.content_digest,
+            },
+        )
+
+        self.assertEqual(result["mount"]["transportKind"], "streamable-http")
+        self.assertEqual(result["mount"]["projectedTools"], ["resource.logs"])
+        self.assertTrue(result["qualificationEvidenceId"].startswith("cevidence_"))
+        self.assertEqual(len(connector.probes), 2)
+        self.assertIs(connector.probes[0][1], credential_broker)
+        self.assertEqual(connector.probes[0][3], logical_name)
+        self.assertEqual(connector.probes[1][3], logical_name)
+        self.assertNotEqual(connector.probes[0][2].lease_id, connector.probes[1][2].lease_id)
+
+        active = await self.store.list_active_leases("task-1", now_ms=self.clock())
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0].lease_id, result["mount"]["leaseId"])
+        self.assertEqual(active[0].credentials["logicalNames"], [logical_name])
+        self.assertEqual(active[0].network["destinations"], [remote_url])
+
+        qualified = await self.store.get_artifact(result["mount"]["digest"])
+        self.assertEqual(qualified.state, ArtifactState.QUALIFIED.value)
+        self.assertEqual(qualified.spec["authentication"]["logicalName"], logical_name)
+        self.assertNotIn("token", qualified.spec["authentication"])
+        self.assertNotIn("headers", qualified.spec)
+        evidence = await self.store.list_evidence("task-1")
+        auth_evidence = next(row for row in evidence if row.kind == "mcp.remote.qualification")
+        self.assertEqual(auth_evidence.claims["authentication"], "credential-brokered-bearer")
+        self.assertNotIn("token", auth_evidence.claims)
 
     async def test_side_effecting_operations_fail_closed_without_runtime_adapters(self):
         with self.assertRaises(CapabilityOsUnavailable):

@@ -17,12 +17,13 @@ import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
 from cptr.services.capability_os.authority import AuthorityBroker, CapabilityLease
+from cptr.services.capability_os.credential_broker import CredentialBroker
 from cptr.services.capability_os.contracts import (
     ArtifactKind,
     ArtifactOrigin,
@@ -93,6 +94,97 @@ class AcquiredMcpAdapter:
     state: str
     eligible: bool
     reasons: tuple[str, ...]
+    projected_match: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class RemoteMcpAuthBinding:
+    """Server-owned binding from one exact remote MCP identity to one logical credential."""
+
+    server_id: str
+    remote_url: str
+    logical_name: str
+    mechanism: str = "bearer"
+
+    def __post_init__(self) -> None:
+        server_id = str(self.server_id).strip()
+        remote_url = str(self.remote_url).strip()
+        logical_name = str(self.logical_name).strip()
+        mechanism = str(self.mechanism).strip().lower()
+        if not server_id or not remote_url or not logical_name:
+            raise ValueError("remote MCP auth binding fields must not be blank")
+        if mechanism != "bearer":
+            raise ValueError("remote MCP auth binding mechanism must be bearer")
+        if len(server_id) > 512 or len(remote_url) > 4096 or len(logical_name) > 512:
+            raise ValueError("remote MCP auth binding exceeds size limits")
+        object.__setattr__(self, "server_id", server_id)
+        object.__setattr__(self, "remote_url", remote_url)
+        object.__setattr__(self, "logical_name", logical_name)
+        object.__setattr__(self, "mechanism", mechanism)
+
+    @property
+    def consumer(self) -> str:
+        return f"mcp.remote:{self.remote_url}"
+
+
+class ConfigRemoteMcpAuthProvider:
+    """Resolve exact remote MCP credential bindings from operator-owned Config.
+
+    Discovery metadata and public API payloads cannot create these bindings. A
+    malformed or ambiguous configured match fails closed.
+    """
+
+    def __init__(
+        self,
+        *,
+        config_getter: Callable[[str], Awaitable[Any]] | None = None,
+        config_key: str = "capability_os.mcp_remote_auth_bindings",
+    ) -> None:
+        self._config_getter = config_getter
+        self._config_key = str(config_key).strip()
+        if not self._config_key:
+            raise ValueError("remote MCP auth config key must not be blank")
+
+    async def _get(self) -> Any:
+        if self._config_getter is not None:
+            return await self._config_getter(self._config_key)
+        from cptr.models import Config
+        return await Config.get(self._config_key)
+
+    async def resolve(self, *, server_id: str, remote_url: str) -> RemoteMcpAuthBinding | None:
+        raw = await self._get()
+        if raw is None:
+            return None
+        if not isinstance(raw, list) or len(raw) > 256:
+            raise RemoteMcpError("remote MCP auth configuration is invalid")
+        matches: list[RemoteMcpAuthBinding] = []
+        try:
+            for item in raw:
+                if not isinstance(item, dict) or item.get("enabled", True) is not True:
+                    continue
+                unknown = set(item) - {"enabled", "serverId", "remoteUrl", "logicalName", "mechanism"}
+                if unknown:
+                    raise ValueError("remote MCP auth binding contains unknown fields")
+                binding = RemoteMcpAuthBinding(
+                    server_id=str(item.get("serverId") or ""),
+                    remote_url=str(item.get("remoteUrl") or ""),
+                    logical_name=str(item.get("logicalName") or ""),
+                    mechanism=str(item.get("mechanism") or "bearer"),
+                )
+                if binding.server_id == str(server_id).strip() and binding.remote_url == str(remote_url).strip():
+                    matches.append(binding)
+        except (TypeError, ValueError) as exc:
+            raise RemoteMcpError("remote MCP auth configuration is invalid") from exc
+        if len(matches) > 1:
+            raise RemoteMcpError("remote MCP auth configuration is ambiguous")
+        return matches[0] if matches else None
+
+
+@dataclass(frozen=True)
+class AuthenticatedRemoteMcpQualification:
+    artifact_digest: str
+    candidate: McpCandidate
+    observation: RemoteMcpObservation
     projected_match: tuple[str, ...]
 
 
@@ -196,12 +288,69 @@ class StreamableHttpMcpConnector:
             raise RemoteMcpError("official MCP SDK is not installed") from exc
         return ClientSession, streamable_http_client
 
-    def _http_client(self) -> httpx.AsyncClient:
+    @staticmethod
+    def credential_consumer(remote_url: str) -> str:
+        return f"mcp.remote:{str(remote_url).strip()}"
+
+    async def validate_url(self, remote_url: str) -> str:
+        return await self._validator.validate(remote_url)
+
+    @staticmethod
+    def _bearer_value(secret: str | bytes) -> str:
+        if isinstance(secret, bytes):
+            try:
+                value = secret.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise RemoteMcpError("remote MCP credential is not UTF-8") from exc
+        else:
+            value = str(secret)
+        value = value.strip()
+        if not value or len(value) > 16_384 or any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise RemoteMcpError("remote MCP credential is invalid")
+        return value
+
+    def _http_client(self, *, bearer_token: str | None = None) -> httpx.AsyncClient:
+        headers = {"User-Agent": "cptr-capability-os", "Accept": "application/json, text/event-stream"}
+        if bearer_token is not None:
+            headers["Authorization"] = f"Bearer {bearer_token}"
         return httpx.AsyncClient(
             timeout=httpx.Timeout(self._timeout_seconds),
             follow_redirects=False,
             trust_env=False,
-            headers={"User-Agent": "cptr-capability-os", "Accept": "application/json, text/event-stream"},
+            headers=headers,
+        )
+
+    async def _with_http_client(
+        self,
+        *,
+        url: str,
+        credential_broker: CredentialBroker | None,
+        credential_lease: CapabilityLease | None,
+        credential_name: str | None,
+        operation,
+    ):
+        name = str(credential_name or "").strip()
+        if not name:
+            async with self._http_client() as http_client:
+                return await operation(http_client)
+        if credential_broker is None or credential_lease is None:
+            raise RemoteMcpError("remote MCP credential authority is unavailable")
+        consumer = self.credential_consumer(url)
+
+        async def consume(secret: str | bytes):
+            token = self._bearer_value(secret)
+            try:
+                async with self._http_client(bearer_token=token) as http_client:
+                    return await operation(http_client)
+            finally:
+                token = ""
+
+        return await credential_broker.inject(
+            lease=credential_lease,
+            logical_name=name,
+            consumer=consumer,
+            operation=consume,
+            ttl_ms=max(1_000, min(30_000, int(self._timeout_seconds * 1000) + 1_000)),
         )
 
     @staticmethod
@@ -218,74 +367,84 @@ class StreamableHttpMcpConnector:
             raise RemoteMcpError("remote MCP returned a non-canonical tool schema") from exc
         return RemoteMcpTool(name=name, input_schema_digest=schema_digest)
 
-    async def probe(self, remote_url: str) -> RemoteMcpObservation:
-        url = await self._validator.validate(remote_url)
+    async def _probe_with_client(self, url: str, http_client: httpx.AsyncClient) -> RemoteMcpObservation:
         ClientSession, streamable_http_client = self._sdk()
         tools: list[RemoteMcpTool] = []
         seen_names: set[str] = set()
-        async with self._http_client() as http_client:
-            try:
-                async with streamable_http_client(url, http_client=http_client) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        initialized = await asyncio.wait_for(
-                            session.initialize(), timeout=self._timeout_seconds
+        try:
+            async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    initialized = await asyncio.wait_for(session.initialize(), timeout=self._timeout_seconds)
+                    cursor = None
+                    for _page in range(self._max_tool_pages):
+                        result = await asyncio.wait_for(
+                            session.list_tools(cursor=cursor), timeout=self._timeout_seconds
                         )
-                        cursor = None
-                        for _page in range(self._max_tool_pages):
-                            result = await asyncio.wait_for(
-                                session.list_tools(cursor=cursor), timeout=self._timeout_seconds
-                            )
-                            for raw_tool in list(getattr(result, "tools", ()) or ()):
-                                descriptor = self._tool_descriptor(raw_tool)
-                                if descriptor.name in seen_names:
-                                    raise RemoteMcpError("remote MCP returned duplicate tool names")
-                                seen_names.add(descriptor.name)
-                                tools.append(descriptor)
-                                if len(tools) > self._max_tools:
-                                    raise RemoteMcpError("remote MCP exceeds the tool-count bound")
-                            cursor = getattr(result, "nextCursor", None)
-                            if not cursor:
-                                break
-                        else:
-                            if cursor:
-                                raise RemoteMcpError("remote MCP tool pagination exceeds the page bound")
-            except RemoteMcpError:
-                raise
-            except Exception as exc:
-                raise RemoteMcpError(f"remote MCP handshake failed: {exc.__class__.__name__}") from exc
-
+                        for raw_tool in list(getattr(result, "tools", ()) or ()):
+                            descriptor = self._tool_descriptor(raw_tool)
+                            if descriptor.name in seen_names:
+                                raise RemoteMcpError("remote MCP returned duplicate tool names")
+                            seen_names.add(descriptor.name)
+                            tools.append(descriptor)
+                            if len(tools) > self._max_tools:
+                                raise RemoteMcpError("remote MCP exceeds the tool-count bound")
+                        cursor = getattr(result, "nextCursor", None)
+                        if not cursor:
+                            break
+                    else:
+                        if cursor:
+                            raise RemoteMcpError("remote MCP tool pagination exceeds the page bound")
+        except RemoteMcpError:
+            raise
+        except Exception as exc:
+            raise RemoteMcpError(f"remote MCP handshake failed: {exc.__class__.__name__}") from exc
         info = getattr(initialized, "serverInfo", None)
-        server_name = str(getattr(info, "name", "") or "unknown")[:256]
-        server_version = str(getattr(info, "version", "") or "unknown")[:128]
-        protocol_version = str(getattr(initialized, "protocolVersion", "") or "unknown")[:128]
         return RemoteMcpObservation(
             remote_url=url,
-            protocol_version=protocol_version,
-            server_name=server_name,
-            server_version=server_version,
+            protocol_version=str(getattr(initialized, "protocolVersion", "") or "unknown")[:128],
+            server_name=str(getattr(info, "name", "") or "unknown")[:256],
+            server_version=str(getattr(info, "version", "") or "unknown")[:128],
             tools=tuple(tools),
         )
 
-    async def invoke(self, *, remote_url: str, tool_name: str, arguments: dict[str, Any]) -> ActionResult:
-        url = await self._validator.validate(remote_url)
-        if not isinstance(arguments, dict):
-            raise RemoteMcpError("remote MCP tool arguments must be an object")
-        ClientSession, streamable_http_client = self._sdk()
-        async with self._http_client() as http_client:
-            try:
-                async with streamable_http_client(url, http_client=http_client) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        await asyncio.wait_for(session.initialize(), timeout=self._timeout_seconds)
-                        result = await asyncio.wait_for(
-                            session.call_tool(tool_name, arguments=arguments),
-                            timeout=self._timeout_seconds,
-                        )
-            except Exception as exc:
-                raise RemoteMcpError(f"remote MCP invocation failed: {exc.__class__.__name__}") from exc
+    async def probe(
+        self,
+        remote_url: str,
+        *,
+        credential_broker: CredentialBroker | None = None,
+        credential_lease: CapabilityLease | None = None,
+        credential_name: str | None = None,
+    ) -> RemoteMcpObservation:
+        url = await self.validate_url(remote_url)
+        return await self._with_http_client(
+            url=url,
+            credential_broker=credential_broker,
+            credential_lease=credential_lease,
+            credential_name=credential_name,
+            operation=lambda http_client: self._probe_with_client(url, http_client),
+        )
 
+    async def _invoke_with_client(
+        self,
+        *,
+        url: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        http_client: httpx.AsyncClient,
+    ) -> ActionResult:
+        ClientSession, streamable_http_client = self._sdk()
+        try:
+            async with streamable_http_client(url, http_client=http_client) as (read, write, _):
+                async with ClientSession(read, write) as session:
+                    await asyncio.wait_for(session.initialize(), timeout=self._timeout_seconds)
+                    result = await asyncio.wait_for(
+                        session.call_tool(tool_name, arguments=arguments), timeout=self._timeout_seconds
+                    )
+        except Exception as exc:
+            raise RemoteMcpError(f"remote MCP invocation failed: {exc.__class__.__name__}") from exc
         if hasattr(result, "model_dump"):
             payload = result.model_dump(mode="json", by_alias=True, exclude_none=True)
-        else:  # defensive compatibility path
+        else:
             payload = {
                 "isError": bool(getattr(result, "isError", False)),
                 "structuredContent": getattr(result, "structuredContent", None),
@@ -300,6 +459,29 @@ class StreamableHttpMcpConnector:
             output=json.loads(encoded.decode("utf-8")),
             verification_passed=not bool(getattr(result, "isError", False)),
             metadata={"transport": "streamable-http", "remoteUrl": url, "tool": tool_name},
+        )
+
+    async def invoke(
+        self,
+        *,
+        remote_url: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        credential_broker: CredentialBroker | None = None,
+        credential_lease: CapabilityLease | None = None,
+        credential_name: str | None = None,
+    ) -> ActionResult:
+        url = await self.validate_url(remote_url)
+        if not isinstance(arguments, dict):
+            raise RemoteMcpError("remote MCP tool arguments must be an object")
+        return await self._with_http_client(
+            url=url,
+            credential_broker=credential_broker,
+            credential_lease=credential_lease,
+            credential_name=credential_name,
+            operation=lambda http_client: self._invoke_with_client(
+                url=url, tool_name=tool_name, arguments=arguments, http_client=http_client
+            ),
         )
 
     async def release(self, **_kwargs) -> None:
@@ -320,6 +502,8 @@ class McpAcquisitionService:
         package_preparer: McpbPackagePreparer | None = None,
         package_runner: Any = None,
         package_resources: dict[str, Any] | None = None,
+        auth_provider: ConfigRemoteMcpAuthProvider | None = None,
+        credential_broker: CredentialBroker | None = None,
         clock_ms=lambda: int(time.time() * 1000),
         max_candidates: int = 8,
     ) -> None:
@@ -327,6 +511,8 @@ class McpAcquisitionService:
         self._fabric = fabric
         self._discovery = discovery
         self._connector = connector
+        self._auth_provider = auth_provider
+        self._credential_broker = credential_broker
         self._package_preparer = package_preparer
         self._package_runner = package_runner
         self._package_resources = dict(package_resources or {})
@@ -371,6 +557,38 @@ class McpAcquisitionService:
     def is_packaged_adapter(row) -> bool:
         spec = dict(row.spec or {})
         return isinstance(spec.get("package"), dict)
+
+    @staticmethod
+    def _remote_auth(spec: dict[str, Any]) -> dict[str, Any]:
+        auth = spec.get("authentication")
+        return dict(auth) if isinstance(auth, dict) else {}
+
+    @classmethod
+    def is_authenticated_remote(cls, row) -> bool:
+        spec = dict(row.spec or {})
+        remote = spec.get("remote") if isinstance(spec.get("remote"), dict) else {}
+        auth = cls._remote_auth(spec)
+        return (
+            remote.get("transport") == "streamable-http"
+            and bool(str(remote.get("url") or "").strip())
+            and auth.get("mechanism") == "bearer"
+            and bool(str(auth.get("logicalName") or "").strip())
+        )
+
+    @classmethod
+    def remote_auth_details(cls, row) -> tuple[str, str, str]:
+        if not cls.is_authenticated_remote(row):
+            raise PermissionError("MCP adapter does not have server-owned remote authentication")
+        spec = dict(row.spec or {})
+        remote = dict(spec.get("remote") or {})
+        auth = cls._remote_auth(spec)
+        remote_url = str(remote.get("url") or "").strip()
+        logical_name = str(auth.get("logicalName") or "").strip()
+        consumer = str(auth.get("consumer") or "").strip()
+        expected_consumer = StreamableHttpMcpConnector.credential_consumer(remote_url)
+        if consumer != expected_consumer:
+            raise PermissionError("remote MCP credential consumer binding is invalid")
+        return remote_url, logical_name, consumer
 
     @staticmethod
     def _candidate_from_artifact(row) -> McpCandidate:
@@ -431,7 +649,84 @@ class McpAcquisitionService:
             if remotes:
                 for remote_url in remotes:
                     try:
-                        observation = await self._connector.probe(remote_url)
+                        validator = getattr(self._connector, "validate_url", None)
+                        if callable(validator):
+                            normalized_url = validator(remote_url)
+                            if asyncio.iscoroutine(normalized_url):
+                                normalized_url = await normalized_url
+                            normalized_url = str(normalized_url)
+                        else:
+                            normalized_url = str(remote_url).strip()
+                        auth_binding = (
+                            await self._auth_provider.resolve(
+                                server_id=discovered.name,
+                                remote_url=normalized_url,
+                            )
+                            if self._auth_provider is not None
+                            else None
+                        )
+                    except Exception as exc:
+                        results.append(
+                            AcquiredMcpAdapter(
+                                artifact_digest="",
+                                server_id=discovered.name,
+                                version=discovered.version or "unversioned",
+                                state="rejected",
+                                eligible=False,
+                                reasons=(f"remote-validation:{exc.__class__.__name__}",),
+                                projected_match=(),
+                            )
+                        )
+                        continue
+                    if auth_binding is not None:
+                        permission = self._permission(discovered.name)
+                        spec = {
+                            "serverId": discovered.name,
+                            "acquisitionTaskId": task_id,
+                            "registryStableId": discovered.stable_id,
+                            "registryIdentity": discovered.identity,
+                            "remote": {"url": normalized_url, "transport": "streamable-http"},
+                            "authentication": {
+                                "mechanism": auth_binding.mechanism,
+                                "logicalName": auth_binding.logical_name,
+                                "consumer": auth_binding.consumer,
+                            },
+                            "permissions": [permission.to_dict()],
+                            "qualification": {
+                                "state": "credential-required",
+                                "identity": "registry+endpoint-validation",
+                                "auth": "server-owned-logical-credential",
+                                "sandbox": "remote-no-local-execution",
+                            },
+                        }
+                        artifact = create_artifact(
+                            artifact_id=f"mcp.adapter.{hashlib.sha256((discovered.name + normalized_url).encode()).hexdigest()[:24]}",
+                            version=discovered.version or "unversioned",
+                            kind=ArtifactKind.MCP_ADAPTER,
+                            owner=ArtifactOwner.EXTERNAL,
+                            origin=ArtifactOrigin.MCP,
+                            spec=spec,
+                            created_at=self._created_at(int(self._clock_ms())),
+                            user_id=user_id,
+                            task_origin=task_id,
+                            source_digest=digest_payload(discovered.to_dict()),
+                            state=ArtifactState.EPHEMERAL,
+                        )
+                        row = await self._store.persist_artifact(artifact)
+                        results.append(
+                            AcquiredMcpAdapter(
+                                artifact_digest=row.content_digest,
+                                server_id=discovered.name,
+                                version=row.version,
+                                state=row.state,
+                                eligible=False,
+                                reasons=("remote-authentication-required",),
+                                projected_match=(),
+                            )
+                        )
+                        continue
+                    try:
+                        observation = await self._connector.probe(normalized_url)
                     except Exception as exc:
                         results.append(
                             AcquiredMcpAdapter(
@@ -659,6 +954,75 @@ class McpAcquisitionService:
             tools.append(RemoteMcpTool(name=name, input_schema_digest=digest_payload(schema)))
         return tuple(tools)
 
+    async def qualify_authenticated_remote(
+        self,
+        row,
+        *,
+        goal: AcquisitionGoal,
+        lease: CapabilityLease,
+    ) -> AuthenticatedRemoteMcpQualification:
+        if self._credential_broker is None:
+            raise RemoteMcpError("remote MCP credential broker is unavailable")
+        if row.kind != ArtifactKind.MCP_ADAPTER.value or row.task_origin != goal.task_id:
+            raise PermissionError("remote MCP adapter belongs to another task")
+        if row.state != ArtifactState.EPHEMERAL.value:
+            raise PermissionError("authenticated remote MCP qualification requires an ephemeral adapter")
+        remote_url, logical_name, _consumer = self.remote_auth_details(row)
+        observation = await self._connector.probe(
+            remote_url,
+            credential_broker=self._credential_broker,
+            credential_lease=lease,
+            credential_name=logical_name,
+        )
+        available = {tool.name for tool in observation.tools}
+        required = tuple(dict.fromkeys(item.strip() for item in goal.required if item.strip()))
+        missing = [item for item in required if item not in available]
+        forbidden = {item.strip() for item in goal.forbidden if item.strip()}
+        if missing:
+            raise PermissionError(f"remote MCP is missing required tool: {missing[0]}")
+        if any(item in forbidden for item in required):
+            raise PermissionError("remote MCP goal requires a forbidden tool")
+        spec = dict(row.spec or {})
+        qualified_spec = dict(spec)
+        qualified_spec["protocolVersion"] = observation.protocol_version
+        qualified_spec["serverInfo"] = {
+            "name": observation.server_name,
+            "version": observation.server_version,
+        }
+        qualified_spec["identityFingerprint"] = observation.fingerprint
+        qualified_spec["tools"] = [
+            {"name": tool.name, "inputSchemaDigest": tool.input_schema_digest}
+            for tool in observation.tools
+        ]
+        qualified_spec["qualification"] = {
+            "state": "credential-qualified",
+            "identity": "registry+credentialed-live-handshake",
+            "auth": "credential-brokered-bearer",
+            "sandbox": "remote-no-local-execution",
+        }
+        parent = f"{row.artifact_id}@{row.version}#{row.content_digest}"
+        artifact = create_artifact(
+            artifact_id=row.artifact_id,
+            version=row.version,
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.EXTERNAL,
+            origin=ArtifactOrigin.MCP,
+            spec=qualified_spec,
+            created_at=self._created_at(int(self._clock_ms())),
+            user_id=row.user_id,
+            parent=parent,
+            task_origin=row.task_origin,
+            source_digest=row.source_digest,
+            state=ArtifactState.EPHEMERAL,
+        )
+        qualified_row = await self._store.persist_artifact(artifact)
+        return AuthenticatedRemoteMcpQualification(
+            artifact_digest=qualified_row.content_digest,
+            candidate=self._candidate_from_artifact(qualified_row),
+            observation=observation,
+            projected_match=tuple(item for item in required if item in available),
+        )
+
     async def qualify_packaged(
         self,
         row,
@@ -825,7 +1189,13 @@ class McpAcquisitionService:
             },
         )
 
-    async def require_mount_candidate(self, row, *, goal: AcquisitionGoal) -> tuple[McpCandidate, str | None]:
+    async def require_mount_candidate(
+        self,
+        row,
+        *,
+        goal: AcquisitionGoal,
+        lease: CapabilityLease | None = None,
+    ) -> tuple[McpCandidate, str | None]:
         if row.kind != ArtifactKind.MCP_ADAPTER.value:
             raise ValueError("MCP mount requires an McpAdapter artifact")
         if row.task_origin != goal.task_id:
@@ -858,7 +1228,22 @@ class McpAcquisitionService:
         remote_url = str(remote.get("url") or "").strip()
         if remote.get("transport") != "streamable-http" or not remote_url:
             raise PermissionError("MCP adapter transport is unsupported")
-        observation = await self._connector.probe(remote_url)
+        auth = self._remote_auth(spec)
+        credential_name = str(auth.get("logicalName") or "").strip() if auth else ""
+        if credential_name:
+            if self._credential_broker is None or lease is None:
+                raise PermissionError("authenticated remote MCP mount requires credential authority")
+            _url, expected_name, _consumer = self.remote_auth_details(row)
+            if credential_name != expected_name:
+                raise PermissionError("remote MCP credential binding changed")
+            observation = await self._connector.probe(
+                remote_url,
+                credential_broker=self._credential_broker,
+                credential_lease=lease,
+                credential_name=credential_name,
+            )
+        else:
+            observation = await self._connector.probe(remote_url)
         expected = str(spec.get("identityFingerprint") or "")
         if not expected or observation.fingerprint != expected:
             raise PermissionError("remote MCP identity changed; reacquisition is required")
@@ -884,12 +1269,14 @@ class ProjectedMcpActionExecutor:
         authority: AuthorityBroker,
         connector: StreamableHttpMcpConnector,
         packaged_invoke: Any = None,
+        credential_broker: CredentialBroker | None = None,
     ) -> None:
         self._base = base_executor
         self._store = store
         self._authority = authority
         self._connector = connector
         self._packaged_invoke = packaged_invoke
+        self._credential_broker = credential_broker
 
     @staticmethod
     def _parse(action_ref: str) -> tuple[str, str] | None:
@@ -948,13 +1335,16 @@ class ProjectedMcpActionExecutor:
             required_permissions=(required,),
             runtime_profile="cptr-vm",
         )
-        await self._authority.require_active(
+        auth = McpAcquisitionService._remote_auth(spec)
+        credential_name = str(auth.get("logicalName") or "").strip() if auth else ""
+        mount_lease = await self._authority.require_active(
             mount.lease_id,
             task_id=mount.task_id,
             artifact_digest=mount.digest,
             required_permissions=(required,),
             runtime_profile="remote-mcp",
             network_destinations=(() if packaged else (remote_url,)),
+            credential_names=((credential_name,) if credential_name else ()),
         )
         if packaged:
             if self._packaged_invoke is None:
@@ -973,7 +1363,23 @@ class ProjectedMcpActionExecutor:
             return result
         if not remote_url:
             raise PermissionError("remote MCP adapter identity is incomplete")
+        invocation = (
+            self._connector.invoke(
+                remote_url=remote_url,
+                tool_name=tool,
+                arguments=dict(inputs),
+                credential_broker=self._credential_broker,
+                credential_lease=mount_lease,
+                credential_name=credential_name,
+            )
+            if credential_name
+            else self._connector.invoke(
+                remote_url=remote_url,
+                tool_name=tool,
+                arguments=dict(inputs),
+            )
+        )
         return await asyncio.wait_for(
-            self._connector.invoke(remote_url=remote_url, tool_name=tool, arguments=dict(inputs)),
+            invocation,
             timeout=max(0.001, int(timeout_ms) / 1000),
         )

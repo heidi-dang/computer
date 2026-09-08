@@ -27,7 +27,11 @@ from cptr.services.capability_os.evolution import EvolutionGate
 from cptr.services.capability_os.forge import ContentAddressedBlobStore, ToolForge
 from cptr.services.capability_os.mcp_fabric import McpFabric
 from cptr.services.capability_os.mcp_package import McpbPackagePreparer
-from cptr.services.capability_os.mcp_remote import McpAcquisitionService, StreamableHttpMcpConnector
+from cptr.services.capability_os.mcp_remote import (
+    ConfigRemoteMcpAuthProvider,
+    McpAcquisitionService,
+    StreamableHttpMcpConnector,
+)
 from cptr.services.capability_os.native_executor import NativeActionExecutor
 from cptr.services.capability_os.policy import (
     CompositeAuthorityPolicyProvider,
@@ -205,6 +209,8 @@ def _service(request: Request) -> CapabilityOsControlService:
             package_preparer=McpbPackagePreparer(blobs=blobs),
             package_runner=tool_runner,
             package_resources=package_resources,
+            auth_provider=ConfigRemoteMcpAuthProvider(),
+            credential_broker=credential_broker,
             clock_ms=clock,
         )
     service = CapabilityOsControlService(
