@@ -330,7 +330,7 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             status="COMPLETE",
             exit_code=0,
             output="tests pass",
-            metadata={"transport": "local-command"},
+            metadata={"transport": "local-command", "privilege": "user"},
         )
         self.assertTrue(session["memory_observation_checked"])
 

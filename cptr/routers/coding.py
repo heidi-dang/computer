@@ -48,6 +48,12 @@ from cptr.services.direct_coding_workers import (
 )
 from cptr.services.fdx_intelligence import service as fdx_intelligence_service
 from cptr.services.lsp_manager import LspError, lsp_manager
+from cptr.services.local_root_grants import (
+    LocalRootGrantDenied,
+    local_root_grant_store,
+    local_root_grants_enabled,
+    parse_root_command_directive,
+)
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.utils.db import get_db
 from cptr.utils.identity import (
@@ -56,6 +62,7 @@ from cptr.utils.identity import (
     expand_user_path,
     identity_for_context,
     preexec_for,
+    unrestricted_root_identity,
 )
 from cptr.utils.runtime import FileError, Runtime
 from cptr.utils.tools import (
@@ -166,6 +173,9 @@ class CommandRequest(WorkerTargetRequest):
     rows: int = Field(default=24, ge=5, le=300)
     cols: int = Field(default=80, ge=20, le=500)
     stdin: str | None = Field(default=None, max_length=65_536)
+    workbench_session_id: str | None = Field(
+        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
+    )
     idempotency_key: str | None = Field(default=None, max_length=200)
 
 
@@ -502,11 +512,15 @@ def _command_idempotency_db_key(workspace_id: str, key: str) -> str:
     return f"direct-command:{workspace_id}:{key}"
 
 
-def _command_request_fingerprint(body: CommandRequest, relative_cwd: str) -> str:
+def _command_request_fingerprint(
+    body: CommandRequest, relative_cwd: str, *, root_unrestricted: bool = False
+) -> str:
     payload = {
         "command": body.command,
         "cwd": relative_cwd,
         "allow_network": body.allow_network,
+        "root_unrestricted": root_unrestricted,
+        "workbench_session_id": body.workbench_session_id,
         "pty": body.pty,
         "rows": body.rows if body.pty else None,
         "cols": body.cols if body.pty else None,
@@ -747,10 +761,17 @@ def _bounded_diff(old: str, new: str, path: str) -> tuple[str, bool]:
     return _truncate(raw, 20_000), len(raw) > 20_000
 
 
-def _validate_command(command: str, allow_network: bool) -> None:
+def _validate_command(
+    command: str, allow_network: bool, *, root_unrestricted: bool = False
+) -> None:
     if "\x00" in command:
         raise HTTPException(status_code=422, detail="command contains an invalid NUL byte")
-    if _DESTRUCTIVE_COMMAND.search(command):
+    # An explicit local-root grant authorizes UID-0 effects on this host, but it
+    # does not widen CPTR's separate transport/network contract. Root may bypass
+    # the normal local destructive-command classifier only; raw SSH remains on
+    # its dedicated control path and external/package commands still require the
+    # ordinary allow_network + command:external authorization.
+    if not root_unrestricted and _DESTRUCTIVE_COMMAND.search(command):
         raise HTTPException(
             status_code=403,
             detail="destructive commands are not available through direct coding",
@@ -2220,23 +2241,81 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         phase_started = now
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     _, relative_cwd = _relative_path(body.cwd, root)
-    _validate_command(body.command, body.allow_network)
-    if body.measure_lifecycle:
-        now = time.perf_counter()
-        lifecycle_timing["root_validation_ms"] = round((now - phase_started) * 1000.0, 3)
-        phase_started = now
-    idempotency_workspace = f"{workspace_id}:{body.worker_id or '-'}"
+    try:
+        directive = parse_root_command_directive(body.command)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if (directive.grant or directive.revoke) and not body.workbench_session_id:
+        raise HTTPException(
+            status_code=403,
+            detail="root grant changes require an owned Workbench session",
+        )
+    body.command = directive.command
+    root_feature_enabled = local_root_grants_enabled()
+    if directive.grant and not root_feature_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="local root grants are disabled by the CPTR host operator",
+        )
+    if directive.revoke and body.workbench_session_id:
+        await local_root_grant_store.revoke(
+            owner_id=user_id,
+            session_id=body.workbench_session_id,
+        )
+    existing_root_grant = bool(
+        root_feature_enabled
+        and body.workbench_session_id
+        and await local_root_grant_store.is_active(
+            owner_id=user_id,
+            session_id=body.workbench_session_id,
+        )
+    )
+    # Validate the requested effect before persisting a new authority grant. A
+    # rejected command must never leave root authority behind as a side effect.
+    root_unrestricted = bool(directive.grant or existing_root_grant)
+    _validate_command(
+        body.command,
+        body.allow_network,
+        root_unrestricted=root_unrestricted,
+    )
     scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
     if body.allow_network and "command:external" not in scopes:
         raise HTTPException(
             status_code=403,
             detail="external commands require the command:external scope",
         )
+    if directive.grant and body.workbench_session_id:
+        probe_context = _command_context(
+            request=request,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            workspace_path=str(root),
+            worker_id=body.worker_id,
+        )
+        try:
+            unrestricted_root_identity(await identity_for_context(probe_context))
+        except IdentityUnavailable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            await local_root_grant_store.grant(
+                owner_id=user_id,
+                session_id=body.workbench_session_id,
+                ttl_seconds=directive.ttl_seconds,
+            )
+        except LocalRootGrantDenied as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+    if body.measure_lifecycle:
+        now = time.perf_counter()
+        lifecycle_timing["root_validation_ms"] = round((now - phase_started) * 1000.0, 3)
+        phase_started = now
+    idempotency_workspace = f"{workspace_id}:{body.worker_id or '-'}"
 
     idempotency_fingerprint: str | None = None
     preallocated_command_id: str | None = None
     if body.idempotency_key:
-        idempotency_fingerprint = _command_request_fingerprint(body, relative_cwd)
+        idempotency_fingerprint = _command_request_fingerprint(
+            body, relative_cwd, root_unrestricted=root_unrestricted
+        )
         candidate_id = uuid.uuid4().hex[:8]
         reservation_state, reserved_id = await _command_idempotency_reserve(
             user_id,
@@ -2312,6 +2391,9 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         workspace_path=str(root),
         worker_id=body.worker_id,
     )
+    if root_unrestricted:
+        command_context["local_root_unrestricted"] = True
+        command_context["root_workbench_session_id"] = body.workbench_session_id
     if body.measure_lifecycle:
         now = time.perf_counter()
         lifecycle_timing["route_pre_run_ms"] = round((now - phase_started) * 1000.0, 3)
@@ -2346,7 +2428,10 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     if session is not None and session.get("workspace") == str(root):
         session["memory_action"] = "command"
         session["memory_command"] = body.command
-        session["memory_metadata"] = {"transport": "local-command"}
+        session["memory_metadata"] = {
+            "transport": "local-root-command" if root_unrestricted else "local-command",
+            "privilege": "root" if root_unrestricted else "user",
+        }
     if body.measure_lifecycle:
         now = time.perf_counter()
         if session is not None:
