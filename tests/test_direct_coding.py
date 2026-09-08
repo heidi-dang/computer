@@ -300,6 +300,83 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             __use_pty=False,
         )
 
+    async def test_direct_command_validates_and_routes_owned_workbench_before_execution(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(
+            command="npm test",
+            cwd=".",
+            wait_seconds=5,
+            workbench_session_id="wbs_1234567890abcdef",
+        )
+        session = {
+            "session_id": "wbs_1234567890abcdef",
+            "workspace_id": "ws_1",
+            "status": "OPEN",
+            "archived_at": None,
+        }
+        get_workbench = AsyncMock(return_value=session)
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch("cptr.routers.coding.workbench_session_store", create=True) as store,
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: exited (code 0)"),
+            ) as run,
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(
+                    return_value={
+                        "command_id": "deadbeef",
+                        "status": "COMPLETE",
+                        "exit_code": 0,
+                        "output": "tests pass",
+                        "next_offset": 10,
+                    }
+                ),
+            ),
+        ):
+            store.get = get_workbench
+            result = await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        get_workbench.assert_awaited_once_with(
+            owner_id="user_1", session_id="wbs_1234567890abcdef"
+        )
+        self.assertEqual(
+            run.await_args.kwargs["__context__"]["workbench_session_id"],
+            "wbs_1234567890abcdef",
+        )
+
+    async def test_archived_workbench_route_is_rejected_before_command_spawn(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(
+            command="npm test",
+            workbench_session_id="wbs_1234567890abcdef",
+        )
+        run = AsyncMock(return_value="Task deadbeef: running")
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch("cptr.routers.coding.workbench_session_store", create=True) as store,
+            patch("cptr.routers.coding.run_command", new=run),
+        ):
+            store.get = AsyncMock(
+                return_value={
+                    "session_id": "wbs_1234567890abcdef",
+                    "workspace_id": "ws_1",
+                    "status": "ARCHIVED",
+                    "archived_at": 1,
+                }
+            )
+            with self.assertRaises(HTTPException) as rejected:
+                await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(rejected.exception.status_code, 409)
+        run.assert_not_awaited()
+
     async def test_completed_high_value_command_is_offered_to_memory_observation_once(self):
         request = SimpleNamespace()
         workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
@@ -534,6 +611,92 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("second", combined)
             self.assertEqual(events[-1].payload["status"], "COMPLETE")
             self.assertEqual(events[-1].payload["exit_code"], 0)
+        finally:
+            command_sessions.pop(command_id, None)
+
+    async def test_run_command_binds_workbench_target_before_live_events(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace()
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        bind_target = AsyncMock(return_value={"session_id": "wbs_1234567890abcdef"})
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+                patch(
+                    "cptr.services.workbench_sessions.workbench_session_store.bind_target",
+                    new=bind_target,
+                ),
+            ):
+                result = await run_command(
+                    "printf bound",
+                    ".",
+                    2,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws_1",
+                        "workbench_session_id": "wbs_1234567890abcdef",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                    __use_pty=False,
+                )
+
+        command_id = result.split(":", 1)[0].removeprefix("Task ")
+        try:
+            bind_target.assert_awaited_once_with(
+                owner_id="user_1",
+                session_id="wbs_1234567890abcdef",
+                target_type="command",
+                target_id=command_id,
+                workspace_id="ws_1",
+            )
+        finally:
+            command_sessions.pop(command_id, None)
+
+    async def test_run_command_projects_runtime_bytes_into_workbench_stream(self):
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace()
+        identity = SimpleNamespace(is_pam=False, app_user_id="user_1")
+        with tempfile.TemporaryDirectory() as workspace_root:
+            with (
+                patch(
+                    "cptr.utils.tools.identity_for_context", new=AsyncMock(return_value=identity)
+                ),
+                patch("cptr.utils.tools.Runtime.write_file", new=AsyncMock(return_value={})),
+                patch("cptr.services.live_events.live_event_hub", hub),
+            ):
+                result = await run_command(
+                    "printf workbench-output",
+                    ".",
+                    2,
+                    __context__={
+                        "workspace": workspace_root,
+                        "workspace_id": "ws_1",
+                        "workbench_session_id": "wbs_1234567890abcdef",
+                        "request": request,
+                        "user_id": "user_1",
+                    },
+                    __use_pty=False,
+                )
+
+        command_id = result.split(":", 1)[0].removeprefix("Task ")
+        try:
+            events = await hub.store.replay("workbench:wbs_1234567890abcdef")
+            self.assertEqual(events[0].event_type, "command.started")
+            self.assertEqual(events[-1].event_type, "command.completed")
+            self.assertTrue(all(event.payload["target"]["id"] == command_id for event in events))
+            self.assertIn(
+                "workbench-output",
+                "".join(
+                    str(event.payload["payload"].get("text") or "")
+                    for event in events
+                    if event.event_type == "terminal.chunk"
+                ),
+            )
         finally:
             command_sessions.pop(command_id, None)
 

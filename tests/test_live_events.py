@@ -1,6 +1,7 @@
 import asyncio
 import inspect
 import unittest
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import cptr.services.live_events as live_events
@@ -200,6 +201,84 @@ class LiveEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(projected), 1)
         self.assertEqual(projected[0].payload["target"]["id"], "cmd-1")
         self.assertEqual(projected[0].payload["payload"]["text"], "hello")
+
+    def test_workbench_route_cache_is_bounded_and_owner_keyed(self):
+        cache: dict[tuple[str, str], tuple[str, str]] = {}
+        with patch.object(live_events, "MAX_WORKBENCH_ROUTE_CACHE_ENTRIES", 2):
+            live_events._remember_workbench_route(cache, ("user-1", "task-1"), ("wbs-1", "ws-1"))
+            live_events._remember_workbench_route(cache, ("user-2", "task-1"), ("wbs-2", "ws-2"))
+            live_events._remember_workbench_route(cache, ("user-3", "task-3"), ("wbs-3", "ws-3"))
+
+        self.assertEqual(len(cache), 2)
+        self.assertNotIn(("user-1", "task-1"), cache)
+        self.assertEqual(cache[("user-2", "task-1")], ("wbs-2", "ws-2"))
+
+    async def test_durable_route_resolution_rejects_cross_owner_ids(self):
+        class _DbContext:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, model, record_id):
+                if model is live_events.ControlTask:
+                    return SimpleNamespace(
+                        id=record_id,
+                        user_id="owner-1",
+                        workspace_id="ws-1",
+                        chat_id="chat-1",
+                    )
+                if model is live_events.AutonomousMonitor:
+                    return SimpleNamespace(
+                        id=record_id,
+                        user_id="owner-1",
+                        workspace_id="ws-1",
+                        director_state={"workbench_session_id": "wbs_1234567890abcdef"},
+                    )
+                raise AssertionError(f"unexpected model {model}")
+
+        live_events._task_workbench_route_cache.clear()
+        live_events._monitor_workbench_route_cache.clear()
+        with patch("cptr.services.live_events.get_db", new=AsyncMock(return_value=_DbContext())):
+            task_route = await live_events._task_workbench_route("task-1", "attacker")
+            monitor_route = await live_events._monitor_workbench_route("monitor-1", "attacker")
+
+        self.assertIsNone(task_route)
+        self.assertIsNone(monitor_route)
+        self.assertEqual(live_events._task_workbench_route_cache, {})
+        self.assertEqual(live_events._monitor_workbench_route_cache, {})
+
+    async def test_task_and_monitor_publishers_project_when_workbench_is_explicit(self):
+        task_parameters = inspect.signature(live_events.publish_task_event).parameters
+        monitor_parameters = inspect.signature(live_events.publish_monitor_event).parameters
+        self.assertIn("workbench_session_id", task_parameters)
+        self.assertIn("workbench_session_id", monitor_parameters)
+
+        store = LiveEventStore()
+        hub = LiveEventHub(store=store)
+        with patch("cptr.services.live_events.live_event_hub", hub):
+            await live_events.publish_task_event(
+                user_id="user-1",
+                task_id="task-1",
+                event_type="task.started",
+                payload={"status": "RUNNING"},
+                workbench_session_id="wbs_1234567890abcdef",
+                workspace_id="ws-1",
+            )
+            await live_events.publish_monitor_event(
+                user_id="user-1",
+                monitor_id="mon-1",
+                event_type="monitor.status",
+                payload={"status": "RUNNING"},
+                workbench_session_id="wbs_1234567890abcdef",
+                workspace_id="ws-1",
+            )
+
+        projected = await store.replay("workbench:wbs_1234567890abcdef")
+        self.assertEqual([event.event_type for event in projected], ["task.started", "monitor.status"])
+        self.assertEqual(projected[0].payload["target"], {"type": "task", "id": "task-1", "workspace_id": "ws-1"})
+        self.assertEqual(projected[1].payload["target"], {"type": "monitor", "id": "mon-1", "workspace_id": "ws-1"})
 
     async def test_terminal_publication_without_workbench_keeps_only_target_stream(self):
         store = LiveEventStore()

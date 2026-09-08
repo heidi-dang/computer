@@ -105,6 +105,34 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             request=request,
         )
 
+    async def test_task_creation_forwards_owned_workbench_route(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(
+            start_task=AsyncMock(return_value={"id": "task_wbs", "workspace_id": "ws_1", "status": "RUNNING"})
+        )
+        body = TaskCreateRequest(
+            workspace_id="ws_1",
+            prompt="Run the tests allow:delegate",
+            model_id="provider/model_1",
+            workbench_session_id="wbs_1234567890abcdef",
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+            patch("cptr.routers.control._ensure_workbench_routing", new=AsyncMock(return_value=object()), create=True) as route,
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+        ):
+            result = await create_task(request, body)
+
+        self.assertEqual(result["id"], "task_wbs")
+        route.assert_awaited_once_with(
+            user_id="user_1", workspace_id="ws_1", session_id="wbs_1234567890abcdef"
+        )
+        self.assertEqual(
+            agent.start_task.await_args.kwargs["workbench_session_id"],
+            "wbs_1234567890abcdef",
+        )
+
     async def test_task_creation_uses_qualified_default_model_after_delegation_opt_in(self):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
         agent = SimpleNamespace(
@@ -367,6 +395,49 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         schedule.assert_called_once_with(request.app, "mon_1")
+
+    async def test_monitor_creation_persists_and_forwards_owned_workbench_route(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        monitor = MonitorState(
+            monitor_id="mon_wbs",
+            goal_id="goal_wbs",
+            user_id="user_1",
+            workspace_id="ws_1",
+            original_goal="Ship feature",
+            original_acceptance_criteria=["Tests pass"],
+            model_id="provider/model_1",
+            scopes=[ScopeRecord("scope_1", "Tests pass", "Tests pass", ["Tests pass"])],
+            director_state={"workbench_session_id": "wbs_1234567890abcdef"},
+        )
+        supervisor = SimpleNamespace(create_goal=AsyncMock(return_value=monitor))
+        body = AutonomousCreateRequest(
+            workspace_id="ws_1",
+            goal="Ship feature allow:delegate",
+            acceptance_criteria=["Tests pass"],
+            model_id="provider/model_1",
+            workbench_session_id="wbs_1234567890abcdef",
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+            patch("cptr.routers.control._ensure_workbench_routing", new=AsyncMock(return_value=object()), create=True) as route,
+            patch("cptr.routers.control._services", return_value=(SimpleNamespace(), supervisor)),
+            patch("cptr.routers.control._schedule_monitor"),
+            patch("cptr.services.live_events.safe_publish_monitor_event", new=AsyncMock()) as publish,
+        ):
+            await create_autonomous(request, body)
+
+        route.assert_awaited_once_with(
+            user_id="user_1", workspace_id="ws_1", session_id="wbs_1234567890abcdef"
+        )
+        self.assertEqual(
+            supervisor.create_goal.await_args.kwargs["workbench_session_id"],
+            "wbs_1234567890abcdef",
+        )
+        self.assertEqual(
+            publish.await_args.kwargs["workbench_session_id"],
+            "wbs_1234567890abcdef",
+        )
 
     async def test_evidence_endpoint_reads_dedicated_evidence_records(self):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
