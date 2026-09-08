@@ -21,6 +21,7 @@ from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
 from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor, ControlIdempotency
 from cptr.services.workspace_availability import is_workspace_available
+from cptr.services.workbench_sessions import workbench_session_store
 from cptr.routers.state import _resolve_request_workspace_path
 from cptr.services.agent_service import AgentService
 from cptr.services.control_auth import require_control_user
@@ -181,6 +182,9 @@ class TaskCreateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=100_000)
     model_id: str | None = Field(default=None, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=200)
+    workbench_session_id: str | None = Field(
+        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
+    )
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
 
@@ -201,6 +205,9 @@ class AutonomousCreateRequest(BaseModel):
     acceptance_criteria: list[str] = Field(min_length=1, max_length=100)
     model_id: str = Field(min_length=1, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=200)
+    workbench_session_id: str | None = Field(
+        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
+    )
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
 
@@ -258,6 +265,22 @@ def _monitor_summary(monitor: MonitorState) -> dict[str, Any]:
 
 async def _user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
+
+
+async def _ensure_workbench_routing(
+    *, user_id: str, workspace_id: str, session_id: str | None
+) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    session = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+    if str(session.get("status") or "").upper() == "ARCHIVED" or session.get("archived_at"):
+        raise HTTPException(status_code=409, detail="workbench session is archived")
+    bound_workspace = session.get("workspace_id")
+    if bound_workspace and str(bound_workspace) != workspace_id:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+    return session
 
 
 def _services(request: Request) -> tuple[AgentService, AutonomousSupervisor]:
@@ -1045,6 +1068,11 @@ async def get_workspace(request: Request, workspace_id: str):
 async def create_task(request: Request, body: TaskCreateRequest):
     user_id = await _user(request, "task:write")
     await _ensure_workspace(user_id, body.workspace_id)
+    await _ensure_workbench_routing(
+        user_id=user_id,
+        workspace_id=body.workspace_id,
+        session_id=body.workbench_session_id,
+    )
     _require_delegation_marker(body.prompt)
     selected_model = body.model_id or await _default_model()
     model_id = _require_explicit_delegation(selected_model, body.prompt)
@@ -1058,6 +1086,11 @@ async def create_task(request: Request, body: TaskCreateRequest):
             idempotency_key=body.idempotency_key,
             execution_policy=body.execution_policy.model_dump(),
             request=request,
+            **(
+                {"workbench_session_id": body.workbench_session_id}
+                if body.workbench_session_id
+                else {}
+            ),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="workspace not found") from exc
@@ -1284,6 +1317,11 @@ async def get_git_diff(
 async def create_autonomous(request: Request, body: AutonomousCreateRequest):
     user_id = await _user(request, "autonomous:run")
     await _ensure_workspace(user_id, body.workspace_id)
+    await _ensure_workbench_routing(
+        user_id=user_id,
+        workspace_id=body.workspace_id,
+        session_id=body.workbench_session_id,
+    )
     model_id = _require_explicit_delegation(body.model_id, body.goal)
     _, supervisor = _services(request)
     try:
@@ -1295,6 +1333,11 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
             model_id=model_id,
             idempotency_key=body.idempotency_key,
             execution_policy=body.execution_policy.model_dump(),
+            **(
+                {"workbench_session_id": body.workbench_session_id}
+                if body.workbench_session_id
+                else {}
+            ),
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -1306,6 +1349,8 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
         monitor_id=monitor.monitor_id,
         event_type="monitor.started",
         payload={"status": monitor.status.value, "scope_count": len(monitor.scopes)},
+        workbench_session_id=body.workbench_session_id,
+        workspace_id=body.workspace_id,
     )
     return _monitor_summary(monitor)
 

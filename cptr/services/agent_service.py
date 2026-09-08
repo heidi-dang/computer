@@ -45,6 +45,7 @@ class AgentService:
         execution_policy: dict[str, bool] | None = None,
         request: Any | None = None,
         review_required: bool = True,
+        workbench_session_id: str | None = None,
     ) -> dict[str, Any]:
         prompt = prompt.strip()
         if not prompt:
@@ -81,6 +82,7 @@ class AgentService:
                 "internal": True,
                 "control_plane": True,
                 "review_required": review_required,
+                **({"workbench_session_id": workbench_session_id} if workbench_session_id else {}),
                 **({"execution_policy": dict(execution_policy)} if execution_policy else {}),
                 **assignment_meta,
             },
@@ -117,6 +119,19 @@ class AgentService:
             updated_at=now,
         )
         await self.store.create(control_task)
+        if workbench_session_id:
+            try:
+                from cptr.services.workbench_sessions import workbench_session_store
+
+                await workbench_session_store.bind_target(
+                    owner_id=user_id,
+                    session_id=workbench_session_id,
+                    target_type="task",
+                    target_id=task_id,
+                    workspace_id=workspace_id,
+                )
+            except Exception:
+                pass
 
         task_request = request
         if task_request is None:
@@ -156,6 +171,8 @@ class AgentService:
                 task_id=task_id,
                 event_type="task.failed",
                 payload={"status": "FAILED", "message": "worker failed to start"},
+                workbench_session_id=workbench_session_id,
+                workspace_id=workspace_id,
             )
             raise
         from cptr.services.live_events import safe_publish_task_event
@@ -165,6 +182,8 @@ class AgentService:
             task_id=task_id,
             event_type="task.started",
             payload={"status": "RUNNING", "workspace_id": workspace_id},
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
         )
         return await self.get_task(task_id, user_id=user_id)
 

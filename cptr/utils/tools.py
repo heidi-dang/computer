@@ -355,6 +355,11 @@ async def _publish_command_session_event(
         worker_task_id=(
             str(session.get("message_id")) if session.get("message_id") is not None else None
         ),
+        workbench_session_id=(
+            str(session.get("workbench_session_id"))
+            if session.get("workbench_session_id") is not None
+            else None
+        ),
     )
 
 
@@ -2250,6 +2255,7 @@ async def run_command(
                 "message_id": __context__.get("message_id"),
                 "call_id": __context__.get("call_id"),
                 "live_target": live_target,
+                "workbench_session_id": __context__.get("workbench_session_id"),
                 "trace_id": trace_context.trace_id if trace_context else None,
                 "trace_request_id": trace_context.request_id if trace_context else None,
                 "trace_tool_name": trace_context.tool_name if trace_context else None,
@@ -2285,6 +2291,22 @@ async def run_command(
                 session,
                 reservation_token=launch_reservation,
             )
+            workbench_session_id = session.get("workbench_session_id")
+            if workbench_session_id and live_target is not None:
+                try:
+                    from cptr.services.workbench_sessions import workbench_session_store
+
+                    await workbench_session_store.bind_target(
+                        owner_id=str(user_id),
+                        session_id=str(workbench_session_id),
+                        target_type=str(live_target["target_type"]),
+                        target_id=str(live_target["target_id"]),
+                        workspace_id=(str(workspace_id) if workspace_id else None),
+                    )
+                except Exception:
+                    # Workbench routing is observability only. The execution
+                    # remains authoritative even if the UI projection is unavailable.
+                    pass
             if trace_context is not None:
                 try:
                     from cptr.services.action_traces import action_trace_store
