@@ -648,6 +648,56 @@ class LiveEventHub:
 live_event_hub = LiveEventHub()
 
 
+def workbench_target_key(session_id: str) -> str:
+    return f"workbench:{session_id}"
+
+
+def _projected_target(event: LiveEventEnvelope, workspace_id: str | None = None) -> dict[str, str]:
+    target_type, _, remainder = event.target_key.partition(":")
+    if target_type == "command":
+        embedded_workspace, separator, command_id = remainder.partition(":")
+        if not separator or not command_id:
+            raise ValueError("invalid command live target key")
+        return {
+            "type": "command",
+            "id": command_id,
+            "workspace_id": workspace_id or embedded_workspace,
+        }
+    if target_type not in {"task", "monitor"} or not remainder:
+        raise ValueError("unsupported live target key")
+    target = {"type": target_type, "id": remainder}
+    if workspace_id:
+        target["workspace_id"] = workspace_id
+    return target
+
+
+async def project_live_event_to_workbench(
+    *,
+    hub: LiveEventHub,
+    event: LiveEventEnvelope,
+    workbench_session_id: str,
+    workspace_id: str | None = None,
+) -> LiveEventEnvelope:
+    """Mirror one already-sanitized target event into its Workbench stream."""
+    session_id = str(workbench_session_id or "").strip()
+    if not session_id:
+        raise ValueError("workbench_session_id is required")
+    return await hub.publish(
+        user_id=event.user_id,
+        target_key=workbench_target_key(session_id),
+        task_id=event.task_id,
+        monitor_id=event.monitor_id,
+        worker_task_id=event.worker_task_id,
+        event_type=event.event_type,
+        payload={
+            "target": _projected_target(event, workspace_id),
+            "payload": event.payload,
+            "source_sequence": event.sequence,
+            "source_event_id": event.event_id,
+        },
+    )
+
+
 async def publish_task_event(
     *,
     user_id: str,
@@ -727,34 +777,44 @@ async def publish_terminal_event(
     payload: dict[str, Any] | None = None,
     worker_task_id: str | None = None,
     workspace_id: str | None = None,
+    workbench_session_id: str | None = None,
 ) -> LiveEventEnvelope:
     if target_type == "task":
-        return await publish_task_event(
+        event = await publish_task_event(
             user_id=user_id,
             task_id=target_id,
             event_type=event_type,
             payload=payload,
             worker_task_id=worker_task_id,
         )
-    if target_type == "monitor":
-        return await publish_monitor_event(
+    elif target_type == "monitor":
+        event = await publish_monitor_event(
             user_id=user_id,
             monitor_id=target_id,
             event_type=event_type,
             payload=payload,
             task_id=worker_task_id,
         )
-    if target_type == "command":
+    elif target_type == "command":
         if not workspace_id:
             raise ValueError("workspace_id is required for a command live target")
-        return await publish_command_event(
+        event = await publish_command_event(
             user_id=user_id,
             workspace_id=workspace_id,
             command_id=target_id,
             event_type=event_type,
             payload=payload,
         )
-    raise ValueError("unsupported live terminal target")
+    else:
+        raise ValueError("unsupported live terminal target")
+    if workbench_session_id:
+        await project_live_event_to_workbench(
+            hub=live_event_hub,
+            event=event,
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
+        )
+    return event
 
 
 async def safe_publish_terminal_event(**kwargs: Any) -> LiveEventEnvelope | None:

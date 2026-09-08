@@ -1,7 +1,9 @@
 import asyncio
+import inspect
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import cptr.services.live_events as live_events
 from cptr.services.live_events import (
     LiveEventHub,
     LiveEventStore,
@@ -147,6 +149,73 @@ class LiveEventTests(unittest.IsolatedAsyncioTestCase):
         text = sanitizer.feed("next\b!\rprogress\x1b]52;c;clipboard\x07\x1b[2Jdone", final=True)
         self.assertEqual(text, "nex!\nprogressdone")
         self.assertEqual(sanitize_terminal_text("\x1b[32mgreen\x1b[0m"), "\x1b[32mgreen\x1b[0m")
+
+    async def test_projects_authoritative_target_event_into_workbench_stream(self):
+        store = LiveEventStore(max_payload_chars=8_000)
+        hub = LiveEventHub(store=store)
+        projector = getattr(live_events, "project_live_event_to_workbench", None)
+        self.assertTrue(callable(projector), "backend Workbench event projector must exist")
+
+        target_event = await hub.publish(
+            user_id="user-1",
+            target_key="command:ws-1:cmd-1",
+            event_type="terminal.chunk",
+            payload={"command_id": "cmd-1", "stream": "stdout", "text": "safe output"},
+        )
+        projected = await projector(
+            hub=hub,
+            event=target_event,
+            workbench_session_id="wbs_1234567890abcdef",
+            workspace_id="ws-1",
+        )
+
+        replay = await store.replay("workbench:wbs_1234567890abcdef")
+        self.assertEqual(projected.target_key, "workbench:wbs_1234567890abcdef")
+        self.assertEqual([item.event_type for item in replay], ["terminal.chunk"])
+        self.assertEqual(
+            replay[0].payload["target"],
+            {"type": "command", "id": "cmd-1", "workspace_id": "ws-1"},
+        )
+        self.assertEqual(replay[0].payload["payload"]["text"], "safe output")
+
+    async def test_terminal_publication_projects_to_workbench_when_routed(self):
+        parameters = inspect.signature(live_events.publish_terminal_event).parameters
+        self.assertIn("workbench_session_id", parameters)
+
+        store = LiveEventStore(max_payload_chars=8_000)
+        hub = LiveEventHub(store=store)
+        with patch("cptr.services.live_events.live_event_hub", hub):
+            event = await live_events.publish_terminal_event(
+                user_id="user-1",
+                target_type="command",
+                target_id="cmd-1",
+                workspace_id="ws-1",
+                workbench_session_id="wbs_1234567890abcdef",
+                event_type="terminal.chunk",
+                payload={"stream": "stdout", "text": "hello"},
+            )
+
+        self.assertEqual(event.target_key, "command:ws-1:cmd-1")
+        projected = await store.replay("workbench:wbs_1234567890abcdef")
+        self.assertEqual(len(projected), 1)
+        self.assertEqual(projected[0].payload["target"]["id"], "cmd-1")
+        self.assertEqual(projected[0].payload["payload"]["text"], "hello")
+
+    async def test_terminal_publication_without_workbench_keeps_only_target_stream(self):
+        store = LiveEventStore()
+        hub = LiveEventHub(store=store)
+        with patch("cptr.services.live_events.live_event_hub", hub):
+            await live_events.publish_terminal_event(
+                user_id="user-1",
+                target_type="command",
+                target_id="cmd-1",
+                workspace_id="ws-1",
+                event_type="terminal.chunk",
+                payload={"stream": "stdout", "text": "hello"},
+            )
+
+        self.assertEqual(len(await store.replay("command:ws-1:cmd-1")), 1)
+        self.assertEqual(len(await store.replay("workbench:wbs_1234567890abcdef")), 0)
 
     async def test_command_completion_reconciles_matching_workbench_target_without_blocking_live_event(
         self,
