@@ -25,6 +25,12 @@ from cptr.services.capability_os.contracts import (
     create_artifact,
 )
 from cptr.services.capability_os.authority import permission_covers
+from cptr.services.capability_os.provenance import (
+    build_slsa_v1_statement,
+    build_spdx_23_document,
+    supply_chain_reference,
+    validate_supply_chain_references,
+)
 from cptr.services.capability_os.runtime import RuntimeBroker, RuntimeClass, RuntimeUnavailable
 from cptr.services.capability_os.store import SqlCapabilityOsStore
 
@@ -74,6 +80,7 @@ class ToolBuildResult:
     runtime_class: str
     artifact_digest: str
     attestation: dict[str, Any]
+    supply_chain: dict[str, dict[str, str]]
 
 
 @dataclass(frozen=True)
@@ -110,12 +117,11 @@ class ContentAddressedBlobStore:
             normalized[key] = content
         return dict(sorted(normalized.items()))
 
-    def put_files(self, files: dict[str, str]) -> tuple[str, str]:
-        safe = self._validate_files(files)
-        raw = canonical_json({"files": safe})
+    def put_json(self, payload: Any) -> tuple[str, str]:
+        raw = canonical_json(payload)
         if len(raw) > self.max_bytes:
-            raise ValueError("tool source exceeds content-store byte bound")
-        digest = digest_payload({"files": safe})
+            raise ValueError("content-store document exceeds byte bound")
+        digest = digest_payload(payload)
         hex_digest = digest.split(":", 1)[1]
         directory = self.root / "sha256"
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -143,17 +149,27 @@ class ContentAddressedBlobStore:
             pass
         return digest, str(path)
 
-    def get_files(self, digest: str) -> dict[str, str]:
+    def get_json(self, digest: str) -> Any:
         if not digest.startswith("sha256:"):
-            raise ValueError("invalid source digest")
+            raise ValueError("invalid content-store digest")
         path = self.root / "sha256" / f"{digest.split(':', 1)[1]}.json"
         raw = path.read_bytes()
         if len(raw) > self.max_bytes:
-            raise ValueError("stored tool source exceeds content-store byte bound")
+            raise ValueError("stored content-store document exceeds byte bound")
         parsed = json.loads(raw)
-        files = parsed.get("files")
-        if not isinstance(files, dict) or digest_payload({"files": files}) != digest:
-            raise ValueError("stored tool source failed digest verification")
+        if digest_payload(parsed) != digest:
+            raise ValueError("stored content-store document failed digest verification")
+        return parsed
+
+    def put_files(self, files: dict[str, str]) -> tuple[str, str]:
+        safe = self._validate_files(files)
+        return self.put_json({"files": safe})
+
+    def get_files(self, digest: str) -> dict[str, str]:
+        parsed = self.get_json(digest)
+        files = parsed.get("files") if isinstance(parsed, dict) else None
+        if not isinstance(files, dict):
+            raise ValueError("stored tool source failed shape verification")
         return {str(key): str(value) for key, value in files.items()}
 
     def uri(self, digest: str) -> str:
@@ -222,6 +238,12 @@ class ToolForge:
         if row is None or row.kind != ArtifactKind.TOOL.value:
             raise KeyError("tool artifact not found")
         return row
+
+    def get_supply_chain_document(self, document_digest: str) -> dict[str, Any]:
+        document = self._blobs.get_json(document_digest)
+        if not isinstance(document, dict):
+            raise ValueError("supply-chain document must be a JSON object")
+        return document
 
     async def modify(
         self,
@@ -317,12 +339,42 @@ class ToolForge:
         attestation = result.get("attestation")
         if not artifact_digest.startswith("sha256:") or not isinstance(attestation, dict):
             raise ValueError("isolated builder must return artifact digest and attestation")
+        build_id = f"build_{uuid.uuid4().hex}"
+        source_digest = str(row.source_digest or "")
+        source_files = self._blobs.get_files(source_digest)
+        sbom = build_spdx_23_document(
+            tool_id=row.artifact_id,
+            version=row.version,
+            source_digest=source_digest,
+            files=source_files,
+            created_at=self._iso_now(),
+        )
+        sbom_digest, _sbom_uri = self._blobs.put_json(sbom)
+        runtime_spec = dict(row.spec.get("runtime") or {})
+        provenance = build_slsa_v1_statement(
+            tool_id=row.artifact_id,
+            version=row.version,
+            build_id=build_id,
+            source_digest=source_digest,
+            artifact_digest=artifact_digest,
+            runtime_class=runtime_class.value,
+            entrypoint=str(runtime_spec.get("entrypoint") or ""),
+            requested_capabilities=list(row.spec.get("requestedCapabilities") or []),
+            broker_attestation=dict(attestation),
+            sbom_digest=sbom_digest,
+        )
+        provenance_digest, _provenance_uri = self._blobs.put_json(provenance)
+        supply_chain = {
+            "sbom": supply_chain_reference(kind="sbom", digest=sbom_digest),
+            "provenance": supply_chain_reference(kind="provenance", digest=provenance_digest),
+        }
         return ToolBuildResult(
-            build_id=f"build_{uuid.uuid4().hex}",
-            source_digest=str(row.source_digest),
+            build_id=build_id,
+            source_digest=source_digest,
             runtime_class=runtime_class.value,
             artifact_digest=artifact_digest,
             attestation=dict(attestation),
+            supply_chain=supply_chain,
         )
 
     async def run(
@@ -427,15 +479,25 @@ class ToolForge:
             evidence_rows.append(evidence)
 
         if target_state is ArtifactState.QUALIFIED:
-            qualified_build = any(
-                evidence.kind == "tool.build"
-                and isinstance(evidence.claims, dict)
-                and str((evidence.claims or {}).get("buildArtifactDigest") or "").startswith("sha256:")
-                and isinstance((evidence.claims or {}).get("attestation"), dict)
-                for evidence in evidence_rows
-            )
+            qualified_build = False
+            for evidence in evidence_rows:
+                if (
+                    evidence.kind != "tool.build"
+                    or not isinstance(evidence.claims, dict)
+                    or not str((evidence.claims or {}).get("buildArtifactDigest") or "").startswith("sha256:")
+                    or not isinstance((evidence.claims or {}).get("attestation"), dict)
+                ):
+                    continue
+                try:
+                    validate_supply_chain_references((evidence.claims or {}).get("supplyChain"))
+                except ValueError:
+                    continue
+                qualified_build = True
+                break
             if not qualified_build:
-                raise ValueError("tool qualification requires trusted successful build evidence")
+                raise ValueError(
+                    "tool qualification requires trusted build evidence with SPDX/SLSA provenance"
+                )
         else:
             promoted = any(
                 evidence.kind == "evolution.promotion"

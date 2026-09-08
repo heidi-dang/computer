@@ -123,6 +123,20 @@ class CapabilityOsForgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.runtime_class, "gvisor")
         self.assertEqual(result.artifact_digest, "sha256:" + "a" * 64)
         self.assertEqual(calls, [("gvisor", draft.artifact.metadata.content_digest, "lease-build")])
+        self.assertEqual(result.supply_chain["sbom"]["specVersion"], "SPDX-2.3")
+        self.assertEqual(
+            result.supply_chain["provenance"]["predicateType"],
+            "https://slsa.dev/provenance/v1",
+        )
+        sbom = forge.get_supply_chain_document(result.supply_chain["sbom"]["digest"])
+        self.assertEqual(sbom["spdxVersion"], "SPDX-2.3")
+        self.assertEqual(sbom["packages"][0]["name"], "broker-built")
+        self.assertEqual(sbom["files"][0]["fileName"], "main.py")
+        provenance = forge.get_supply_chain_document(
+            result.supply_chain["provenance"]["digest"]
+        )
+        self.assertEqual(provenance["predicateType"], "https://slsa.dev/provenance/v1")
+        self.assertEqual(provenance["subject"][0]["digest"]["sha256"], "a" * 64)
 
         with self.assertRaises(PermissionError):
             await forge.build(draft.artifact.metadata.content_digest)
@@ -184,6 +198,78 @@ class CapabilityOsForgeTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(PermissionError, "another user"):
             await forge.run(digest, inputs={}, lease=wrong_user, timeout_ms=1000)
         self.assertEqual(len(calls), 2)
+
+    async def test_qualification_requires_trusted_spdx_and_slsa_build_evidence(self):
+        async def builder(*, runtime_class, artifact, lease):
+            return {
+                "artifact_digest": "sha256:" + "a" * 64,
+                "attestation": {"runtimeClass": runtime_class.value, "qualified": True},
+            }
+
+        forge = ToolForge(
+            store=self.store,
+            blobs=self.blobs,
+            runtime=self.runtime,
+            builder=builder,
+        )
+        draft = await forge.create(
+            CreateToolRequest(
+                tool_id="qualified-provenance",
+                version="1",
+                task_id="task-1",
+                runtime_class="gvisor",
+                entrypoint="main.py",
+                files={"main.py": "print('qualified')\n"},
+                requested_capabilities=(CapabilityRequest("compute.transform", "input:json"),),
+            )
+        )
+        digest = draft.artifact.metadata.content_digest
+        legacy = await self.store.append_evidence(
+            task_id="task-1",
+            kind="tool.build",
+            producer_identity="capability-os-control",
+            claims={
+                "buildArtifactDigest": "sha256:" + "a" * 64,
+                "attestation": {"qualified": True},
+            },
+            artifact_digest=digest,
+            created_at_ms=1_000_000,
+        )
+        with self.assertRaisesRegex(ValueError, "SPDX/SLSA provenance"):
+            await forge.persist(
+                digest,
+                target_state=ArtifactState.QUALIFIED,
+                evidence_ids=(legacy.evidence_id,),
+            )
+
+        lease = SimpleNamespace(
+            lease_id="lease-build-provenance",
+            task_id="task-1",
+            artifact_digest=digest,
+            runtime_profile="gvisor",
+            permissions=(CapabilityRequest("runtime.build", f"artifact:{digest}"),),
+        )
+        build = await forge.build(digest, lease=lease)
+        trusted = await self.store.append_evidence(
+            task_id="task-1",
+            kind="tool.build",
+            producer_identity="capability-os-control",
+            claims={
+                "buildArtifactDigest": build.artifact_digest,
+                "attestation": build.attestation,
+                "supplyChain": build.supply_chain,
+            },
+            run_id=build.build_id,
+            artifact_digest=digest,
+            created_at_ms=1_000_001,
+        )
+        await forge.persist(
+            digest,
+            target_state=ArtifactState.QUALIFIED,
+            evidence_ids=(trusted.evidence_id,),
+        )
+        row = await self.store.get_artifact(digest)
+        self.assertEqual(row.state, ArtifactState.QUALIFIED.value)
 
     async def test_learned_promotion_requires_server_evolution_promotion_evidence(self):
         draft = await self.forge.create(

@@ -61,6 +61,13 @@ async def lifespan(app: FastAPI):
 
     setup_logging()
 
+    # OpenTelemetry is explicitly opt-in and fail-closed to a local no-op when
+    # the optional SDK/exporter is unavailable. Exporter secrets remain owned
+    # by the standard OTEL_* environment and are never surfaced by CPTR.
+    from cptr.services.telemetry import telemetry
+
+    app.state.telemetry_configured = telemetry.configure()
+
     # Use OS certificate store (Windows CertStore, macOS Keychain, etc.)
     # instead of the bundled certifi CA bundle — fixes #31.
     import logging as _logging
@@ -230,6 +237,12 @@ async def lifespan(app: FastAPI):
             from cptr.services.live_events import live_event_hub
 
             await live_event_hub.close()
+        except Exception:
+            pass
+        try:
+            from cptr.services.telemetry import telemetry
+
+            telemetry.shutdown()
         except Exception:
             pass
         try:

@@ -411,6 +411,31 @@ class SqlCapabilityOsStore:
                 ).all()
             )
 
+    async def list_artifact_evidence(
+        self,
+        artifact_digest: str,
+        *,
+        limit: int = 200,
+    ) -> list[CapabilityOsEvidence]:
+        artifact_digest = str(artifact_digest).strip()
+        if not artifact_digest:
+            raise ValueError("artifact_digest must not be blank")
+        limit = max(1, min(int(limit), 1000))
+        async with self._session_factory() as db:
+            return list(
+                (
+                    await db.scalars(
+                        select(CapabilityOsEvidence)
+                        .where(CapabilityOsEvidence.artifact_digest == artifact_digest)
+                        .order_by(
+                            CapabilityOsEvidence.created_at_ms.desc(),
+                            CapabilityOsEvidence.evidence_id.desc(),
+                        )
+                        .limit(limit)
+                    )
+                ).all()
+            )
+
     async def verify_evidence_chain(self, task_id: str) -> dict[str, Any]:
         async with self._session_factory() as db:
             rows = list(
