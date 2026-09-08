@@ -150,7 +150,6 @@ class FactoryOrchestrator:
                     gates=gates,
                     steering_messages=steering_messages,
                 ),
-                claimed_at_ms=claimed_at,
             )
             if not isinstance(outcome, PhaseOutcome):
                 raise FactoryOrchestratorError(
@@ -288,12 +287,21 @@ class FactoryOrchestrator:
         run_id: str,
         handler: PhaseHandler,
         context: PhaseContext,
-        *,
-        claimed_at_ms: int,
     ) -> PhaseOutcome:
         """Keep ownership fenced while a phase performs slow external or verification work."""
         interval_seconds = max(0.05, min(5.0, self._lease_ms / 3000))
-        last_renewed_ms = claimed_at_ms
+        now_ms = self._clock_ms()
+        renewed = await self._store.renew_run(
+            run_id,
+            lease_token=self._owner_token,
+            now_ms=now_ms,
+            lease_ms=self._lease_ms,
+        )
+        if not renewed:
+            raise FactoryOrchestratorError(
+                "factory run lease expired before phase execution began"
+            )
+        last_renewed_ms = now_ms
         task = asyncio.create_task(handler.execute(context))
         try:
             while True:
