@@ -65,8 +65,36 @@ def _managed_browser_startup_timeout_seconds() -> float:
     return min(60.0, max(5.0, value))
 
 
+def _configured_browser_executable() -> str | None:
+    """Return the operator-configured browser executable, failing closed on drift."""
+    raw = os.environ.get("CPTR_BROWSER_EXECUTABLE", "").strip()
+    if not raw:
+        return None
+
+    path = Path(raw)
+    if not path.is_absolute():
+        raise RuntimeError("CPTR_BROWSER_EXECUTABLE must be an absolute path")
+    if path.is_symlink():
+        raise RuntimeError("CPTR_BROWSER_EXECUTABLE must not be a symlink")
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise RuntimeError("CPTR_BROWSER_EXECUTABLE does not exist") from exc
+    if resolved != path:
+        raise RuntimeError("CPTR_BROWSER_EXECUTABLE must not traverse symlinked path components")
+    if not resolved.is_file():
+        raise RuntimeError("CPTR_BROWSER_EXECUTABLE must reference a regular file")
+    if not os.access(resolved, os.X_OK):
+        raise RuntimeError("CPTR_BROWSER_EXECUTABLE is not executable")
+    return str(resolved)
+
+
 def find_browser() -> str | None:
     """Find a compatible Chrome-family browser without launching it."""
+    configured = _configured_browser_executable()
+    if configured:
+        return configured
+
     import platform
 
     system = platform.system()
