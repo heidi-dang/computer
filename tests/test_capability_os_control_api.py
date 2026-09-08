@@ -302,6 +302,78 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
 
+    async def test_skill_portable_bundle_round_trip_is_server_evidenced_and_authority_free(self):
+        genome = {
+            "objective": "Inspect logs through semantic MCP hints",
+            "assumptions": ["mount binding is server-owned"],
+            "decompositionStrategy": ["inspect", "verify"],
+            "decisionRules": ["prefer current projections"],
+            "evidencePolicy": ["require server evidence"],
+            "toolSelectionHeuristics": ["select by semantic tool name"],
+            "stoppingConditions": ["verification complete"],
+            "failureRecovery": ["reacquire projection"],
+            "verificationRequirements": ["verify result"],
+            "outputContract": "Return verified summary",
+            "activation": {"domains": ["cptr"], "taskPatterns": ["inspect logs"]},
+            "context": {"resources": [], "maxInjectedTokens": 1500},
+            "evaluation": {
+                "benchmarkSuite": "skill-portability",
+                "primaryMetric": "pass-rate",
+                "guardrailMetrics": ["policy-violations"],
+            },
+            "executionHints": {
+                "mcpSteps": [
+                    {"id": "inspect", "tool": "resource.logs", "timeoutMs": 5000}
+                ]
+            },
+        }
+        created = await self.service.forge(
+            user_id="user-1",
+            task_id="task-1",
+            operation="skill-create",
+            payload={"skillId": "skill.portable", "version": "1", "genome": genome},
+        )
+        source_digest = created["artifact"]["metadata"]["contentDigest"]
+        exported = await self.service.forge(
+            user_id="user-1",
+            task_id="task-1",
+            operation="skill-export",
+            payload={"contentDigest": source_digest},
+        )
+        self.assertEqual(exported["bundle"]["apiVersion"], "cptr.io/skill-bundle/v1")
+        self.assertTrue(exported["bundleDigest"].startswith("sha256:"))
+        self.assertNotIn("permissions", str(exported["bundle"]).lower())
+        self.assertNotIn("mountid", str(exported["bundle"]).lower())
+        imported = await self.service.forge(
+            user_id="user-1",
+            task_id="task-1",
+            operation="skill-import",
+            payload={"bundle": exported["bundle"]},
+        )
+        self.assertEqual(imported["artifact"]["metadata"]["owner"], ArtifactOwner.USER.value)
+        self.assertEqual(imported["artifact"]["metadata"]["origin"], ArtifactOrigin.IMPORTED.value)
+        self.assertEqual(imported["artifact"]["metadata"]["sourceDigest"], exported["bundleDigest"])
+        self.assertNotEqual(imported["artifact"]["metadata"]["contentDigest"], source_digest)
+        evidence = await self.store.list_evidence("task-1")
+        export_row = next(row for row in evidence if row.kind == "skill.export")
+        import_row = next(row for row in evidence if row.kind == "skill.import")
+        self.assertEqual(export_row.producer_identity, "capability-os-control")
+        self.assertEqual(import_row.producer_identity, "capability-os-control")
+        self.assertEqual(export_row.claims["bundleDigest"], exported["bundleDigest"])
+        self.assertEqual(import_row.claims["bundleDigest"], exported["bundleDigest"])
+
+        tampered = {
+            **exported["bundle"],
+            "spec": {**exported["bundle"]["spec"], "permissions": [{"action": "*"}]},
+        }
+        with self.assertRaisesRegex(ValueError, "authority field: permissions"):
+            await self.service.forge(
+                user_id="user-1",
+                task_id="task-1",
+                operation="skill-import",
+                payload={"bundle": tampered},
+            )
+
     async def test_forge_build_uses_server_isolation_lease_records_evidence_and_revokes(self):
         calls = []
         async def builder(*, runtime_class, artifact, lease):

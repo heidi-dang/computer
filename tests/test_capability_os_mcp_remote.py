@@ -19,6 +19,7 @@ from cptr.services.capability_os.contracts import (
     create_artifact,
     digest_payload,
 )
+from cptr.services.capability_os.evidence import EvidenceService
 from cptr.services.capability_os.forge import ContentAddressedBlobStore
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpCandidate, McpFabric, McpQualification
 from cptr.services.capability_os.mcp_package import McpbPackagePreparer
@@ -158,6 +159,7 @@ class CapabilityOsRemoteMcpTests(unittest.IsolatedAsyncioTestCase):
         self.store = SqlCapabilityOsStore(session_factory=sessions)
         self.clock = lambda: 1_000_000
         self.authority = AuthorityBroker(store=self.store, clock_ms=self.clock)
+        self.evidence = EvidenceService(store=self.store, clock_ms=self.clock)
         self.fabric = McpFabric(store=self.store, authority=self.authority, clock_ms=self.clock)
         self.observation = RemoteMcpObservation(
             remote_url="https://mcp.example.test/mcp",
@@ -206,6 +208,68 @@ class CapabilityOsRemoteMcpTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("identityOk", row.spec)
         self.assertNotIn("authOk", row.spec)
         self.assertNotIn("sandboxable", row.spec)
+
+    async def test_reputation_counts_only_trusted_server_outcomes_across_adapter_lineage(self):
+        acquired = await self.acquisition.discover_and_qualify(
+            user_id="user-1", task_id="task-1", goal=_goal(), query="service logs"
+        )
+        row = await self.store.get_artifact(acquired[0].artifact_digest)
+        await self.store.append_evidence(
+            task_id="task-1",
+            kind="mcp.invoke.outcome",
+            producer_identity="capability-os-client:user-1",
+            claims={"serverId": "io.example/logs", "success": True},
+            artifact_digest=row.content_digest,
+            created_at_ms=999_990,
+        )
+        await self.store.append_evidence(
+            task_id="task-1",
+            kind="mcp.invoke.outcome",
+            producer_identity="capability-os-control",
+            claims={"serverId": "io.example/logs", "success": True},
+            artifact_digest=row.content_digest,
+            created_at_ms=999_991,
+        )
+        sibling = create_artifact(
+            artifact_id="mcp.adapter.logs.requalified",
+            version="2.1.1",
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.EXTERNAL,
+            origin=ArtifactOrigin.MCP,
+            spec={**dict(row.spec), "serverInfo": {"name": "example-logs", "version": "2.1.1"}},
+            created_at="1970-01-01T00:16:40Z",
+            user_id="user-1",
+            task_origin="task-1",
+            source_digest=row.source_digest,
+            state=ArtifactState.QUALIFIED,
+        )
+        await self.store.persist_artifact(sibling)
+        await self.store.append_evidence(
+            task_id="task-1",
+            kind="mcp.invoke.outcome",
+            producer_identity="capability-os-control",
+            claims={"serverId": "io.example/logs", "success": False, "errorType": "RemoteMcpError"},
+            artifact_digest=sibling.metadata.content_digest,
+            created_at_ms=999_992,
+        )
+        await self.store.append_evidence(
+            task_id="task-1",
+            kind="mcp.invoke.outcome",
+            producer_identity="capability-os-control",
+            claims={"serverId": "io.example/logs", "success": "yes"},
+            artifact_digest=sibling.metadata.content_digest,
+            created_at_ms=999_993,
+        )
+
+        reputation = await self.acquisition.reputation_snapshot(
+            user_id="user-1", server_id="io.example/logs"
+        )
+        self.assertEqual((reputation.successes, reputation.failures), (1, 1))
+        self.assertEqual(reputation.total, 2)
+        self.assertEqual(reputation.last_observed_at_ms, 999_992)
+        candidate, _remote_url = await self.acquisition.require_mount_candidate(row, goal=_goal())
+        self.assertEqual((candidate.successes, candidate.failures), (1, 1))
+        self.assertGreaterEqual(self.fabric.utility_score(candidate), 0.0)
 
     async def test_mount_revalidates_live_identity_and_task_scope(self):
         acquired = await self.acquisition.discover_and_qualify(
@@ -484,6 +548,7 @@ class CapabilityOsRemoteMcpTests(unittest.IsolatedAsyncioTestCase):
             store=self.store,
             authority=self.authority,
             connector=self.connector,
+            evidence=self.evidence,
         )
         result = await executor.invoke(
             action_ref=f"mcp://{mount.mount_id}/resource.logs",
@@ -494,6 +559,20 @@ class CapabilityOsRemoteMcpTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result.output["tool"], "resource.logs")
         self.assertEqual(len(self.connector.calls), 1)
+        outcomes = [
+            row for row in await self.store.list_evidence("task-1")
+            if row.kind == "mcp.invoke.outcome"
+        ]
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].producer_identity, "capability-os-control")
+        self.assertTrue(outcomes[0].claims["success"])
+        self.assertEqual(outcomes[0].claims["serverId"], "io.example/logs")
+        self.assertNotIn("inputs", outcomes[0].claims)
+        self.assertNotIn("output", outcomes[0].claims)
+        reputation = await self.acquisition.reputation_snapshot(
+            user_id="user-1", server_id="io.example/logs"
+        )
+        self.assertEqual((reputation.successes, reputation.failures), (1, 0))
 
         with self.assertRaises(PermissionError):
             await executor.invoke(

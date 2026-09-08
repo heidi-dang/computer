@@ -15,7 +15,7 @@ import ipaddress
 import json
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit, urlunsplit
@@ -24,6 +24,7 @@ import httpx
 
 from cptr.services.capability_os.authority import AuthorityBroker, CapabilityLease
 from cptr.services.capability_os.credential_broker import CredentialBroker
+from cptr.services.capability_os.evidence import EvidenceService
 from cptr.services.capability_os.contracts import (
     ArtifactKind,
     ArtifactOrigin,
@@ -35,6 +36,7 @@ from cptr.services.capability_os.contracts import (
     digest_payload,
 )
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpCandidate, McpFabric
+from cptr.services.capability_os.mcp_reputation import McpReputationService
 from cptr.services.capability_os.mcp_package import (
     BRIDGE_ENTRYPOINT,
     McpbPackageError,
@@ -504,6 +506,7 @@ class McpAcquisitionService:
         package_resources: dict[str, Any] | None = None,
         auth_provider: ConfigRemoteMcpAuthProvider | None = None,
         credential_broker: CredentialBroker | None = None,
+        reputation: McpReputationService | None = None,
         clock_ms=lambda: int(time.time() * 1000),
         max_candidates: int = 8,
     ) -> None:
@@ -513,6 +516,7 @@ class McpAcquisitionService:
         self._connector = connector
         self._auth_provider = auth_provider
         self._credential_broker = credential_broker
+        self._reputation = reputation or McpReputationService(store=store)
         self._package_preparer = package_preparer
         self._package_runner = package_runner
         self._package_resources = dict(package_resources or {})
@@ -622,6 +626,23 @@ class McpAcquisitionService:
             sandboxable=True,
             hard_denies=(),
         )
+
+    async def _candidate_with_reputation(self, row) -> McpCandidate:
+        candidate = self._candidate_from_artifact(row)
+        if not row.user_id:
+            return candidate
+        reputation = await self._reputation.snapshot(
+            user_id=row.user_id,
+            server_id=candidate.server_id,
+        )
+        return replace(
+            candidate,
+            successes=reputation.successes,
+            failures=reputation.failures,
+        )
+
+    async def reputation_snapshot(self, *, user_id: str, server_id: str):
+        return await self._reputation.snapshot(user_id=user_id, server_id=server_id)
 
     async def discover_and_qualify(
         self,
@@ -1018,7 +1039,7 @@ class McpAcquisitionService:
         qualified_row = await self._store.persist_artifact(artifact)
         return AuthenticatedRemoteMcpQualification(
             artifact_digest=qualified_row.content_digest,
-            candidate=self._candidate_from_artifact(qualified_row),
+            candidate=await self._candidate_with_reputation(qualified_row),
             observation=observation,
             projected_match=tuple(item for item in required if item in available),
         )
@@ -1119,7 +1140,7 @@ class McpAcquisitionService:
             state=ArtifactState.EPHEMERAL,
         )
         qualified_row = await self._store.persist_artifact(artifact)
-        candidate = self._candidate_from_artifact(qualified_row)
+        candidate = await self._candidate_with_reputation(qualified_row)
         return PackagedMcpQualification(
             artifact_digest=qualified_row.content_digest,
             candidate=candidate,
@@ -1213,7 +1234,7 @@ class McpAcquisitionService:
                 or str(package.get("bundleDigest") or "") != row.source_digest
             ):
                 raise PermissionError("packaged MCP adapter is not sandbox-qualified")
-            candidate = self._candidate_from_artifact(row)
+            candidate = await self._candidate_with_reputation(row)
             qualification = self._fabric.qualify(candidate)
             if not qualification.eligible:
                 raise PermissionError("packaged MCP adapter failed server qualification")
@@ -1247,7 +1268,7 @@ class McpAcquisitionService:
         expected = str(spec.get("identityFingerprint") or "")
         if not expected or observation.fingerprint != expected:
             raise PermissionError("remote MCP identity changed; reacquisition is required")
-        candidate = self._candidate_from_artifact(row)
+        candidate = await self._candidate_with_reputation(row)
         qualification = self._fabric.qualify(candidate)
         if not qualification.eligible:
             raise PermissionError("MCP adapter failed server qualification")
@@ -1270,6 +1291,7 @@ class ProjectedMcpActionExecutor:
         connector: StreamableHttpMcpConnector,
         packaged_invoke: Any = None,
         credential_broker: CredentialBroker | None = None,
+        evidence: EvidenceService | None = None,
     ) -> None:
         self._base = base_executor
         self._store = store
@@ -1277,6 +1299,39 @@ class ProjectedMcpActionExecutor:
         self._connector = connector
         self._packaged_invoke = packaged_invoke
         self._credential_broker = credential_broker
+        self._evidence = evidence
+
+    async def _record_outcome(
+        self,
+        *,
+        mount,
+        server_id: str,
+        tool: str,
+        transport: str,
+        success: bool,
+        verification_passed: bool | None = None,
+        error_type: str | None = None,
+    ) -> None:
+        if self._evidence is None:
+            return
+        claims: dict[str, Any] = {
+            "serverId": server_id,
+            "tool": tool,
+            "transport": transport,
+            "success": bool(success),
+        }
+        if verification_passed is not None:
+            claims["verificationPassed"] = bool(verification_passed)
+        if error_type:
+            claims["errorType"] = str(error_type)[:160]
+        await self._evidence.record(
+            task_id=mount.task_id,
+            kind="mcp.invoke.outcome",
+            producer_identity="capability-os-control",
+            claims=claims,
+            artifact_digest=mount.digest,
+            lease_id=mount.lease_id,
+        )
 
     @staticmethod
     def _parse(action_ref: str) -> tuple[str, str] | None:
@@ -1349,17 +1404,36 @@ class ProjectedMcpActionExecutor:
         if packaged:
             if self._packaged_invoke is None:
                 raise PermissionError("packaged MCP runtime is unavailable")
-            result = self._packaged_invoke(
-                artifact=artifact,
-                tool_name=tool,
-                arguments=dict(inputs),
-                task_id=mount.task_id,
-                timeout_ms=int(timeout_ms),
+            try:
+                result = self._packaged_invoke(
+                    artifact=artifact,
+                    tool_name=tool,
+                    arguments=dict(inputs),
+                    task_id=mount.task_id,
+                    timeout_ms=int(timeout_ms),
+                )
+                if asyncio.iscoroutine(result):
+                    result = await result
+                if not isinstance(result, ActionResult):
+                    raise TypeError("packaged MCP executor returned an invalid result")
+            except Exception as exc:
+                await self._record_outcome(
+                    mount=mount,
+                    server_id=server_id,
+                    tool=tool,
+                    transport="stdio-gvisor",
+                    success=False,
+                    error_type=exc.__class__.__name__,
+                )
+                raise
+            await self._record_outcome(
+                mount=mount,
+                server_id=server_id,
+                tool=tool,
+                transport="stdio-gvisor",
+                success=bool(result.verification_passed),
+                verification_passed=bool(result.verification_passed),
             )
-            if asyncio.iscoroutine(result):
-                result = await result
-            if not isinstance(result, ActionResult):
-                raise TypeError("packaged MCP executor returned an invalid result")
             return result
         if not remote_url:
             raise PermissionError("remote MCP adapter identity is incomplete")
@@ -1379,7 +1453,27 @@ class ProjectedMcpActionExecutor:
                 arguments=dict(inputs),
             )
         )
-        return await asyncio.wait_for(
-            invocation,
-            timeout=max(0.001, int(timeout_ms) / 1000),
+        try:
+            result = await asyncio.wait_for(
+                invocation,
+                timeout=max(0.001, int(timeout_ms) / 1000),
+            )
+        except Exception as exc:
+            await self._record_outcome(
+                mount=mount,
+                server_id=server_id,
+                tool=tool,
+                transport="streamable-http",
+                success=False,
+                error_type=exc.__class__.__name__,
+            )
+            raise
+        await self._record_outcome(
+            mount=mount,
+            server_id=server_id,
+            tool=tool,
+            transport="streamable-http",
+            success=bool(result.verification_passed),
+            verification_passed=bool(result.verification_passed),
         )
+        return result
