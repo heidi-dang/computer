@@ -7,10 +7,30 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
 from pathlib import Path
+
+
+def _seal_candidate(destination: Path) -> None:
+    """Make a built candidate immutable to its non-root builder identity.
+
+    Qualification may execute the relocated interpreter before root-owned
+    installation.  If candidate directories remain owner-writable, CPython can
+    create ``__pycache__`` files and silently change the measured tree digest.
+    Seal every file and directory after construction so qualification is a
+    read-only operation and the content-addressed identity stays stable.
+    """
+    for current, _dirs, files in os.walk(destination, topdown=False):
+        directory = Path(current)
+        for name in files:
+            path = directory / name
+            mode = stat.S_IMODE(path.stat().st_mode)
+            path.chmod(0o555 if mode & 0o111 else 0o444)
+        directory.chmod(0o555)
+
 
 def build(destination):
     destination = Path(destination).absolute()
@@ -69,8 +89,7 @@ def build(destination):
         (destination / path).mkdir(mode=0o755, exist_ok=True)
     (destination / "etc/passwd").write_text("nobody:x:65534:65534:Sandbox:/tmp:/nonexistent\n")
     (destination / "etc/group").write_text("nogroup:x:65534:\n")
-    for current, dirs, files in os.walk(destination):
-        Path(current).chmod(0o755)
+    _seal_candidate(destination)
     result = {"rootfs": str(destination), "pythonVersion": "Python " + sys.version.split()[0],
               "profileVersion": "cptr-python-gvisor/2", "source": "installed-host-python",
               "files": len(copied)}
