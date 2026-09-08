@@ -91,6 +91,69 @@ class CapabilityOsSkillForgeTests(unittest.IsolatedAsyncioTestCase):
         row = await self.store.get_artifact(artifact.metadata.content_digest)
         self.assertEqual(row.kind, "Skill")
 
+    async def test_portable_skill_export_import_recomputes_identity_and_carries_no_authority(self):
+        source = await self.forge.create(
+            skill_id="debug.distributed-lifecycle",
+            version="1",
+            task_id="task-1",
+            user_id="user-1",
+            genome=self.genome,
+        )
+        exported = await self.forge.export_bundle(source.metadata.content_digest)
+        bundle = exported["bundle"]
+        self.assertTrue(exported["bundleDigest"].startswith("sha256:"))
+        self.assertEqual(bundle["apiVersion"], "cptr.io/skill-bundle/v1")
+        self.assertEqual(
+            [step["tool"] for step in bundle["spec"]["executionHints"]["mcpSteps"]],
+            ["resource.inspect", "resource.logs"],
+        )
+        rendered = str(bundle).lower()
+        self.assertNotIn("permissions", rendered)
+        self.assertNotIn("credential", rendered)
+        self.assertNotIn("mountid", rendered)
+        self.assertNotIn("serverid", rendered)
+
+        imported, bundle_digest, source_digest = await self.forge.import_bundle(
+            bundle=bundle,
+            task_id="task-2",
+            user_id="user-2",
+        )
+        self.assertEqual(bundle_digest, exported["bundleDigest"])
+        self.assertEqual(source_digest, source.metadata.content_digest)
+        self.assertEqual(imported.metadata.owner, ArtifactOwner.USER)
+        self.assertEqual(imported.metadata.origin, ArtifactOrigin.IMPORTED)
+        self.assertEqual(imported.metadata.user_id, "user-2")
+        self.assertEqual(imported.metadata.task_origin, "task-2")
+        self.assertEqual(imported.metadata.source_digest, exported["bundleDigest"])
+        self.assertEqual(imported.state, ArtifactState.EPHEMERAL)
+        self.assertNotEqual(imported.metadata.content_digest, source.metadata.content_digest)
+        imported_genome = SkillGenome.from_spec(imported.spec)
+        self.assertEqual(
+            tuple(step.tool_name for step in imported_genome.mcp_steps),
+            ("resource.inspect", "resource.logs"),
+        )
+
+        tampered = {**bundle, "spec": {**bundle["spec"], "permissions": [{"action": "*"}]}}
+        with self.assertRaisesRegex(ValueError, "authority field: permissions"):
+            await self.forge.import_bundle(
+                bundle=tampered,
+                task_id="task-2",
+                user_id="user-2",
+            )
+        nested = {
+            **bundle,
+            "spec": {
+                **bundle["spec"],
+                "context": {**bundle["spec"]["context"], "mountId": "caller-mount"},
+            },
+        }
+        with self.assertRaisesRegex(ValueError, "authority field: mountId"):
+            await self.forge.import_bundle(
+                bundle=nested,
+                task_id="task-2",
+                user_id="user-2",
+            )
+
     async def test_fork_and_mutation_preserve_lineage_and_parent(self):
         parent = await self.forge.create(
             skill_id="debug.distributed-lifecycle",

@@ -163,7 +163,22 @@ class CapabilityOsControlService:
 
     async def inspect(self, *, user_id, task_id, artifact_digest=None, limit=50):
         task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
-        artifact = _artifact(await self._visible(user_id, task_id, artifact_digest)) if artifact_digest else None
+        artifact_row = await self._visible(user_id, task_id, artifact_digest) if artifact_digest else None
+        artifact = _artifact(artifact_row) if artifact_row is not None else None
+        artifact_reputation = None
+        if (
+            artifact_row is not None
+            and artifact_row.kind == ArtifactKind.MCP_ADAPTER.value
+            and self.mcp_acquisition is not None
+        ):
+            server_id = str((artifact_row.spec or {}).get("serverId") or "").strip()
+            if server_id:
+                artifact_reputation = (
+                    await self.mcp_acquisition.reputation_snapshot(
+                        user_id=user_id,
+                        server_id=server_id,
+                    )
+                ).to_api()
         rows = await self.store.list_artifacts(user_id=user_id, include_global=True, limit=max(1, min(int(limit), 100)))
         leases = await self.store.list_active_leases(task_id, now_ms=int(self.clock_ms()))
         mounts = await self.store.list_active_mounts(task_id)
@@ -173,7 +188,8 @@ class CapabilityOsControlService:
             row for row in rows
             if row.state != ArtifactState.EPHEMERAL.value or row.task_origin == task_id
         ]
-        return {"task": _task(task), "artifact": artifact, "artifacts": [_artifact(r) for r in visible_rows],
+        return {"task": _task(task), "artifact": artifact, "artifactReputation": artifact_reputation,
+                "artifacts": [_artifact(r) for r in visible_rows],
                 "activeLeases": [{"leaseId": r.lease_id, "artifactDigest": r.artifact_digest,
                                   "permissions": list(r.permissions or []), "runtimeProfile": r.runtime_profile,
                                   "expiresAtMs": int(r.expires_at_ms)} for r in leases],
@@ -198,6 +214,60 @@ class CapabilityOsControlService:
 
     async def forge(self, *, user_id, task_id, operation, payload):
         operation = operation.strip().lower()
+        if operation == "skill-export":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            if set(payload) - {"contentDigest"}:
+                raise ValueError("skill-export accepts only contentDigest")
+            digest = str(payload.get("contentDigest") or "").strip()
+            row = await self._visible(user_id, task_id, digest)
+            if row.kind != ArtifactKind.SKILL.value:
+                raise ValueError("skill-export requires a Skill artifact")
+            exported = await self.skill_forge.export_bundle(digest)
+            evidence = await self.evidence.record(
+                task_id=task_id,
+                kind="skill.export",
+                producer_identity="capability-os-control",
+                claims={
+                    "bundleDigest": exported["bundleDigest"],
+                    "sourceContentDigest": digest,
+                    "format": "cptr.io/skill-bundle/v1",
+                },
+                artifact_digest=digest,
+            )
+            return {
+                "task": _task(task),
+                **exported,
+                "evidenceId": evidence.evidence_id,
+            }
+        if operation == "skill-import":
+            task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
+            if set(payload) - {"bundle"}:
+                raise ValueError("skill-import accepts only bundle")
+            bundle = payload.get("bundle")
+            if not isinstance(bundle, dict):
+                raise ValueError("skill-import requires a bundle object")
+            artifact, bundle_digest, source_content_digest = await self.skill_forge.import_bundle(
+                bundle=dict(bundle),
+                task_id=task_id,
+                user_id=user_id,
+            )
+            evidence = await self.evidence.record(
+                task_id=task_id,
+                kind="skill.import",
+                producer_identity="capability-os-control",
+                claims={
+                    "bundleDigest": bundle_digest,
+                    "sourceContentDigest": source_content_digest,
+                    "format": "cptr.io/skill-bundle/v1",
+                },
+                artifact_digest=artifact.metadata.content_digest,
+            )
+            return {
+                "task": _task(task),
+                "artifact": artifact.to_dict(),
+                "bundleDigest": bundle_digest,
+                "evidenceId": evidence.evidence_id,
+            }
         if operation == "skill-create":
             task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
             genome_payload = payload.get("genome")
@@ -530,6 +600,7 @@ class CapabilityOsControlService:
                 connector=self.mcp_connector,
                 packaged_invoke=self._invoke_packaged_mcp,
                 credential_broker=self.credential_broker,
+                evidence=self.evidence,
             )
         try:
             result = await CapabilityVm(executor=executor, evidence=self.evidence, clock_ms=self.clock_ms).execute(

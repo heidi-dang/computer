@@ -397,6 +397,39 @@ class SqlCapabilityOsStore:
         async with self._session_factory() as db:
             return await db.get(CapabilityOsEvidence, evidence_id)
 
+    async def list_evidence_for_artifacts(
+        self,
+        artifact_digests: tuple[str, ...],
+        *,
+        kinds: tuple[str, ...] = (),
+        producer_identity: str | None = None,
+        limit: int = 5_000,
+    ) -> list[CapabilityOsEvidence]:
+        digests = tuple(dict.fromkeys(str(item).strip() for item in artifact_digests if str(item).strip()))
+        if not digests:
+            return []
+        if len(digests) > 1_000:
+            raise ValueError("artifact evidence query exceeds digest bound")
+        limit = max(1, min(int(limit), 10_000))
+        async with self._session_factory() as db:
+            query = select(CapabilityOsEvidence).where(
+                CapabilityOsEvidence.artifact_digest.in_(digests)
+            )
+            if kinds:
+                query = query.where(CapabilityOsEvidence.kind.in_(tuple(kinds)))
+            if producer_identity is not None:
+                query = query.where(CapabilityOsEvidence.producer_identity == producer_identity)
+            return list(
+                (
+                    await db.scalars(
+                        query.order_by(
+                            CapabilityOsEvidence.created_at_ms,
+                            CapabilityOsEvidence.evidence_id,
+                        ).limit(limit)
+                    )
+                ).all()
+            )
+
     async def list_evidence(self, task_id: str, *, limit: int = 100) -> list[CapabilityOsEvidence]:
         limit = max(1, min(int(limit), 500))
         async with self._session_factory() as db:
