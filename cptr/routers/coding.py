@@ -55,6 +55,7 @@ from cptr.services.local_root_grants import (
     parse_root_command_directive,
 )
 from cptr.services.workspace_availability import is_workspace_available
+from cptr.services.workbench_sessions import workbench_session_store
 from cptr.utils.db import get_db
 from cptr.utils.identity import (
     IdentityUnavailable,
@@ -288,12 +289,18 @@ class TestTargetRequest(WorkerTargetRequest):
     path: str = Field(default=".", min_length=1, max_length=1_000)
     test_path: str | None = Field(default=None, min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
+    workbench_session_id: str | None = Field(
+        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
+    )
 
 
 class SshCommandRequest(BaseModel):
     alias: str = Field(min_length=1, max_length=MAX_SSH_ALIAS_CHARS)
     command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
     wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
+    workbench_session_id: str | None = Field(
+        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
+    )
 
 
 class BrowserControlRequest(BaseModel):
@@ -386,6 +393,22 @@ async def _workspace(user_id: str, workspace_id: str) -> Workspace:
     return workspace
 
 
+async def _validate_workbench_routing(
+    *, user_id: str, workspace_id: str, session_id: str | None
+) -> dict[str, Any] | None:
+    if not session_id:
+        return None
+    session = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+    if str(session.get("status") or "").upper() == "ARCHIVED" or session.get("archived_at"):
+        raise HTTPException(status_code=409, detail="workbench session is archived")
+    bound_workspace = session.get("workspace_id")
+    if bound_workspace and str(bound_workspace) != workspace_id:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+    return session
+
+
 def _raise_worker_error(exc: DirectCodingWorkerError) -> None:
     raise HTTPException(
         status_code=exc.status_code,
@@ -416,7 +439,13 @@ async def _touch_worker(user_id: str, workspace_id: str, worker_id: str | None) 
 
 
 def _command_context(
-    *, request: Request, user_id: str, workspace_id: str, workspace_path: str, worker_id: str | None
+    *,
+    request: Request,
+    user_id: str,
+    workspace_id: str,
+    workspace_path: str,
+    worker_id: str | None,
+    workbench_session_id: str | None = None,
 ) -> dict[str, Any]:
     context: dict[str, Any] = {
         "workspace": workspace_path,
@@ -426,6 +455,8 @@ def _command_context(
     }
     if worker_id:
         context["direct_worker_id"] = worker_id
+    if workbench_session_id:
+        context["workbench_session_id"] = workbench_session_id
     return context
 
 
@@ -1649,6 +1680,11 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
     """Run one fixed local validation profile; callers cannot provide arbitrary commands."""
     user_id = await _user(request, "command:execute")
     workspace = await _workspace(user_id, workspace_id)
+    await _validate_workbench_routing(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        session_id=body.workbench_session_id,
+    )
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     _, relative_cwd = _relative_path(body.path, root)
     test_relative = None
@@ -1682,6 +1718,7 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
             workspace_id=workspace_id,
             workspace_path=str(root),
             worker_id=body.worker_id,
+            workbench_session_id=body.workbench_session_id,
         ),
         __argv=argv,
         __use_pty=False,
@@ -2235,6 +2272,11 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         lifecycle_timing["auth_memory_ms"] = round((now - phase_started) * 1000.0, 3)
         phase_started = now
     workspace = await _workspace(user_id, workspace_id)
+    await _validate_workbench_routing(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        session_id=body.workbench_session_id,
+    )
     if body.measure_lifecycle:
         now = time.perf_counter()
         lifecycle_timing["workspace_lookup_ms"] = round((now - phase_started) * 1000.0, 3)
@@ -2391,6 +2433,8 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         workspace_path=str(root),
         worker_id=body.worker_id,
     )
+    if body.workbench_session_id:
+        command_context["workbench_session_id"] = body.workbench_session_id
     if root_unrestricted:
         command_context["local_root_unrestricted"] = True
         command_context["root_workbench_session_id"] = body.workbench_session_id
@@ -2858,6 +2902,11 @@ async def start_ssh_command(request: Request, workspace_id: str, body: SshComman
     user_id = await _user(request, "command:execute")
     _require_external_scope(request)
     workspace = await _workspace(user_id, workspace_id)
+    await _validate_workbench_routing(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        session_id=body.workbench_session_id,
+    )
     if "\x00" in body.command:
         raise HTTPException(status_code=422, detail="SSH command contains an invalid NUL byte")
     if not _SSH_ALIAS_RE.fullmatch(body.alias):
@@ -2891,6 +2940,11 @@ async def start_ssh_command(request: Request, workspace_id: str, body: SshComman
             "workspace_id": workspace_id,
             "request": request,
             "user_id": user_id,
+            **(
+                {"workbench_session_id": body.workbench_session_id}
+                if body.workbench_session_id
+                else {}
+            ),
         },
         __argv=argv,
     )

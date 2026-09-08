@@ -44,6 +44,21 @@ class LocalRootCommandRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         self.root_feature_patch.start()
         self.addCleanup(self.root_feature_patch.stop)
+        # Root-route tests exercise root authority semantics, not Workbench
+        # ownership rejection. Supply the valid owned Workbench prerequisite
+        # now required by command routing; dedicated routing tests cover
+        # missing/foreign/archived sessions separately.
+        self.workbench_patch = patch(
+            "cptr.routers.coding.workbench_session_store.get",
+            new=AsyncMock(return_value={
+                "session_id": "wbs_1234567890abcdef",
+                "workspace_id": "ws-1",
+                "status": "OPEN",
+                "archived_at": None,
+            }),
+        )
+        self.workbench_patch.start()
+        self.addCleanup(self.workbench_patch.stop)
 
     @staticmethod
     def _request():

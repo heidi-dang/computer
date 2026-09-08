@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -82,6 +83,46 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("after-idle", event)
             await iterator.aclose()
 
+    async def test_workbench_stream_survives_target_terminal_event_for_next_target(self):
+        parameters = inspect.signature(control_stream._stream).parameters
+        self.assertIn("stop_on_terminal", parameters)
+
+        hub = LiveEventHub(store=LiveEventStore())
+        request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+        with patch.object(control_stream, "live_event_hub", hub):
+            iterator = control_stream._stream(
+                request,
+                target_key="workbench:wbs_1234567890abcdef",
+                snapshot={"target": "workbench", "snapshot": {"status": "OPEN"}},
+                after_sequence=0,
+                stop_on_terminal=False,
+            ).__aiter__()
+            await iterator.__anext__()
+            await hub.publish(
+                user_id="user-1",
+                target_key="workbench:wbs_1234567890abcdef",
+                event_type="command.completed",
+                payload={
+                    "target": {"type": "command", "id": "cmd-1", "workspace_id": "ws-1"},
+                    "payload": {"status": "COMPLETE", "exit_code": 0},
+                },
+            )
+            completed = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+            self.assertIn("command.completed", completed)
+
+            await hub.publish(
+                user_id="user-1",
+                target_key="workbench:wbs_1234567890abcdef",
+                event_type="command.started",
+                payload={
+                    "target": {"type": "command", "id": "cmd-2", "workspace_id": "ws-1"},
+                    "payload": {"status": "RUNNING"},
+                },
+            )
+            started = await asyncio.wait_for(iterator.__anext__(), timeout=0.2)
+            self.assertIn("cmd-2", started)
+            await iterator.aclose()
+
     async def test_terminal_snapshot_closes_without_polling(self):
         request = SimpleNamespace(
             headers={},
@@ -150,6 +191,48 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["snapshot"]["status"], "RUNNING")
         self.assertEqual(snapshot["replay"]["last_sequence"], 1)
         self.assertEqual(snapshot["replay"]["events"][0]["type"], "terminal.chunk")
+
+    async def test_workbench_recovery_snapshot_is_owner_scoped_and_replayable(self):
+        handler = getattr(control_stream, "workbench_stream_snapshot", None)
+        self.assertTrue(callable(handler), "Workbench live snapshot endpoint must exist")
+
+        hub = LiveEventHub(store=LiveEventStore())
+        await hub.publish(
+            user_id="user-1",
+            target_key="workbench:wbs_1234567890abcdef",
+            event_type="command.started",
+            payload={
+                "target": {"type": "command", "id": "cmd-1", "workspace_id": "ws-1"},
+                "payload": {"status": "RUNNING"},
+            },
+        )
+        request = SimpleNamespace(headers={}, query_params={"after": "0"})
+        session = {
+            "session_id": "wbs_1234567890abcdef",
+            "name": "CPTR",
+            "status": "RUNNING",
+            "workspace_id": "ws-1",
+            "active_target_type": "command",
+            "active_target_id": "cmd-1",
+            "active_workspace_id": "ws-1",
+        }
+        get_session = AsyncMock(return_value=session)
+        with (
+            patch.object(control_stream, "live_event_hub", hub),
+            patch.object(control_stream, "_user", new=AsyncMock(return_value="user-1")) as user,
+            patch.object(control_stream, "workbench_session_store", create=True) as store,
+        ):
+            store.get = get_session
+            snapshot = await handler(request, "wbs_1234567890abcdef")
+
+        user.assert_awaited_once_with(request, "task:read")
+        get_session.assert_awaited_once_with(
+            owner_id="user-1", session_id="wbs_1234567890abcdef"
+        )
+        self.assertEqual(snapshot["target"], "workbench")
+        self.assertEqual(snapshot["snapshot"]["session_id"], "wbs_1234567890abcdef")
+        self.assertEqual(snapshot["replay"]["last_sequence"], 1)
+        self.assertEqual(snapshot["replay"]["events"][0]["type"], "command.started")
 
     async def test_command_recovery_snapshot_is_workspace_owned_redacted_and_replayable(self):
         hub = LiveEventHub(store=LiveEventStore())

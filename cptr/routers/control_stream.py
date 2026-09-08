@@ -13,7 +13,13 @@ from fastapi.responses import StreamingResponse
 
 from cptr.routers.coding import _coding_root, _command_snapshot, _workspace
 from cptr.routers.control import _services, _user
-from cptr.services.live_events import LiveEventEnvelope, command_target_key, live_event_hub
+from cptr.services.live_events import (
+    LiveEventEnvelope,
+    command_target_key,
+    live_event_hub,
+    workbench_target_key,
+)
+from cptr.services.workbench_sessions import workbench_session_store
 from cptr.utils.redaction import redact_external_text
 
 router = APIRouter(prefix="/api/control/v1", tags=["control-live"])
@@ -40,6 +46,31 @@ def _task_snapshot(task: dict[str, Any]) -> dict[str, Any]:
         for key in ("id", "workspace_id", "status", "error", "created_at", "updated_at")
         if key in task
     }
+
+
+def _workbench_snapshot(session: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: session.get(key)
+        for key in (
+            "session_id",
+            "name",
+            "workspace_id",
+            "status",
+            "active_target_type",
+            "active_target_id",
+            "active_workspace_id",
+        )
+    }
+
+
+async def _owned_workbench_snapshot(request: Request, session_id: str) -> dict[str, Any]:
+    user_id = await _user(request, "task:read")
+    session = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+    if str(session.get("status") or "").upper() == "ARCHIVED":
+        raise HTTPException(status_code=409, detail="workbench session is archived")
+    return _workbench_snapshot(session)
 
 
 def _monitor_snapshot(monitor: Any) -> dict[str, Any]:
@@ -76,11 +107,13 @@ async def _stream(
     target_key: str,
     snapshot: dict[str, Any],
     after_sequence: int,
+    stop_on_terminal: bool = True,
 ) -> AsyncIterator[str]:
     yield _sse(event="snapshot", event_id="0", data=snapshot)
     snapshot_value = snapshot.get("snapshot")
     if (
-        isinstance(snapshot_value, dict)
+        stop_on_terminal
+        and isinstance(snapshot_value, dict)
         and str(snapshot_value.get("status", "")).upper() in TERMINAL_STATUSES
     ):
         return
@@ -103,7 +136,9 @@ async def _stream(
 
             yield _sse(event=_event_name(event), event_id=str(event.sequence), data=event.to_dict())
             status = str(event.payload.get("status", "")).upper()
-            if status in TERMINAL_STATUSES or event.event_type.endswith(".terminal"):
+            if stop_on_terminal and (
+                status in TERMINAL_STATUSES or event.event_type.endswith(".terminal")
+            ):
                 return
             pending = asyncio.create_task(iterator.__anext__())
     finally:
@@ -130,6 +165,37 @@ async def _recovery_snapshot(*, target_key: str, target: str, snapshot: dict[str
         "snapshot": snapshot,
         "replay": replay,
     }
+
+
+@router.get("/workbench-sessions/{session_id}/stream/snapshot")
+async def workbench_stream_snapshot(request: Request, session_id: str):
+    snapshot = await _owned_workbench_snapshot(request, session_id)
+    return await _recovery_snapshot(
+        target_key=workbench_target_key(session_id),
+        target="workbench",
+        snapshot=snapshot,
+        after=_after_sequence(request),
+    )
+
+
+@router.get("/workbench-sessions/{session_id}/stream")
+async def workbench_stream(request: Request, session_id: str):
+    snapshot = await _owned_workbench_snapshot(request, session_id)
+    return StreamingResponse(
+        _stream(
+            request,
+            target_key=workbench_target_key(session_id),
+            snapshot={"target": "workbench", "snapshot": snapshot},
+            after_sequence=_after_sequence(request),
+            stop_on_terminal=False,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/tasks/{task_id}/stream/snapshot")

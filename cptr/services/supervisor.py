@@ -419,6 +419,7 @@ class AutonomousSupervisor:
         model_id: str,
         idempotency_key: str | None = None,
         execution_policy: dict[str, bool] | None = None,
+        workbench_session_id: str | None = None,
     ) -> MonitorState:
         normalized_goal = goal.strip()
         criteria = [item.strip() for item in acceptance_criteria if item.strip()]
@@ -444,9 +445,10 @@ class AutonomousSupervisor:
             original_acceptance_criteria=list(criteria),
             model_id=model_id,
             scopes=scopes,
-            director_state=(
-                {"execution_policy": dict(execution_policy)} if execution_policy else {}
-            ),
+            director_state={
+                **({"execution_policy": dict(execution_policy)} if execution_policy else {}),
+                **({"workbench_session_id": workbench_session_id} if workbench_session_id else {}),
+            },
         )
         return await self.store.create_monitor(monitor, idempotency_key)
 
@@ -1141,6 +1143,11 @@ class AutonomousSupervisor:
                 else None
             ),
             review_required=False,
+            **(
+                {"workbench_session_id": monitor.director_state.get("workbench_session_id")}
+                if monitor.director_state.get("workbench_session_id")
+                else {}
+            ),
         )
         if str(task.get("status") or "").upper() in {"FAILED", "ERROR", "CANCELLED"}:
             raise RuntimeError("idempotent worker task is already terminal and unsuccessful")
