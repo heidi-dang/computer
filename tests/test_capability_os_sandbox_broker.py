@@ -8,6 +8,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cptr.services.capability_os.sandbox_broker import (
+    BROKER_PROTOCOL_V1,
+    BROKER_PROTOCOL_V2,
     BrokerProtocolError,
     SandboxBrokerClient,
     SandboxRequest,
@@ -15,6 +17,54 @@ from cptr.services.capability_os.sandbox_broker import (
 
 
 class CapabilityOsSandboxBrokerTests(unittest.IsolatedAsyncioTestCase):
+    def test_protocol_v1_remains_parseable_without_runtime_inputs(self):
+        request = SandboxRequest(
+            operation="status",
+            task_id="task-1",
+            lease_id="lease-1",
+            artifact_digest="sha256:" + "1" * 64,
+            runtime_class="gvisor",
+            bundle_digest="sha256:" + "2" * 64,
+            profile="python",
+            protocol_version=BROKER_PROTOCOL_V1,
+        )
+        payload = request.to_dict()
+        self.assertEqual(payload["protocolVersion"], BROKER_PROTOCOL_V1)
+        self.assertNotIn("inputs", payload)
+        parsed = SandboxRequest.from_dict(payload)
+        self.assertEqual(parsed.protocol_version, BROKER_PROTOCOL_V1)
+        self.assertEqual(parsed.inputs, {})
+
+        with self.assertRaisesRegex(BrokerProtocolError, "v1 does not support runtime inputs"):
+            SandboxRequest(
+                operation="run",
+                task_id="task-1",
+                lease_id="lease-1",
+                artifact_digest="sha256:" + "1" * 64,
+                runtime_class="gvisor",
+                bundle_digest="sha256:" + "2" * 64,
+                profile="python",
+                inputs={"x": 1},
+                protocol_version=BROKER_PROTOCOL_V1,
+            )
+
+    def test_protocol_v2_explicitly_carries_bounded_runtime_inputs(self):
+        request = SandboxRequest(
+            operation="run",
+            task_id="task-1",
+            lease_id="lease-1",
+            artifact_digest="sha256:" + "1" * 64,
+            runtime_class="gvisor",
+            bundle_digest="sha256:" + "2" * 64,
+            profile="python",
+            inputs={"x": 1},
+        )
+        payload = request.to_dict()
+        self.assertEqual(payload["protocolVersion"], BROKER_PROTOCOL_V2)
+        self.assertEqual(payload["inputs"], {"x": 1})
+        parsed = SandboxRequest.from_dict(payload)
+        self.assertEqual(parsed.inputs, {"x": 1})
+
     def test_request_rejects_shell_passthrough_and_non_digest_identity(self):
         with self.assertRaises(BrokerProtocolError):
             SandboxRequest(

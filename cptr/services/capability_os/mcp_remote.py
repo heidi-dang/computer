@@ -34,6 +34,12 @@ from cptr.services.capability_os.contracts import (
     digest_payload,
 )
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpCandidate, McpFabric
+from cptr.services.capability_os.mcp_package import (
+    BRIDGE_ENTRYPOINT,
+    McpbPackageError,
+    McpbPackagePreparer,
+)
+from cptr.services.capability_os.runtime import RuntimeClass
 from cptr.services.capability_os.store import SqlCapabilityOsStore
 from cptr.services.capability_os.vm import ActionResult
 from cptr.services.factory_discovery import (
@@ -87,6 +93,17 @@ class AcquiredMcpAdapter:
     state: str
     eligible: bool
     reasons: tuple[str, ...]
+    projected_match: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PackagedMcpQualification:
+    artifact_digest: str
+    candidate: McpCandidate
+    protocol_version: str
+    server_name: str
+    server_version: str
+    attestation: dict[str, Any]
     projected_match: tuple[str, ...]
 
 
@@ -300,6 +317,9 @@ class McpAcquisitionService:
         fabric: McpFabric,
         discovery: FactoryDiscovery,
         connector: StreamableHttpMcpConnector,
+        package_preparer: McpbPackagePreparer | None = None,
+        package_runner: Any = None,
+        package_resources: dict[str, Any] | None = None,
         clock_ms=lambda: int(time.time() * 1000),
         max_candidates: int = 8,
     ) -> None:
@@ -307,6 +327,9 @@ class McpAcquisitionService:
         self._fabric = fabric
         self._discovery = discovery
         self._connector = connector
+        self._package_preparer = package_preparer
+        self._package_runner = package_runner
+        self._package_resources = dict(package_resources or {})
         self._clock_ms = clock_ms
         self._max_candidates = max(1, min(int(max_candidates), 32))
 
@@ -333,9 +356,27 @@ class McpAcquisitionService:
         return CapabilityRequest("mcp.invoke", f"mcp:{server_id}/*")
 
     @staticmethod
+    def _package_entries(candidate: DiscoveryCandidate) -> tuple[dict[str, Any], ...]:
+        packages = candidate.metadata.get("packages") if isinstance(candidate.metadata, dict) else None
+        if not isinstance(packages, list):
+            return ()
+        return tuple(item for item in packages[:20] if isinstance(item, dict) and item)
+
+    @staticmethod
+    def _package_kind(spec: dict[str, Any]) -> str:
+        package = spec.get("package") if isinstance(spec.get("package"), dict) else {}
+        return str(package.get("registryType") or "").strip().lower()
+
+    @staticmethod
+    def is_packaged_adapter(row) -> bool:
+        spec = dict(row.spec or {})
+        return isinstance(spec.get("package"), dict)
+
+    @staticmethod
     def _candidate_from_artifact(row) -> McpCandidate:
         spec = dict(row.spec or {})
         remote = spec.get("remote") if isinstance(spec.get("remote"), dict) else {}
+        package = spec.get("package") if isinstance(spec.get("package"), dict) else {}
         tool_rows = spec.get("tools") if isinstance(spec.get("tools"), list) else []
         tools = tuple(
             str(item.get("name") or "")
@@ -351,7 +392,11 @@ class McpAcquisitionService:
             server_id=server_id,
             version=str(row.version),
             digest=str(row.content_digest),
-            transport_kind=str(remote.get("transport") or ""),
+            transport_kind=(
+                str(remote.get("transport") or "")
+                if remote
+                else str(package.get("transport") or "")
+            ),
             tools=tools,
             permissions=permissions,
             identity_ok=True,
@@ -460,52 +505,126 @@ class McpAcquisitionService:
                     )
                 continue
 
-            # Packaged MCPs remain data-only until the gVisor qualification gate
-            # is promoted. Fetching is bounded and cannot execute the package.
-            if discovered.source_uri:
-                reasons: tuple[str, ...] = ("package-quarantined-pending-gvisor",)
+            packages = self._package_entries(discovered)
+            if packages:
+                package = next(
+                    (
+                        item
+                        for item in packages
+                        if str(item.get("registryType") or "").strip().lower() == "mcpb"
+                    ),
+                    packages[0],
+                )
+                registry_type = str(package.get("registryType") or "").strip().lower()
+                digest = ""
+                state = "rejected"
+                reasons: tuple[str, ...]
                 try:
-                    quarantine = await self._discovery.fetch_into_quarantine(
-                        discovered,
-                        budget=DiscoveryBudget(
-                            max_providers=1,
-                            max_results=1,
-                            max_bytes=16 * 1024 * 1024,
-                            max_runtime_ms=30_000,
-                        ),
-                    )
-                    if discovered.expected_digest and quarantine.digest != discovered.expected_digest:
-                        raise RemoteMcpError("published package digest does not match fetched bytes")
-                    spec = {
-                        "serverId": discovered.name,
-                        "acquisitionTaskId": task_id,
-                        "package": {
-                            "source": discovered.source_uri,
-                            "sha256": quarantine.digest,
-                            "sizeBytes": quarantine.size_bytes,
-                            "executable": False,
-                        },
-                        "qualification": {"state": "quarantined", "reason": reasons[0]},
-                    }
-                    artifact = create_artifact(
-                        artifact_id=f"mcp.adapter.{hashlib.sha256(discovered.identity.encode()).hexdigest()[:24]}",
-                        version=discovered.version or "unversioned",
-                        kind=ArtifactKind.MCP_ADAPTER,
-                        owner=ArtifactOwner.EXTERNAL,
-                        origin=ArtifactOrigin.MCP,
-                        spec=spec,
-                        created_at=self._created_at(int(self._clock_ms())),
-                        user_id=user_id,
-                        task_origin=task_id,
-                        source_digest=digest_payload(discovered.to_dict()),
-                        state=ArtifactState.EPHEMERAL,
-                    )
-                    row = await self._store.persist_artifact(artifact)
-                    digest = row.content_digest
-                    state = row.state
-                except (DiscoveryBudgetExceeded, RemoteMcpError, ValueError):
-                    digest = ""
-                    state = "rejected"
+                    if registry_type != "mcpb":
+                        reasons = ("package-install-runtime-disabled",)
+                        spec = {
+                            "serverId": discovered.name,
+                            "acquisitionTaskId": task_id,
+                            "registryStableId": discovered.stable_id,
+                            "registryIdentity": discovered.identity,
+                            "package": {
+                                **package,
+                                "source": None,
+                                "executable": False,
+                            },
+                            "qualification": {"state": "quarantined", "reason": reasons[0]},
+                        }
+                        artifact = create_artifact(
+                            artifact_id=(
+                                "mcp.adapter."
+                                + hashlib.sha256(discovered.identity.encode()).hexdigest()[:24]
+                            ),
+                            version=discovered.version or "unversioned",
+                            kind=ArtifactKind.MCP_ADAPTER,
+                            owner=ArtifactOwner.EXTERNAL,
+                            origin=ArtifactOrigin.MCP,
+                            spec=spec,
+                            created_at=self._created_at(int(self._clock_ms())),
+                            user_id=user_id,
+                            task_origin=task_id,
+                            source_digest=digest_payload(discovered.to_dict()),
+                            state=ArtifactState.EPHEMERAL,
+                        )
+                        row = await self._store.persist_artifact(artifact)
+                        digest, state = row.content_digest, row.state
+                    else:
+                        if not discovered.source_uri or not discovered.expected_digest:
+                            raise McpbPackageError(
+                                "MCPB package requires an HTTPS artifact URL and published SHA-256"
+                            )
+                        quarantine = await self._discovery.fetch_into_quarantine(
+                            discovered,
+                            budget=DiscoveryBudget(
+                                max_providers=1,
+                                max_results=1,
+                                max_bytes=16 * 1024 * 1024,
+                                max_runtime_ms=30_000,
+                            ),
+                        )
+                        if quarantine.digest != discovered.expected_digest:
+                            raise RemoteMcpError(
+                                "published package digest does not match fetched bytes"
+                            )
+                        if self._package_preparer is None or self._package_runner is None:
+                            raise McpbPackageError("MCPB gVisor runtime is not configured")
+                        content = quarantine.read_bytes(max_bytes=16 * 1024 * 1024)
+                        prepared = self._package_preparer.prepare(
+                            content, expected_version=discovered.version
+                        )
+                        reasons = ("package-awaiting-gvisor-qualification",)
+                        permission = self._permission(discovered.name)
+                        spec = {
+                            "serverId": discovered.name,
+                            "acquisitionTaskId": task_id,
+                            "registryStableId": discovered.stable_id,
+                            "registryIdentity": discovered.identity,
+                            "package": {
+                                **package,
+                                "source": discovered.source_uri,
+                                "sha256": quarantine.digest,
+                                "sizeBytes": quarantine.size_bytes,
+                                "transport": "stdio-gvisor",
+                                "bundleDigest": prepared.bundle_digest,
+                                "manifestDigest": prepared.manifest_digest,
+                                "manifestVersion": prepared.manifest_version,
+                                "packageName": prepared.package_name,
+                                "serverEntrypoint": prepared.server_entrypoint,
+                                "fileCount": prepared.file_count,
+                                "executable": False,
+                            },
+                            "runtime": {
+                                "class": "gvisor",
+                                "language": "python",
+                                "entrypoint": BRIDGE_ENTRYPOINT,
+                            },
+                            "resources": dict(self._package_resources),
+                            "permissions": [permission.to_dict()],
+                            "qualification": {"state": "quarantined", "reason": reasons[0]},
+                        }
+                        artifact = create_artifact(
+                            artifact_id=(
+                                "mcp.adapter."
+                                + hashlib.sha256(discovered.identity.encode()).hexdigest()[:24]
+                            ),
+                            version=discovered.version or prepared.package_version,
+                            kind=ArtifactKind.MCP_ADAPTER,
+                            owner=ArtifactOwner.EXTERNAL,
+                            origin=ArtifactOrigin.MCP,
+                            spec=spec,
+                            created_at=self._created_at(int(self._clock_ms())),
+                            user_id=user_id,
+                            task_origin=task_id,
+                            source_digest=prepared.bundle_digest,
+                            state=ArtifactState.EPHEMERAL,
+                        )
+                        row = await self._store.persist_artifact(artifact)
+                        digest, state = row.content_digest, row.state
+                except (DiscoveryBudgetExceeded, RemoteMcpError, McpbPackageError, ValueError):
                     reasons = ("package-quarantine-failed",)
                 results.append(
                     AcquiredMcpAdapter(
@@ -520,18 +639,225 @@ class McpAcquisitionService:
                 )
         return results
 
-    async def require_mount_candidate(self, row, *, goal: AcquisitionGoal) -> tuple[McpCandidate, str]:
+    @staticmethod
+    def _packaged_live_tools(output: Any) -> tuple[RemoteMcpTool, ...]:
+        if not isinstance(output, dict) or output.get("ok") is not True:
+            raise RemoteMcpError("packaged MCP live probe failed")
+        raw_tools = output.get("tools")
+        if not isinstance(raw_tools, list) or len(raw_tools) > 128:
+            raise RemoteMcpError("packaged MCP returned an invalid tool list")
+        tools: list[RemoteMcpTool] = []
+        seen: set[str] = set()
+        for item in raw_tools:
+            if not isinstance(item, dict):
+                raise RemoteMcpError("packaged MCP returned an invalid tool descriptor")
+            name = str(item.get("name") or "").strip()
+            schema = item.get("inputSchema")
+            if not name or len(name) > 256 or name in seen or not isinstance(schema, dict):
+                raise RemoteMcpError("packaged MCP returned an invalid tool descriptor")
+            seen.add(name)
+            tools.append(RemoteMcpTool(name=name, input_schema_digest=digest_payload(schema)))
+        return tuple(tools)
+
+    async def qualify_packaged(
+        self,
+        row,
+        *,
+        goal: AcquisitionGoal,
+        lease: CapabilityLease,
+        timeout_ms: int | None = None,
+    ) -> PackagedMcpQualification:
+        if self._package_runner is None:
+            raise RemoteMcpError("packaged MCP gVisor runner is unavailable")
+        if row.kind != ArtifactKind.MCP_ADAPTER.value or row.task_origin != goal.task_id:
+            raise PermissionError("packaged MCP adapter belongs to another task")
+        if row.state != ArtifactState.EPHEMERAL.value:
+            raise PermissionError("packaged MCP qualification requires a quarantined adapter")
+        spec = dict(row.spec or {})
+        package = spec.get("package") if isinstance(spec.get("package"), dict) else {}
+        if self._package_kind(spec) != "mcpb" or package.get("transport") != "stdio-gvisor":
+            raise PermissionError("MCP adapter is not an enabled MCPB package")
+        if not row.source_digest or str(package.get("bundleDigest") or "") != row.source_digest:
+            raise PermissionError("packaged MCP immutable bundle identity is incomplete")
+        resources = dict(spec.get("resources") or {})
+        wall_time_ms = int(resources.get("wallTimeMs") or 0)
+        bounded_timeout = int(timeout_ms or wall_time_ms)
+        if bounded_timeout <= 0 or wall_time_ms <= 0:
+            raise RemoteMcpError("packaged MCP runtime bounds are unavailable")
+        result = self._package_runner(
+            runtime_class=RuntimeClass.GVISOR,
+            artifact=row,
+            lease=lease,
+            inputs={"mode": "probe", "protocolVersion": "2025-06-18"},
+            timeout_ms=min(bounded_timeout, wall_time_ms),
+        )
+        if asyncio.iscoroutine(result):
+            result = await result
+        if not isinstance(result, ActionResult):
+            raise TypeError("packaged MCP runner returned an invalid result")
+        output = result.output
+        tools = self._packaged_live_tools(output)
+        available = {tool.name for tool in tools}
+        required = tuple(dict.fromkeys(item.strip() for item in goal.required if item.strip()))
+        missing = [item for item in required if item not in available]
+        forbidden = {item.strip() for item in goal.forbidden if item.strip()}
+        if missing:
+            raise PermissionError(f"packaged MCP is missing required tool: {missing[0]}")
+        if any(item in forbidden for item in required):
+            raise PermissionError("packaged MCP goal requires a forbidden tool")
+        server_info = output.get("serverInfo") if isinstance(output, dict) else {}
+        if not isinstance(server_info, dict):
+            server_info = {}
+        protocol_version = str(output.get("protocolVersion") or "unknown")[:128]
+        server_name = str(server_info.get("name") or package.get("packageName") or "unknown")[:256]
+        server_version = str(server_info.get("version") or row.version or "unknown")[:128]
+        fingerprint = digest_payload(
+            {
+                "packageDigest": package.get("sha256"),
+                "bundleDigest": row.source_digest,
+                "manifestDigest": package.get("manifestDigest"),
+                "protocolVersion": protocol_version,
+                "serverName": server_name,
+                "serverVersion": server_version,
+                "tools": [
+                    {"name": tool.name, "inputSchemaDigest": tool.input_schema_digest}
+                    for tool in tools
+                ],
+            }
+        )
+        qualified_spec = dict(spec)
+        qualified_spec["package"] = {**package, "executable": True}
+        qualified_spec["protocolVersion"] = protocol_version
+        qualified_spec["serverInfo"] = {"name": server_name, "version": server_version}
+        qualified_spec["identityFingerprint"] = fingerprint
+        qualified_spec["tools"] = [
+            {"name": tool.name, "inputSchemaDigest": tool.input_schema_digest} for tool in tools
+        ]
+        qualified_spec["qualification"] = {
+            "state": "sandbox-qualified",
+            "identity": "registry-digest+mcpb-manifest+live-stdio-handshake",
+            "auth": "no-ambient-credentials",
+            "sandbox": "gvisor-network-deny",
+        }
+        parent = f"{row.artifact_id}@{row.version}#{row.content_digest}"
+        artifact = create_artifact(
+            artifact_id=row.artifact_id,
+            version=row.version,
+            kind=ArtifactKind.MCP_ADAPTER,
+            owner=ArtifactOwner.EXTERNAL,
+            origin=ArtifactOrigin.MCP,
+            spec=qualified_spec,
+            created_at=self._created_at(int(self._clock_ms())),
+            user_id=row.user_id,
+            parent=parent,
+            task_origin=row.task_origin,
+            source_digest=row.source_digest,
+            state=ArtifactState.EPHEMERAL,
+        )
+        qualified_row = await self._store.persist_artifact(artifact)
+        candidate = self._candidate_from_artifact(qualified_row)
+        return PackagedMcpQualification(
+            artifact_digest=qualified_row.content_digest,
+            candidate=candidate,
+            protocol_version=protocol_version,
+            server_name=server_name,
+            server_version=server_version,
+            attestation=dict(result.metadata.get("attestation") or {}),
+            projected_match=tuple(item for item in required if item in available),
+        )
+
+    async def invoke_packaged(
+        self,
+        row,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        lease: CapabilityLease,
+        timeout_ms: int,
+    ) -> ActionResult:
+        if self._package_runner is None:
+            raise RemoteMcpError("packaged MCP gVisor runner is unavailable")
+        if row.kind != ArtifactKind.MCP_ADAPTER.value or row.state != ArtifactState.QUALIFIED.value:
+            raise PermissionError("packaged MCP adapter is not qualified")
+        spec = dict(row.spec or {})
+        package = spec.get("package") if isinstance(spec.get("package"), dict) else {}
+        if self._package_kind(spec) != "mcpb" or package.get("transport") != "stdio-gvisor":
+            raise PermissionError("MCP adapter is not a qualified packaged MCP")
+        result = self._package_runner(
+            runtime_class=RuntimeClass.GVISOR,
+            artifact=row,
+            lease=lease,
+            inputs={
+                "mode": "call",
+                "protocolVersion": str(spec.get("protocolVersion") or "2025-06-18"),
+                "toolName": str(tool_name),
+                "arguments": dict(arguments),
+            },
+            timeout_ms=int(timeout_ms),
+        )
+        if asyncio.iscoroutine(result):
+            result = await result
+        if not isinstance(result, ActionResult) or not isinstance(result.output, dict):
+            raise TypeError("packaged MCP runner returned an invalid result")
+        live_tools = self._packaged_live_tools(result.output)
+        expected_tools = tuple(
+            (str(item.get("name") or ""), str(item.get("inputSchemaDigest") or ""))
+            for item in spec.get("tools") or ()
+            if isinstance(item, dict)
+        )
+        observed_tools = tuple((item.name, item.input_schema_digest) for item in live_tools)
+        if observed_tools != expected_tools:
+            raise PermissionError("packaged MCP identity changed; reacquisition is required")
+        payload = result.output.get("result")
+        if not isinstance(payload, dict):
+            raise RemoteMcpError("packaged MCP tool returned an invalid result")
+        encoded = canonical_json(payload)
+        if len(encoded) > 1_048_576:
+            raise RemoteMcpError("packaged MCP result exceeds the response-size bound")
+        return ActionResult(
+            output=json.loads(encoded.decode("utf-8")),
+            verification_passed=not bool(payload.get("isError", False)),
+            metadata={
+                **dict(result.metadata),
+                "transport": "stdio-gvisor",
+                "tool": str(tool_name),
+                "packageDigest": package.get("sha256"),
+            },
+        )
+
+    async def require_mount_candidate(self, row, *, goal: AcquisitionGoal) -> tuple[McpCandidate, str | None]:
         if row.kind != ArtifactKind.MCP_ADAPTER.value:
             raise ValueError("MCP mount requires an McpAdapter artifact")
         if row.task_origin != goal.task_id:
             raise PermissionError("MCP adapter belongs to a different acquisition task")
         if row.state != ArtifactState.QUALIFIED.value:
-            raise PermissionError("MCP adapter is not qualified for remote mounting")
+            raise PermissionError("MCP adapter is not qualified for mounting")
         spec = dict(row.spec or {})
+        package = spec.get("package") if isinstance(spec.get("package"), dict) else {}
+        if package:
+            if (
+                self._package_kind(spec) != "mcpb"
+                or package.get("transport") != "stdio-gvisor"
+                or package.get("executable") is not True
+                or not row.source_digest
+                or str(package.get("bundleDigest") or "") != row.source_digest
+            ):
+                raise PermissionError("packaged MCP adapter is not sandbox-qualified")
+            candidate = self._candidate_from_artifact(row)
+            qualification = self._fabric.qualify(candidate)
+            if not qualification.eligible:
+                raise PermissionError("packaged MCP adapter failed server qualification")
+            available = set(candidate.tools)
+            for tool in goal.required:
+                if tool not in available:
+                    raise PermissionError(
+                        "packaged MCP adapter no longer exposes a required projected tool"
+                    )
+            return candidate, None
         remote = spec.get("remote") if isinstance(spec.get("remote"), dict) else {}
         remote_url = str(remote.get("url") or "").strip()
         if remote.get("transport") != "streamable-http" or not remote_url:
-            raise PermissionError("MCP adapter is not a remote Streamable HTTP adapter")
+            raise PermissionError("MCP adapter transport is unsupported")
         observation = await self._connector.probe(remote_url)
         expected = str(spec.get("identityFingerprint") or "")
         if not expected or observation.fingerprint != expected:
@@ -557,11 +883,13 @@ class ProjectedMcpActionExecutor:
         store: SqlCapabilityOsStore,
         authority: AuthorityBroker,
         connector: StreamableHttpMcpConnector,
+        packaged_invoke: Any = None,
     ) -> None:
         self._base = base_executor
         self._store = store
         self._authority = authority
         self._connector = connector
+        self._packaged_invoke = packaged_invoke
 
     @staticmethod
     def _parse(action_ref: str) -> tuple[str, str] | None:
@@ -604,10 +932,12 @@ class ProjectedMcpActionExecutor:
             raise PermissionError("projected MCP adapter artifact is unavailable")
         spec = dict(artifact.spec or {})
         remote = spec.get("remote") if isinstance(spec.get("remote"), dict) else {}
+        package = spec.get("package") if isinstance(spec.get("package"), dict) else {}
         remote_url = str(remote.get("url") or "").strip()
         server_id = str(spec.get("serverId") or "").strip()
-        if not remote_url or not server_id:
+        if not server_id:
             raise PermissionError("projected MCP adapter identity is incomplete")
+        packaged = package.get("transport") == "stdio-gvisor"
         if str(version) != str(mount.version):
             raise PermissionError("projected MCP action version does not match the mounted adapter")
         required = CapabilityRequest("mcp.invoke", f"mcp:{server_id}/{tool}")
@@ -624,8 +954,25 @@ class ProjectedMcpActionExecutor:
             artifact_digest=mount.digest,
             required_permissions=(required,),
             runtime_profile="remote-mcp",
-            network_destinations=(remote_url,),
+            network_destinations=(() if packaged else (remote_url,)),
         )
+        if packaged:
+            if self._packaged_invoke is None:
+                raise PermissionError("packaged MCP runtime is unavailable")
+            result = self._packaged_invoke(
+                artifact=artifact,
+                tool_name=tool,
+                arguments=dict(inputs),
+                task_id=mount.task_id,
+                timeout_ms=int(timeout_ms),
+            )
+            if asyncio.iscoroutine(result):
+                result = await result
+            if not isinstance(result, ActionResult):
+                raise TypeError("packaged MCP executor returned an invalid result")
+            return result
+        if not remote_url:
+            raise PermissionError("remote MCP adapter identity is incomplete")
         return await asyncio.wait_for(
             self._connector.invoke(remote_url=remote_url, tool_name=tool, arguments=dict(inputs)),
             timeout=max(0.001, int(timeout_ms) / 1000),

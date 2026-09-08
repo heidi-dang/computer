@@ -17,7 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from cptr.services.capability_os.sandbox_broker import BrokerProtocolError, SandboxRequest
+from cptr.services.capability_os.sandbox_broker import (
+    BROKER_PROTOCOL_CURRENT,
+    BROKER_PROTOCOL_V1,
+    BROKER_PROTOCOL_V2,
+    BrokerProtocolError,
+    SandboxRequest,
+)
 
 
 class SandboxRuntimeUnavailable(RuntimeError):
@@ -180,7 +186,8 @@ class SandboxBrokerEngine:
             "runtimes": {"gvisor": gvisor_ready, "microvm": False, "wasm": False},
             "installedRuntimes": {"gvisor": gvisor_installed, "microvm": False, "wasm": False},
             "egressAllowList": self.egress_proxy_available,
-            "brokerProtocol": "cptr-sandbox/1",
+            "brokerProtocol": BROKER_PROTOCOL_CURRENT,
+            "supportedBrokerProtocols": [BROKER_PROTOCOL_V1, BROKER_PROTOCOL_V2],
         }
 
     def handle(self, request: SandboxRequest) -> dict[str, Any]:

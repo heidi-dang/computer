@@ -319,6 +319,55 @@ class CapabilityOsControlService:
             policy=policy, approval_id=approval_id)
         return lease, True
 
+    async def _invoke_packaged_mcp(
+        self,
+        *,
+        artifact,
+        tool_name: str,
+        arguments: dict,
+        task_id: str,
+        timeout_ms: int,
+    ):
+        if self.mcp_acquisition is None:
+            raise CapabilityOsUnavailable("Capability OS MCP acquisition service is not configured")
+        if not artifact.user_id:
+            raise PermissionError("packaged MCP adapter is missing user ownership")
+        task = await self.tasks.require_executable(user_id=artifact.user_id, task_id=task_id)
+        resources = dict(artifact.spec.get("resources") or {})
+        lease, automatic = await self._lease(
+            task=task,
+            artifact_digest=artifact.content_digest,
+            workload_id=f"tool-run:mcp-package:{artifact.artifact_id}",
+            permissions=(CapabilityRequest("runtime.run", f"artifact:{artifact.content_digest}"),),
+            runtime_profile="gvisor",
+            resource_limits=resources,
+        )
+        try:
+            result = await self.mcp_acquisition.invoke_packaged(
+                artifact,
+                tool_name=tool_name,
+                arguments=dict(arguments),
+                lease=lease,
+                timeout_ms=int(timeout_ms),
+            )
+            await self.evidence.record(
+                task_id=task_id,
+                kind="mcp.package.invoke",
+                producer_identity="capability-os-control",
+                claims={
+                    "serverId": str((artifact.spec or {}).get("serverId") or ""),
+                    "tool": str(tool_name),
+                    "transport": "stdio-gvisor",
+                    "attestation": dict(result.metadata.get("attestation") or {}),
+                },
+                artifact_digest=artifact.content_digest,
+                lease_id=lease.lease_id,
+            )
+            return result
+        finally:
+            if automatic:
+                await self._revoke_lease(lease.lease_id)
+
     async def execute(self, *, user_id, task_id, capability_digest, lease_id, spec, inputs, approval_id=None):
         task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
         if self.action_executor is None:
@@ -348,6 +397,7 @@ class CapabilityOsControlService:
                 store=self.store,
                 authority=self.authority,
                 connector=self.mcp_connector,
+                packaged_invoke=self._invoke_packaged_mcp,
             )
         try:
             result = await CapabilityVm(executor=executor, evidence=self.evidence, clock_ms=self.clock_ms).execute(
@@ -406,6 +456,61 @@ class CapabilityOsControlService:
         if not digest:
             raise ValueError("MCP mount requires an acquired artifactDigest")
         row = await self._visible(user_id, task_id, digest, mutable=True)
+        qualification_evidence_id = None
+        if (
+            row.state == ArtifactState.EPHEMERAL.value
+            and self.mcp_acquisition.is_packaged_adapter(row)
+        ):
+            resources = dict(row.spec.get("resources") or {})
+            package_lease, package_automatic = await self._lease(
+                task=task,
+                artifact_digest=row.content_digest,
+                workload_id=f"tool-run:mcp-qualify:{row.artifact_id}",
+                permissions=(
+                    CapabilityRequest("runtime.run", f"artifact:{row.content_digest}"),
+                ),
+                runtime_profile="gvisor",
+                resource_limits=resources,
+            )
+            try:
+                packaged = await self.mcp_acquisition.qualify_packaged(
+                    row,
+                    goal=goal,
+                    lease=package_lease,
+                )
+                evidence = await self.evidence.record(
+                    task_id=task_id,
+                    kind="mcp.package.qualification",
+                    producer_identity="capability-os-control",
+                    claims={
+                        "quarantinedArtifactDigest": row.content_digest,
+                        "qualifiedArtifactDigest": packaged.artifact_digest,
+                        "protocolVersion": packaged.protocol_version,
+                        "serverName": packaged.server_name,
+                        "serverVersion": packaged.server_version,
+                        "projectedMatch": list(packaged.projected_match),
+                        "transport": "stdio-gvisor",
+                        "attestation": dict(packaged.attestation),
+                    },
+                    artifact_digest=row.content_digest,
+                    lease_id=package_lease.lease_id,
+                )
+                qualification_evidence_id = evidence.evidence_id
+                updated = await self.store.set_artifact_state(
+                    packaged.artifact_digest,
+                    state=ArtifactState.QUALIFIED.value,
+                )
+                if not updated:
+                    raise RuntimeError("packaged MCP qualification artifact disappeared")
+                row = await self._visible(
+                    user_id,
+                    task_id,
+                    packaged.artifact_digest,
+                    mutable=True,
+                )
+            finally:
+                if package_automatic:
+                    await self._revoke_lease(package_lease.lease_id)
         candidate, remote_url = await self.mcp_acquisition.require_mount_candidate(row, goal=goal)
         qualification = self.fabric.qualify(candidate)
         q = {"eligible": qualification.eligible, "reasons": list(qualification.reasons),
@@ -414,7 +519,7 @@ class CapabilityOsControlService:
             task=task, artifact_digest=candidate.digest, workload_id=f"mcp:{candidate.server_id}",
             permissions=candidate.permissions, runtime_profile="remote-mcp",
             lease_id=payload.get("leaseId"), approval_id=payload.get("approvalId"),
-            network_destinations=(remote_url,))
+            network_destinations=((remote_url,) if remote_url else ()))
         try:
             mount = await self.fabric.mount(
                 goal=goal,
@@ -429,6 +534,7 @@ class CapabilityOsControlService:
                 "mount": {"mountId": mount.mount_id, "serverId": mount.server_id, "version": mount.version,
                           "digest": mount.digest, "state": mount.state.value, "leaseId": mount.lease_id,
                           "projectedTools": list(mount.projected_tools), "transportKind": mount.transport_kind},
+                "qualificationEvidenceId": qualification_evidence_id,
                 "automaticLease": automatic}
 
     async def reflect(self, *, user_id, task_id, kind, claims, artifact_digest=None, lease_id=None,

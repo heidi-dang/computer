@@ -28,7 +28,10 @@ class CapabilityOsSandboxPackageTests(unittest.TestCase):
             smoke = subprocess.run([sys.executable, str(output), "--self-test"], check=True,
                                    capture_output=True, text=True)
             status = json.loads(smoke.stdout)
-            self.assertEqual(status["brokerProtocol"], "cptr-sandbox/1")
+            self.assertEqual(status["brokerProtocol"], "cptr-sandbox/2")
+            self.assertEqual(
+                status["supportedBrokerProtocols"], ["cptr-sandbox/1", "cptr-sandbox/2"]
+            )
             self.assertEqual(status["executionSource"], "standalone-zipapp")
 
 

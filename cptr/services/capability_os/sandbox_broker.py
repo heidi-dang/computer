@@ -21,7 +21,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-_PROTOCOL = "cptr-sandbox/1"
+BROKER_PROTOCOL_V1 = "cptr-sandbox/1"
+BROKER_PROTOCOL_V2 = "cptr-sandbox/2"
+BROKER_PROTOCOL_CURRENT = BROKER_PROTOCOL_V2
+_SUPPORTED_PROTOCOLS = frozenset({BROKER_PROTOCOL_V1, BROKER_PROTOCOL_V2})
 _ALLOWED_OPERATIONS = frozenset({"status", "build", "run", "destroy"})
 _ALLOWED_RUNTIMES = frozenset({"gvisor", "microvm", "wasm"})
 _ALLOWED_PROFILES = frozenset({"python", "node", "shell", "rust", "go", "wasm"})
@@ -65,14 +68,15 @@ class SandboxRequest:
     resources: dict[str, Any] = field(default_factory=dict)
     network: dict[str, Any] = field(default_factory=lambda: {"outbound": "deny", "destinations": []})
     inputs: dict[str, Any] = field(default_factory=dict)
-    protocol_version: str = _PROTOCOL
+    protocol_version: str = BROKER_PROTOCOL_CURRENT
 
     def __post_init__(self) -> None:
         operation = str(self.operation).strip().lower()
         runtime = str(self.runtime_class).strip().lower()
         profile = str(self.profile).strip().lower()
         entrypoint = str(self.entrypoint).strip().replace("\\", "/")
-        if self.protocol_version != _PROTOCOL:
+        protocol = str(self.protocol_version).strip()
+        if protocol not in _SUPPORTED_PROTOCOLS:
             raise BrokerProtocolError("unsupported sandbox broker protocol")
         if operation not in _ALLOWED_OPERATIONS:
             raise BrokerProtocolError("unsupported sandbox broker operation")
@@ -98,6 +102,8 @@ class SandboxRequest:
         resources = _safe_mapping(self.resources, label="resources")
         network = _safe_mapping(self.network, label="network")
         inputs = _safe_mapping(self.inputs, label="inputs")
+        if protocol == BROKER_PROTOCOL_V1 and inputs:
+            raise BrokerProtocolError("sandbox broker protocol v1 does not support runtime inputs")
         outbound = str(network.get("outbound") or "deny")
         if outbound not in {"deny", "allow-list"}:
             raise BrokerProtocolError("invalid sandbox network policy")
@@ -105,6 +111,7 @@ class SandboxRequest:
         if not isinstance(destinations, list) or len(destinations) > 64:
             raise BrokerProtocolError("invalid sandbox network destinations")
         network = {"outbound": outbound, "destinations": [str(item) for item in destinations]}
+        object.__setattr__(self, "protocol_version", protocol)
         object.__setattr__(self, "operation", operation)
         object.__setattr__(self, "runtime_class", runtime)
         object.__setattr__(self, "profile", profile)
@@ -118,16 +125,21 @@ class SandboxRequest:
     def from_dict(cls, value: dict[str, Any]) -> "SandboxRequest":
         if not isinstance(value, dict):
             raise BrokerProtocolError("sandbox broker request must be an object")
+        protocol = str(value.get("protocolVersion") or "").strip()
+        if protocol not in _SUPPORTED_PROTOCOLS:
+            raise BrokerProtocolError("unsupported sandbox broker protocol")
         expected = {
             "protocolVersion", "requestId", "operation", "taskId", "leaseId",
             "artifactDigest", "runtimeClass", "bundleDigest", "profile",
-            "entrypoint", "timeoutMs", "resources", "network", "inputs",
+            "entrypoint", "timeoutMs", "resources", "network",
         }
+        if protocol == BROKER_PROTOCOL_V2:
+            expected.add("inputs")
         unknown = set(value) - expected
         if unknown:
             raise BrokerProtocolError("sandbox broker request contains unsupported fields")
         return cls(
-            protocol_version=str(value.get("protocolVersion") or ""),
+            protocol_version=protocol,
             request_id=str(value.get("requestId") or ""),
             operation=str(value.get("operation") or ""),
             task_id=str(value.get("taskId") or ""),
@@ -144,7 +156,7 @@ class SandboxRequest:
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "protocolVersion": self.protocol_version,
             "requestId": self.request_id,
             "operation": self.operation,
@@ -158,8 +170,10 @@ class SandboxRequest:
             "timeoutMs": self.timeout_ms,
             "resources": self.resources,
             "network": self.network,
-            "inputs": self.inputs,
         }
+        if self.protocol_version == BROKER_PROTOCOL_V2:
+            payload["inputs"] = self.inputs
+        return payload
 
 
 class SandboxBrokerClient:
