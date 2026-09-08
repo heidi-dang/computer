@@ -16,6 +16,12 @@ from cptr.services.capability_os.evolution import (
     ExperimentComparison,
     PromotionDecision,
 )
+from cptr.services.capability_os.evolution_engine import (
+    EvolutionExperimentEngine,
+    ExperimentArmName,
+    ExperimentContext,
+    ExperimentMode,
+)
 from cptr.services.capability_os.forge import CreateToolRequest, ToolForge
 from cptr.services.capability_os.generated_executor import ProjectedGeneratedToolExecutor
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpFabric, McpQualification
@@ -129,6 +135,7 @@ class CapabilityOsControlService:
                  skill_activator: SkillMcpActivator | None = None,
                  skill_forge: SkillForge | None = None,
                  skill_evaluator: SkillEvaluator | None = None,
+                 evolution_engine: EvolutionExperimentEngine | None = None,
                  evolution_approval_verifier=None,
                  policy_provider=None, clock_ms=lambda: int(time.time() * 1000)):
         self.store, self.tasks, self.authority, self.resolver = store, tasks, authority, resolver
@@ -140,6 +147,11 @@ class CapabilityOsControlService:
         self.skill_activator = skill_activator
         self.skill_forge = skill_forge or SkillForge(store=store, clock_ms=clock_ms)
         self.skill_evaluator = skill_evaluator or SkillEvaluator()
+        self.evolution_engine = evolution_engine or EvolutionExperimentEngine(
+            store=store,
+            evidence=evidence,
+            gate=evolution,
+        )
         self.evolution_approval_verifier = evolution_approval_verifier
         self.policy_provider = policy_provider or DenyAllAuthorityPolicyProvider()
         self.clock_ms = clock_ms
@@ -766,12 +778,248 @@ class CapabilityOsControlService:
                 "qualificationEvidenceId": qualification_evidence_id,
                 "automaticLease": automatic}
 
+    async def _reflect_experiment(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        task,
+        artifact_digest: str | None,
+        experiment: dict,
+        promotion_target_state: str | None,
+        owner_approval_id: str | None,
+    ):
+        operation = str(experiment.get("operation") or "").strip().lower()
+        if not operation:
+            raise ValueError("experiment operation is required")
+        allowed_fields = {
+            "create": {
+                "operation",
+                "changeClass",
+                "mode",
+                "hypothesis",
+                "controlArtifactDigest",
+                "context",
+                "minRunsPerArm",
+            },
+            "observe": {
+                "operation",
+                "experimentId",
+                "arm",
+                "sourceEvidenceId",
+            },
+            "evaluate": {"operation", "experimentId"},
+            "status": {"operation", "experimentId"},
+            "cancel": {"operation", "experimentId", "reason"},
+            "promote": {"operation", "experimentId"},
+        }
+        if operation not in allowed_fields:
+            raise ValueError("unsupported evolution experiment operation")
+        unknown = set(experiment) - allowed_fields[operation]
+        if unknown:
+            raise ValueError(f"unknown evolution experiment field: {sorted(unknown)[0]}")
+
+        if operation == "create":
+            if artifact_digest is None:
+                raise ValueError("experiment create requires artifactDigest")
+            candidate = await self._visible(user_id, task_id, artifact_digest, mutable=True)
+            if ArtifactState(candidate.state) not in {ArtifactState.QUALIFIED, ArtifactState.LEARNED}:
+                raise ValueError("experiment candidate must already be qualified or learned")
+            control_digest = str(experiment.get("controlArtifactDigest") or "").strip()
+            if not control_digest:
+                raise ValueError("experiment create requires controlArtifactDigest")
+            if control_digest == artifact_digest:
+                raise ValueError("experiment control and candidate artifacts must differ")
+            control = await self._visible(user_id, task_id, control_digest)
+            if ArtifactState(control.state) not in {
+                ArtifactState.QUALIFIED,
+                ArtifactState.LEARNED,
+                ArtifactState.CERTIFIED,
+                ArtifactState.CORE,
+            }:
+                raise ValueError("experiment control artifact is not qualified")
+            plan, evidence_id = await self.evolution_engine.create(
+                task_id=task_id,
+                change_class=ChangeClass(str(experiment.get("changeClass") or "internal")),
+                mode=ExperimentMode(str(experiment.get("mode") or "shadow")),
+                hypothesis=str(experiment.get("hypothesis") or ""),
+                control_artifact_digest=control_digest,
+                candidate_artifact_digest=artifact_digest,
+                context=ExperimentContext.from_dict(experiment.get("context")),
+                min_runs_per_arm=(
+                    int(experiment["minRunsPerArm"])
+                    if experiment.get("minRunsPerArm") is not None
+                    else None
+                ),
+            )
+            return {
+                "task": _task(task),
+                "experiment": plan.to_api(),
+                "experimentEvidenceId": evidence_id,
+            }
+
+        experiment_id = str(experiment.get("experimentId") or "").strip()
+        if not experiment_id:
+            raise ValueError("experimentId is required")
+        if operation == "status":
+            return {
+                "task": _task(task),
+                "experiment": await self.evolution_engine.status(
+                    task_id=task_id,
+                    experiment_id=experiment_id,
+                ),
+            }
+        if operation == "observe":
+            observation = await self.evolution_engine.observe(
+                task_id=task_id,
+                experiment_id=experiment_id,
+                arm=ExperimentArmName(str(experiment.get("arm") or "")),
+                source_evidence_id=str(experiment.get("sourceEvidenceId") or ""),
+            )
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "observationEvidenceId": observation.evidence_id,
+            }
+        if operation == "evaluate":
+            evaluation = await self.evolution_engine.evaluate(
+                task_id=task_id,
+                experiment_id=experiment_id,
+            )
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "evaluation": evaluation.to_api(),
+                "promoted": False,
+            }
+        if operation == "cancel":
+            evidence_id = await self.evolution_engine.cancel(
+                task_id=task_id,
+                experiment_id=experiment_id,
+                reason=str(experiment.get("reason") or ""),
+            )
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "cancelEvidenceId": evidence_id,
+                "cancelled": True,
+            }
+
+        plan, evaluation, _rows = await self.evolution_engine.latest_evaluation(
+            task_id=task_id,
+            experiment_id=experiment_id,
+        )
+        candidate = await self._visible(
+            user_id,
+            task_id,
+            plan.candidate_artifact_digest,
+            mutable=True,
+        )
+        if artifact_digest is not None and artifact_digest != plan.candidate_artifact_digest:
+            raise ValueError("experiment promotion artifactDigest does not match candidate")
+        if promotion_target_state is None:
+            raise ValueError("experiment promotion requires promotionTargetState")
+        target = ArtifactState(str(promotion_target_state))
+        current = ArtifactState(candidate.state)
+        allowed = {
+            ArtifactState.QUALIFIED: {ArtifactState.LEARNED, ArtifactState.CERTIFIED},
+            ArtifactState.LEARNED: {ArtifactState.CERTIFIED},
+        }
+        if target not in allowed.get(current, set()):
+            raise ValueError("invalid evolution promotion transition")
+
+        approved = evaluation.decision is PromotionDecision.PROMOTE
+        owner_approval_verified = False
+        if evaluation.decision is PromotionDecision.OWNER_APPROVAL_REQUIRED:
+            if owner_approval_id and self.evolution_approval_verifier is not None:
+                verified = self.evolution_approval_verifier(
+                    owner_approval_id,
+                    {
+                        "userId": user_id,
+                        "taskId": task_id,
+                        "artifactDigest": plan.candidate_artifact_digest,
+                        "changeClass": plan.change_class.value,
+                        "targetState": target.value,
+                        "evaluationEvidenceId": evaluation.evaluation_evidence_id,
+                        "experimentId": experiment_id,
+                    },
+                )
+                if inspect.isawaitable(verified):
+                    verified = await verified
+                owner_approval_verified = verified is True
+                approved = owner_approval_verified
+        if not approved:
+            return {
+                "task": _task(task),
+                "experimentId": experiment_id,
+                "promotionDecision": evaluation.decision.value,
+                "evaluationEvidenceId": evaluation.evaluation_evidence_id,
+                "promoted": False,
+            }
+        intent_evidence_id = await self.evolution_engine.record_promotion_intent(
+            task_id=task_id,
+            experiment_id=experiment_id,
+            evaluation=evaluation,
+            from_state=current.value,
+            target_state=target.value,
+            owner_approval_verified=owner_approval_verified,
+        )
+        updated = await self.store.compare_and_set_artifact_state(
+            plan.candidate_artifact_digest,
+            expected_state=current.value,
+            state=target.value,
+        )
+        if not updated:
+            raise RuntimeError("evolution promotion candidate changed concurrently; reevaluation is required")
+        try:
+            promotion_evidence_id = await self.evolution_engine.record_promotion(
+                task_id=task_id,
+                experiment_id=experiment_id,
+                evaluation=evaluation,
+                intent_evidence_id=intent_evidence_id,
+                from_state=current.value,
+                target_state=target.value,
+                owner_approval_verified=owner_approval_verified,
+            )
+        except Exception:
+            rolled_back = await self.store.compare_and_set_artifact_state(
+                plan.candidate_artifact_digest,
+                expected_state=target.value,
+                state=current.value,
+            )
+            if not rolled_back:
+                raise RuntimeError(
+                    "evolution promotion evidence failed and state rollback could not be verified"
+                )
+            raise
+        return {
+            "task": _task(task),
+            "experimentId": experiment_id,
+            "promotionDecision": evaluation.decision.value,
+            "evaluationEvidenceId": evaluation.evaluation_evidence_id,
+            "promotionEvidenceId": promotion_evidence_id,
+            "artifactState": target.value,
+            "promoted": True,
+        }
+
     async def reflect(self, *, user_id, task_id, kind, claims, artifact_digest=None, lease_id=None,
                       comparison=None, change_class=None, promotion_target_state=None,
-                      owner_approval_id=None):
+                      owner_approval_id=None, experiment=None):
         task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
         if artifact_digest is not None:
             await self._visible(user_id, task_id, artifact_digest)
+        if experiment is not None:
+            if not isinstance(experiment, dict):
+                raise ValueError("experiment must be an object")
+            return await self._reflect_experiment(
+                user_id=user_id,
+                task_id=task_id,
+                task=task,
+                artifact_digest=artifact_digest,
+                experiment=dict(experiment),
+                promotion_target_state=promotion_target_state,
+                owner_approval_id=owner_approval_id,
+            )
         row = await self.evidence.record(task_id=task_id, kind=kind,
                                          producer_identity=f"capability-os-client:{user_id}",
                                          claims=dict(claims), artifact_digest=artifact_digest, lease_id=lease_id)
@@ -813,65 +1061,10 @@ class CapabilityOsControlService:
             result["evaluationEvidenceId"] = evaluation.evidence_id
 
             if promotion_target_state is not None:
-                if artifact_digest is None:
-                    raise ValueError("artifact promotion requires artifactDigest")
-                target = ArtifactState(str(promotion_target_state))
-                if target not in {
-                    ArtifactState.QUALIFIED,
-                    ArtifactState.LEARNED,
-                    ArtifactState.CERTIFIED,
-                }:
-                    raise ValueError("unsupported evolution promotion target state")
-                artifact_row = await self._visible(user_id, task_id, artifact_digest, mutable=True)
-                current = ArtifactState(artifact_row.state)
-                allowed = {
-                    # Qualification is artifact-specific (for example Tool Forge
-                    # requires a successful isolated build attestation). Generic
-                    # evolution may only advance an already-qualified artifact.
-                    ArtifactState.QUALIFIED: {ArtifactState.LEARNED, ArtifactState.CERTIFIED},
-                    ArtifactState.LEARNED: {ArtifactState.CERTIFIED},
-                }
-                if target not in allowed.get(current, set()):
-                    raise ValueError("invalid evolution promotion transition")
-
-                approved = decision is PromotionDecision.PROMOTE
-                if decision is PromotionDecision.OWNER_APPROVAL_REQUIRED:
-                    if not owner_approval_id or self.evolution_approval_verifier is None:
-                        approved = False
-                    else:
-                        verified = self.evolution_approval_verifier(
-                            owner_approval_id,
-                            {
-                                "userId": user_id,
-                                "taskId": task_id,
-                                "artifactDigest": artifact_digest,
-                                "changeClass": change.value,
-                                "targetState": target.value,
-                                "evaluationEvidenceId": evaluation.evidence_id,
-                            },
-                        )
-                        if inspect.isawaitable(verified):
-                            verified = await verified
-                        approved = verified is True
-                if approved:
-                    promotion = await self.evidence.record(
-                        task_id=task_id,
-                        kind="evolution.promotion",
-                        producer_identity="capability-os-control",
-                        claims={
-                            "changeClass": change.value,
-                            "decision": decision.value,
-                            "evaluationEvidenceId": evaluation.evidence_id,
-                            "fromState": current.value,
-                            "targetState": target.value,
-                            "ownerApprovalVerified": decision is PromotionDecision.OWNER_APPROVAL_REQUIRED,
-                        },
-                        artifact_digest=artifact_digest,
-                    )
-                    await self.store.set_artifact_state(artifact_digest, state=target.value)
-                    result["promoted"] = True
-                    result["promotionEvidenceId"] = promotion.evidence_id
-                    result["artifactState"] = target.value
-                else:
-                    result["promoted"] = False
+                # Legacy aggregate comparisons are caller-supplied compatibility
+                # input. They remain useful for diagnostics, but are not trusted
+                # promotion evidence. State changes require the durable experiment
+                # lifecycle above, which binds server-produced per-run outcomes.
+                result["promoted"] = False
+                result["promotionBlocked"] = "durable-experiment-required"
         return result

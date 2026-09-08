@@ -21,6 +21,7 @@ from cptr.services.capability_os.contracts import (
 from cptr.services.capability_os.credential_broker import CredentialBroker
 from cptr.services.capability_os.evidence import EvidenceService
 from cptr.services.capability_os.evolution import EvolutionGate
+from cptr.services.capability_os.evolution_engine import EvolutionExperimentEngine
 from cptr.services.capability_os.forge import ContentAddressedBlobStore, ToolForge
 from cptr.services.capability_os.mcp_fabric import McpFabric
 from cptr.services.capability_os.mcp_remote import (
@@ -449,7 +450,163 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(activator.calls), 1)
 
-    async def test_reflect_persists_matched_evolution_decision_and_promotes_qualified_artifact(self):
+    async def test_reflect_experiment_lifecycle_derives_outcomes_from_server_evidence_before_explicit_promotion(self):
+        control = create_artifact(
+            artifact_id="tool.evolution.control",
+            version="1",
+            kind=ArtifactKind.TOOL,
+            owner=ArtifactOwner.GENERATED,
+            origin=ArtifactOrigin.FORGE,
+            spec={"variant": "control"},
+            created_at="2026-09-08T05:00:00Z",
+            user_id="user-1",
+            task_origin="task-1",
+            state=ArtifactState.QUALIFIED,
+        )
+        candidate = create_artifact(
+            artifact_id="tool.evolution.candidate",
+            version="2",
+            kind=ArtifactKind.TOOL,
+            owner=ArtifactOwner.GENERATED,
+            origin=ArtifactOrigin.FORGE,
+            spec={"variant": "candidate"},
+            created_at="2026-09-08T05:00:01Z",
+            user_id="user-1",
+            task_origin="task-1",
+            state=ArtifactState.QUALIFIED,
+        )
+        await self.store.persist_artifact(control)
+        await self.store.persist_artifact(candidate)
+        gate = EvolutionGate(min_runs_per_arm=2, max_regression_rate=0.1)
+        self.service.evolution = gate
+        self.service.evolution_engine = EvolutionExperimentEngine(
+            store=self.store,
+            evidence=self.evidence,
+            gate=gate,
+            max_runs_per_arm=20,
+        )
+        created = await self.service.reflect(
+            user_id="user-1",
+            task_id="task-1",
+            kind="ignored-when-experiment-present",
+            claims={"caller": "cannot replace experiment lifecycle"},
+            artifact_digest=candidate.metadata.content_digest,
+            experiment={
+                "operation": "create",
+                "changeClass": "internal",
+                "mode": "shadow",
+                "hypothesis": "candidate improves verified success rate",
+                "controlArtifactDigest": control.metadata.content_digest,
+                "context": {
+                    "modelId": "gpt-5.6-sol",
+                    "reasoningEffort": "high",
+                    "toolPermissionFingerprint": "perm-v1",
+                    "resourceBudgetFingerprint": "budget-v1",
+                    "taskDistributionFingerprint": "holdout-v1",
+                },
+                "minRunsPerArm": 2,
+            },
+        )
+        experiment_id = created["experiment"]["experimentId"]
+        self.assertTrue(experiment_id.startswith("evoexp_"))
+
+        async def source(digest, *, success, cost):
+            return await self.evidence.record(
+                task_id="task-1",
+                kind="capability.node",
+                producer_identity="capability-vm",
+                claims={
+                    "status": "pass",
+                    "verificationPassed": True,
+                    "evolutionOutcome": {
+                        "success": success,
+                        "regression": False,
+                        "safetyEvents": 0,
+                        "cost": cost,
+                    },
+                },
+                artifact_digest=digest,
+            )
+
+        control_sources = (
+            await source(control.metadata.content_digest, success=True, cost=10.0),
+            await source(control.metadata.content_digest, success=False, cost=12.0),
+        )
+        candidate_sources = (
+            await source(candidate.metadata.content_digest, success=True, cost=8.0),
+            await source(candidate.metadata.content_digest, success=True, cost=8.0),
+        )
+        for arm, rows in (("control", control_sources), ("candidate", candidate_sources)):
+            for row in rows:
+                observed = await self.service.reflect(
+                    user_id="user-1",
+                    task_id="task-1",
+                    kind="ignored",
+                    claims={},
+                    experiment={
+                        "operation": "observe",
+                        "experimentId": experiment_id,
+                        "arm": arm,
+                        "sourceEvidenceId": row.evidence_id,
+                    },
+                )
+                self.assertTrue(observed["observationEvidenceId"].startswith("cevidence_"))
+
+        with self.assertRaisesRegex(ValueError, "unknown evolution experiment field: success"):
+            await self.service.reflect(
+                user_id="user-1",
+                task_id="task-1",
+                kind="ignored",
+                claims={},
+                experiment={
+                    "operation": "observe",
+                    "experimentId": experiment_id,
+                    "arm": "candidate",
+                    "sourceEvidenceId": candidate_sources[0].evidence_id,
+                    "success": False,
+                },
+            )
+
+        evaluated = await self.service.reflect(
+            user_id="user-1",
+            task_id="task-1",
+            kind="ignored",
+            claims={},
+            experiment={"operation": "evaluate", "experimentId": experiment_id},
+        )
+        self.assertEqual(evaluated["evaluation"]["decision"], "promote")
+        self.assertFalse(evaluated["promoted"])
+        before = await self.store.get_artifact(candidate.metadata.content_digest)
+        self.assertEqual(before.state, ArtifactState.QUALIFIED.value)
+
+        promoted = await self.service.reflect(
+            user_id="user-1",
+            task_id="task-1",
+            kind="ignored",
+            claims={},
+            promotion_target_state=ArtifactState.LEARNED.value,
+            experiment={"operation": "promote", "experimentId": experiment_id},
+        )
+        self.assertTrue(promoted["promoted"])
+        self.assertEqual(promoted["artifactState"], ArtifactState.LEARNED.value)
+        after = await self.store.get_artifact(candidate.metadata.content_digest)
+        self.assertEqual(after.state, ArtifactState.LEARNED.value)
+        status = await self.service.reflect(
+            user_id="user-1",
+            task_id="task-1",
+            kind="ignored",
+            claims={},
+            experiment={"operation": "status", "experimentId": experiment_id},
+        )
+        self.assertEqual(status["experiment"]["state"], "promoted")
+        evidence = await self.store.list_evidence_for_run("task-1", experiment_id)
+        kinds = [row.kind for row in evidence]
+        self.assertEqual(kinds.count("evolution.experiment.observation"), 4)
+        self.assertIn("evolution.experiment.evaluated", kinds)
+        self.assertIn("evolution.experiment.promotion", kinds)
+        self.assertNotIn("ignored-when-experiment-present", kinds)
+
+    async def test_reflect_legacy_aggregate_comparison_is_informational_and_cannot_promote(self):
         artifact = create_artifact(
             artifact_id="tool.evolution",
             version="1",
@@ -486,17 +643,16 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             promotion_target_state=ArtifactState.LEARNED.value,
         )
         self.assertEqual(result["promotionDecision"], "promote")
-        self.assertTrue(result["promoted"])
-        self.assertEqual(result["artifactState"], ArtifactState.LEARNED.value)
+        self.assertFalse(result["promoted"])
+        self.assertEqual(result["promotionBlocked"], "durable-experiment-required")
         row = await self.store.get_artifact(artifact.metadata.content_digest)
-        self.assertEqual(row.state, ArtifactState.LEARNED.value)
+        self.assertEqual(row.state, ArtifactState.QUALIFIED.value)
         evidence = await self.store.list_evidence("task-1")
         kinds = {item.kind for item in evidence}
-        self.assertTrue({"experiment.summary", "evolution.evaluation", "evolution.promotion"} <= kinds)
-        promotion = next(item for item in evidence if item.kind == "evolution.promotion")
-        self.assertEqual(promotion.claims["targetState"], ArtifactState.LEARNED.value)
+        self.assertTrue({"experiment.summary", "evolution.evaluation"} <= kinds)
+        self.assertNotIn("evolution.promotion", kinds)
 
-    async def test_reflect_authority_critical_promotion_requires_server_verified_owner_approval(self):
+    async def test_reflect_legacy_authority_critical_summary_cannot_bypass_durable_experiment(self):
         artifact = create_artifact(
             artifact_id="capability.evolution",
             version="1",
@@ -532,22 +688,25 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(denied["promotionDecision"], "owner-approval-required")
         self.assertFalse(denied["promoted"])
+        self.assertEqual(denied["promotionBlocked"], "durable-experiment-required")
 
         approvals = []
         async def verify(approval_id, context):
             approvals.append((approval_id, context))
             return approval_id == "approval-verified"
         self.service.evolution_approval_verifier = verify
-        approved = await self.service.reflect(
+        still_blocked = await self.service.reflect(
             user_id="user-1", task_id="task-1", kind="experiment.authority",
             claims={}, artifact_digest=artifact.metadata.content_digest,
             comparison=comparison, change_class="authority-critical",
             promotion_target_state=ArtifactState.LEARNED.value,
             owner_approval_id="approval-verified",
         )
-        self.assertTrue(approved["promoted"])
-        self.assertTrue(approvals)
-        self.assertEqual(approvals[0][1]["artifactDigest"], artifact.metadata.content_digest)
+        self.assertFalse(still_blocked["promoted"])
+        self.assertEqual(still_blocked["promotionBlocked"], "durable-experiment-required")
+        self.assertEqual(approvals, [])
+        row = await self.store.get_artifact(artifact.metadata.content_digest)
+        self.assertEqual(row.state, ArtifactState.QUALIFIED.value)
 
     async def test_server_policy_can_auto_issue_one_shot_lease_without_accepting_caller_policy(self):
         read = CapabilityRequest("filesystem.read", "repo:cptr/**")

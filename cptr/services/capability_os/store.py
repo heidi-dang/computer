@@ -151,6 +151,25 @@ class SqlCapabilityOsStore:
             await db.commit()
             return bool(result.rowcount)
 
+    async def compare_and_set_artifact_state(
+        self,
+        content_digest: str,
+        *,
+        expected_state: str,
+        state: str,
+    ) -> bool:
+        async with self._session_factory() as db:
+            result = await db.execute(
+                update(CapabilityOsArtifact)
+                .where(
+                    CapabilityOsArtifact.content_digest == content_digest,
+                    CapabilityOsArtifact.state == expected_state,
+                )
+                .values(state=state)
+            )
+            await db.commit()
+            return bool(result.rowcount)
+
     async def artifact_exists(self, content_digest: str) -> bool:
         async with self._session_factory() as db:
             return (
@@ -405,6 +424,33 @@ class SqlCapabilityOsStore:
                     await db.scalars(
                         select(CapabilityOsEvidence)
                         .where(CapabilityOsEvidence.task_id == task_id)
+                        .order_by(CapabilityOsEvidence.sequence, CapabilityOsEvidence.evidence_id)
+                        .limit(limit)
+                    )
+                ).all()
+            )
+
+    async def list_evidence_for_run(
+        self,
+        task_id: str,
+        run_id: str,
+        *,
+        limit: int = 500,
+    ) -> list[CapabilityOsEvidence]:
+        task_id = str(task_id).strip()
+        run_id = str(run_id).strip()
+        if not task_id or not run_id:
+            raise ValueError("task_id and run_id must not be blank")
+        limit = max(1, min(int(limit), 2500))
+        async with self._session_factory() as db:
+            return list(
+                (
+                    await db.scalars(
+                        select(CapabilityOsEvidence)
+                        .where(
+                            CapabilityOsEvidence.task_id == task_id,
+                            CapabilityOsEvidence.run_id == run_id,
+                        )
                         .order_by(CapabilityOsEvidence.sequence, CapabilityOsEvidence.evidence_id)
                         .limit(limit)
                     )
