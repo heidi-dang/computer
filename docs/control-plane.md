@@ -125,6 +125,18 @@ API-key metadata is stored in an indexed `control_api_keys` table for hot-path a
 
 Direct-coding requests are bound to an owned workspace ID and accept only paths relative to that workspace. CPTR rejects absolute paths, traversal attempts, and environment-file paths. Reads reject binary files and files over 500 KB; writes and edits are capped at 1 MB. Exact edits require one unambiguous matching target. Command sessions are bounded, owned by the authenticated user, and support status, incremental output, and cancellation. CPTR rejects destructive command patterns and requires both an explicit `allow_network` flag and the separate `command:external` scope for commands that may contact external services.
 
+### Explicit local root mode
+
+Local UID-0 execution is a host trust-boundary feature and is disabled by default. An operator who intentionally wants an authenticated ChatGPT Direct Coding session to be able to use local root must set:
+
+```text
+CPTR_LOCAL_ROOT_GRANTS_ENABLED=true
+```
+
+The CPTR service must itself already have effective UID 0; root mode never prompts for a password or performs implicit privilege escalation. When the user explicitly grants root (for example, `use root`), the ChatGPT MCP adapter sends the exact first-line marker `# cptr-root: use root` on an owned Workbench command. CPTR validates the command and host capability before persisting a Workbench-scoped grant. A rejected command cannot leave root authority behind. The grant has no expiry unless the user supplied one; an explicit TTL is carried as `# cptr-root-ttl-seconds: <seconds>`. `# cptr-root: revoke`, Workbench archive/delete, or TTL expiry disables the grant.
+
+An active grant gives subsequent commands in that owned Workbench real UID-0 filesystem/process authority and bypasses the normal local destructive-command classifier. It does **not** widen CPTR's transport/network contract: external/package commands still require explicit `allow_network=true` plus `command:external`, and raw SSH/SCP/rsync remain on the dedicated SSH control path. The MCP adapter remains a thin proxy; grant ownership, persistence, validation, and root identity selection are server-owned in `computer`.
+
 The direct-coding tools are deliberately distinct from the broader internal CPTR agent-tool registry. ChatGPT can autonomously chain the exposed coding primitives but is not given direct access to credentials, arbitrary host paths, CPTR browser sessions, deployment controls, or unconstrained internal tools.
 
 Directory listing is structured and bounded at traversal time; a shallow list never recursively counts every child file. Batch reads use bounded I/O concurrency, and search context groups matches by source file so one file is not reread for every match.

@@ -219,6 +219,46 @@ def env_for(
     return env
 
 
+def unrestricted_root_identity(identity: ExecutionIdentity) -> ExecutionIdentity:
+    """Return a sanitized UID-0 execution identity for an explicitly granted command.
+
+    CPTR does not attempt password prompting or implicit privilege escalation.
+    The host service must already have effective UID 0 (the normal PAM
+    impersonation topology) so the server can prove the requested root
+    execution is actually available before spawning work.
+    """
+    if IS_WINDOWS:
+        raise IdentityUnavailable("unrestricted local root execution is not available on Windows")
+    if os.geteuid() != 0:
+        raise IdentityUnavailable(
+            "unrestricted local root execution requires the CPTR host service to run with effective UID 0"
+        )
+    try:
+        import pwd
+
+        pw = pwd.getpwuid(0)
+        username = pw.pw_name or "root"
+        home = pw.pw_dir or "/root"
+        shell = pw.pw_shell or "/bin/sh"
+        try:
+            groups = tuple(os.getgrouplist(username, pw.pw_gid))
+        except AttributeError:
+            groups = (pw.pw_gid,)
+        gid = pw.pw_gid
+    except (KeyError, ImportError):
+        username, home, shell, groups, gid = "root", "/root", "/bin/sh", (0,), 0
+    return ExecutionIdentity(
+        app_user_id=identity.app_user_id,
+        username=username,
+        uid=0,
+        gid=gid,
+        groups=groups,
+        home=home,
+        shell=shell,
+        is_pam=False,
+    )
+
+
 def preexec_for(identity: ExecutionIdentity) -> Callable[[], None] | None:
     if IS_WINDOWS or not identity.is_pam or identity.uid is None or identity.gid is None:
         return None

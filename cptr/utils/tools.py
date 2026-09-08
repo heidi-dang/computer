@@ -53,6 +53,7 @@ from cptr.utils.identity import (
     expand_user_path,
     identity_for_context,
     preexec_for,
+    unrestricted_root_identity,
 )
 from cptr.services.execution_manager import command_session_registry
 from cptr.utils.runtime import Runtime, FileError
@@ -2099,6 +2100,8 @@ async def run_command(
     phase_started = time.perf_counter()
     try:
         identity = await identity_for_context(__context__)
+        if bool(__context__.get("local_root_unrestricted")):
+            identity = unrestricted_root_identity(identity)
     except IdentityUnavailable as e:
         return f"Error: {e}"
     if measure_lifecycle:
@@ -2242,6 +2245,7 @@ async def run_command(
                 "workspace": workspace,
                 "user_id": user_id,
                 "identity": identity,
+                "privilege": "root" if bool(__context__.get("local_root_unrestricted")) else "user",
                 "chat_id": __context__.get("chat_id"),
                 "message_id": __context__.get("message_id"),
                 "call_id": __context__.get("call_id"),
