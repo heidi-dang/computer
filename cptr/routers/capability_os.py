@@ -82,6 +82,7 @@ class ReflectRequest(BaseModel):
     artifact_digest: str | None = Field(default=None, max_length=200)
     lease_id: str | None = Field(default=None, max_length=200)
     comparison: dict[str, Any] | None = None
+    experiment: dict[str, Any] | None = None
     change_class: str | None = Field(default=None, max_length=80)
     promotion_target_state: str | None = Field(default=None, max_length=80)
     owner_approval_id: str | None = Field(default=None, max_length=200)
@@ -320,6 +321,7 @@ async def reflect_capability_os(request: Request, body: ReflectRequest):
         return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
                                                claims=body.claims, artifact_digest=body.artifact_digest,
                                                lease_id=body.lease_id, comparison=body.comparison,
+                                               experiment=body.experiment,
                                                change_class=body.change_class,
                                                promotion_target_state=body.promotion_target_state,
                                                owner_approval_id=body.owner_approval_id)

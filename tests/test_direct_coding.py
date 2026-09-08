@@ -155,13 +155,18 @@ class DirectCodingAppRegistrationTests(unittest.TestCase):
                     ),
                 ),
                 patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
-                TestClient(cptr_application) as client,
             ):
+                # This test verifies Socket.IO ASGI dispatch, not application startup.
+                # Entering TestClient as a context manager runs the production
+                # lifespan and can migrate the operator's shared CPTR database,
+                # making this route-registration test non-hermetic.
+                client = TestClient(cptr_application)
                 response = client.post(
                     "/api/control/v1/workspaces/ws_1/coding/read",
                     headers=headers,
                     json={"path": "wrapped.py"},
                 )
+                client.close()
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["content"], "wrapped = True\n")
