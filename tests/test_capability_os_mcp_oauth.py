@@ -331,7 +331,7 @@ class CapabilityOsMcpOAuthTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    async def test_status_is_user_and_task_scoped_and_expired_exchange_is_reconciled(self):
+    async def test_status_is_user_and_task_scoped_and_recovers_stale_exchange_after_grace(self):
         started = await self._start()
         with self.assertRaisesRegex(McpOAuthError, "not found"):
             await self.service.status(
@@ -351,8 +351,45 @@ class CapabilityOsMcpOAuthTests(unittest.IsolatedAsyncioTestCase):
             task_id="task-1",
             flow_id=started.flow_id or "",
         )
+        self.assertEqual(status["status"], "exchanging")
+        self.now[0] += 60_000
+        status = await self.service.status(
+            user_id="user-1",
+            task_id="task-1",
+            flow_id=started.flow_id or "",
+        )
         self.assertEqual(status["status"], "expired")
         self.assertEqual(status["errorCode"], "flow-expired")
+
+    async def test_atomic_finalize_refuses_unclaimed_flow_without_publishing_credential(self):
+        started = await self._start()
+        flow = await self.oauth_store.get_flow(started.flow_id or "")
+        self.assertIsNotNone(flow)
+        derived = await self.artifacts.get_artifact(started.artifact_digest)
+        logical_name = derived.spec["authentication"]["logicalName"]
+        finalized = await self.oauth_store.finalize_flow_with_credential(
+            started.flow_id or "",
+            logical_name=logical_name,
+            user_id="user-1",
+            profile_id="logs-oauth",
+            server_id="io.example/logs",
+            remote_url="https://mcp.example/mcp",
+            consumer="mcp.remote:https://mcp.example/mcp",
+            access_token="must-not-persist",
+            refresh_token="must-not-persist-either",
+            token_type="Bearer",
+            scope="logs.read",
+            expires_at_ms=self.now[0] + 60_000,
+            client_info=self.oauth_store.flow_client_info(flow),
+            protected_resource_metadata=dict(flow.protected_resource_metadata or {}),
+            oauth_metadata=dict(flow.oauth_metadata or {}),
+            redirect_uri=flow.redirect_uri,
+            now_ms=self.now[0],
+        )
+        self.assertFalse(finalized)
+        self.assertIsNone(await self.oauth_store.get_credential(logical_name))
+        persisted = await self.oauth_store.get_flow(started.flow_id or "")
+        self.assertEqual(persisted.status, "pending")
 
     async def test_private_network_oauth_endpoints_are_rejected_before_http(self):
         validator = PublicHttpsEndpointValidator()

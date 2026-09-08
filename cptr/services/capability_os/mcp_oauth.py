@@ -387,6 +387,78 @@ class McpOAuthStore:
             await db.refresh(row)
             return row
 
+    async def finalize_flow_with_credential(
+        self,
+        flow_id: str,
+        *,
+        logical_name: str,
+        user_id: str,
+        profile_id: str,
+        server_id: str,
+        remote_url: str,
+        consumer: str,
+        access_token: str,
+        refresh_token: str | None,
+        token_type: str,
+        scope: str | None,
+        expires_at_ms: int | None,
+        client_info: dict[str, Any],
+        protected_resource_metadata: dict[str, Any] | None,
+        oauth_metadata: dict[str, Any] | None,
+        redirect_uri: str,
+        now_ms: int,
+    ) -> bool:
+        """Atomically publish an exchanged credential and complete its claimed flow."""
+        encrypted_access = self._encrypt(access_token)
+        encrypted_refresh = self._encrypt(refresh_token) if refresh_token else None
+        encrypted_client = self.encrypt_json(client_info)
+        async with self._session_factory() as db:
+            async with db.begin():
+                flow = await db.scalar(
+                    select(CapabilityOsMcpOAuthFlow).where(
+                        CapabilityOsMcpOAuthFlow.flow_id == str(flow_id),
+                        CapabilityOsMcpOAuthFlow.status == "exchanging",
+                    )
+                )
+                if flow is None:
+                    return False
+                row = await db.get(CapabilityOsMcpOAuthCredential, logical_name)
+                values = {
+                    "user_id": user_id,
+                    "profile_id": profile_id,
+                    "server_id": server_id,
+                    "remote_url": remote_url,
+                    "consumer": consumer,
+                    "access_token_encrypted": encrypted_access,
+                    "refresh_token_encrypted": encrypted_refresh,
+                    "token_type": token_type,
+                    "scope": scope,
+                    "expires_at_ms": expires_at_ms,
+                    "client_info_encrypted": encrypted_client,
+                    "protected_resource_metadata": protected_resource_metadata,
+                    "oauth_metadata": oauth_metadata,
+                    "redirect_uri": redirect_uri,
+                    "updated_at_ms": int(now_ms),
+                    "revoked_at_ms": None,
+                }
+                if row is None:
+                    db.add(CapabilityOsMcpOAuthCredential(logical_name=logical_name, **values))
+                else:
+                    if (
+                        row.user_id != user_id
+                        or row.profile_id != profile_id
+                        or row.server_id != server_id
+                        or row.remote_url != remote_url
+                        or row.consumer != consumer
+                    ):
+                        raise McpOAuthError("OAuth logical credential identity collision")
+                    for key, value in values.items():
+                        setattr(row, key, value)
+                flow.status = "complete"
+                flow.completed_at_ms = int(now_ms)
+                flow.error_code = None
+        return True
+
     async def update_tokens(
         self,
         logical_name: str,
@@ -823,7 +895,11 @@ class McpOAuthService:
         if row is None or row.user_id != user_id or row.task_id != task_id:
             raise McpOAuthError("MCP OAuth flow not found")
         now = int(self._clock_ms())
-        if row.status in {"pending", "exchanging"} and row.expires_at_ms <= now:
+        should_expire = row.status == "pending" and row.expires_at_ms <= now
+        if row.status == "exchanging":
+            exchange_grace_ms = max(60_000, int(self._timeout_seconds * 4_000))
+            should_expire = row.expires_at_ms + exchange_grace_ms <= now
+        if should_expire:
             await self._store.set_flow_status(
                 row.flow_id,
                 expected_status=row.status,
@@ -900,7 +976,8 @@ class McpOAuthService:
             token = await self._exchange_code(flow=flow, code=code)
             client_info = self._store.flow_client_info(flow)
             completed_at = int(self._clock_ms())
-            await self._store.upsert_credential(
+            finalized = await self._store.finalize_flow_with_credential(
+                flow.flow_id,
                 logical_name=flow.logical_name,
                 user_id=flow.user_id,
                 profile_id=flow.profile_id,
@@ -928,6 +1005,8 @@ class McpOAuthService:
                 redirect_uri=flow.redirect_uri,
                 now_ms=completed_at,
             )
+            if not finalized:
+                raise McpOAuthError("MCP OAuth flow changed during completion")
         except Exception as exc:
             await self._store.set_flow_status(
                 flow.flow_id,
@@ -939,14 +1018,6 @@ class McpOAuthService:
             if isinstance(exc, McpOAuthError):
                 raise
             raise McpOAuthError("MCP OAuth token exchange failed") from exc
-        updated = await self._store.set_flow_status(
-            flow.flow_id,
-            expected_status="exchanging",
-            status="complete",
-            now_ms=int(self._clock_ms()),
-        )
-        if not updated:
-            raise McpOAuthError("MCP OAuth flow changed during completion")
         return {
             "flowId": flow.flow_id,
             "status": "complete",
