@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "skipLibCheck": true
+  },
+  "include": [
+    "cptr/frontend/src/**/*.ts",
+    "cptr/frontend/src/**/*.js",
+    "cptr/frontend/scripts/**/*.mjs"
+  ],
+  "exclude": [
+    "cptr/frontend/node_modules",
+    "cptr/frontend/.svelte-kit",
+    "cptr/frontend/build"
+  ]
+}
