@@ -19,6 +19,7 @@ from cptr.services.browser_device_connections import browser_device_connections
 from cptr.services.browser_devices import BrowserTabInUseError, browser_device_store
 from cptr.services.browser_visual_frames import BrowserVisualFrame, browser_visual_frames
 from cptr.services.browser_protocol import (
+    BATCHABLE_BROWSER_ACTIONS,
     BROWSER_ACTIONS,
     PROTOCOL_VERSION,
     action_mutates_browser,
@@ -80,6 +81,19 @@ class SendCommandBody(BaseModel):
     def require_mutation_epoch(self):
         if action_mutates_browser(self.action) and self.expected_epoch is None:
             raise ValueError("mutating browser action requires expected_epoch")
+        if self.action == "batch":
+            steps = self.payload.get("steps")
+            if not isinstance(steps, list) or not 1 <= len(steps) <= 24:
+                raise ValueError("browser batch requires 1-24 steps")
+            for step in steps:
+                if not isinstance(step, dict):
+                    raise ValueError("browser batch step must be an object")
+                action = step.get("action")
+                args = step.get("args", {})
+                if action not in BATCHABLE_BROWSER_ACTIONS:
+                    raise ValueError("browser batch step action is not allowed")
+                if not isinstance(args, dict):
+                    raise ValueError("browser batch step args must be an object")
         return self
 
 
@@ -384,6 +398,63 @@ async def _discover_device_tabs(
     return _safe_discovered_tabs(result)
 
 
+async def _open_dedicated_device_tab(
+    *, user_id: str, device_id: str, wait_seconds: float = 15.0
+) -> dict[str, Any]:
+    if not await browser_device_store.owns_active_device(user_id=user_id, device_id=device_id):
+        raise HTTPException(status_code=404, detail="browser device not found")
+    if not await browser_device_connections.is_connected(device_id=device_id):
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    command_id = f"dedicated_{uuid4().hex}"
+    await browser_command_results.reserve(command_id)
+    event = await browser_device_store.append_device_event(
+        device_id=device_id,
+        event_type="browser.dedicated.open",
+        payload={"command_id": command_id},
+    )
+    delivered = await browser_device_connections.send_control(
+        device_id=device_id,
+        message={
+            "protocol_version": PROTOCOL_VERSION,
+            "type": "browser.command",
+            "device_id": device_id,
+            "session_id": f"device_{device_id}",
+            "surface_id": f"device_{device_id}",
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": "OBSERVING",
+            "command_id": command_id,
+            "payload": {"action": "open_dedicated", "args": {}},
+        },
+    )
+    if not delivered:
+        await browser_command_results.abandon(command_id)
+        raise HTTPException(status_code=409, detail="browser device is offline")
+    result = await _wait_browser_command(
+        command_id,
+        timeout_seconds=wait_seconds,
+        timeout_detail="dedicated browser creation timed out",
+    )
+    if result.get("type") != "browser.command.completed":
+        raise HTTPException(status_code=409, detail="dedicated browser creation failed")
+    payload = result.get("payload")
+    tab = payload.get("tab") if isinstance(payload, dict) else None
+    if not isinstance(tab, dict):
+        raise HTTPException(status_code=409, detail="dedicated browser did not return a tab")
+    tab_id = tab.get("id")
+    window_id = tab.get("windowId")
+    if not isinstance(tab_id, int) or tab_id < 0 or not isinstance(window_id, int) or window_id < 0:
+        raise HTTPException(status_code=409, detail="dedicated browser returned invalid tab metadata")
+    return {
+        "id": tab_id,
+        "window_id": window_id,
+        "active": bool(tab.get("active")),
+        "title": str(tab.get("title") or "")[:512],
+        "url": str(tab.get("url") or "")[:4096],
+    }
+
+
 @router.get("/devices/{device_id}/tabs")
 async def list_device_tabs(request: Request, device_id: str):
     user_id = await _control_user(request, "task:read")
@@ -412,14 +483,10 @@ async def rotate_device_credential(request: Request, device_id: str):
 async def open_browser_session(request: Request, body: OpenSessionBody):
     user_id = await _control_user(request, "task:write")
     tab_id = body.tab_id
+    dedicated_tab: dict[str, Any] | None = None
     if tab_id is None:
-        tabs = await _discover_device_tabs(user_id=user_id, device_id=body.device_id)
-        selected = next(
-            (tab for tab in tabs if tab.get("active") is True), tabs[0] if tabs else None
-        )
-        if selected is None:
-            raise HTTPException(status_code=409, detail="browser device has no discoverable tabs")
-        tab_id = int(selected["id"])
+        dedicated_tab = await _open_dedicated_device_tab(user_id=user_id, device_id=body.device_id)
+        tab_id = int(dedicated_tab["id"])
     try:
         session = await browser_device_store.open_session(
             user_id=user_id,
@@ -541,6 +608,8 @@ async def open_browser_session(request: Request, body: OpenSessionBody):
         "surface_id": session.surface_id,
         "lease": acquired,
         "attach": attach_result.get("payload", {}),
+        "dedicated": dedicated_tab is not None,
+        "dedicated_tab": dedicated_tab,
     }
 
 
@@ -1067,6 +1136,128 @@ async def _receive_auth(websocket: WebSocket) -> tuple[str, str, int] | None:
     return device_id, credential, resume_from
 
 
+async def _handle_device_handoff_request(
+    *, device: Any, device_id: str, message: dict[str, Any], payload: dict[str, Any]
+) -> dict[str, Any]:
+    session_id = message.get("session_id")
+    expected_epoch = payload.get("expected_epoch")
+    expected_owner = payload.get("expected_owner")
+    new_owner = payload.get("new_owner")
+    fresh_snapshot_id = payload.get("fresh_snapshot_id")
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("browser handoff request requires session_id")
+    if not isinstance(expected_epoch, int) or expected_epoch < 0:
+        raise ValueError("browser handoff request requires expected_epoch")
+    transition = (expected_owner, new_owner)
+    if transition not in {("agent", "human"), ("human", "agent")}:
+        raise ValueError("browser handoff request transition is not allowed")
+    if transition == ("human", "agent") and (
+        not isinstance(fresh_snapshot_id, str) or not fresh_snapshot_id
+    ):
+        raise ValueError("browser return request requires a fresh snapshot")
+
+    user_id = str(getattr(device, "user_id", "") or "")
+    if not user_id:
+        raise PermissionError("browser device has no authoritative owner")
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None or str(session.device_id) != device_id:
+        raise PermissionError("browser handoff session does not belong to this device")
+
+    result = await browser_device_store.transfer_lease(
+        session_id=session_id,
+        expected_epoch=expected_epoch,
+        expected_owner=expected_owner,
+        new_owner=new_owner,
+        fresh_snapshot_id=fresh_snapshot_id if isinstance(fresh_snapshot_id, str) else None,
+    )
+    event_type = (
+        "browser.handoff.returned" if new_owner == "agent" else "browser.lease.transferred"
+    )
+    handoff_event = await browser_device_store.append_device_event(
+        device_id=device_id,
+        event_type=event_type,
+        payload={
+            "session_id": session_id,
+            "tab_id": result["tab_id"],
+            "owner": result["owner"],
+            "epoch": result["epoch"],
+            "snapshot_id": result["snapshot_id"],
+            "state": result["state"],
+            "source": "extension_request",
+        },
+    )
+    await browser_device_connections.send_control(
+        device_id=device_id,
+        message={
+            "protocol_version": PROTOCOL_VERSION,
+            "type": "browser.handoff.returned" if new_owner == "agent" else "browser.handoff.accepted",
+            "device_id": device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(handoff_event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": result["state"],
+            "payload": {
+                "owner": result["owner"],
+                "epoch": result["epoch"],
+                "snapshot_id": result["snapshot_id"],
+            },
+        },
+    )
+    await _trace_browser_stage(
+        None,
+        user_id=user_id,
+        session_id=session_id,
+        name="browser.lease.transferred",
+        status="ok",
+    )
+    return result
+
+
+async def _notify_device_handoff_rejected(
+    *, device: Any, device_id: str, message: dict[str, Any], reason: str
+) -> None:
+    session_id = message.get("session_id")
+    user_id = str(getattr(device, "user_id", "") or "")
+    if not isinstance(session_id, str) or not session_id or not user_id:
+        return
+    session = await browser_device_store.get_session(user_id=user_id, session_id=session_id)
+    if session is None or str(session.device_id) != device_id:
+        return
+    lease = await browser_device_store.session_lease(session_id=session_id)
+    if lease is None:
+        return
+    event = await browser_device_store.append_device_event(
+        device_id=device_id,
+        event_type="browser.handoff.rejected",
+        payload={
+            "session_id": session_id,
+            "owner": lease["owner"],
+            "epoch": lease["epoch"],
+            "reason": reason[:240],
+        },
+    )
+    await browser_device_connections.send_control(
+        device_id=device_id,
+        message={
+            "protocol_version": PROTOCOL_VERSION,
+            "type": "browser.handoff.rejected",
+            "device_id": device_id,
+            "session_id": session_id,
+            "surface_id": session.surface_id or session_id,
+            "sequence": int(event.sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "source": "cptr",
+            "mode": _session_wire_mode(session),
+            "payload": {
+                "owner": lease["owner"],
+                "epoch": lease["epoch"],
+            },
+        },
+    )
+
+
 async def _browser_device_control_heartbeat(device_id: str) -> None:
     try:
         while True:
@@ -1221,6 +1412,22 @@ async def browser_device_control_socket(websocket: WebSocket):
             if not isinstance(payload, dict):
                 payload = {}
             command_id = message.get("command_id")
+            if event_type == "browser.handoff.request":
+                try:
+                    await _handle_device_handoff_request(
+                        device=device,
+                        device_id=device_id,
+                        message=message,
+                        payload=payload,
+                    )
+                except (KeyError, PermissionError, ValueError) as exc:
+                    await _notify_device_handoff_rejected(
+                        device=device,
+                        device_id=device_id,
+                        message=message,
+                        reason=str(exc),
+                    )
+                continue
             if event_type in {"browser.command.completed", "browser.command.failed"}:
                 if not isinstance(command_id, str) or not command_id:
                     await websocket.close(code=1008, reason="browser result missing command id")
