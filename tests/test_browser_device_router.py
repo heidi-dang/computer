@@ -32,6 +32,7 @@ from cptr.routers.browser_device import (
     open_browser_session,
     transfer_browser_lease,
     _browser_device_control_heartbeat,
+    _open_dedicated_device_tab,
     _wait_browser_command,
 )
 from cptr.services.browser_devices import BrowserTabInUseError, PairingRequest
@@ -228,7 +229,51 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["session_id"], "device_bdv_1")
         self.assertEqual(message["payload"], {"action": "list_tabs", "args": {}})
 
-    async def test_open_session_without_tab_id_auto_selects_active_discovered_tab(self):
+    async def test_dedicated_browser_bootstrap_dispatches_device_scoped_open_command(self):
+        completed = {
+            "type": "browser.command.completed",
+            "payload": {
+                "tab": {
+                    "id": 8,
+                    "windowId": 3,
+                    "active": True,
+                    "title": "Dedicated",
+                    "url": "about:blank",
+                }
+            },
+        }
+        with (
+            patch(
+                "cptr.routers.browser_device.browser_device_store.owns_active_device",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.is_connected",
+                new=AsyncMock(return_value=True),
+            ),
+            patch("cptr.routers.browser_device.browser_command_results.reserve", new=AsyncMock()),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=14)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+            patch(
+                "cptr.routers.browser_device.browser_command_results.wait",
+                new=AsyncMock(return_value=completed),
+            ),
+        ):
+            tab = await _open_dedicated_device_tab(user_id="user_1", device_id="bdv_1")
+        self.assertEqual(tab["id"], 8)
+        self.assertEqual(tab["window_id"], 3)
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["session_id"], "device_bdv_1")
+        self.assertEqual(message["mode"], "OBSERVING")
+        self.assertEqual(message["payload"], {"action": "open_dedicated", "args": {}})
+
+    async def test_open_session_without_tab_id_creates_dedicated_browser_tab(self):
         request = SimpleNamespace()
         session = SimpleNamespace(id="brs_1", device_id="bdv_1", tab_id=8, surface_id="surf_1")
         acquired = {
@@ -245,9 +290,17 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                 "cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")
             ),
             patch(
-                "cptr.routers.browser_device._discover_device_tabs",
-                new=AsyncMock(return_value=[{"id": 7, "active": False}, {"id": 8, "active": True}]),
-            ),
+                "cptr.routers.browser_device._open_dedicated_device_tab",
+                new=AsyncMock(
+                    return_value={
+                        "id": 8,
+                        "window_id": 3,
+                        "active": True,
+                        "title": "Dedicated",
+                        "url": "about:blank",
+                    }
+                ),
+            ) as open_dedicated,
             patch(
                 "cptr.routers.browser_device.browser_device_store.open_session",
                 new=AsyncMock(return_value=session),
@@ -283,7 +336,10 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
                 request, OpenSessionBody(device_id="bdv_1", surface_id="surf_1")
             )
         self.assertEqual(result["tab_id"], 8)
+        self.assertTrue(result["dedicated"])
+        self.assertEqual(result["dedicated_tab"]["window_id"], 3)
         self.assertEqual(open_session.await_args.kwargs["tab_id"], 8)
+        open_dedicated.assert_awaited_once_with(user_id="user_1", device_id="bdv_1")
 
     async def test_open_session_returns_conflict_when_tab_already_has_live_session(self):
         request = SimpleNamespace()
@@ -1058,6 +1114,34 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["payload"]["text"], "super-secret-password")
         self.assertTrue(message["payload"]["sensitive"])
 
+    def test_batch_command_validation_is_bounded_and_allowlisted(self):
+        valid = SendCommandBody(
+            command_id="cmd_batch",
+            action="batch",
+            expected_epoch=9,
+            payload={
+                "steps": [
+                    {"action": "scroll", "args": {"delta_y": 100}},
+                    {"action": "press_key", "args": {"key": "Tab"}},
+                ]
+            },
+        )
+        self.assertEqual(len(valid.payload["steps"]), 2)
+        with self.assertRaises(ValueError):
+            SendCommandBody(
+                command_id="cmd_nested",
+                action="batch",
+                expected_epoch=9,
+                payload={"steps": [{"action": "batch", "args": {}}]},
+            )
+        with self.assertRaises(ValueError):
+            SendCommandBody(
+                command_id="cmd_oversized",
+                action="batch",
+                expected_epoch=9,
+                payload={"steps": [{"action": "scroll", "args": {}} for _ in range(25)]},
+            )
+
     async def test_agent_command_requires_current_lease_epoch_before_delivery(self):
         request = SimpleNamespace()
         session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="AGENT_CONTROL")
@@ -1291,6 +1375,154 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("sequence", message)
         self.assertNotIn("session_id", message)
+
+    async def test_authenticated_extension_handoff_request_uses_server_owned_session_and_epoch(self):
+        socket = FakeWebSocket(
+            [
+                {
+                    "protocol_version": 1,
+                    "type": "device.authenticate",
+                    "device_id": "bdv_1",
+                    "device_credential": "secret",
+                    "resume_from": 0,
+                },
+                {
+                    "protocol_version": 1,
+                    "type": "browser.handoff.request",
+                    "device_id": "bdv_1",
+                    "session_id": "brs_1",
+                    "source": "human",
+                    "mode": "AGENT_CONTROL",
+                    "payload": {
+                        "expected_epoch": 9,
+                        "expected_owner": "agent",
+                        "new_owner": "human",
+                    },
+                },
+            ]
+        )
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="HUMAN_CONTROL")
+        transferred = {
+            "device_id": "bdv_1",
+            "tab_id": 7,
+            "session_id": "brs_1",
+            "owner": "human",
+            "epoch": 10,
+            "snapshot_id": None,
+            "state": "HUMAN_CONTROL",
+        }
+        with (
+            patch(
+                "cptr.routers.browser_device.browser_device_store.authenticate_device",
+                new=AsyncMock(return_value=SimpleNamespace(id="bdv_1", user_id="user_1")),
+            ),
+            patch("cptr.routers.browser_device.browser_device_connections.attach", new=AsyncMock()),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.detach",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.get_session",
+                new=AsyncMock(return_value=session),
+            ) as get_session,
+            patch(
+                "cptr.routers.browser_device.browser_device_store.transfer_lease",
+                new=AsyncMock(return_value=transferred),
+            ) as transfer,
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=44)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+            patch("cptr.routers.browser_device._trace_browser_stage", new=AsyncMock()),
+        ):
+            await browser_device_control_socket(socket)
+
+        get_session.assert_awaited_once_with(user_id="user_1", session_id="brs_1")
+        transfer.assert_awaited_once_with(
+            session_id="brs_1",
+            expected_epoch=9,
+            expected_owner="agent",
+            new_owner="human",
+            fresh_snapshot_id=None,
+        )
+        handoff = next(
+            call.kwargs["message"]
+            for call in send.await_args_list
+            if call.kwargs["message"].get("type") == "browser.handoff.accepted"
+        )
+        self.assertEqual(handoff["payload"], {"owner": "human", "epoch": 10, "snapshot_id": None})
+
+    async def test_rejected_extension_return_sends_authoritative_human_epoch_for_recovery(self):
+        socket = FakeWebSocket(
+            [
+                {
+                    "protocol_version": 1,
+                    "type": "device.authenticate",
+                    "device_id": "bdv_1",
+                    "device_credential": "secret",
+                    "resume_from": 0,
+                },
+                {
+                    "protocol_version": 1,
+                    "type": "browser.handoff.request",
+                    "device_id": "bdv_1",
+                    "session_id": "brs_1",
+                    "source": "human",
+                    "mode": "HUMAN_CONTROL",
+                    "payload": {
+                        "expected_epoch": 9,
+                        "expected_owner": "human",
+                        "new_owner": "agent",
+                        "fresh_snapshot_id": "snap_fresh",
+                    },
+                },
+            ]
+        )
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="HUMAN_CONTROL")
+        with (
+            patch(
+                "cptr.routers.browser_device.browser_device_store.authenticate_device",
+                new=AsyncMock(return_value=SimpleNamespace(id="bdv_1", user_id="user_1")),
+            ),
+            patch("cptr.routers.browser_device.browser_device_connections.attach", new=AsyncMock()),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.detach",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.get_session",
+                new=AsyncMock(return_value=session),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.transfer_lease",
+                new=AsyncMock(side_effect=PermissionError("stale browser lease epoch or owner")),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.session_lease",
+                new=AsyncMock(return_value={"owner": "human", "epoch": 10}),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=45)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+        ):
+            await browser_device_control_socket(socket)
+
+        rejected = next(
+            call.kwargs["message"]
+            for call in send.await_args_list
+            if call.kwargs["message"].get("type") == "browser.handoff.rejected"
+        )
+        self.assertEqual(rejected["mode"], "HUMAN_CONTROL")
+        self.assertEqual(rejected["payload"], {"owner": "human", "epoch": 10})
 
     async def test_websocket_completes_matching_command_id(self):
         socket = FakeWebSocket(
