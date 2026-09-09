@@ -848,6 +848,65 @@ class CapabilityOsControlService:
             )
             return {"task": _task(task), "matches": list(matches)}
 
+        if operation == "invoke":
+            task = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
+            if self.mcp_connector is None:
+                raise CapabilityOsUnavailable("Capability OS MCP connector is not configured")
+            allowed = {"mountId", "tool", "inputs", "timeoutMs", "leaseId", "approvalId"}
+            unknown = set(payload) - allowed
+            if unknown:
+                raise ValueError(f"unknown MCP invoke field: {sorted(unknown)[0]}")
+            mount_id = str(payload.get("mountId") or "").strip()
+            tool = str(payload.get("tool") or "").strip()
+            if not mount_id or not tool:
+                raise ValueError("MCP invoke requires mountId and tool")
+            inputs = payload.get("inputs") or {}
+            if not isinstance(inputs, dict):
+                raise ValueError("MCP invoke inputs must be an object")
+            timeout_ms = int(payload.get("timeoutMs") or 30_000)
+            if timeout_ms < 1 or timeout_ms > 120_000:
+                raise ValueError("MCP invoke timeoutMs must be between 1 and 120000")
+            mount = await self.store.get_mcp_mount(mount_id)
+            if mount is None or mount.task_id != task_id or mount.state != "mounted":
+                raise KeyError("MCP mount not found")
+            artifact = await self._visible(user_id, task_id, mount.digest)
+            if artifact.kind != ArtifactKind.MCP_ADAPTER.value:
+                raise ValueError("MCP invoke requires a mounted MCP adapter")
+            server_id = str((artifact.spec or {}).get("serverId") or "").strip()
+            if not server_id:
+                raise ValueError("mounted MCP adapter identity is incomplete")
+            required = CapabilityRequest("mcp.invoke", f"mcp:{server_id}/{tool}")
+            lease, automatic = await self._lease(
+                task=task,
+                artifact_digest=mount.digest,
+                workload_id=f"mcp:{server_id}:invoke",
+                permissions=(required,),
+                runtime_profile="cptr-vm",
+                lease_id=payload.get("leaseId"),
+                approval_id=payload.get("approvalId"),
+            )
+            executor = ProjectedMcpActionExecutor(
+                base_executor=self.action_executor,
+                store=self.store,
+                authority=self.authority,
+                connector=self.mcp_connector,
+                packaged_invoke=self._invoke_packaged_mcp,
+                credential_broker=self.credential_broker,
+                evidence=self.evidence,
+            )
+            try:
+                result = await executor.invoke(
+                    action_ref=f"mcp://{mount_id}/{tool}",
+                    version=mount.version,
+                    inputs=dict(inputs),
+                    lease=lease,
+                    timeout_ms=timeout_ms,
+                )
+                return {"task": _task(task), "result": asdict(result), "automaticLease": automatic}
+            finally:
+                if automatic:
+                    await self._revoke_lease(lease.lease_id)
+
         if operation in {"oauth-start", "oauth-status", "oauth-revoke"}:
             if self.mcp_oauth is None:
                 raise CapabilityOsUnavailable("Capability OS MCP OAuth service is not configured")

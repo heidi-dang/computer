@@ -70,7 +70,7 @@ class CapabilityOsResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.acquisition_modes, ())
         self.assertTrue(all(item.artifact_id != "dangerous" for item in result.candidates))
 
-    async def test_ephemeral_artifact_is_reusable_only_by_originating_task(self):
+    async def test_ephemeral_generated_tool_is_not_resolvable_until_qualified(self):
         ephemeral = await self._tool(
             tool_id="task-probe",
             state=ArtifactState.EPHEMERAL,
@@ -84,18 +84,31 @@ class CapabilityOsResolverTests(unittest.IsolatedAsyncioTestCase):
                 forbidden=(),
             )
         )
-        self.assertEqual(same.candidates[0].content_digest, ephemeral.metadata.content_digest)
+        self.assertEqual(same.candidates, ())
+        self.assertEqual(same.acquisition_modes, ("forge", "mcp"))
 
-        other = await self.resolver.resolve(
+        await self.store.set_artifact_state(
+            ephemeral.metadata.content_digest,
+            state=ArtifactState.QUALIFIED.value,
+        )
+        qualified = await self.resolver.resolve(
             ResolutionGoal(
-                task_id="task-2",
+                task_id="task-1",
                 required=(CapabilityRequest("trace.read", "service:cptr/backend"),),
                 optional=(),
                 forbidden=(),
             )
         )
-        self.assertEqual(other.candidates, ())
-        self.assertEqual(other.acquisition_modes, ("forge", "mcp"))
+        self.assertEqual(qualified.candidates[0].content_digest, ephemeral.metadata.content_digest)
+
+    async def test_resolution_goal_rejects_required_forbidden_overlap(self):
+        with self.assertRaisesRegex(ValueError, "required effect conflicts with forbidden effect"):
+            ResolutionGoal(
+                task_id="task-1",
+                required=(CapabilityRequest("filesystem.read", "repo:cptr/file.py"),),
+                optional=(),
+                forbidden=(CapabilityRequest("filesystem.read", "repo:cptr/**"),),
+            )
 
     async def test_user_scoped_artifact_is_invisible_to_other_users_but_global_remains_visible(self):
         private = await self._tool(

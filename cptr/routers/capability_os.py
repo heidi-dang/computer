@@ -121,7 +121,7 @@ def _span(
     span_name = f"cptr.capability_os.{operation}"
     if operation == "forge" and detail:
         span_name = f"cptr.forge.{detail}"
-    elif operation == "acquire" and detail in {"discover", "discover-effects", "qualify", "mount", "release"}:
+    elif operation == "acquire" and detail in {"discover", "discover-effects", "qualify", "mount", "invoke", "release"}:
         span_name = f"cptr.mcp.{detail.replace('-', '_')}"
     elif operation == "reflect" and detail:
         span_name = f"cptr.evolution.{detail}"

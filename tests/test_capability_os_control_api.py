@@ -259,7 +259,19 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             optional=(),
             forbidden=(),
         )
-        self.assertEqual(resolved["candidates"][0]["contentDigest"], digest)
+        self.assertEqual(resolved["candidates"], [])
+        self.assertEqual(resolved["acquisitionModes"], ["forge", "mcp"])
+
+        updated = await self.store.set_artifact_state(digest, state=ArtifactState.QUALIFIED.value)
+        self.assertTrue(updated)
+        qualified = await self.service.resolve(
+            user_id="user-1",
+            task_id="task-1",
+            required=(CapabilityRequest("filesystem.read", "repo:cptr/file.py"),),
+            optional=(),
+            forbidden=(),
+        )
+        self.assertEqual(qualified["candidates"][0]["contentDigest"], digest)
 
         reflected = await self.service.reflect(
             user_id="user-1",
@@ -1245,6 +1257,7 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         class Connector:
             def __init__(self):
                 self.probes = []
+                self.invocations = []
 
             async def probe(
                 self,
@@ -1258,6 +1271,25 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
                     (remote_url, credential_broker, credential_lease, credential_name)
                 )
                 return observation
+
+            async def invoke(
+                self,
+                *,
+                remote_url,
+                tool_name,
+                arguments,
+                credential_broker=None,
+                credential_lease=None,
+                credential_name=None,
+            ):
+                self.invocations.append(
+                    (remote_url, tool_name, arguments, credential_broker, credential_lease, credential_name)
+                )
+                return ActionResult(
+                    output={"entries": ["ok"], "arguments": arguments},
+                    verification_passed=True,
+                    metadata={"transport": "streamable-http"},
+                )
 
             async def release(self, **_kwargs):
                 return None
@@ -1349,6 +1381,26 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(active[0].lease_id, result["mount"]["leaseId"])
         self.assertEqual(active[0].credentials["logicalNames"], [logical_name])
         self.assertEqual(active[0].network["destinations"], [remote_url])
+
+        invoked = await self.service.acquire(
+            user_id="user-1",
+            task_id="task-1",
+            operation="invoke",
+            payload={
+                "mountId": result["mount"]["mountId"],
+                "tool": "resource.logs",
+                "inputs": {"limit": 5},
+                "timeoutMs": 2000,
+            },
+        )
+        self.assertEqual(invoked["result"]["output"], {"entries": ["ok"], "arguments": {"limit": 5}})
+        self.assertTrue(invoked["automaticLease"])
+        self.assertEqual(len(connector.invocations), 1)
+        self.assertEqual(connector.invocations[0][0:3], (remote_url, "resource.logs", {"limit": 5}))
+        self.assertIs(connector.invocations[0][3], credential_broker)
+        self.assertEqual(connector.invocations[0][5], logical_name)
+        active_after_invoke = await self.store.list_active_leases("task-1", now_ms=self.clock())
+        self.assertEqual([lease.lease_id for lease in active_after_invoke], [result["mount"]["leaseId"]])
 
         qualified = await self.store.get_artifact(result["mount"]["digest"])
         self.assertEqual(qualified.state, ArtifactState.QUALIFIED.value)

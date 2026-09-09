@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 from dataclasses import dataclass
 
-from cptr.services.capability_os.contracts import ArtifactState, CapabilityRequest
+from cptr.services.capability_os.contracts import ArtifactKind, ArtifactState, CapabilityRequest
 from cptr.services.capability_os.store import SqlCapabilityOsStore
 
 
@@ -70,6 +70,9 @@ class ResolutionGoal:
             raise ValueError("resolution task id must not be blank")
         if not self.required:
             raise ValueError("resolution goal must require at least one effect")
+        for required in self.required:
+            if any(_overlaps(required, forbidden) for forbidden in self.forbidden):
+                raise ValueError("required effect conflicts with forbidden effect")
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,8 @@ class CapabilityResolver:
             if row.state == ArtifactState.RETIRED.value:
                 continue
             if row.state == ArtifactState.EPHEMERAL.value and row.task_origin != goal.task_id:
+                continue
+            if row.kind == ArtifactKind.TOOL.value and row.state == ArtifactState.EPHEMERAL.value:
                 continue
             if row.state != ArtifactState.EPHEMERAL.value and row.state not in _REUSABLE_STATES:
                 continue
