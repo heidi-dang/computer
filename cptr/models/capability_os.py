@@ -204,3 +204,128 @@ class CapabilityOsMcpMount(Base):
         Index("ix_capability_os_mcp_mount_task_state", "task_id", "state"),
         Index("ix_capability_os_mcp_mount_server", "server_id", "version", "digest"),
     )
+
+
+# ---------------------------------------------------------------------------
+# 0035 – Experiments, Promotions, Lineage, Policy Decisions, Observations
+# ---------------------------------------------------------------------------
+
+class CapabilityOsExperiment(Base):
+    __tablename__ = "capability_os_experiments"
+
+    id = Column(Text, primary_key=True, default=lambda: _id("cexp"))
+    name = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    artifact_id = Column(Text, nullable=False)
+    baseline_version = Column(Text, nullable=False)
+    candidate_version = Column(Text, nullable=False)
+    status = Column(Text, nullable=False)
+    traffic_split = Column(sa.Float, nullable=False, default=0.5)
+    owner = Column(Text, nullable=False)
+    created_at = Column(sa.Float, nullable=False)
+    updated_at = Column(sa.Float, nullable=True)
+    concluded_at = Column(sa.Float, nullable=True)
+
+    __table_args__ = (
+        Index("ix_capability_os_experiment_artifact_status", "artifact_id", "status"),
+        Index("ix_capability_os_experiment_owner", "owner", "created_at"),
+    )
+
+
+class CapabilityOsExperimentRun(Base):
+    __tablename__ = "capability_os_experiment_runs"
+
+    id = Column(Text, primary_key=True, default=lambda: _id("crun"))
+    experiment_id = Column(Text, nullable=False)
+    variant = Column(Text, nullable=False)
+    task_id = Column(Text, nullable=True)
+    status = Column(Text, nullable=False)
+    latency_ms = Column(sa.Float, nullable=True)
+    success = Column(sa.Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(sa.Float, nullable=False)
+    completed_at = Column(sa.Float, nullable=True)
+
+    __table_args__ = (
+        Index("ix_capability_os_experiment_run_experiment", "experiment_id", "variant"),
+        Index("ix_capability_os_experiment_run_task", "task_id", "created_at"),
+    )
+
+
+class CapabilityOsPromotion(Base):
+    __tablename__ = "capability_os_promotions"
+
+    id = Column(Text, primary_key=True, default=lambda: _id("cpro"))
+    artifact_id = Column(Text, nullable=False)
+    from_version = Column(Text, nullable=False)
+    to_version = Column(Text, nullable=False)
+    from_stage = Column(Text, nullable=False)
+    to_stage = Column(Text, nullable=False)
+    experiment_id = Column(Text, nullable=True)
+    promoted_by = Column(Text, nullable=False)
+    reason = Column(Text, nullable=True)
+    policy_decision_id = Column(Text, nullable=True)
+    created_at = Column(sa.Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_capability_os_promotion_artifact", "artifact_id", "created_at"),
+        Index("ix_capability_os_promotion_stage", "from_stage", "to_stage"),
+    )
+
+
+class CapabilityOsLineageEdge(Base):
+    __tablename__ = "capability_os_lineage_edges"
+
+    id = Column(Text, primary_key=True, default=lambda: _id("clin"))
+    parent_id = Column(Text, nullable=False)
+    child_id = Column(Text, nullable=False)
+    edge_type = Column(Text, nullable=False)
+    metadata_json = Column(Text, nullable=True)
+    created_at = Column(sa.Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_capability_os_lineage_parent", "parent_id", "edge_type"),
+        Index("ix_capability_os_lineage_child", "child_id", "edge_type"),
+    )
+
+
+class CapabilityOsPolicyDecision(Base):
+    __tablename__ = "capability_os_policy_decisions"
+
+    id = Column(Text, primary_key=True, default=lambda: _id("cpol"))
+    policy_id = Column(Text, nullable=False)
+    policy_version = Column(Text, nullable=False)
+    subject = Column(Text, nullable=False)
+    action = Column(Text, nullable=False)
+    resource = Column(Text, nullable=True)
+    decision = Column(Text, nullable=False)
+    reason = Column(Text, nullable=True)
+    context_json = Column(Text, nullable=True)
+    latency_ms = Column(sa.Float, nullable=True)
+    created_at = Column(sa.Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_capability_os_policy_decision_subject", "subject", "decision"),
+        Index("ix_capability_os_policy_decision_policy", "policy_id", "created_at"),
+    )
+
+
+class CapabilityOsObservation(Base):
+    __tablename__ = "capability_os_observations"
+
+    id = Column(Text, primary_key=True, default=lambda: _id("cobs"))
+    artifact_id = Column(Text, nullable=False)
+    artifact_version = Column(Text, nullable=False)
+    task_id = Column(Text, nullable=True)
+    metric_name = Column(Text, nullable=False)
+    metric_value = Column(sa.Float, nullable=False)
+    unit = Column(Text, nullable=True)
+    tags_json = Column(Text, nullable=True)
+    source = Column(Text, nullable=True)
+    count = Column(sa.Integer, nullable=False, default=1)
+    created_at = Column(sa.Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_capability_os_observation_artifact", "artifact_id", "metric_name"),
+        Index("ix_capability_os_observation_task", "task_id", "created_at"),
+    )
