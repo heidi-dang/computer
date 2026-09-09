@@ -25,7 +25,14 @@ _STATE_SCORE = {
 
 
 def _covers(offered: CapabilityRequest, requested: CapabilityRequest) -> bool:
-    return offered.action == requested.action and (
+    if offered.action != requested.action:
+        return False
+    # Legacy effect-only clients have no resource dimension. Treat their
+    # explicit wildcard as "any resource for this action" without widening
+    # resource-aware native requests.
+    if requested.resource == "*":
+        return True
+    return (
         offered.resource == requested.resource
         or fnmatch.fnmatchcase(requested.resource, offered.resource)
     )
@@ -34,6 +41,8 @@ def _covers(offered: CapabilityRequest, requested: CapabilityRequest) -> bool:
 def _overlaps(left: CapabilityRequest, right: CapabilityRequest) -> bool:
     if left.action != right.action:
         return False
+    if left.resource == "*" or right.resource == "*":
+        return True
     return (
         left.resource == right.resource
         or fnmatch.fnmatchcase(left.resource, right.resource)

@@ -70,6 +70,33 @@ class CapabilityOsResolverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.acquisition_modes, ())
         self.assertTrue(all(item.artifact_id != "dangerous" for item in result.candidates))
 
+    async def test_effect_only_wildcard_matches_any_resource_and_forbidden_blocks_any_resource(self):
+        good = await self._tool(
+            tool_id="filesystem.reader",
+            state=ArtifactState.QUALIFIED,
+            capabilities=(CapabilityRequest("filesystem.read", "repo:cptr/**"),),
+        )
+        result = await self.resolver.resolve(
+            ResolutionGoal(
+                task_id="task-1",
+                required=(CapabilityRequest("filesystem.read", "*"),),
+                optional=(),
+                forbidden=(),
+            )
+        )
+        self.assertEqual(result.candidates[0].content_digest, good.metadata.content_digest)
+
+        blocked = await self.resolver.resolve(
+            ResolutionGoal(
+                task_id="task-1",
+                required=(CapabilityRequest("filesystem.read", "*"),),
+                optional=(),
+                forbidden=(CapabilityRequest("filesystem.read", "*"),),
+            )
+        )
+        self.assertEqual(blocked.candidates, ())
+        self.assertEqual(blocked.acquisition_modes, ("forge", "mcp"))
+
     async def test_ephemeral_artifact_is_reusable_only_by_originating_task(self):
         ephemeral = await self._tool(
             tool_id="task-probe",
