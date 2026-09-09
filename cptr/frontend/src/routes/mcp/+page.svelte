@@ -1,19 +1,73 @@
 <script lang="ts">
-	import McpConsole from '$lib/components/mcp/McpConsole.svelte';
-	import McpDarkFactory from '$lib/components/mcp/McpDarkFactory.svelte';
-	import McpMemory from '$lib/components/mcp/McpMemory.svelte';
-	import McpServices from '$lib/components/mcp/McpServices.svelte';
 	import McpTopology from '$lib/components/mcp/McpTopology.svelte';
 
 	type McpView = 'topology' | 'console' | 'factory' | 'memory' | 'services';
+	type McpConsoleComponent = typeof import('$lib/components/mcp/McpConsole.svelte').default;
+	type McpDarkFactoryComponent = typeof import('$lib/components/mcp/McpDarkFactory.svelte').default;
+	type McpMemoryComponent = typeof import('$lib/components/mcp/McpMemory.svelte').default;
+	type McpServicesComponent = typeof import('$lib/components/mcp/McpServices.svelte').default;
 	let view = $state<McpView>('topology');
 	let focusRequestId = $state<string | null>(null);
 	let focusCorrelationId = $state<string | null>(null);
+	let LazyMcpConsole = $state<McpConsoleComponent | null>(null);
+	let LazyMcpDarkFactory = $state<McpDarkFactoryComponent | null>(null);
+	let LazyMcpMemory = $state<McpMemoryComponent | null>(null);
+	let LazyMcpServices = $state<McpServicesComponent | null>(null);
+	let consoleLoad: Promise<McpConsoleComponent> | null = null;
+	let factoryLoad: Promise<McpDarkFactoryComponent> | null = null;
+	let memoryLoad: Promise<McpMemoryComponent> | null = null;
+	let servicesLoad: Promise<McpServicesComponent> | null = null;
+
+	function ensureConsole(): Promise<McpConsoleComponent> {
+		consoleLoad ??= import('$lib/components/mcp/McpConsole.svelte').then(
+			({ default: component }) => {
+				LazyMcpConsole = component;
+				return component;
+			}
+		);
+		return consoleLoad;
+	}
+
+	function ensureFactory(): Promise<McpDarkFactoryComponent> {
+		factoryLoad ??= import('$lib/components/mcp/McpDarkFactory.svelte').then(
+			({ default: component }) => {
+				LazyMcpDarkFactory = component;
+				return component;
+			}
+		);
+		return factoryLoad;
+	}
+
+	function ensureMemory(): Promise<McpMemoryComponent> {
+		memoryLoad ??= import('$lib/components/mcp/McpMemory.svelte').then(({ default: component }) => {
+			LazyMcpMemory = component;
+			return component;
+		});
+		return memoryLoad;
+	}
+
+	function ensureServices(): Promise<McpServicesComponent> {
+		servicesLoad ??= import('$lib/components/mcp/McpServices.svelte').then(
+			({ default: component }) => {
+				LazyMcpServices = component;
+				return component;
+			}
+		);
+		return servicesLoad;
+	}
+
+	$effect(() => {
+		if (view === 'console' && !LazyMcpConsole) void ensureConsole();
+		if (view === 'factory' && !LazyMcpDarkFactory) void ensureFactory();
+		if (view === 'memory' && !LazyMcpMemory) void ensureMemory();
+		if (view === 'services' && !LazyMcpServices) void ensureServices();
+	});
 
 	function revealActivity(requestId: string | null, correlationId: string | null) {
 		focusRequestId = requestId;
 		focusCorrelationId = correlationId;
 		view = 'console';
+		void ensureConsole();
 	}
 </script>
 
@@ -137,13 +191,35 @@
 		{#if view === 'topology'}
 			<McpTopology onrevealactivity={revealActivity} />
 		{:else if view === 'console'}
-			<McpConsole {focusRequestId} {focusCorrelationId} />
+			{#if LazyMcpConsole}
+				<LazyMcpConsole {focusRequestId} {focusCorrelationId} />
+			{:else}
+				<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
+					Loading console…
+				</div>
+			{/if}
 		{:else if view === 'factory'}
-			<McpDarkFactory />
+			{#if LazyMcpDarkFactory}
+				<LazyMcpDarkFactory />
+			{:else}
+				<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
+					Loading factory…
+				</div>
+			{/if}
 		{:else if view === 'memory'}
-			<McpMemory />
+			{#if LazyMcpMemory}
+				<LazyMcpMemory />
+			{:else}
+				<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
+					Loading memory…
+				</div>
+			{/if}
+		{:else if LazyMcpServices}
+			<LazyMcpServices />
 		{:else}
-			<McpServices />
+			<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
+				Loading services…
+			</div>
 		{/if}
 	</div>
 </div>
