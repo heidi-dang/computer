@@ -41,6 +41,10 @@ from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
 from cptr.routers.admin import require_admin
 from cptr.services.action_traces import action_trace_store
+from cptr.services.capability_os.operator import CapabilityOsOperatorService
+from cptr.services.capability_os.runtime import RuntimeBroker
+from cptr.services.capability_os.store import SqlCapabilityOsStore
+from cptr.services.capability_os.tasks import CapabilityTaskCoordinator
 from cptr.services.coding_benchmark import SUITE_ID, coding_benchmark_store
 from cptr.services.control_auth import require_control_user
 from cptr.services.factory_observability import FactoryObservabilityService
@@ -70,6 +74,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 factory_observability = FactoryObservabilityService()
 memory_observability = MemoryObservabilityService()
+capability_os_operator = CapabilityOsOperatorService(
+    store=SqlCapabilityOsStore(),
+    tasks=CapabilityTaskCoordinator(),
+    runtime=RuntimeBroker(production=True),
+)
 
 # ── Per-server log buffer (stdio only, ring buffer of 500 lines) ──────────────
 _server_logs: dict[str, deque[str]] = {}
@@ -391,6 +400,34 @@ async def stream_memory_observability(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/capability-os/tasks")
+async def get_capability_os_operator_tasks(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=50),
+):
+    """List active owner-scoped tasks available to the Capability OS operator console."""
+    admin = require_admin(request)
+    return await capability_os_operator.list_tasks(user_id=admin.user_id, limit=limit)
+
+
+@router.get("/capability-os/operator")
+async def get_capability_os_operator_snapshot(
+    request: Request,
+    task_id: str = Query(min_length=1, max_length=200),
+    limit: int = Query(default=100, ge=1, le=100),
+):
+    """Return the read-only owner-scoped Capability OS operations projection."""
+    admin = require_admin(request)
+    try:
+        return await capability_os_operator.snapshot(
+            user_id=admin.user_id,
+            task_id=task_id,
+            limit=limit,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Capability OS task not found") from exc
 
 
 @router.get("/factory/snapshot")

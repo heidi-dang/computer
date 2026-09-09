@@ -58,7 +58,7 @@ class MigrationConvergenceTests(unittest.TestCase):
 
     def test_merged_history_has_one_head_and_supports_fresh_and_both_legacy_lineages(self):
         script = ScriptDirectory.from_config(self._config(Path("unused.db")))
-        self.assertEqual(script.get_heads(), ["0034"])
+        self.assertEqual(script.get_heads(), ["0035"])
 
         browser_tables = [
             Base.metadata.tables[name]
@@ -75,7 +75,7 @@ class MigrationConvergenceTests(unittest.TestCase):
 
             fresh = root / "fresh.db"
             command.upgrade(self._config(fresh), "head")
-            self.assertEqual(self._version(fresh), "0034")
+            self.assertEqual(self._version(fresh), "0035")
             self.assertTrue(
                 {
                     "factory_runs",
@@ -94,6 +94,16 @@ class MigrationConvergenceTests(unittest.TestCase):
                     "local_root_grants",
                     "capability_os_mcp_oauth_flows",
                     "capability_os_mcp_oauth_credentials",
+                    "capability_os_runs",
+                    "capability_os_run_steps",
+                    "capability_os_experiments",
+                    "capability_os_experiment_runs",
+                    "capability_os_promotions",
+                    "capability_os_lineage_edges",
+                    "capability_os_policy_decisions",
+                    "capability_os_observations",
+                    "capability_os_mcp_discovery_entries",
+                    "capability_os_retention_jobs",
                 }
                 <= self._tables(fresh)
             )
@@ -109,8 +119,10 @@ class MigrationConvergenceTests(unittest.TestCase):
             self.assertEqual(self._version(fresh), "0033")
             self.assertNotIn("capability_os_mcp_oauth_flows", self._tables(fresh))
             self.assertNotIn("capability_os_mcp_oauth_credentials", self._tables(fresh))
+            self.assertNotIn("capability_os_runs", self._tables(fresh))
+            self.assertNotIn("capability_os_mcp_discovery_entries", self._tables(fresh))
             command.upgrade(self._config(fresh), "head")
-            self.assertEqual(self._version(fresh), "0034")
+            self.assertEqual(self._version(fresh), "0035")
             self.assertTrue(
                 {
                     "capability_os_mcp_oauth_flows",
@@ -123,7 +135,7 @@ class MigrationConvergenceTests(unittest.TestCase):
             command.upgrade(self._config(factory), "0025")
             self.assertNotIn("browser_devices", self._tables(factory))
             command.upgrade(self._config(factory), "head")
-            self.assertEqual(self._version(factory), "0034")
+            self.assertEqual(self._version(factory), "0035")
             self.assertTrue(
                 {
                     "browser_devices",
@@ -151,7 +163,7 @@ class MigrationConvergenceTests(unittest.TestCase):
             self.assertIn("browser_devices", self._tables(legacy_main))
 
             command.upgrade(self._config(legacy_main), "head")
-            self.assertEqual(self._version(legacy_main), "0034")
+            self.assertEqual(self._version(legacy_main), "0035")
             self.assertTrue(
                 {
                     "factory_runs",

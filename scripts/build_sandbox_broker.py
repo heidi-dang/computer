@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build a standalone standard-library-only Capability OS sandbox broker zipapp."""
+
 from __future__ import annotations
 
 import argparse
@@ -12,7 +13,14 @@ import zipapp
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-MODULES = ("sandbox_broker.py", "sandbox_daemon.py", "gvisor_dispatcher.py", "runtime_identity.py", "sandbox_server.py")
+MODULES = (
+    "sandbox_broker.py",
+    "sandbox_daemon.py",
+    "gvisor_dispatcher.py",
+    "runtime_identity.py",
+    "sandbox_server.py",
+    "wasm_dispatcher.py",
+)
 
 
 def build(output: Path) -> dict[str, object]:
@@ -22,7 +30,11 @@ def build(output: Path) -> dict[str, object]:
         root = Path(value)
         package = root / "cptr" / "services" / "capability_os"
         package.mkdir(parents=True)
-        for init in (root / "cptr" / "__init__.py", root / "cptr" / "services" / "__init__.py", package / "__init__.py"):
+        for init in (
+            root / "cptr" / "__init__.py",
+            root / "cptr" / "services" / "__init__.py",
+            package / "__init__.py",
+        ):
             init.write_text("", encoding="utf-8")
         for name in MODULES:
             shutil.copy2(REPO / "cptr" / "services" / "capability_os" / name, package / name)
@@ -32,7 +44,9 @@ def build(output: Path) -> dict[str, object]:
         )
         temporary = output.with_name(f".{output.name}.{os.getpid()}.tmp")
         try:
-            zipapp.create_archive(root, target=temporary, interpreter="/usr/bin/env python3", compressed=True)
+            zipapp.create_archive(
+                root, target=temporary, interpreter="/usr/bin/env python3", compressed=True
+            )
             os.chmod(temporary, 0o755)
             os.replace(temporary, output)
         finally:

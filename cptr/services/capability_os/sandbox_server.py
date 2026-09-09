@@ -21,6 +21,7 @@ from cptr.services.capability_os.sandbox_broker import (
     SandboxRequest,
 )
 from cptr.services.capability_os.sandbox_daemon import BundleStore, SandboxBrokerEngine, SandboxRuntimeUnavailable
+from cptr.services.capability_os.wasm_dispatcher import WasmDispatcher
 
 MAX_FRAME_BYTES = 64 * 1024
 
@@ -161,6 +162,7 @@ def _engine_from_env() -> SandboxBrokerEngine:
     gid = grp.getgrnam(group).gr_gid
     state_root = Path(os.environ.get("CPTR_SANDBOX_STATE_ROOT", "/run/cptr-sandbox"))
     runsc_path = Path(os.environ.get("CPTR_SANDBOX_RUNSC", "/usr/bin/runsc"))
+    wasmtime_path = Path(os.environ.get("CPTR_SANDBOX_WASMTIME", "/usr/bin/wasmtime"))
     bundles = BundleStore(
         spool_root=Path(os.environ.get("CPTR_SANDBOX_SPOOL_ROOT", "/var/lib/cptr/data/capability-os/blobs")),
         state_root=state_root,
@@ -172,6 +174,17 @@ def _engine_from_env() -> SandboxBrokerEngine:
         state_root=state_root,
         expected_rootfs_uid=0,
     )
+    wasm_dispatcher = None
+    if wasmtime_path.is_file() and os.access(wasmtime_path, os.X_OK):
+        wasm_dispatcher = WasmDispatcher(
+            wasmtime_path=wasmtime_path,
+            runtime_uid=uid,
+            runtime_gid=gid,
+        )
+        try:
+            wasm_dispatcher.validate_configuration()
+        except SandboxRuntimeUnavailable as exc:
+            raise RuntimeError(f"WASM qualification profile is invalid: {exc}") from exc
     return SandboxBrokerEngine(
         bundles=bundles,
         runsc_path=runsc_path,
@@ -179,6 +192,8 @@ def _engine_from_env() -> SandboxBrokerEngine:
         expected_peer_gid=gid,
         egress_proxy_available=os.environ.get("CPTR_SANDBOX_EGRESS_PROXY_READY", "false").lower() in {"1", "true", "yes"},
         dispatcher=dispatcher,
+        wasmtime_path=wasmtime_path,
+        wasm_dispatcher=wasm_dispatcher,
     )
 
 

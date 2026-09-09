@@ -175,46 +175,83 @@ class AuthorityBroker:
         policy: TaskAuthorityPolicy,
         approval_id: str | None = None,
     ) -> CapabilityLease:
-        if not await self._store.artifact_exists(request.artifact_digest):
-            raise AuthorityDenied("lease subject artifact is not registered")
+        decision_id = f"policy_{uuid.uuid4().hex}"
+        decision_at = int(self._clock_ms())
+        requested_permissions = [item.to_dict() for item in request.permissions]
+        decision_constraints = {
+            "runtimeProfile": request.runtime_profile,
+            "requestedLeaseMs": int(request.requested_lease_ms),
+            "resourceLimits": dict(request.resource_limits),
+            "networkDestinations": list(request.network_destinations),
+            "credentialNames": list(request.credential_names),
+        }
+        try:
+            if not await self._store.artifact_exists(request.artifact_digest):
+                raise AuthorityDenied("lease subject artifact is not registered")
 
-        critical_permissions: list[CapabilityRequest] = []
-        for permission in request.permissions:
-            if any(_covered(permission, forbidden) for forbidden in policy.forbidden):
-                raise AuthorityDenied("requested permission is explicitly forbidden")
-            if not any(_covered(permission, allowed) for allowed in policy.allowed):
-                raise AuthorityDenied("requested permission is outside task policy")
-            if _critical(permission.action):
-                critical_permissions.append(permission)
+            critical_permissions: list[CapabilityRequest] = []
+            for permission in request.permissions:
+                if any(_covered(permission, forbidden) for forbidden in policy.forbidden):
+                    raise AuthorityDenied("requested permission is explicitly forbidden")
+                if not any(_covered(permission, allowed) for allowed in policy.allowed):
+                    raise AuthorityDenied("requested permission is outside task policy")
+                if _critical(permission.action):
+                    critical_permissions.append(permission)
 
-        await self._verify_approval(approval_id, request, tuple(critical_permissions))
+            await self._verify_approval(approval_id, request, tuple(critical_permissions))
 
-        if request.credential_names:
-            unknown_credentials = set(request.credential_names) - set(policy.credential_names)
-            if unknown_credentials:
-                raise AuthorityDenied("requested credential is outside task policy")
-        if request.network_destinations:
-            if policy.outbound_network != "allow-list":
-                raise AuthorityDenied("outbound network is denied by task policy")
-            unknown_destinations = set(request.network_destinations) - set(policy.network_destinations)
-            if unknown_destinations:
-                raise AuthorityDenied("requested network destination is outside task policy")
+            if request.credential_names:
+                unknown_credentials = set(request.credential_names) - set(policy.credential_names)
+                if unknown_credentials:
+                    raise AuthorityDenied("requested credential is outside task policy")
+            if request.network_destinations:
+                if policy.outbound_network != "allow-list":
+                    raise AuthorityDenied("outbound network is denied by task policy")
+                unknown_destinations = set(request.network_destinations) - set(policy.network_destinations)
+                if unknown_destinations:
+                    raise AuthorityDenied("requested network destination is outside task policy")
 
+            limits = dict(policy.resource_limits)
+            for key, value in {
+                "maxCalls": policy.max_calls,
+                "maxBytesRead": policy.max_bytes_read,
+                "maxBytesWritten": policy.max_bytes_written,
+                "maxNetworkBytes": policy.max_network_bytes,
+            }.items():
+                if value is not None:
+                    limits[key] = value
+            if not _constraints_within(dict(request.resource_limits), limits):
+                raise AuthorityDenied("requested resource limit exceeds task policy")
+            limits.update(dict(request.resource_limits))
+        except AuthorityDenied as exc:
+            await self._store.record_policy_decision(
+                decision_id=decision_id,
+                task_id=request.task_id,
+                workload_id=request.workload_id,
+                artifact_digest=request.artifact_digest,
+                outcome="deny",
+                permissions=requested_permissions,
+                constraints=decision_constraints,
+                approval_id=approval_id,
+                reason_code=str(exc)[:200],
+                created_at_ms=decision_at,
+            )
+            raise
+
+        await self._store.record_policy_decision(
+            decision_id=decision_id,
+            task_id=request.task_id,
+            workload_id=request.workload_id,
+            artifact_digest=request.artifact_digest,
+            outcome="allow",
+            permissions=requested_permissions,
+            constraints={**decision_constraints, "effectiveResourceLimits": dict(limits)},
+            approval_id=approval_id,
+            reason_code=None,
+            created_at_ms=decision_at,
+        )
         issued_at = int(self._clock_ms())
         expires_at = issued_at + min(int(request.requested_lease_ms), int(policy.max_lease_ms))
-        limits = dict(policy.resource_limits)
-        for key, value in {
-            "maxCalls": policy.max_calls,
-            "maxBytesRead": policy.max_bytes_read,
-            "maxBytesWritten": policy.max_bytes_written,
-            "maxNetworkBytes": policy.max_network_bytes,
-        }.items():
-            if value is not None:
-                limits[key] = value
-        if not _constraints_within(dict(request.resource_limits), limits):
-            raise AuthorityDenied("requested resource limit exceeds task policy")
-        limits.update(dict(request.resource_limits))
-        decision_id = f"policy_{uuid.uuid4().hex}"
         row = await self._store.create_lease(
             task_id=request.task_id,
             workload_id=request.workload_id,

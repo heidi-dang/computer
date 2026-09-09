@@ -14,7 +14,7 @@ from cptr.services.capability_os.vm import ActionResult
 
 _PROFILE_BY_SUFFIX = {
     ".py": "python", ".js": "node", ".mjs": "node", ".cjs": "node",
-    ".sh": "shell", ".rs": "rust", ".go": "go", ".wasm": "wasm",
+    ".sh": "shell", ".rs": "rust", ".go": "go", ".wat": "wasm",
 }
 _ALLOWED_PROFILES = frozenset({"python", "node", "shell", "rust", "go", "wasm"})
 

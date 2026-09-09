@@ -35,6 +35,7 @@ from cptr.services.capability_os.contracts import (
     create_artifact,
     digest_payload,
 )
+from cptr.services.capability_os.mcp_discovery_index import McpSemanticDiscoveryIndex
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpCandidate, McpFabric
 from cptr.services.capability_os.mcp_reputation import McpReputationService
 from cptr.services.capability_os.mcp_package import (
@@ -508,6 +509,7 @@ class McpAcquisitionService:
         oauth_profile_provider: Any = None,
         credential_broker: CredentialBroker | None = None,
         reputation: McpReputationService | None = None,
+        semantic_index: McpSemanticDiscoveryIndex | None = None,
         clock_ms=lambda: int(time.time() * 1000),
         max_candidates: int = 8,
     ) -> None:
@@ -519,6 +521,7 @@ class McpAcquisitionService:
         self._oauth_profile_provider = oauth_profile_provider
         self._credential_broker = credential_broker
         self._reputation = reputation or McpReputationService(store=store)
+        self._semantic_index = semantic_index
         self._package_preparer = package_preparer
         self._package_runner = package_runner
         self._package_resources = dict(package_resources or {})
@@ -664,6 +667,8 @@ class McpAcquisitionService:
                 max_runtime_ms=20_000,
             ),
         )
+        if self._semantic_index is not None:
+            await self._semantic_index.sync_candidates(batch.candidates)
         results: list[AcquiredMcpAdapter] = []
         for discovered in batch.candidates[: self._max_candidates]:
             if discovered.provider != "mcp_registry" or discovered.candidate_type != "mcp_server":
@@ -1015,6 +1020,43 @@ class McpAcquisitionService:
                     )
                 )
         return results
+
+    async def discover_by_effects(
+        self,
+        *,
+        required_effects: tuple[str, ...],
+        forbidden_effects: tuple[str, ...] = (),
+        refresh_query: str | None = None,
+        limit: int = 20,
+    ) -> tuple[dict[str, Any], ...]:
+        if self._semantic_index is None:
+            raise RemoteMcpError("semantic MCP discovery index is not configured")
+        query = str(refresh_query or "").strip()
+        if query:
+            batch = await self._discovery.discover(
+                query,
+                signals=ResearchSignals(unfamiliar_technology=True, api_uncertain=True),
+                budget=DiscoveryBudget(
+                    max_providers=8,
+                    max_results=max(1, min(int(limit) * 4, 100)),
+                    max_bytes=1_000_000,
+                    max_runtime_ms=20_000,
+                ),
+            )
+            await self._semantic_index.sync_candidates(batch.candidates)
+        qualified = await self._store.list_artifacts(
+            kinds=(ArtifactKind.MCP_ADAPTER.value,),
+            states=(ArtifactState.QUALIFIED.value, ArtifactState.LEARNED.value, ArtifactState.CERTIFIED.value),
+            limit=1000,
+        )
+        for row in qualified:
+            await self._semantic_index.sync_qualified_adapter(row)
+        matches = await self._semantic_index.query(
+            required_effects=required_effects,
+            forbidden_effects=forbidden_effects,
+            limit=limit,
+        )
+        return tuple(item.to_api() for item in matches)
 
     @staticmethod
     def _packaged_live_tools(output: Any) -> tuple[RemoteMcpTool, ...]:

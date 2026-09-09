@@ -255,6 +255,18 @@ class EvolutionExperimentEngine:
             },
             artifact_digest=candidate_digest,
         )
+        await self.store.create_experiment_projection(
+            experiment_id=experiment_id,
+            task_id=task_id,
+            change_class=change_class.value,
+            mode=mode.value,
+            hypothesis=hypothesis,
+            control_artifact_digest=control_digest,
+            candidate_artifact_digest=candidate_digest,
+            context=context.to_api(),
+            min_runs_per_arm=requested_min,
+            created_at_ms=int(row.created_at_ms),
+        )
         return plan, row.evidence_id
 
     @staticmethod
@@ -344,6 +356,17 @@ class EvolutionExperimentEngine:
                 "outcomeSource": "server-evidence",
             },
             artifact_digest=expected_digest,
+        )
+        await self.store.add_experiment_run_projection(
+            experiment_id=plan.experiment_id,
+            arm=arm.value,
+            source_evidence_id=source_id,
+            source_evidence_digest=str(source.digest),
+            success=observation.success,
+            regression=observation.regression,
+            safety_events=observation.safety_events,
+            cost=observation.cost,
+            created_at_ms=int(row.created_at_ms),
         )
         return ExperimentObservation(
             evidence_id=row.evidence_id,
@@ -435,6 +458,10 @@ class EvolutionExperimentEngine:
         )
         return plan, evaluation, rows
 
+    async def plan(self, *, task_id: str, experiment_id: str) -> ExperimentPlan:
+        plan, _rows = await self._load(task_id, experiment_id)
+        return plan
+
     async def status(self, *, task_id: str, experiment_id: str) -> dict[str, Any]:
         plan, rows = await self._load(task_id, experiment_id)
         observations = [row for row in rows if row.kind == self._OBSERVATION]
@@ -470,6 +497,11 @@ class EvolutionExperimentEngine:
             producer_identity="capability-os-control",
             claims={"reason": reason},
             artifact_digest=plan.candidate_artifact_digest,
+        )
+        await self.store.set_experiment_state(
+            plan.experiment_id,
+            state="cancelled",
+            updated_at_ms=int(row.created_at_ms),
         )
         return row.evidence_id
 
@@ -543,5 +575,22 @@ class EvolutionExperimentEngine:
                 "ownerApprovalVerified": bool(owner_approval_verified),
             },
             artifact_digest=plan.candidate_artifact_digest,
+        )
+        await self.store.record_promotion_projection(
+            experiment_id=plan.experiment_id,
+            candidate_artifact_digest=plan.candidate_artifact_digest,
+            decision=evaluation.decision.value,
+            from_state=str(from_state),
+            target_state=str(target_state),
+            evaluation_evidence_id=str(evaluation.evaluation_evidence_id or ""),
+            intent_evidence_id=intent.evidence_id,
+            promotion_evidence_id=row.evidence_id,
+            owner_approval_verified=owner_approval_verified,
+            created_at_ms=int(row.created_at_ms),
+        )
+        await self.store.set_experiment_state(
+            plan.experiment_id,
+            state="promoted",
+            updated_at_ms=int(row.created_at_ms),
         )
         return row.evidence_id

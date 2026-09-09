@@ -435,6 +435,67 @@ export interface McpBenchmarkLeaderboard {
 	models: McpBenchmarkLeaderboardModel[];
 }
 
+export interface McpCapabilityOsTask {
+	taskId: string;
+	workspaceId: string | null;
+	source: 'workbench' | 'factory' | 'control' | string;
+	status: string;
+	active: boolean;
+	executionAllowed: boolean;
+	label: string;
+	updatedAtMs: number;
+}
+
+export interface McpCapabilityOsOperatorSnapshot {
+	task: Omit<McpCapabilityOsTask, 'label' | 'updatedAtMs'>;
+	views: {
+		taskCausality: {
+			runs: number;
+			activeRuns: number;
+			evidenceRecords: number;
+			observations: number;
+			evidenceChain: Record<string, unknown>;
+		};
+		capabilityHealth: {
+			artifacts: number;
+			capabilities: number;
+			byKind: Record<string, number>;
+			byState: Record<string, number>;
+		};
+		forge: { tools: number; builds: number; runs: number; failures: number };
+		skillEvolution: { skills: number; evaluations: number; promotions: number };
+		mcpFabric: { adapters: number; activeMounts: number; events: number };
+		authority: { activeLeases: number; policyDecisions: number };
+		sandbox: { runtime: Record<string, unknown> };
+		evolution: {
+			experiments: number;
+			activeExperiments: number;
+			events: number;
+			promotions: number;
+		};
+		releases: {
+			learnedOrHigher: number;
+			certified: number;
+			core: number;
+			supplyChainBuilds: number;
+		};
+	};
+	activeLeases: Array<{
+		leaseId: string;
+		artifactDigest: string;
+		permissions: unknown[];
+		runtimeProfile: string;
+		expiresAtMs: number;
+	}>;
+	activeMounts: Array<{
+		mountId: string;
+		serverId: string;
+		projectedTools: string[];
+	}>;
+	artifactStates: Record<string, number>;
+	evidenceKinds: Record<string, number>;
+}
+
 export interface McpFactoryRunSummary {
 	run_id: string;
 	workspace_id: string;
@@ -1059,6 +1120,16 @@ export function openMcpMemoryStream(
 	source.onerror = (event) => callbacks.onError?.(event);
 	return () => source.close();
 }
+
+export const getMcpCapabilityOsTasks = (limit = 20) =>
+	fetchJSON<{ tasks: McpCapabilityOsTask[] }>(`/api/mcp/capability-os/tasks?limit=${limit}`);
+
+export const getMcpCapabilityOsOperatorSnapshot = (taskId: string, limit = 100) => {
+	const params = new URLSearchParams({ task_id: taskId, limit: String(limit) });
+	return fetchJSON<McpCapabilityOsOperatorSnapshot>(
+		`/api/mcp/capability-os/operator?${params.toString()}`
+	);
+};
 
 export const getMcpFactorySnapshot = (runId?: string | null, runLimit = 20) => {
 	const params = new URLSearchParams({ run_limit: String(runLimit) });

@@ -46,6 +46,8 @@ class CapabilityTaskContext:
     status: str
     active: bool
     execution_allowed: bool
+    label: str = ""
+    updated_at_ms: int = 0
 
 
 class CapabilityTaskCoordinator:
@@ -74,6 +76,8 @@ class CapabilityTaskCoordinator:
                     status=status,
                     active=active,
                     execution_allowed=active and status not in _WORKBENCH_WAITING,
+                    label=str(workbench.name or "Workbench session"),
+                    updated_at_ms=int(workbench.updated_at or 0),
                 )
 
             factory = await db.scalar(
@@ -93,6 +97,8 @@ class CapabilityTaskCoordinator:
                     status=status,
                     active=active,
                     execution_allowed=active and status not in _FACTORY_WAITING,
+                    label=str(factory.mission or "Factory run"),
+                    updated_at_ms=int(factory.updated_at or 0),
                 )
 
             control = await db.scalar(
@@ -112,8 +118,99 @@ class CapabilityTaskCoordinator:
                     status=status,
                     active=active,
                     execution_allowed=active and status not in _CONTROL_WAITING,
+                    label=str(control.prompt or "Control task"),
+                    updated_at_ms=int(control.updated_at or 0),
                 )
         return None
+
+    async def list_recent(
+        self, *, user_id: str, limit: int = 20
+    ) -> tuple[CapabilityTaskContext, ...]:
+        normalized_user = str(user_id or "").strip()
+        bounded_limit = max(1, min(int(limit), 50))
+        if not normalized_user:
+            return ()
+        query_limit = min(100, bounded_limit * 3)
+        async with self._session_factory() as db:
+            workbenches = (
+                await db.scalars(
+                    select(WorkbenchSession)
+                    .where(
+                        WorkbenchSession.user_id == normalized_user,
+                        WorkbenchSession.deleted_at.is_(None),
+                        WorkbenchSession.status.not_in(_WORKBENCH_TERMINAL),
+                    )
+                    .order_by(WorkbenchSession.updated_at.desc())
+                    .limit(query_limit)
+                )
+            ).all()
+            factories = (
+                await db.scalars(
+                    select(FactoryRun)
+                    .where(
+                        FactoryRun.user_id == normalized_user,
+                        FactoryRun.state.not_in(_FACTORY_TERMINAL),
+                    )
+                    .order_by(FactoryRun.updated_at.desc())
+                    .limit(query_limit)
+                )
+            ).all()
+            controls = (
+                await db.scalars(
+                    select(ControlTask)
+                    .where(
+                        ControlTask.user_id == normalized_user,
+                        ControlTask.status.not_in(_CONTROL_TERMINAL),
+                    )
+                    .order_by(ControlTask.updated_at.desc())
+                    .limit(query_limit)
+                )
+            ).all()
+
+        contexts = [
+            CapabilityTaskContext(
+                task_id=row.id,
+                user_id=row.user_id,
+                workspace_id=row.active_workspace_id or row.workspace_id,
+                source="workbench",
+                status=str(row.status or "").upper(),
+                active=True,
+                execution_allowed=str(row.status or "").upper() not in _WORKBENCH_WAITING,
+                label=str(row.name or "Workbench session"),
+                updated_at_ms=int(row.updated_at or 0),
+            )
+            for row in workbenches
+        ]
+        contexts.extend(
+            CapabilityTaskContext(
+                task_id=row.id,
+                user_id=row.user_id,
+                workspace_id=row.workspace_id,
+                source="factory",
+                status=str(row.state or "").upper(),
+                active=True,
+                execution_allowed=str(row.state or "").upper() not in _FACTORY_WAITING,
+                label=str(row.mission or "Factory run"),
+                updated_at_ms=int(row.updated_at or 0),
+            )
+            for row in factories
+        )
+        contexts.extend(
+            CapabilityTaskContext(
+                task_id=row.id,
+                user_id=row.user_id,
+                workspace_id=row.workspace_id,
+                source="control",
+                status=str(row.status or "").upper(),
+                active=True,
+                execution_allowed=str(row.status or "").upper() not in _CONTROL_WAITING,
+                label=str(row.prompt or "Control task"),
+                updated_at_ms=int(row.updated_at or 0),
+            )
+            for row in controls
+        )
+        contexts.sort(key=lambda item: (item.updated_at_ms, item.task_id), reverse=True)
+        return tuple(contexts[:bounded_limit])
 
     async def require_active(self, *, user_id: str, task_id: str) -> CapabilityTaskContext:
         task = await self.resolve(user_id=user_id, task_id=task_id)

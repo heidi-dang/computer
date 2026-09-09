@@ -55,11 +55,15 @@ class CreateToolRequest:
     def __post_init__(self) -> None:
         if not self.tool_id.strip() or not self.version.strip() or not self.task_id.strip():
             raise ValueError("tool id, version, and task id must not be blank")
-        RuntimeClass(self.runtime_class)
+        runtime_class = RuntimeClass(self.runtime_class)
         if not self.entrypoint.strip():
             raise ValueError("tool entrypoint must not be blank")
         if self.entrypoint not in self.files:
             raise ValueError("tool entrypoint must exist in source files")
+        if runtime_class is RuntimeClass.WASM and not self.entrypoint.lower().endswith(".wat"):
+            raise ValueError("portable WASM tools must use a text .wat entrypoint")
+        if runtime_class is not RuntimeClass.WASM and self.entrypoint.lower().endswith(".wat"):
+            raise ValueError(".wat entrypoints require runtimeClass=wasm")
         if not self.requested_capabilities:
             raise ValueError("tool must declare requested capabilities")
         if self.reversibility not in {"full", "compensating", "partial", "irreversible", "unknown"}:

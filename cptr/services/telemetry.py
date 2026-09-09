@@ -9,6 +9,7 @@ accepted as span attributes by this module.
 from __future__ import annotations
 
 from contextlib import nullcontext
+import re
 from threading import Lock
 from typing import Any, ContextManager
 
@@ -25,11 +26,26 @@ _ALLOWED_ATTRIBUTES = frozenset(
         "cptr.status",
         "cptr.automatic_lease",
         "cptr.verification_passed",
+        "cptr.task.id",
+        "cptr.lease.id",
+        "cptr.artifact.digest",
+        "cptr.experiment.id",
+        "cptr.run.id",
         "http.request.method",
         "http.response.status_code",
     }
 )
 _ALLOWED_SCALARS = (bool, int, float, str)
+_IDENTIFIER_ATTRIBUTES = frozenset(
+    {
+        "cptr.task.id",
+        "cptr.lease.id",
+        "cptr.artifact.digest",
+        "cptr.experiment.id",
+        "cptr.run.id",
+    }
+)
+_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9._:@/-]{1,200}$")
 
 
 def sanitize_attributes(attributes: dict[str, Any] | None) -> dict[str, bool | int | float | str]:
@@ -42,7 +58,12 @@ def sanitize_attributes(attributes: dict[str, Any] | None) -> dict[str, bool | i
         if key not in _ALLOWED_ATTRIBUTES or not isinstance(value, _ALLOWED_SCALARS):
             continue
         if isinstance(value, str):
-            value = value[:160]
+            if key in _IDENTIFIER_ATTRIBUTES:
+                value = value[:200]
+                if not _IDENTIFIER_RE.fullmatch(value):
+                    continue
+            else:
+                value = value[:160]
         safe[key] = value
     return safe
 
