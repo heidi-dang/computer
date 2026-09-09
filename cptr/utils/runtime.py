@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
+import hashlib
 import io
 import json
 import mimetypes
 import os
 import signal
 import shutil
+import stat as statmod
 import subprocess
 import sys
 import uuid
 import zipfile
 from datetime import datetime, timezone
-from pathlib import Path
+from contextlib import contextmanager
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from fastapi import Request
@@ -207,11 +211,55 @@ class Runtime:
         return await _file(identity, _list_tree_entries, path, recursive, offset, limit)
 
     @staticmethod
+    async def list_tree_entries_beneath_as(
+        identity: ExecutionIdentity,
+        root: str,
+        relative: str,
+        recursive: bool = False,
+        offset: int = 0,
+        limit: int = 500,
+        root_device: int | None = None,
+        root_inode: int | None = None,
+    ) -> dict[str, Any]:
+        """List without following path components that change into symlinks after validation."""
+        return await _file(
+            identity,
+            _list_tree_entries_beneath,
+            root,
+            relative,
+            recursive,
+            offset,
+            limit,
+            root_device,
+            root_inode,
+        )
+
+    @staticmethod
     async def read_text_file_as(
         identity: ExecutionIdentity, path: str, max_bytes: int
     ) -> dict[str, Any]:
         """Read bounded text under a server-resolved identity for native Capability OS actions."""
         return await _file(identity, _read_text_file, path, max_bytes)
+
+    @staticmethod
+    async def read_text_file_beneath_as(
+        identity: ExecutionIdentity,
+        root: str,
+        relative: str,
+        max_bytes: int,
+        root_device: int | None = None,
+        root_inode: int | None = None,
+    ) -> dict[str, Any]:
+        """Read one regular file beneath a stable directory chain using O_NOFOLLOW."""
+        return await _file(
+            identity,
+            _read_text_file_beneath,
+            root,
+            relative,
+            max_bytes,
+            root_device,
+            root_inode,
+        )
 
     @staticmethod
     async def read_file_as(identity: ExecutionIdentity, path: str) -> dict[str, Any]:
@@ -224,6 +272,32 @@ class Runtime:
     ) -> dict[str, Any]:
         """Write one bounded file under an already server-resolved execution identity."""
         return await _file(identity, _write_file, path, content)
+
+    @staticmethod
+    async def write_text_file_beneath_as(
+        identity: ExecutionIdentity,
+        root: str,
+        relative: str,
+        content: str | bytes,
+        overwrite: bool,
+        expected_sha256: str | None,
+        max_bytes: int,
+        root_device: int | None = None,
+        root_inode: int | None = None,
+    ) -> dict[str, Any]:
+        """Check and write the same opened inode beneath a no-follow directory chain."""
+        return await _file(
+            identity,
+            _write_text_file_beneath,
+            root,
+            relative,
+            content,
+            overwrite,
+            expected_sha256,
+            max_bytes,
+            root_device,
+            root_inode,
+        )
 
     @staticmethod
     async def write_private_file_as(
@@ -517,6 +591,305 @@ def _is_text_file(path: Path) -> bool:
             return b"\0" not in source.read(8192)
     except OSError:
         return False
+
+
+def _is_text_payload(name: str, payload: bytes) -> bool:
+    path = Path(name)
+    if path.suffix.lower() in TEXT_EXTENSIONS or path.name.lower() in {
+        "changelog",
+        "dockerfile",
+        "gemfile",
+        "license",
+        "makefile",
+        "procfile",
+        "rakefile",
+        "readme",
+    }:
+        return True
+    return b"\0" not in payload[:8192]
+
+
+def _beneath_parts(relative: str) -> tuple[str, ...]:
+    raw = str(relative or ".").strip() or "."
+    path = PurePosixPath(raw)
+    if path.is_absolute() or any(part == ".." for part in path.parts):
+        raise FileError("relative path escapes the workspace", 403)
+    return tuple(part for part in path.parts if part not in {"", "."})
+
+
+def _translate_beneath_open_error(exc: OSError) -> FileError:
+    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+        return FileError("path changed or traverses a symlink", 409)
+    if exc.errno == errno.ENOENT:
+        return FileError("path not found", 404)
+    if exc.errno in {errno.EACCES, errno.EPERM}:
+        return FileError("permission denied", 403)
+    return FileError(str(exc), 400)
+
+
+@contextmanager
+def _open_directory_beneath(
+    root: str,
+    relative: str,
+    root_device: int | None = None,
+    root_inode: int | None = None,
+):
+    flags = (
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptors: list[int] = []
+    try:
+        try:
+            current = os.open(str(Path(root).expanduser()), flags)
+        except OSError as exc:
+            raise _translate_beneath_open_error(exc) from exc
+        descriptors.append(current)
+        opened_root = os.fstat(current)
+        if root_device is not None and root_inode is not None:
+            if opened_root.st_dev != root_device or opened_root.st_ino != root_inode:
+                raise FileError("workspace root changed during operation", 409)
+        for part in _beneath_parts(relative):
+            try:
+                current = os.open(part, flags, dir_fd=current)
+            except OSError as exc:
+                raise _translate_beneath_open_error(exc) from exc
+            descriptors.append(current)
+        yield descriptors[-1]
+    finally:
+        for fd in reversed(descriptors):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+@contextmanager
+def _open_parent_beneath(
+    root: str,
+    relative: str,
+    root_device: int | None = None,
+    root_inode: int | None = None,
+):
+    parts = _beneath_parts(relative)
+    if not parts:
+        raise FileError("file path must not be the workspace root", 400)
+    parent = "/".join(parts[:-1]) or "."
+    with _open_directory_beneath(root, parent, root_device, root_inode) as parent_fd:
+        yield parent_fd, parts[-1]
+
+
+def _entry_matches_fd(parent_fd: int, name: str, opened) -> bool:
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        return False
+    return (
+        not statmod.S_ISLNK(current.st_mode)
+        and current.st_dev == opened.st_dev
+        and current.st_ino == opened.st_ino
+    )
+
+
+def _read_fd_bounded(fd: int, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = max_bytes + 1
+    while remaining > 0:
+        chunk = os.read(fd, min(65_536, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    payload = b"".join(chunks)
+    if len(payload) > max_bytes:
+        raise FileError(f"File too large. Max is {max_bytes} bytes.", 413)
+    return payload
+
+
+def _read_text_file_beneath(
+    root: str,
+    relative: str,
+    max_bytes: int,
+    root_device: int | None = None,
+    root_inode: int | None = None,
+) -> dict[str, Any]:
+    if max_bytes < 1 or max_bytes > MAX_FILE_SIZE:
+        raise FileError(f"Invalid bounded read size: {max_bytes}")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    with _open_parent_beneath(root, relative, root_device, root_inode) as (parent_fd, name):
+        try:
+            fd = os.open(name, flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise _translate_beneath_open_error(exc) from exc
+        try:
+            opened = os.fstat(fd)
+            if not statmod.S_ISREG(opened.st_mode):
+                raise FileError("native read requires a regular file", 409)
+            if opened.st_size > max_bytes:
+                raise FileError(
+                    f"File too large ({opened.st_size} bytes). Max is {max_bytes} bytes.", 413
+                )
+            payload = _read_fd_bounded(fd, max_bytes)
+            if not _entry_matches_fd(parent_fd, name, opened):
+                raise FileError("native read target changed during operation", 409)
+        finally:
+            os.close(fd)
+    is_text = _is_text_payload(name, payload)
+    return {
+        "path": str(Path(root) / relative),
+        "name": name,
+        "size": len(payload),
+        "binary": not is_text,
+        "content": payload.decode("utf-8", errors="replace") if is_text else None,
+        "language": _detect_language(name) if is_text else None,
+    }
+
+
+def _write_all(fd: int, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("native write made no progress")
+        view = view[written:]
+
+
+def _write_text_file_beneath(
+    root: str,
+    relative: str,
+    content: str | bytes,
+    overwrite: bool,
+    expected_sha256: str | None,
+    max_bytes: int,
+    root_device: int | None = None,
+    root_inode: int | None = None,
+) -> dict[str, Any]:
+    payload = content if isinstance(content, bytes) else str(content).encode("utf-8")
+    if max_bytes < 1 or max_bytes > MAX_FILE_SIZE or len(payload) > max_bytes:
+        raise FileError("native write exceeds bounded text size", 413)
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    with _open_parent_beneath(root, relative, root_device, root_inode) as (parent_fd, name):
+        created = False
+        try:
+            fd = os.open(name, os.O_RDWR | cloexec | nofollow, dir_fd=parent_fd)
+        except FileNotFoundError:
+            if expected_sha256 is not None:
+                raise FileError("expectedSha256 cannot be used for a missing file", 409)
+            try:
+                fd = os.open(
+                    name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | cloexec | nofollow,
+                    0o666,
+                    dir_fd=parent_fd,
+                )
+            except OSError as exc:
+                raise _translate_beneath_open_error(exc) from exc
+            created = True
+        except OSError as exc:
+            raise _translate_beneath_open_error(exc) from exc
+        try:
+            opened = os.fstat(fd)
+            if not statmod.S_ISREG(opened.st_mode):
+                raise FileError("native write target is not a regular file", 409)
+            if not created:
+                if not overwrite:
+                    raise FileError(
+                        "native write requires overwrite=true for an existing file", 409
+                    )
+                if opened.st_size > max_bytes:
+                    raise FileError("existing file is too large for safe native overwrite", 413)
+                current = _read_fd_bounded(fd, max_bytes)
+                if not _is_text_payload(name, current):
+                    raise FileError("binary files cannot be overwritten by native write", 409)
+                if expected_sha256 is not None:
+                    current_digest = hashlib.sha256(current).hexdigest()
+                    if current_digest != expected_sha256:
+                        raise FileError("native write stale-hash precondition failed", 409)
+                os.lseek(fd, 0, os.SEEK_SET)
+                os.ftruncate(fd, 0)
+            _write_all(fd, payload)
+            os.fsync(fd)
+            after = os.fstat(fd)
+            if not _entry_matches_fd(parent_fd, name, after):
+                raise FileError("native write target changed during operation", 409)
+        finally:
+            os.close(fd)
+    return {
+        "status": "saved",
+        "path": str(Path(root) / relative),
+        "size": len(payload),
+        "created": created,
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _list_tree_entries_beneath(
+    root: str,
+    relative: str,
+    recursive: bool = False,
+    offset: int = 0,
+    limit: int = 500,
+    root_device: int | None = None,
+    root_inode: int | None = None,
+) -> dict[str, Any]:
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 5_000))
+    stop_after = offset + limit + 1
+    discovered: list[dict[str, Any]] = []
+    directory_flags = (
+        os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+    def scan(directory_fd: int, prefix: PurePosixPath) -> None:
+        if len(discovered) >= stop_after:
+            return
+        entries = sorted(os.scandir(directory_fd), key=lambda entry: entry.name.casefold())
+        for entry in entries:
+            if len(discovered) >= stop_after:
+                return
+            if entry.name in _TREE_IGNORE:
+                continue
+            try:
+                st = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            kind = (
+                "symlink"
+                if statmod.S_ISLNK(st.st_mode)
+                else "directory"
+                if statmod.S_ISDIR(st.st_mode)
+                else "file"
+            )
+            child = prefix / entry.name
+            discovered.append(
+                {
+                    "path": child.as_posix(),
+                    "type": kind,
+                    "size": st.st_size if kind == "file" else 0,
+                    "modified": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc).isoformat(),
+                }
+            )
+            if recursive and kind == "directory":
+                try:
+                    child_fd = os.open(entry.name, directory_flags, dir_fd=directory_fd)
+                except OSError:
+                    continue
+                try:
+                    scan(child_fd, child)
+                finally:
+                    os.close(child_fd)
+
+    with _open_directory_beneath(root, relative, root_device, root_inode) as target_fd:
+        scan(target_fd, PurePosixPath("."))
+    has_more = len(discovered) > offset + limit
+    page = discovered[offset : offset + limit]
+    return {
+        "entries": page,
+        "truncated": has_more,
+        "next_offset": offset + len(page) if has_more else None,
+        "total": len(discovered) if not has_more else offset + len(page) + 1,
+        "total_exact": not has_more,
+    }
 
 
 def _list_directory(path: str) -> dict[str, Any]:
@@ -1202,16 +1575,19 @@ CALLS = {
         _list_directory,
         _list_tree,
         _list_tree_entries,
+        _list_tree_entries_beneath,
         _move_item,
         _read_bytes,
         _read_file,
         _read_text_file,
+        _read_text_file_beneath,
         _read_text_files,
         _search_files,
         _stat,
         _upload_file,
         _write_file,
         _write_private_file,
+        _write_text_file_beneath,
     )
 }
 
