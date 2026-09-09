@@ -10,6 +10,7 @@ import signal
 import shutil
 import subprocess
 import sys
+import uuid
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +182,15 @@ class Runtime:
         return await _file(await _request_identity(request), _write_file, path, content)
 
     @staticmethod
+    async def write_private_file(
+        request: Request, path: str, content: str | bytes, *, overwrite: bool = False
+    ) -> dict[str, Any]:
+        """Materialize sensitive content without exposing size/hash metadata."""
+        return await _file(
+            await _request_identity(request), _write_private_file, path, content, overwrite
+        )
+
+    @staticmethod
     async def stat_as(identity: ExecutionIdentity, path: str) -> dict[str, Any]:
         """Run a bounded stat operation under an already server-resolved execution identity."""
         return await _file(identity, _stat, path)
@@ -214,6 +224,17 @@ class Runtime:
     ) -> dict[str, Any]:
         """Write one bounded file under an already server-resolved execution identity."""
         return await _file(identity, _write_file, path, content)
+
+    @staticmethod
+    async def write_private_file_as(
+        identity: ExecutionIdentity,
+        path: str,
+        content: str | bytes,
+        *,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Materialize sensitive content under an already-resolved identity."""
+        return await _file(identity, _write_private_file, path, content, overwrite)
 
     @staticmethod
     async def file_matches(
@@ -731,6 +752,81 @@ def _write_file(path: str, content: str | bytes) -> dict[str, Any]:
     return {"status": "saved", "path": str(target), "size": target.stat().st_size}
 
 
+def _write_private_file(path: str, content: str | bytes, overwrite: bool = False) -> dict[str, Any]:
+    """Write sensitive bytes with 0600 permissions and no secret-derived result metadata.
+
+    The final component is never followed when it already exists. Replacements
+    are staged beside the target and atomically swapped into place, preventing a
+    partially-written credential file from becoming observable.
+    """
+
+    raw = Path(path).expanduser()
+    target = Path(os.path.abspath(raw))
+    parent = target.parent.resolve()
+    target = parent / target.name
+    if target.is_symlink():
+        raise FileError("secret target must not be a symlink", 409)
+    if target.exists():
+        if not target.is_file():
+            raise FileError("secret target must be a regular file", 409)
+        if not overwrite:
+            raise FileError("existing secret file requires overwrite=true", 409)
+    parent.mkdir(parents=True, exist_ok=True)
+
+    payload = content if isinstance(content, bytes) else content.encode("utf-8")
+    if len(payload) > MAX_FILE_SIZE:
+        raise FileError(
+            f"File too large ({len(payload)} bytes). Max is {MAX_FILE_SIZE} bytes.", 413
+        )
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow
+
+    def write_fd(fd: int) -> None:
+        try:
+            view = memoryview(payload)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("secret write made no progress")
+                view = view[written:]
+            os.fsync(fd)
+            os.fchmod(fd, 0o600)
+        finally:
+            os.close(fd)
+
+    if not overwrite:
+        try:
+            fd = os.open(target, flags, 0o600)
+        except FileExistsError as exc:
+            raise FileError("existing secret file requires overwrite=true", 409) from exc
+        created = os.fstat(fd)
+        try:
+            write_fd(fd)
+        except Exception:
+            try:
+                current = os.lstat(target)
+                if current.st_dev == created.st_dev and current.st_ino == created.st_ino:
+                    target.unlink()
+            except OSError:
+                pass
+            raise
+        return {"status": "saved", "path": str(target)}
+
+    temporary = parent / f".{target.name}.cptr-secret-{uuid.uuid4().hex}"
+    try:
+        write_fd(os.open(temporary, flags, 0o600))
+        if target.is_symlink():
+            raise FileError("secret target must not be a symlink", 409)
+        os.replace(temporary, target)
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {"status": "saved", "path": str(target)}
+
+
 def _ensure_cptr_gitignored_for(path: Path) -> None:
     parts = path.parts
     if ".cptr" not in parts:
@@ -1115,6 +1211,7 @@ CALLS = {
         _stat,
         _upload_file,
         _write_file,
+        _write_private_file,
     )
 }
 

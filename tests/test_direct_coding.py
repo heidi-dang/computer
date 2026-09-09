@@ -15,6 +15,7 @@ from cptr.routers.coding import (
     ApplyEditsRequest,
     CommandRequest,
     EditRequest,
+    SecretWriteRequest,
     TestTargetRequest as CodingTestTargetRequest,
     WorkspaceInspectRequest,
     _relative_path,
@@ -24,6 +25,7 @@ from cptr.routers.coding import (
     inspect_workspace,
     run_workspace_test_target,
     start_workspace_command,
+    write_workspace_secret,
     _cursor,
     _sha256,
 )
@@ -183,6 +185,173 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(path=unsafe), self.assertRaises(HTTPException):
                 _relative_path(unsafe, root)
 
+    async def test_secret_write_requires_exact_prompt_approval_and_owned_workbench(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = SecretWriteRequest(
+            path=".env",
+            secret="PASSWORD=synthetic-test-secret\n",
+            workbench_session_id="wbs_1234567890abcdef",
+        )
+        private_write = AsyncMock(return_value={"status": "saved"})
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch("cptr.routers.coding.Runtime.write_private_file", new=private_write),
+            self.assertRaises(HTTPException) as denied,
+        ):
+            await write_workspace_secret(request, "ws_1", body)
+
+        self.assertEqual(denied.exception.status_code, 403)
+        private_write.assert_not_awaited()
+
+    async def test_prompt_approved_secret_write_can_materialize_dotenv_without_exposing_secret_metadata(
+        self,
+    ):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = SecretWriteRequest(
+            path=".env",
+            secret="PASSWORD=synthetic-test-secret\n",
+            workbench_session_id="wbs_1234567890abcdef",
+            user_approval="allow:secret-write",
+            overwrite=True,
+        )
+        session = {
+            "session_id": "wbs_1234567890abcdef",
+            "workspace_id": "ws_1",
+            "status": "OPEN",
+            "archived_at": None,
+        }
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.workbench_session_store.get",
+                new=AsyncMock(return_value=session),
+            ) as get_session,
+            patch(
+                "cptr.routers.coding.Runtime.write_private_file",
+                new=AsyncMock(return_value={"status": "saved"}),
+            ) as private_write,
+        ):
+            result = await write_workspace_secret(request, "ws_1", body)
+
+        get_session.assert_awaited_once_with(owner_id="user_1", session_id="wbs_1234567890abcdef")
+        private_write.assert_awaited_once_with(
+            request,
+            "/tmp/cptr-direct-coding/.env",
+            "PASSWORD=synthetic-test-secret\n",
+            overwrite=True,
+        )
+        self.assertEqual(
+            result,
+            {
+                "workspace_id": "ws_1",
+                "path": ".env",
+                "scope": "workspace",
+                "materialized": True,
+                "permissions": "0600",
+            },
+        )
+        self.assertNotIn("synthetic-test-secret", repr(result))
+        self.assertNotIn("sha256", result)
+        self.assertNotIn("bytes_written", result)
+        with self.assertRaises(HTTPException):
+            _relative_path(".env", Path("/tmp/cptr-direct-coding").resolve())
+
+    async def test_host_secret_write_requires_active_root_grant_and_uses_root_identity(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = SecretWriteRequest(
+            path="/etc/cptr/example.secret",
+            secret="synthetic-test-secret\n",
+            workbench_session_id="wbs_1234567890abcdef",
+            user_approval="allow:secret-write",
+            overwrite=True,
+        )
+        session = {
+            "session_id": "wbs_1234567890abcdef",
+            "workspace_id": "ws_1",
+            "status": "OPEN",
+            "archived_at": None,
+        }
+        root_identity = SimpleNamespace(app_user_id="user_1", is_pam=False, uid=0)
+        private_write = AsyncMock(return_value={"status": "saved"})
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.workbench_session_store.get",
+                new=AsyncMock(return_value=session),
+            ),
+            patch("cptr.routers.coding.local_root_grants_enabled", return_value=True),
+            patch(
+                "cptr.routers.coding.local_root_grant_store.is_active",
+                new=AsyncMock(return_value=True),
+            ) as root_active,
+            patch(
+                "cptr.routers.coding.identity_for_context",
+                new=AsyncMock(return_value=root_identity),
+            ),
+            patch(
+                "cptr.routers.coding.unrestricted_root_identity",
+                return_value=root_identity,
+            ),
+            patch("cptr.routers.coding.Runtime.write_private_file_as", new=private_write),
+        ):
+            result = await write_workspace_secret(request, "ws_1", body)
+
+        root_active.assert_awaited_once_with(owner_id="user_1", session_id="wbs_1234567890abcdef")
+        private_write.assert_awaited_once_with(
+            root_identity,
+            "/etc/cptr/example.secret",
+            "synthetic-test-secret\n",
+            overwrite=True,
+        )
+        self.assertEqual(result["scope"], "host-root")
+        self.assertEqual(result["path"], "/etc/cptr/example.secret")
+        self.assertNotIn("synthetic-test-secret", repr(result))
+
+    async def test_host_secret_write_is_denied_without_active_root_grant(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = SecretWriteRequest(
+            path="/etc/cptr/example.secret",
+            secret="synthetic-test-secret\n",
+            workbench_session_id="wbs_1234567890abcdef",
+            user_approval="allow:secret-write",
+        )
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.workbench_session_store.get",
+                new=AsyncMock(
+                    return_value={
+                        "session_id": "wbs_1234567890abcdef",
+                        "workspace_id": "ws_1",
+                        "status": "OPEN",
+                        "archived_at": None,
+                    }
+                ),
+            ),
+            patch("cptr.routers.coding.local_root_grants_enabled", return_value=True),
+            patch(
+                "cptr.routers.coding.local_root_grant_store.is_active",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "cptr.routers.coding.Runtime.write_private_file_as",
+                new=AsyncMock(return_value={"status": "saved"}),
+            ) as private_write,
+            self.assertRaises(HTTPException) as denied,
+        ):
+            await write_workspace_secret(request, "ws_1", body)
+
+        self.assertEqual(denied.exception.status_code, 403)
+        private_write.assert_not_awaited()
+
     def test_command_policy_rejects_destructive_and_unapproved_network_commands(self):
         with self.assertRaises(HTTPException) as destructive:
             _validate_command("rm -rf build", False)
@@ -341,9 +510,7 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             result = await start_workspace_command(request, "ws_1", body)
 
         self.assertEqual(result["status"], "COMPLETE")
-        get_workbench.assert_awaited_once_with(
-            owner_id="user_1", session_id="wbs_1234567890abcdef"
-        )
+        get_workbench.assert_awaited_once_with(owner_id="user_1", session_id="wbs_1234567890abcdef")
         self.assertEqual(
             run.await_args.kwargs["__context__"]["workbench_session_id"],
             "wbs_1234567890abcdef",
