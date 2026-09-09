@@ -154,6 +154,14 @@ class WriteRequest(WorkerTargetRequest):
     overwrite: bool = False
 
 
+class SecretWriteRequest(WorkerTargetRequest):
+    path: str = Field(min_length=1, max_length=4_096)
+    secret: str = Field(min_length=1, max_length=MAX_WRITE_BYTES)
+    workbench_session_id: str = Field(pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$")
+    user_approval: Literal["allow:secret-write"] | None = None
+    overwrite: bool = False
+
+
 class EditRequest(WorkerTargetRequest):
     path: str = Field(min_length=1, max_length=1_000)
     target: str = Field(min_length=1, max_length=MAX_WRITE_BYTES)
@@ -174,9 +182,7 @@ class CommandRequest(WorkerTargetRequest):
     rows: int = Field(default=24, ge=5, le=300)
     cols: int = Field(default=80, ge=20, le=500)
     stdin: str | None = Field(default=None, max_length=65_536)
-    workbench_session_id: str | None = Field(
-        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
-    )
+    workbench_session_id: str | None = Field(default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$")
     idempotency_key: str | None = Field(default=None, max_length=200)
 
 
@@ -289,18 +295,14 @@ class TestTargetRequest(WorkerTargetRequest):
     path: str = Field(default=".", min_length=1, max_length=1_000)
     test_path: str | None = Field(default=None, min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
-    workbench_session_id: str | None = Field(
-        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
-    )
+    workbench_session_id: str | None = Field(default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$")
 
 
 class SshCommandRequest(BaseModel):
     alias: str = Field(min_length=1, max_length=MAX_SSH_ALIAS_CHARS)
     command: str = Field(min_length=1, max_length=MAX_COMMAND_CHARS)
     wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
-    workbench_session_id: str | None = Field(
-        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
-    )
+    workbench_session_id: str | None = Field(default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$")
 
 
 class BrowserControlRequest(BaseModel):
@@ -476,6 +478,20 @@ def _relative_path(path: str, root: Path) -> tuple[Path, str]:
             status_code=403, detail="environment files are not available through direct coding"
         )
     return resolved, relative
+
+
+def _secret_workspace_path(path: str, root: Path) -> tuple[Path, str]:
+    """Resolve one prompt-approved secret target without widening normal file access."""
+    value = path.strip()
+    if not value:
+        raise HTTPException(status_code=422, detail="path must not be blank")
+    supplied = Path(value)
+    if supplied.is_absolute() or PureWindowsPath(value).is_absolute():
+        raise HTTPException(status_code=422, detail="workspace secret path must be relative")
+    resolved = (root / supplied).resolve()
+    if not resolved.is_relative_to(root):
+        raise HTTPException(status_code=422, detail="path traversal rejected")
+    return resolved, resolved.relative_to(root).as_posix()
 
 
 def _truncate(text: str, max_chars: int = MAX_COMMAND_OUTPUT_CHARS) -> str:
@@ -686,7 +702,10 @@ async def _command_idempotency_commit(
         ).scalar_one_or_none()
         if record is None:
             raise HTTPException(status_code=409, detail="command idempotency reservation was lost")
-        if str(record.resource_id) != command_id or _command_idempotency_fingerprint(record) != fingerprint:
+        if (
+            str(record.resource_id) != command_id
+            or _command_idempotency_fingerprint(record) != fingerprint
+        ):
             raise HTTPException(status_code=409, detail="command idempotency reservation changed")
         if record.resource_type == "direct_command":
             _command_idempotency_memory_put(user_id, workspace_id, key, command_id)
@@ -778,9 +797,7 @@ async def _command_idempotency_put(
         user_id, workspace_id, key, fingerprint, command_id
     )
     if state == "reserved":
-        await _command_idempotency_commit(
-            user_id, workspace_id, key, fingerprint, command_id
-        )
+        await _command_idempotency_commit(user_id, workspace_id, key, fingerprint, command_id)
         return command_id
     return winner
 
@@ -1942,6 +1959,105 @@ async def write_workspace_file(request: Request, workspace_id: str, body: WriteR
     }
 
 
+@router.post("/workspaces/{workspace_id}/coding/materialize-secret")
+async def write_workspace_secret(request: Request, workspace_id: str, body: SecretWriteRequest):
+    """Materialize a secret only for the exact prompt-approved Workbench operation."""
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    if body.user_approval != "allow:secret-write":
+        raise HTTPException(
+            status_code=403,
+            detail="secret materialization requires explicit prompt approval: allow:secret-write",
+        )
+    await _validate_workbench_routing(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        session_id=body.workbench_session_id,
+    )
+
+    raw_path = body.path.strip()
+    native_path = Path(raw_path)
+    windows_path = PureWindowsPath(raw_path)
+    if windows_path.is_absolute() and not native_path.is_absolute():
+        raise HTTPException(
+            status_code=422, detail="host secret path is not valid on this platform"
+        )
+
+    if native_path.is_absolute():
+        if body.worker_id:
+            raise HTTPException(
+                status_code=422, detail="host secret targets cannot be combined with worker_id"
+            )
+        if not local_root_grants_enabled():
+            raise HTTPException(
+                status_code=403,
+                detail="local root grants are disabled by the CPTR host operator",
+            )
+        if not await local_root_grant_store.is_active(
+            owner_id=user_id,
+            session_id=body.workbench_session_id,
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail="host secret materialization requires an active local-root Workbench grant",
+            )
+        try:
+            identity = await identity_for_context(
+                _command_context(
+                    request=request,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    workspace_path=workspace.path,
+                    worker_id=None,
+                    workbench_session_id=body.workbench_session_id,
+                )
+            )
+            root_identity = unrestricted_root_identity(identity)
+            await Runtime.write_private_file_as(
+                root_identity,
+                raw_path,
+                body.secret,
+                overwrite=body.overwrite,
+            )
+        except IdentityUnavailable as exc:
+            raise HTTPException(
+                status_code=409, detail="local root identity is unavailable"
+            ) from exc
+        except FileError as exc:
+            raise HTTPException(
+                status_code=exc.status_code, detail="secret materialization failed"
+            ) from exc
+        return {
+            "workspace_id": workspace_id,
+            "path": raw_path,
+            "scope": "host-root",
+            "materialized": True,
+            "permissions": "0600",
+        }
+
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    full, relative = _secret_workspace_path(raw_path, root)
+    try:
+        await Runtime.write_private_file(
+            request,
+            str(full),
+            body.secret,
+            overwrite=body.overwrite,
+        )
+    except FileError as exc:
+        raise HTTPException(
+            status_code=exc.status_code, detail="secret materialization failed"
+        ) from exc
+    await _touch_worker(user_id, workspace_id, body.worker_id)
+    return {
+        "workspace_id": workspace_id,
+        "path": relative,
+        "scope": "workspace",
+        "materialized": True,
+        "permissions": "0600",
+    }
+
+
 @router.post("/workspaces/{workspace_id}/coding/edit")
 async def edit_workspace_file(request: Request, workspace_id: str, body: EditRequest):
     user_id = await _user(request, "coding:write")
@@ -2458,7 +2574,9 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     command_id = match.group(1)
     if preallocated_command_id is not None and command_id != preallocated_command_id:
         stop_command_session(request, command_id, force=True)
-        raise HTTPException(status_code=500, detail="command id did not match its durable reservation")
+        raise HTTPException(
+            status_code=500, detail="command id did not match its durable reservation"
+        )
     if body.measure_lifecycle:
         now = time.perf_counter()
         session = get_command_session(request, command_id)
