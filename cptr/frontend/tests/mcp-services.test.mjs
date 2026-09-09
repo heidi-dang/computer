@@ -7,13 +7,15 @@ import { compile, preprocess } from 'svelte/compiler';
 const root = new URL('../src/', import.meta.url);
 const read = (path) => readFile(new URL(path, root), 'utf8');
 
-test('Services tab is registered next to Memory on /mcp', async () => {
+test('Services tab is registered next to Memory and lazy-loaded on /mcp', async () => {
 	const page = await read('routes/mcp/+page.svelte');
-	assert.match(page, /import McpServices/);
 	assert.match(page, /'topology' \| 'console' \| 'factory' \| 'memory' \| 'services'/);
+	assert.match(page, /typeof import\('\$lib\/components\/mcp\/McpServices\.svelte'\)\.default/);
+	assert.match(page, /servicesLoad \?\?= import\('\$lib\/components\/mcp\/McpServices\.svelte'\)/);
 	assert.match(page, /view === 'services'/);
 	assert.match(page, />\s*Services\s*</);
-	assert.match(page, /<McpServices \/>/);
+	assert.match(page, /<LazyMcpServices \/>/);
+	assert.match(page, /Loading services…/);
 	assert.match(page, /view === 'memory'/);
 });
 

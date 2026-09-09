@@ -19,10 +19,12 @@
 	let servicesLoad: Promise<McpServicesComponent> | null = null;
 
 	function ensureConsole(): Promise<McpConsoleComponent> {
-		consoleLoad ??= import('$lib/components/mcp/McpConsole.svelte').then(({ default: component }) => {
-			LazyMcpConsole = component;
-			return component;
-		});
+		consoleLoad ??= import('$lib/components/mcp/McpConsole.svelte').then(
+			({ default: component }) => {
+				LazyMcpConsole = component;
+				return component;
+			}
+		);
 		return consoleLoad;
 	}
 
@@ -45,10 +47,12 @@
 	}
 
 	function ensureServices(): Promise<McpServicesComponent> {
-		servicesLoad ??= import('$lib/components/mcp/McpServices.svelte').then(({ default: component }) => {
-			LazyMcpServices = component;
-			return component;
-		});
+		servicesLoad ??= import('$lib/components/mcp/McpServices.svelte').then(
+			({ default: component }) => {
+				LazyMcpServices = component;
+				return component;
+			}
+		);
 		return servicesLoad;
 	}
 
@@ -210,14 +214,12 @@
 					Loading memory…
 				</div>
 			{/if}
+		{:else if LazyMcpServices}
+			<LazyMcpServices />
 		{:else}
-			{#if LazyMcpServices}
-				<LazyMcpServices />
-			{:else}
-				<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
-					Loading services…
-				</div>
-			{/if}
+			<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
+				Loading services…
+			</div>
 		{/if}
 	</div>
 </div>

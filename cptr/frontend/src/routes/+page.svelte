@@ -72,10 +72,12 @@
 	let terminalLoad: Promise<TerminalComponent> | null = null;
 
 	function ensureFileBrowser(): Promise<FileBrowserComponent> {
-		fileBrowserLoad ??= import('$lib/components/FileBrowser.svelte').then(({ default: component }) => {
-			LazyFileBrowser = component;
-			return component;
-		});
+		fileBrowserLoad ??= import('$lib/components/FileBrowser.svelte').then(
+			({ default: component }) => {
+				LazyFileBrowser = component;
+				return component;
+			}
+		);
 		return fileBrowserLoad;
 	}
 
@@ -98,10 +100,12 @@
 	}
 
 	function ensureChatPanel(): Promise<ChatPanelComponent> {
-		chatPanelLoad ??= import('$lib/components/chat/ChatPanel.svelte').then(({ default: component }) => {
-			LazyChatPanel = component;
-			return component;
-		});
+		chatPanelLoad ??= import('$lib/components/chat/ChatPanel.svelte').then(
+			({ default: component }) => {
+				LazyChatPanel = component;
+				return component;
+			}
+		);
 		return chatPanelLoad;
 	}
 
