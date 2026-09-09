@@ -5,7 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from cptr.routers.coding import LspStartRequest, start_workspace_lsp
+from cptr.routers.coding import (
+    LspStartRequest,
+    WorkerTargetRequest,
+    discover_workspace_lsp,
+    start_workspace_lsp,
+)
 from cptr.routers.terminal_extended import ExecRequest, exec_command
 from cptr.utils.identity import ExecutionIdentity, env_for
 from cptr.utils.terminal import SessionManager
@@ -121,6 +126,42 @@ class ExecutionEnvironmentCallSiteTests(unittest.IsolatedAsyncioTestCase):
         child_env = create_process.await_args.kwargs["env"]
         self.assertNotIn("CPTR_SENTINEL_SECRET", child_env)
         self.assertEqual(result["exit_code"], 0)
+
+    async def test_lsp_discovery_uses_same_sanitized_workspace_environment_as_start(self):
+        request = SimpleNamespace(state=SimpleNamespace(control_scopes=set()))
+        discover = unittest.mock.Mock(return_value={"servers": []})
+        with tempfile.TemporaryDirectory() as workspace_root:
+            workspace = SimpleNamespace(path=workspace_root, user_id="user-1")
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "PATH": "/usr/bin:/bin",
+                        "CPTR_SENTINEL_SECRET": "must-not-leak",
+                    },
+                    clear=True,
+                ),
+                patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
+                patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+                patch(
+                    "cptr.routers.coding._coding_root",
+                    new=AsyncMock(return_value=Path(workspace_root)),
+                ),
+                patch(
+                    "cptr.routers.coding.identity_for_context",
+                    new=AsyncMock(return_value=self.identity),
+                ),
+                patch("cptr.routers.coding.lsp_manager.discover", new=discover),
+            ):
+                await discover_workspace_lsp(
+                    request,
+                    "workspace-1",
+                    WorkerTargetRequest(),
+                )
+        child_env = discover.call_args.kwargs["env"]
+        self.assertNotIn("CPTR_SENTINEL_SECRET", child_env)
+        self.assertEqual(discover.call_args.kwargs["root"], Path(workspace_root))
+        self.assertEqual(child_env["PATH"], "/usr/bin:/bin")
 
     async def test_lsp_start_does_not_copy_parent_secret(self):
         request = SimpleNamespace(state=SimpleNamespace(control_scopes=set()))

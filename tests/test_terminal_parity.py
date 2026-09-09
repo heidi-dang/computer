@@ -318,6 +318,32 @@ class TerminalParityTests(unittest.IsolatedAsyncioTestCase):
 
 
 class LspManagerTests(unittest.IsolatedAsyncioTestCase):
+    def test_discover_resolves_workspace_local_and_managed_user_language_servers(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp, "repo")
+            root.mkdir()
+            home = Path(temp, "home")
+            workspace_bin = root / "node_modules" / ".bin"
+            managed_bin = home / ".cptr" / "lsp" / "node_modules" / ".bin"
+            workspace_bin.mkdir(parents=True)
+            managed_bin.mkdir(parents=True)
+            ts = workspace_bin / "typescript-language-server"
+            pyright = managed_bin / "pyright-langserver"
+            for executable in (ts, pyright):
+                executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                executable.chmod(0o755)
+            manager = LspManager(
+                server_commands={
+                    "typescript": ["typescript-language-server", "--stdio"],
+                    "pyright": ["pyright-langserver", "--stdio"],
+                }
+            )
+            discovered = manager.discover(root=root, env={"HOME": str(home), "PATH": ""})
+
+        servers = {item["server_id"]: item for item in discovered["servers"]}
+        self.assertTrue(servers["typescript"]["available"])
+        self.assertTrue(servers["pyright"]["available"])
+
     async def test_fake_language_server_round_trip_and_lifecycle(self):
         source = textwrap.dedent(r"""
             import json, sys

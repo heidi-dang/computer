@@ -2750,8 +2750,24 @@ async def discover_workspace_lsp(
 ):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
-    await _coding_root(user_id, workspace_id, workspace, body.worker_id)
-    return {"workspace_id": workspace_id, **lsp_manager.discover()}
+    root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
+    try:
+        identity = await identity_for_context(
+            _command_context(
+                request=request,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                workspace_path=str(root),
+                worker_id=body.worker_id,
+            )
+        )
+    except IdentityUnavailable as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    process_env = env_for(identity, root, {"PAGER": "cat", "GIT_PAGER": "cat"})
+    return {
+        "workspace_id": workspace_id,
+        **lsp_manager.discover(root=root, env=process_env),
+    }
 
 
 @router.post("/workspaces/{workspace_id}/coding/lsp/start")
