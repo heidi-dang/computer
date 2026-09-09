@@ -70,6 +70,25 @@ class CapabilityOsTaskCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(task.workspace_id, "workspace-2")
         self.assertTrue(task.active)
 
+    async def test_bootstrap_creates_owner_bound_active_workbench_context(self):
+        task = await self.coordinator.bootstrap(user_id="user-1")
+
+        self.assertEqual(task.source, "workbench")
+        self.assertEqual(task.user_id, "user-1")
+        self.assertIsNone(task.workspace_id)
+        self.assertEqual(task.status, "OPEN")
+        self.assertTrue(task.active)
+        self.assertTrue(task.execution_allowed)
+
+        resolved = await self.coordinator.require_active(
+            user_id="user-1", task_id=task.task_id
+        )
+        self.assertEqual(resolved, task)
+        with self.assertRaises(CapabilityTaskNotFound):
+            await self.coordinator.require_active(
+                user_id="user-2", task_id=task.task_id
+            )
+
     async def test_wrong_owner_and_terminal_task_fail_closed(self):
         with self.assertRaises(CapabilityTaskNotFound):
             await self.coordinator.require_active(user_id="user-2", task_id="wbs_active")

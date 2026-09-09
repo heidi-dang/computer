@@ -2,9 +2,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models import Base
+from cptr.routers import capability_os as capability_os_module
 from cptr.routers.capability_os import capability_os_router
 from cptr.services.capability_os.authority import AuthorityBroker, AuthorityDenied, TaskAuthorityPolicy
 from cptr.services.capability_os.compiler import CapabilityCompiler
@@ -55,6 +57,18 @@ class _Tasks:
             active=True,
             execution_allowed=True,
         )
+
+    async def bootstrap(self, *, user_id):
+        self.context = CapabilityTaskContext(
+            task_id="wbs_bootstrap",
+            user_id=user_id,
+            workspace_id=None,
+            source="workbench",
+            status="OPEN",
+            active=True,
+            execution_allowed=True,
+        )
+        return self.context
 
     async def require_active(self, *, user_id, task_id):
         if user_id != self.context.user_id or task_id != self.context.task_id:
@@ -119,6 +133,16 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         self.tempdir.cleanup()
         await self.engine.dispose()
+
+    def test_forge_request_allows_taskless_bootstrap_without_loosening_acquire(self):
+        forge_request = getattr(capability_os_module, "ForgeRequest", None)
+        self.assertIsNotNone(forge_request)
+        parsed = forge_request.model_validate({"operation": "bootstrap", "payload": {}})
+        self.assertIsNone(parsed.task_id)
+        with self.assertRaises(ValidationError):
+            capability_os_module.OperationRequest.model_validate(
+                {"operation": "discover", "payload": {}}
+            )
 
     def test_router_exposes_exact_compact_six_operation_surface(self):
         actual = {
@@ -225,6 +249,20 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
                 operation="oauth-status",
                 payload={"flowId": "flow-1", "credential": "caller-value"},
             )
+
+    async def test_forge_bootstrap_creates_task_without_existing_task_id(self):
+        result = await self.service.forge(
+            user_id="user-1",
+            task_id="",
+            operation="bootstrap",
+            payload={},
+        )
+
+        self.assertTrue(result["bootstrapped"])
+        self.assertEqual(result["task"]["taskId"], "wbs_bootstrap")
+        self.assertEqual(result["task"]["source"], "workbench")
+        self.assertEqual(result["task"]["status"], "OPEN")
+        self.assertTrue(result["task"]["executionAllowed"])
 
     async def test_forge_inspect_resolve_and_reflect_form_a_safe_control_plane(self):
         forged = await self.service.forge(
