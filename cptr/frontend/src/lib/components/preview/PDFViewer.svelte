@@ -31,7 +31,7 @@
 			const pdfjs = await import('pdfjs-dist');
 
 			// Set up worker
-			const workerUrl = await import('pdfjs-dist/build/pdf.worker.mjs?url');
+			const workerUrl = await import('pdfjs-dist/build/pdf.worker.min.mjs?url');
 			pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.default;
 
 			const res = await fetchHandler(src);

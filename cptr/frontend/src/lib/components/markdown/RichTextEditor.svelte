@@ -18,7 +18,7 @@
 	import Superscript from '@tiptap/extension-superscript';
 	import Subscript from '@tiptap/extension-subscript';
 	import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
-	import { all, createLowlight } from 'lowlight';
+	import { common, createLowlight } from 'lowlight';
 
 	import EditorToolbar from './EditorToolbar.svelte';
 	import { uploadFiles } from '$lib/apis/files';
@@ -36,7 +36,7 @@
 	let editorEl: HTMLDivElement | undefined = $state();
 	let editor: Editor | null = $state(null);
 
-	const lowlight = createLowlight(all);
+	const lowlight = createLowlight(common);
 
 	// Gracefully handle unregistered language tags (e.g. ```nginx, ```mermaid, etc.)
 	const _origHighlight = lowlight.highlight.bind(lowlight);
