@@ -20,6 +20,11 @@ from cptr.services.api_keys import (
     list_api_keys,
     save_api_keys,
 )
+from cptr.services.control_scopes import (
+    InvalidControlScopes,
+    normalize_control_scopes,
+    set_capability_os_scopes,
+)
 
 log = logging.getLogger(__name__)
 
@@ -38,6 +43,7 @@ def _mask_key(entry: dict) -> dict:
 class UpdateKeyRequest(BaseModel):
     name: Optional[str] = None
     scopes: Optional[list[str]] = None
+    capability_os: Optional[bool] = None
 
 
 # ── Get single key ────────────────────────────────────────────────────────────
@@ -66,14 +72,23 @@ async def update_api_key(request: Request, key_id: str, body: UpdateKeyRequest):
     if key is None:
         raise HTTPException(404, f"API key '{key_id}' not found")
 
+    updated_key = dict(key)
     if body.name is not None:
-        key["name"] = body.name.strip() or key["name"]
-    if body.scopes is not None:
-        key["scopes"] = [s.strip() for s in body.scopes if isinstance(s, str) and s.strip()]
+        updated_key["name"] = body.name.strip() or updated_key["name"]
 
-    updated_keys = [k if k.get("id") != key_id else key for k in keys]
+    try:
+        if body.scopes is not None:
+            updated_key["scopes"] = normalize_control_scopes(body.scopes)
+        if body.capability_os is not None:
+            updated_key["scopes"] = set_capability_os_scopes(
+                updated_key.get("scopes") or [], body.capability_os
+            )
+    except InvalidControlScopes as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    updated_keys = [k if k.get("id") != key_id else updated_key for k in keys]
     await save_api_keys(updated_keys)
-    return {"ok": True, **_mask_key(key)}
+    return {"ok": True, **_mask_key(updated_key)}
 
 
 # ── Rotate key ────────────────────────────────────────────────────────────────

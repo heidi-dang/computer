@@ -101,10 +101,11 @@ Public identities are opaque workspace, task, goal, monitor, and scope IDs. Work
 
 ## Scopes and credentials
 
-Control-plane bearer tokens are validated by CPTR. The initial key scopes are:
+Control-plane bearer tokens are validated by CPTR. New keys receive these default scopes:
 
 ```text
 workspace:read
+memory:read
 task:read
 task:write
 autonomous:run
@@ -112,12 +113,18 @@ git:read
 coding:read
 coding:write
 command:execute
-command:external (optional; not issued by default)
+mcp:traffic:write
+mcp:activity:write
+mcp:diagnostics:write
 ```
+
+Additional authority remains opt-in. `command:external` permits explicitly approved external commands. Capability OS requires the complete `capability:read`, `capability:write`, and `capability:execute` bundle; these scopes are allowed but are never granted by default.
 
 The direct-coding API is designed for an official ChatGPT MCP connector. It performs no CPTR model selection and does not invoke the CPTR agent loop: ChatGPT itself chooses and sequences scoped file and command tools. `coding:read` is required for list/read/search; `coding:write` is required for file writes and exact edits; `command:execute` is required for managed workspace commands; `command:external` is additionally required for explicitly approved commands that may contact external services. `git:write` and `deploy:write` remain reserved. The MCP adapter is not trusted merely because a request originated in ChatGPT. CPTR checks the token, required scope, user ownership, and resource identity.
 
 New keys issued through `POST /v1/keys` receive the default direct-coding scopes. An authenticated administrator may send an explicit `scopes` array to issue a least-privilege custom key; CPTR accepts only the documented scopes and rejects unknown values. `command:external` is optional and must be explicitly included when an operator intends to permit approved external commands.
+
+For Capability OS, callers may set `"capability_os": true` when creating a key instead of duplicating the full scope bundle. Existing keys can be upgraded or downgraded in place with `PUT /api/gateway/keys/{key_id}` and `{"capability_os": true|false}`. This toggles only the three Capability OS scopes, preserves unrelated scopes and the existing key secret, and applies the same allowed-scope validation used during issuance. The admin Gateway UI exposes the same explicit opt-in; CPTR never mass-upgrades existing keys.
 
 API-key metadata is stored in an indexed `control_api_keys` table for hot-path authentication and cached for a short bounded TTL. Existing installations that stored `api_keys` inside the config JSON are migrated automatically on startup and the compatibility mirror is retained when keys are changed.
 

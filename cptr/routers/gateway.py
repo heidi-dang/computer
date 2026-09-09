@@ -37,6 +37,14 @@ from cptr.services.api_keys import (
     resolve_api_key_principal,
     save_api_keys,
 )
+from cptr.services.control_scopes import (
+    ALLOWED_CONTROL_SCOPES as ALLOWED_CONTROL_SCOPES,
+    DEFAULT_CONTROL_SCOPES as DEFAULT_CONTROL_SCOPES,
+    OPTIONAL_CONTROL_SCOPES as OPTIONAL_CONTROL_SCOPES,
+    InvalidControlScopes,
+    normalize_control_scopes,
+    set_capability_os_scopes,
+)
 from cptr.utils.agents.prompts import message_text
 from cptr.utils.config import AuthResult, now_ms
 from cptr.utils.runtime import FileError, Runtime
@@ -805,32 +813,10 @@ async def _ensure_chat(
 # ── API key admin endpoint ───────────────────────────────────
 
 
-DEFAULT_CONTROL_SCOPES = (
-    "workspace:read",
-    "memory:read",
-    "task:read",
-    "task:write",
-    "autonomous:run",
-    "git:read",
-    "coding:read",
-    "coding:write",
-    "command:execute",
-    "mcp:traffic:write",
-    "mcp:activity:write",
-    "mcp:diagnostics:write",
-)
-OPTIONAL_CONTROL_SCOPES = (
-    "command:external",
-    "capability:read",
-    "capability:write",
-    "capability:execute",
-)
-ALLOWED_CONTROL_SCOPES = frozenset((*DEFAULT_CONTROL_SCOPES, *OPTIONAL_CONTROL_SCOPES))
-
-
 class CreateApiKeyRequest(BaseModel):
     name: str = "default"
     scopes: list[str] | None = None
+    capability_os: bool = False
 
 
 @router.post("/keys")
@@ -844,13 +830,12 @@ async def create_api_key(request: Request, body: CreateApiKeyRequest):
     if not auth or not auth.user_id:
         raise HTTPException(401, "Admin authentication required")
 
-    requested_scopes = body.scopes if body.scopes is not None else list(DEFAULT_CONTROL_SCOPES)
-    scopes = list(dict.fromkeys(scope.strip() for scope in requested_scopes if scope.strip()))
-    if not scopes:
-        raise HTTPException(422, "at least one API-key scope is required")
-    unknown_scopes = sorted(set(scopes) - ALLOWED_CONTROL_SCOPES)
-    if unknown_scopes:
-        raise HTTPException(422, f"unsupported API-key scope(s): {', '.join(unknown_scopes)}")
+    try:
+        scopes = normalize_control_scopes(body.scopes, use_defaults=True)
+        if body.capability_os:
+            scopes = set_capability_os_scopes(scopes, True)
+    except InvalidControlScopes as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     raw = f"sk-cptr-{secrets.token_urlsafe(32)}"
     entry = {

@@ -10,6 +10,7 @@
 	interface ApiKey {
 		id: string;
 		name: string;
+		scopes?: string[];
 		created_at: number;
 	}
 
@@ -25,10 +26,13 @@
 	let creating = $state(false);
 	let saving = $state(false);
 	let newKeyName = $state('');
+	let newKeyCapabilityOs = $state(false);
+	let updatingCapabilityKeyId = $state('');
 	let selectedModel = $state('');
 
 	/** Newly created key, shown once, then hidden */
 	let revealedKey = $state('');
+	const capabilityScopes = ['capability:read', 'capability:write', 'capability:execute'] as const;
 	const openWebUIHeaders = `{
   "X-OpenWebUI-User-Name": "{{USER_NAME}}",
   "X-OpenWebUI-User-Id": "{{USER_ID}}",
@@ -73,6 +77,10 @@
 		}
 	}
 
+	function hasCapabilityOs(key: ApiKey) {
+		return capabilityScopes.every((scope) => (key.scopes ?? []).includes(scope));
+	}
+
 	async function createKey() {
 		if (!newKeyName.trim()) {
 			newKeyName = 'default';
@@ -81,10 +89,11 @@
 		try {
 			const result = await fetchJSON<{ key: string; id: string; name: string }>(
 				'/v1/keys',
-				jsonBody({ name: newKeyName.trim() })
+				jsonBody({ name: newKeyName.trim(), capability_os: newKeyCapabilityOs })
 			);
 			revealedKey = result.key;
 			newKeyName = '';
+			newKeyCapabilityOs = false;
 			const loadedKeys = await fetchJSON<ApiKey[]>('/v1/keys');
 			keys = loadedKeys;
 			toast.success($t('admin.gateway.keyCreated'));
@@ -92,6 +101,24 @@
 			toast.error($t('admin.gateway.createError'));
 		} finally {
 			creating = false;
+		}
+	}
+
+	async function setCapabilityOs(key: ApiKey, enabled: boolean) {
+		updatingCapabilityKeyId = key.id;
+		try {
+			const updated = await fetchJSON<ApiKey & { ok: boolean }>(
+				`/api/gateway/keys/${key.id}`,
+				{ ...jsonBody({ capability_os: enabled }), method: 'PUT' }
+			);
+			keys = keys.map((item) => (item.id === key.id ? { ...item, scopes: updated.scopes } : item));
+			toast.success(
+				$t(enabled ? 'admin.gateway.capabilityEnabled' : 'admin.gateway.capabilityDisabled')
+			);
+		} catch {
+			toast.error($t('admin.gateway.capabilityUpdateError'));
+		} finally {
+			updatingCapabilityKeyId = '';
 		}
 	}
 
@@ -188,7 +215,7 @@
 		{/if}
 
 		<h3 class="text-xs text-gray-400 dark:text-gray-600 mb-2">{$t('admin.gateway.keys')}</h3>
-		<div class="flex items-center gap-2 mb-4">
+		<div class="flex items-center gap-2 mb-2">
 			<input
 				type="text"
 				class="flex-1 h-7 px-2 rounded-lg text-xs bg-gray-100 dark:bg-white/6 text-gray-700 dark:text-gray-300 border border-gray-200 dark:border-white/8 outline-none focus:border-gray-400 dark:focus:border-white/20 transition-colors"
@@ -209,6 +236,20 @@
 				{/if}
 			</button>
 		</div>
+		<label class="mb-4 flex cursor-pointer items-start gap-2 text-[0.6875rem] text-gray-500 dark:text-gray-500">
+			<input
+				type="checkbox"
+				class="mt-0.5 h-3 w-3 rounded accent-gray-600"
+				bind:checked={newKeyCapabilityOs}
+				disabled={creating}
+			/>
+			<span>
+				<span class="block text-gray-600 dark:text-gray-400">{$t('admin.gateway.capabilityOs')}</span>
+				<span class="block text-gray-400 dark:text-gray-600">
+					{$t('admin.gateway.capabilityOsDescription')}
+				</span>
+			</span>
+		</label>
 
 		{#if keys.length === 0}
 			<div
@@ -222,23 +263,44 @@
 				class="divide-y divide-gray-100 dark:divide-white/5 border-b border-gray-100 dark:border-white/5"
 			>
 				{#each keys as key (key.id)}
-					<div class="flex items-center justify-between h-9">
-						<div class="flex items-center gap-2 min-w-0">
+					<div class="flex min-h-10 items-center justify-between gap-3 py-1.5">
+						<div class="flex min-w-0 items-center gap-2">
 							<Icon name="shield" size={12} class="shrink-0 text-gray-400 dark:text-gray-600" />
-							<span class="text-xs font-medium text-gray-700 dark:text-gray-300 truncate">
+							<span class="truncate text-xs font-medium text-gray-700 dark:text-gray-300">
 								{key.name}
 							</span>
-							<span class="text-[0.625rem] text-gray-400 dark:text-gray-600 shrink-0">
+							<span class="shrink-0 text-[0.625rem] text-gray-400 dark:text-gray-600">
 								{formatDate(key.created_at)}
 							</span>
+							{#if hasCapabilityOs(key)}
+								<span class="shrink-0 rounded bg-gray-100 px-1.5 py-0.5 text-[0.625rem] text-gray-500 dark:bg-white/6 dark:text-gray-500">
+									{$t('admin.gateway.capabilityOs')}
+								</span>
+							{/if}
 						</div>
-						<button
-							class="shrink-0 p-1 text-gray-300 hover:text-gray-600 dark:text-gray-700 dark:hover:text-gray-400 transition-colors"
-							onclick={() => deleteKey(key.id)}
-							title={$t('admin.delete')}
-						>
-							<Icon name="trash" size={12} />
-						</button>
+						<div class="flex shrink-0 items-center gap-1">
+							<button
+								class="min-h-7 rounded px-2 text-[0.6875rem] text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-500 dark:hover:bg-white/6 dark:hover:text-white"
+								onclick={() => setCapabilityOs(key, !hasCapabilityOs(key))}
+								disabled={updatingCapabilityKeyId === key.id}
+							>
+								{#if updatingCapabilityKeyId === key.id}
+									<Spinner size={11} />
+								{:else if hasCapabilityOs(key)}
+									{$t('admin.gateway.capabilityDisable')}
+								{:else}
+									{$t('admin.gateway.capabilityEnable')}
+								{/if}
+							</button>
+							<button
+								class="shrink-0 p-1 text-gray-300 transition-colors hover:text-gray-600 disabled:opacity-50 dark:text-gray-700 dark:hover:text-gray-400"
+								onclick={() => deleteKey(key.id)}
+								title={$t('admin.delete')}
+								disabled={updatingCapabilityKeyId === key.id}
+							>
+								<Icon name="trash" size={12} />
+							</button>
+						</div>
 					</div>
 				{/each}
 			</div>
