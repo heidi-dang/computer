@@ -7,6 +7,7 @@ and Control task records instead of creating a parallel task namespace.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -51,6 +52,34 @@ class CapabilityTaskContext:
 class CapabilityTaskCoordinator:
     def __init__(self, *, session_factory: async_sessionmaker | None = None) -> None:
         self._session_factory = session_factory or get_session_factory()
+
+    async def bootstrap(self, *, user_id: str) -> CapabilityTaskContext:
+        owner_id = user_id.strip()
+        if not owner_id:
+            raise CapabilityTaskNotFound("Capability OS task owner is required")
+        now = int(time.time() * 1000)
+        async with self._session_factory() as db:
+            session = WorkbenchSession(
+                user_id=owner_id,
+                name="Capability OS MCP Session",
+                workspace_id=None,
+                status="OPEN",
+                event_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(session)
+            await db.commit()
+            await db.refresh(session)
+            return CapabilityTaskContext(
+                task_id=session.id,
+                user_id=session.user_id,
+                workspace_id=None,
+                source="workbench",
+                status="OPEN",
+                active=True,
+                execution_allowed=True,
+            )
 
     async def resolve(self, *, user_id: str, task_id: str) -> CapabilityTaskContext | None:
         if not user_id.strip() or not task_id.strip():

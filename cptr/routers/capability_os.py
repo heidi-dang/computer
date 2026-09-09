@@ -79,6 +79,12 @@ class OperationRequest(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+class ForgeRequest(BaseModel):
+    task_id: str | None = Field(default=None, min_length=1, max_length=200)
+    operation: str = Field(min_length=1, max_length=80)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class ExecuteRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=200)
     capability_digest: str = Field(min_length=1, max_length=200)
@@ -366,12 +372,16 @@ async def resolve_capability_os(request: Request, body: ResolveRequest):
 
 
 @capability_os_router.post("/forge")
-async def forge_capability_os(request: Request, body: OperationRequest):
+async def forge_capability_os(request: Request, body: ForgeRequest):
     user_id = await _user(request, "capability:write")
     try:
         with _span("forge"):
-            return await _service(request).forge(user_id=user_id, task_id=body.task_id,
-                                                 operation=body.operation, payload=body.payload)
+            return await _service(request).forge(
+                user_id=user_id,
+                task_id=body.task_id or "",
+                operation=body.operation,
+                payload=body.payload,
+            )
     except Exception as exc:
         raise _error(exc) from exc
 

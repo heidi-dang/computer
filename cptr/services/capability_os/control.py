@@ -229,6 +229,15 @@ class CapabilityOsControlService:
 
     async def forge(self, *, user_id, task_id, operation, payload):
         operation = operation.strip().lower()
+        if operation == "bootstrap":
+            if str(task_id or "").strip():
+                raise ValueError("Capability OS bootstrap must not include task_id")
+            if payload:
+                raise ValueError("Capability OS bootstrap accepts no payload")
+            task = await self.tasks.bootstrap(user_id=user_id)
+            return {"task": _task(task), "bootstrapped": True}
+        if not str(task_id or "").strip():
+            raise ValueError("task_id is required for Tool Forge operations other than bootstrap")
         if operation == "skill-export":
             task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
             if set(payload) - {"contentDigest"}:
