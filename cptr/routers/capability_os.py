@@ -29,8 +29,11 @@ from cptr.services.capability_os.credential_broker import (
 from cptr.services.capability_os.contracts import CapabilityRequest
 from cptr.services.capability_os.evidence import EvidenceService, EvidenceViolation
 from cptr.services.capability_os.evolution import EvolutionGate
+from cptr.services.capability_os.evolution_engine import EvolutionExperimentEngine
+from cptr.services.capability_os.experiment_scheduler import MatchedExperimentScheduler
 from cptr.services.capability_os.forge import ContentAddressedBlobStore, ToolForge
 from cptr.services.capability_os.mcp_fabric import McpFabric
+from cptr.services.capability_os.mcp_discovery_index import McpSemanticDiscoveryIndex
 from cptr.services.capability_os.mcp_oauth import (
     ConfigRemoteMcpOAuthProfileProvider,
     McpOAuthCredentialProvider,
@@ -105,14 +108,32 @@ async def _user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
 
 
-def _span(operation: str):
-    return telemetry.span(
-        f"cptr.capability_os.{operation}",
-        attributes={
-            "cptr.operation": operation,
-            "cptr.component": "capability-os",
-        },
-    )
+def _span(
+    operation: str,
+    *,
+    task_id: str | None = None,
+    artifact_digest: str | None = None,
+    lease_id: str | None = None,
+    experiment_id: str | None = None,
+    suboperation: str | None = None,
+):
+    detail = str(suboperation or "").strip().lower()
+    span_name = f"cptr.capability_os.{operation}"
+    if operation == "forge" and detail:
+        span_name = f"cptr.forge.{detail}"
+    elif operation == "acquire" and detail in {"discover", "discover-effects", "qualify", "mount", "release"}:
+        span_name = f"cptr.mcp.{detail.replace('-', '_')}"
+    elif operation == "reflect" and detail:
+        span_name = f"cptr.evolution.{detail}"
+    attributes = {
+        "cptr.operation": detail or operation,
+        "cptr.component": "capability-os",
+        "cptr.task.id": task_id,
+        "cptr.artifact.digest": artifact_digest,
+        "cptr.lease.id": lease_id,
+        "cptr.experiment.id": experiment_id,
+    }
+    return telemetry.span(span_name, attributes=attributes)
 
 
 def _default_tool_builder() -> BrokerToolBuilder:
@@ -256,8 +277,20 @@ def _service(request: Request) -> CapabilityOsControlService:
             auth_provider=ConfigRemoteMcpAuthProvider(),
             oauth_profile_provider=oauth_profiles,
             credential_broker=credential_broker,
+            semantic_index=McpSemanticDiscoveryIndex(store=store, clock_ms=clock),
             clock_ms=clock,
         )
+    experiment_runner = getattr(
+        request.app.state, "capability_os_experiment_runner", None
+    )
+    experiment_scheduler = (
+        MatchedExperimentScheduler(
+            engine=EvolutionExperimentEngine(store=store, evidence=EvidenceService(store=store, clock_ms=clock), gate=EvolutionGate()),
+            runner=experiment_runner,
+        )
+        if experiment_runner is not None
+        else None
+    )
     service = CapabilityOsControlService(
         store=store,
         tasks=CapabilityTaskCoordinator(),
@@ -269,6 +302,7 @@ def _service(request: Request) -> CapabilityOsControlService:
         compiler=CapabilityCompiler(),
         evidence=EvidenceService(store=store, clock_ms=clock),
         evolution=EvolutionGate(),
+        experiment_scheduler=experiment_scheduler,
         runtime=runtime,
         fabric=fabric,
         action_executor=action_executor,
@@ -346,7 +380,7 @@ async def inspect_capability_os(request: Request, task_id: str = Query(min_lengt
                                 limit: int = Query(default=50, ge=1, le=100)):
     user_id = await _user(request, "capability:read")
     try:
-        with _span("inspect"):
+        with _span("inspect", task_id=task_id, artifact_digest=artifact_digest):
             return await _service(request).inspect(user_id=user_id, task_id=task_id,
                                                    artifact_digest=artifact_digest, limit=limit)
     except Exception as exc:
@@ -357,7 +391,7 @@ async def inspect_capability_os(request: Request, task_id: str = Query(min_lengt
 async def resolve_capability_os(request: Request, body: ResolveRequest):
     user_id = await _user(request, "capability:read")
     try:
-        with _span("resolve"):
+        with _span("resolve", task_id=body.task_id):
             return await _service(request).resolve(user_id=user_id, task_id=body.task_id,
                                                    required=_reqs(body.required), optional=_reqs(body.optional),
                                                    forbidden=_reqs(body.forbidden))
@@ -369,7 +403,12 @@ async def resolve_capability_os(request: Request, body: ResolveRequest):
 async def forge_capability_os(request: Request, body: OperationRequest):
     user_id = await _user(request, "capability:write")
     try:
-        with _span("forge"):
+        with _span(
+            "forge",
+            task_id=body.task_id,
+            artifact_digest=str(body.payload.get("contentDigest") or "") or None,
+            suboperation=body.operation,
+        ):
             return await _service(request).forge(user_id=user_id, task_id=body.task_id,
                                                  operation=body.operation, payload=body.payload)
     except Exception as exc:
@@ -380,7 +419,12 @@ async def forge_capability_os(request: Request, body: OperationRequest):
 async def execute_capability_os(request: Request, body: ExecuteRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        with _span("execute"):
+        with _span(
+            "execute",
+            task_id=body.task_id,
+            artifact_digest=body.capability_digest,
+            lease_id=body.lease_id,
+        ):
             return await _service(request).execute(user_id=user_id, task_id=body.task_id,
                                                    capability_digest=body.capability_digest, lease_id=body.lease_id,
                                                    spec=body.spec, inputs=body.inputs, approval_id=body.approval_id)
@@ -392,7 +436,13 @@ async def execute_capability_os(request: Request, body: ExecuteRequest):
 async def acquire_capability_os(request: Request, body: OperationRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        with _span("acquire"):
+        with _span(
+            "acquire",
+            task_id=body.task_id,
+            artifact_digest=str(body.payload.get("artifactDigest") or "") or None,
+            lease_id=str(body.payload.get("leaseId") or "") or None,
+            suboperation=body.operation,
+        ):
             return await _service(request).acquire(user_id=user_id, task_id=body.task_id,
                                                    operation=body.operation, payload=body.payload)
     except Exception as exc:
@@ -403,7 +453,19 @@ async def acquire_capability_os(request: Request, body: OperationRequest):
 async def reflect_capability_os(request: Request, body: ReflectRequest):
     user_id = await _user(request, "capability:write")
     try:
-        with _span("reflect"):
+        experiment_id = None
+        experiment_operation = None
+        if isinstance(body.experiment, dict):
+            experiment_id = str(body.experiment.get("experimentId") or "") or None
+            experiment_operation = str(body.experiment.get("operation") or "") or None
+        with _span(
+            "reflect",
+            task_id=body.task_id,
+            artifact_digest=body.artifact_digest,
+            lease_id=body.lease_id,
+            experiment_id=experiment_id,
+            suboperation=experiment_operation,
+        ):
             return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
                                                    claims=body.claims, artifact_digest=body.artifact_digest,
                                                    lease_id=body.lease_id, comparison=body.comparison,

@@ -6,15 +6,25 @@ import datetime as dt
 import time
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from cptr.models import (
     CapabilityOsArtifact,
     CapabilityOsEvidence,
+    CapabilityOsExperiment,
+    CapabilityOsExperimentRun,
     CapabilityOsLease,
+    CapabilityOsLineageEdge,
+    CapabilityOsMcpDiscoveryEntry,
     CapabilityOsMcpMount,
+    CapabilityOsObservation,
+    CapabilityOsPolicyDecision,
+    CapabilityOsPromotion,
+    CapabilityOsRetentionJob,
+    CapabilityOsRun,
+    CapabilityOsRunStep,
 )
 from cptr.services.capability_os.contracts import CptrArtifact, digest_payload
 from cptr.utils.db import get_session_factory
@@ -72,6 +82,15 @@ class SqlCapabilityOsStore:
                 created_at_ms=_created_at_ms(artifact.metadata.created_at),
             )
             db.add(row)
+            if artifact.metadata.parent:
+                lineage = dict(artifact.spec.get("lineage") or {}) if isinstance(artifact.spec, dict) else {}
+                db.add(CapabilityOsLineageEdge(
+                    child_digest=artifact.metadata.content_digest,
+                    parent_ref=artifact.metadata.parent,
+                    relation="derived-from",
+                    operator=str(lineage.get("operator") or "").strip() or None,
+                    created_at_ms=_created_at_ms(artifact.metadata.created_at),
+                ))
             await db.commit()
             await db.refresh(row)
             return row
@@ -343,6 +362,338 @@ class SqlCapabilityOsStore:
                 ).all()
             )
 
+    async def record_policy_decision(
+        self,
+        *,
+        decision_id: str,
+        task_id: str,
+        workload_id: str,
+        artifact_digest: str,
+        outcome: str,
+        permissions: list[dict[str, Any]],
+        constraints: dict[str, Any],
+        approval_id: str | None,
+        reason_code: str | None,
+        created_at_ms: int,
+    ) -> CapabilityOsPolicyDecision:
+        row = CapabilityOsPolicyDecision(
+            decision_id=decision_id,
+            task_id=task_id,
+            workload_id=workload_id,
+            artifact_digest=artifact_digest,
+            outcome=outcome,
+            permissions=list(permissions),
+            constraints=dict(constraints),
+            approval_id=approval_id,
+            reason_code=reason_code,
+            created_at_ms=int(created_at_ms),
+        )
+        async with self._session_factory() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def create_run(
+        self,
+        *,
+        task_id: str,
+        capability_digest: str,
+        lease_id: str | None,
+        inputs: dict[str, Any],
+        started_at_ms: int,
+    ) -> CapabilityOsRun:
+        row = CapabilityOsRun(
+            task_id=task_id,
+            capability_digest=capability_digest,
+            lease_id=lease_id,
+            status="running",
+            inputs_digest=digest_payload(inputs),
+            started_at_ms=int(started_at_ms),
+        )
+        async with self._session_factory() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def complete_run(
+        self,
+        run_id: str,
+        *,
+        status: str,
+        completed_at_ms: int,
+        error_code: str | None = None,
+    ) -> bool:
+        async with self._session_factory() as db:
+            result = await db.execute(
+                update(CapabilityOsRun)
+                .where(CapabilityOsRun.run_id == run_id, CapabilityOsRun.status == "running")
+                .values(status=status, completed_at_ms=int(completed_at_ms), error_code=error_code)
+            )
+            await db.commit()
+            return bool(result.rowcount)
+
+    async def record_run_step(
+        self,
+        *,
+        run_id: str,
+        node_id: str,
+        status: str,
+        attempt: int = 1,
+        output: Any = None,
+        error_code: str | None = None,
+        started_at_ms: int,
+        completed_at_ms: int | None = None,
+    ) -> CapabilityOsRunStep:
+        row = CapabilityOsRunStep(
+            run_id=run_id,
+            node_id=node_id,
+            attempt=max(1, int(attempt)),
+            status=status,
+            output_digest=digest_payload(output) if output is not None else None,
+            error_code=error_code,
+            started_at_ms=int(started_at_ms),
+            completed_at_ms=int(completed_at_ms) if completed_at_ms is not None else None,
+        )
+        async with self._session_factory() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def create_experiment_projection(
+        self,
+        *,
+        experiment_id: str,
+        task_id: str,
+        change_class: str,
+        mode: str,
+        hypothesis: str,
+        control_artifact_digest: str,
+        candidate_artifact_digest: str,
+        context: dict[str, Any],
+        min_runs_per_arm: int,
+        created_at_ms: int,
+    ) -> CapabilityOsExperiment:
+        row = CapabilityOsExperiment(
+            experiment_id=experiment_id,
+            task_id=task_id,
+            change_class=change_class,
+            mode=mode,
+            hypothesis=hypothesis,
+            control_artifact_digest=control_artifact_digest,
+            candidate_artifact_digest=candidate_artifact_digest,
+            context=dict(context),
+            min_runs_per_arm=int(min_runs_per_arm),
+            state="active",
+            created_at_ms=int(created_at_ms),
+            updated_at_ms=int(created_at_ms),
+        )
+        async with self._session_factory() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def add_experiment_run_projection(
+        self,
+        *,
+        experiment_id: str,
+        arm: str,
+        source_evidence_id: str,
+        source_evidence_digest: str,
+        success: bool,
+        regression: bool,
+        safety_events: int,
+        cost: float,
+        created_at_ms: int,
+    ) -> CapabilityOsExperimentRun:
+        row = CapabilityOsExperimentRun(
+            experiment_id=experiment_id,
+            arm=arm,
+            source_evidence_id=source_evidence_id,
+            source_evidence_digest=source_evidence_digest,
+            success=int(bool(success)),
+            regression=int(bool(regression)),
+            safety_events=int(safety_events),
+            cost=repr(float(cost)),
+            created_at_ms=int(created_at_ms),
+        )
+        async with self._session_factory() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def set_experiment_state(self, experiment_id: str, *, state: str, updated_at_ms: int) -> bool:
+        async with self._session_factory() as db:
+            result = await db.execute(
+                update(CapabilityOsExperiment)
+                .where(CapabilityOsExperiment.experiment_id == experiment_id)
+                .values(state=state, updated_at_ms=int(updated_at_ms))
+            )
+            await db.commit()
+            return bool(result.rowcount)
+
+    async def record_promotion_projection(
+        self,
+        *,
+        experiment_id: str,
+        candidate_artifact_digest: str,
+        decision: str,
+        from_state: str,
+        target_state: str,
+        evaluation_evidence_id: str,
+        intent_evidence_id: str,
+        promotion_evidence_id: str,
+        owner_approval_verified: bool,
+        created_at_ms: int,
+    ) -> CapabilityOsPromotion:
+        row = CapabilityOsPromotion(
+            experiment_id=experiment_id,
+            candidate_artifact_digest=candidate_artifact_digest,
+            decision=decision,
+            from_state=from_state,
+            target_state=target_state,
+            evaluation_evidence_id=evaluation_evidence_id,
+            intent_evidence_id=intent_evidence_id,
+            promotion_evidence_id=promotion_evidence_id,
+            owner_approval_verified=int(bool(owner_approval_verified)),
+            created_at_ms=int(created_at_ms),
+        )
+        async with self._session_factory() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def upsert_mcp_discovery_entry(
+        self,
+        *,
+        entry_id: str,
+        provider: str,
+        server_id: str,
+        version: str | None,
+        origin_uri: str,
+        source_uri: str | None,
+        effects: list[str],
+        permissions: list[str],
+        metadata: dict[str, Any],
+        refreshed_at_ms: int,
+    ) -> CapabilityOsMcpDiscoveryEntry:
+        async with self._session_factory() as db:
+            row = await db.get(CapabilityOsMcpDiscoveryEntry, entry_id)
+            values = {
+                "provider": provider,
+                "server_id": server_id,
+                "version": version,
+                "origin_uri": origin_uri,
+                "source_uri": source_uri,
+                "effects": list(effects),
+                "permissions": list(permissions),
+                "metadata_json": dict(metadata),
+                "refreshed_at_ms": int(refreshed_at_ms),
+            }
+            if row is None:
+                row = CapabilityOsMcpDiscoveryEntry(entry_id=entry_id, **values)
+                db.add(row)
+            else:
+                for key, value in values.items():
+                    setattr(row, key, value)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def query_mcp_discovery_entries(
+        self,
+        *,
+        required_effects: tuple[str, ...],
+        forbidden_effects: tuple[str, ...] = (),
+        limit: int = 20,
+    ) -> list[CapabilityOsMcpDiscoveryEntry]:
+        required = set(required_effects)
+        forbidden = set(forbidden_effects)
+        bounded = max(1, min(int(limit), 100))
+        async with self._session_factory() as db:
+            rows = list(
+                (
+                    await db.scalars(
+                        select(CapabilityOsMcpDiscoveryEntry)
+                        .order_by(
+                            CapabilityOsMcpDiscoveryEntry.refreshed_at_ms.desc(),
+                            CapabilityOsMcpDiscoveryEntry.entry_id,
+                        )
+                        .limit(1000)
+                    )
+                ).all()
+            )
+        matched: list[CapabilityOsMcpDiscoveryEntry] = []
+        for row in rows:
+            effects = set(str(item) for item in (row.effects or ()))
+            if required <= effects and not (forbidden & effects):
+                matched.append(row)
+                if len(matched) >= bounded:
+                    break
+        return matched
+
+    async def schedule_retention_job(
+        self,
+        *,
+        policy: dict[str, Any],
+        scheduled_at_ms: int,
+        task_id: str | None = None,
+        artifact_digest: str | None = None,
+    ) -> CapabilityOsRetentionJob:
+        if not task_id and not artifact_digest:
+            raise ValueError("retention job requires task_id or artifact_digest")
+        row = CapabilityOsRetentionJob(
+            task_id=task_id,
+            artifact_digest=artifact_digest,
+            policy=dict(policy),
+            status="pending",
+            scheduled_at_ms=int(scheduled_at_ms),
+        )
+        async with self._session_factory() as db:
+            db.add(row)
+            await db.commit()
+            await db.refresh(row)
+            return row
+
+    async def operator_snapshot(self, *, task_id: str | None = None) -> dict[str, Any]:
+        async with self._session_factory() as db:
+            async def count(model, predicate=None) -> int:
+                query = select(func.count()).select_from(model)
+                if predicate is not None:
+                    query = query.where(predicate)
+                return int(await db.scalar(query) or 0)
+
+            task_run_filter = CapabilityOsRun.task_id == task_id if task_id else None
+            task_exp_filter = CapabilityOsExperiment.task_id == task_id if task_id else None
+            task_policy_filter = CapabilityOsPolicyDecision.task_id == task_id if task_id else None
+            task_obs_filter = CapabilityOsObservation.task_id == task_id if task_id else None
+            return {
+                "runs": await count(CapabilityOsRun, task_run_filter),
+                "activeRuns": await count(
+                    CapabilityOsRun,
+                    (CapabilityOsRun.task_id == task_id) & (CapabilityOsRun.status == "running")
+                    if task_id else CapabilityOsRun.status == "running",
+                ),
+                "experiments": await count(CapabilityOsExperiment, task_exp_filter),
+                "activeExperiments": await count(
+                    CapabilityOsExperiment,
+                    (CapabilityOsExperiment.task_id == task_id) & (CapabilityOsExperiment.state == "active")
+                    if task_id else CapabilityOsExperiment.state == "active",
+                ),
+                "policyDecisions": await count(CapabilityOsPolicyDecision, task_policy_filter),
+                "observations": await count(CapabilityOsObservation, task_obs_filter),
+                "lineageEdges": await count(CapabilityOsLineageEdge),
+                "promotions": await count(CapabilityOsPromotion),
+                "retentionPending": await count(
+                    CapabilityOsRetentionJob, CapabilityOsRetentionJob.status == "pending"
+                ),
+            }
+
     async def append_evidence(
         self,
         *,
@@ -404,6 +755,17 @@ class SqlCapabilityOsStore:
                 )
                 db.add(row)
                 try:
+                    await db.flush()
+                    if kind.startswith("evolution.") or isinstance(safe_claims.get("evolutionOutcome"), dict):
+                        db.add(CapabilityOsObservation(
+                            task_id=task_id,
+                            run_id=run_id,
+                            kind=kind,
+                            artifact_digest=artifact_digest,
+                            evidence_id=row.evidence_id,
+                            metrics=dict(safe_claims.get("evolutionOutcome") or safe_claims),
+                            created_at_ms=timestamp,
+                        ))
                     await db.commit()
                 except IntegrityError:
                     await db.rollback()

@@ -165,13 +165,17 @@ class SandboxBrokerEngine:
     def __init__(self, *, bundles: BundleStore, runsc_path: Path | str,
                  expected_peer_uid: int | None = None, expected_peer_gid: int | None = None,
                  egress_proxy_available: bool = False,
-                 dispatcher: Callable[[SandboxRequest, StagedBundle], dict[str, Any]] | None = None) -> None:
+                 dispatcher: Callable[[SandboxRequest, StagedBundle], dict[str, Any]] | None = None,
+                 wasmtime_path: Path | str | None = None,
+                 wasm_dispatcher: Callable[[SandboxRequest, StagedBundle], dict[str, Any]] | None = None) -> None:
         self.bundles = bundles
         self.runsc_path = Path(runsc_path)
         self.expected_peer_uid = bundles.expected_uid if expected_peer_uid is None else int(expected_peer_uid)
         self.expected_peer_gid = bundles.expected_gid if expected_peer_gid is None else int(expected_peer_gid)
         self.egress_proxy_available = bool(egress_proxy_available)
         self.dispatcher = dispatcher
+        self.wasmtime_path = Path(wasmtime_path) if wasmtime_path is not None else None
+        self.wasm_dispatcher = wasm_dispatcher
 
     def peer_allowed(self, *, uid: int, gid: int) -> bool:
         return int(uid) == self.expected_peer_uid and int(gid) == self.expected_peer_gid
@@ -182,9 +186,15 @@ class SandboxBrokerEngine:
     def status(self) -> dict[str, Any]:
         gvisor_installed = self._gvisor_available()
         gvisor_ready = gvisor_installed and self.dispatcher is not None
+        wasm_installed = bool(
+            self.wasmtime_path is not None
+            and self.wasmtime_path.is_file()
+            and os.access(self.wasmtime_path, os.X_OK)
+        )
+        wasm_ready = wasm_installed and self.wasm_dispatcher is not None
         return {
-            "runtimes": {"gvisor": gvisor_ready, "microvm": False, "wasm": False},
-            "installedRuntimes": {"gvisor": gvisor_installed, "microvm": False, "wasm": False},
+            "runtimes": {"gvisor": gvisor_ready, "microvm": False, "wasm": wasm_ready},
+            "installedRuntimes": {"gvisor": gvisor_installed, "microvm": False, "wasm": wasm_installed},
             "egressAllowList": self.egress_proxy_available,
             "brokerProtocol": BROKER_PROTOCOL_CURRENT,
             "supportedBrokerProtocols": [BROKER_PROTOCOL_V1, BROKER_PROTOCOL_V2],
@@ -195,17 +205,24 @@ class SandboxBrokerEngine:
             raise TypeError("sandbox broker requires SandboxRequest")
         if request.operation == "status":
             return self.status()
-        if request.runtime_class != "gvisor":
+        dispatcher = None
+        if request.runtime_class == "gvisor":
+            if not self._gvisor_available():
+                raise SandboxRuntimeUnavailable("gVisor runsc is not installed or executable")
+            dispatcher = self.dispatcher
+        elif request.runtime_class == "wasm":
+            if self.wasmtime_path is None or not self.wasmtime_path.is_file() or not os.access(self.wasmtime_path, os.X_OK):
+                raise SandboxRuntimeUnavailable("wasmtime is not installed or executable")
+            dispatcher = self.wasm_dispatcher
+        else:
             raise SandboxRuntimeUnavailable(f"sandbox runtime {request.runtime_class} is unavailable")
-        if not self._gvisor_available():
-            raise SandboxRuntimeUnavailable("gVisor runsc is not installed or executable")
-        if self.dispatcher is None:
+        if dispatcher is None:
             raise SandboxRuntimeUnavailable("approved sandbox runtime dispatcher is not configured")
         if request.network.get("outbound") == "allow-list" and not self.egress_proxy_available:
             raise SandboxRuntimeUnavailable("allow-list egress enforcement is unavailable")
         staged = self.bundles.stage(request)
         try:
-            result = self.dispatcher(request, staged)
+            result = dispatcher(request, staged)
             if not isinstance(result, dict):
                 raise BrokerProtocolError("sandbox dispatcher returned invalid result")
             return result

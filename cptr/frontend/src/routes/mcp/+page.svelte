@@ -1,7 +1,9 @@
 <script lang="ts">
 	import McpTopology from '$lib/components/mcp/McpTopology.svelte';
 
-	type McpView = 'topology' | 'console' | 'factory' | 'memory' | 'services';
+	type McpView = 'topology' | 'capability' | 'console' | 'factory' | 'memory' | 'services';
+	type McpCapabilityOsComponent =
+		typeof import('$lib/components/mcp/McpCapabilityOs.svelte').default;
 	type McpConsoleComponent = typeof import('$lib/components/mcp/McpConsole.svelte').default;
 	type McpDarkFactoryComponent = typeof import('$lib/components/mcp/McpDarkFactory.svelte').default;
 	type McpMemoryComponent = typeof import('$lib/components/mcp/McpMemory.svelte').default;
@@ -9,14 +11,26 @@
 	let view = $state<McpView>('topology');
 	let focusRequestId = $state<string | null>(null);
 	let focusCorrelationId = $state<string | null>(null);
+	let LazyMcpCapabilityOs = $state<McpCapabilityOsComponent | null>(null);
 	let LazyMcpConsole = $state<McpConsoleComponent | null>(null);
 	let LazyMcpDarkFactory = $state<McpDarkFactoryComponent | null>(null);
 	let LazyMcpMemory = $state<McpMemoryComponent | null>(null);
 	let LazyMcpServices = $state<McpServicesComponent | null>(null);
+	let capabilityLoad: Promise<McpCapabilityOsComponent> | null = null;
 	let consoleLoad: Promise<McpConsoleComponent> | null = null;
 	let factoryLoad: Promise<McpDarkFactoryComponent> | null = null;
 	let memoryLoad: Promise<McpMemoryComponent> | null = null;
 	let servicesLoad: Promise<McpServicesComponent> | null = null;
+
+	function ensureCapability(): Promise<McpCapabilityOsComponent> {
+		capabilityLoad ??= import('$lib/components/mcp/McpCapabilityOs.svelte').then(
+			({ default: component }) => {
+				LazyMcpCapabilityOs = component;
+				return component;
+			}
+		);
+		return capabilityLoad;
+	}
 
 	function ensureConsole(): Promise<McpConsoleComponent> {
 		consoleLoad ??= import('$lib/components/mcp/McpConsole.svelte').then(
@@ -57,6 +71,7 @@
 	}
 
 	$effect(() => {
+		if (view === 'capability' && !LazyMcpCapabilityOs) void ensureCapability();
 		if (view === 'console' && !LazyMcpConsole) void ensureConsole();
 		if (view === 'factory' && !LazyMcpDarkFactory) void ensureFactory();
 		if (view === 'memory' && !LazyMcpMemory) void ensureMemory();
@@ -118,7 +133,7 @@
 				<div class="min-w-0">
 					<h1 class="truncate text-sm font-semibold">MCP</h1>
 					<p class="hidden truncate text-[0.68rem] app-muted sm:block">
-						Live topology, console, Dark Factory, and persistent memory operations
+						Live topology, Capability OS, console, Factory, memory, and service operations
 					</p>
 				</div>
 			</div>
@@ -138,6 +153,17 @@
 					onclick={() => (view = 'topology')}
 				>
 					Topology
+				</button>
+				<button
+					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
+					'capability'
+						? 'app-interactive-active'
+						: 'app-muted'}"
+					role="tab"
+					aria-selected={view === 'capability'}
+					onclick={() => (view = 'capability')}
+				>
+					Capability OS
 				</button>
 				<button
 					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
@@ -190,6 +216,14 @@
 	<div class="min-h-0 flex-1 overflow-hidden">
 		{#if view === 'topology'}
 			<McpTopology onrevealactivity={revealActivity} />
+		{:else if view === 'capability'}
+			{#if LazyMcpCapabilityOs}
+				<LazyMcpCapabilityOs />
+			{:else}
+				<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
+					Loading Capability OS…
+				</div>
+			{/if}
 		{:else if view === 'console'}
 			{#if LazyMcpConsole}
 				<LazyMcpConsole {focusRequestId} {focusCorrelationId} />

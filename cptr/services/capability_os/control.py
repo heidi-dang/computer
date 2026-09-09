@@ -22,6 +22,10 @@ from cptr.services.capability_os.evolution_engine import (
     ExperimentContext,
     ExperimentMode,
 )
+from cptr.services.capability_os.experiment_scheduler import (
+    HeldOutTaskCase,
+    MatchedExperimentScheduler,
+)
 from cptr.services.capability_os.forge import CreateToolRequest, ToolForge
 from cptr.services.capability_os.generated_executor import ProjectedGeneratedToolExecutor
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpFabric, McpQualification
@@ -138,6 +142,7 @@ class CapabilityOsControlService:
                  skill_forge: SkillForge | None = None,
                  skill_evaluator: SkillEvaluator | None = None,
                  evolution_engine: EvolutionExperimentEngine | None = None,
+                 experiment_scheduler: MatchedExperimentScheduler | None = None,
                  evolution_approval_verifier=None,
                  policy_provider=None, clock_ms=lambda: int(time.time() * 1000)):
         self.store, self.tasks, self.authority, self.resolver = store, tasks, authority, resolver
@@ -155,6 +160,7 @@ class CapabilityOsControlService:
             evidence=evidence,
             gate=evolution,
         )
+        self.experiment_scheduler = experiment_scheduler
         self.evolution_approval_verifier = evolution_approval_verifier
         self.policy_provider = policy_provider or DenyAllAuthorityPolicyProvider()
         self.clock_ms = clock_ms
@@ -218,6 +224,109 @@ class CapabilityOsControlService:
                               "claims": dict(r.claims or {})} for r in evidence],
                 "evidenceChain": evidence_chain,
                 "runtime": self.runtime.production_snapshot()}
+
+    async def operator_snapshot(self, *, user_id: str, task_id: str, limit: int = 100):
+        snapshot = await self.inspect(
+            user_id=user_id,
+            task_id=task_id,
+            artifact_digest=None,
+            limit=limit,
+        )
+        relational = await self.store.operator_snapshot(task_id=task_id)
+        artifacts = list(snapshot.get("artifacts") or ())
+        evidence = list(snapshot.get("evidence") or ())
+        active_leases = list(snapshot.get("activeLeases") or ())
+        active_mounts = list(snapshot.get("activeMounts") or ())
+
+        artifact_kinds: dict[str, int] = {}
+        artifact_states: dict[str, int] = {}
+        for artifact in artifacts:
+            kind = str(artifact.get("kind") or "unknown")
+            state = str(artifact.get("state") or "unknown")
+            artifact_kinds[kind] = artifact_kinds.get(kind, 0) + 1
+            artifact_states[state] = artifact_states.get(state, 0) + 1
+
+        evidence_kinds: dict[str, int] = {}
+        for item in evidence:
+            kind = str(item.get("kind") or "unknown")
+            evidence_kinds[kind] = evidence_kinds.get(kind, 0) + 1
+
+        def evidence_count(*prefixes: str) -> int:
+            return sum(
+                count
+                for kind, count in evidence_kinds.items()
+                if any(kind == prefix or kind.startswith(f"{prefix}.") for prefix in prefixes)
+            )
+
+        tool_count = int(artifact_kinds.get(ArtifactKind.TOOL.value, 0))
+        skill_count = int(artifact_kinds.get(ArtifactKind.SKILL.value, 0))
+        mcp_count = int(artifact_kinds.get(ArtifactKind.MCP_ADAPTER.value, 0))
+        capability_count = int(artifact_kinds.get(ArtifactKind.CAPABILITY.value, 0))
+        learned_or_higher = sum(
+            int(artifact_states.get(state.value, 0))
+            for state in (ArtifactState.LEARNED, ArtifactState.CERTIFIED, ArtifactState.CORE)
+        )
+        task = dict(snapshot["task"])
+        views = {
+            "taskCausality": {
+                "runs": int(relational.get("runs") or 0),
+                "activeRuns": int(relational.get("activeRuns") or 0),
+                "evidenceRecords": len(evidence),
+                "observations": int(relational.get("observations") or 0),
+                "evidenceChain": dict(snapshot.get("evidenceChain") or {}),
+            },
+            "capabilityHealth": {
+                "artifacts": len(artifacts),
+                "capabilities": capability_count,
+                "byKind": artifact_kinds,
+                "byState": artifact_states,
+            },
+            "forge": {
+                "tools": tool_count,
+                "builds": evidence_count("tool.build"),
+                "runs": evidence_count("tool.run"),
+                "failures": sum(
+                    count for kind, count in evidence_kinds.items() if kind.startswith("tool.") and kind.endswith(".failure")
+                ),
+            },
+            "skillEvolution": {
+                "skills": skill_count,
+                "evaluations": evidence_count("skill.evaluation"),
+                "promotions": evidence_count("skill.promotion"),
+            },
+            "mcpFabric": {
+                "adapters": mcp_count,
+                "activeMounts": len(active_mounts),
+                "events": evidence_count("mcp"),
+            },
+            "authority": {
+                "activeLeases": len(active_leases),
+                "policyDecisions": int(relational.get("policyDecisions") or 0),
+            },
+            "sandbox": {
+                "runtime": dict(snapshot.get("runtime") or {}),
+            },
+            "evolution": {
+                "experiments": int(relational.get("experiments") or 0),
+                "activeExperiments": int(relational.get("activeExperiments") or 0),
+                "events": evidence_count("evolution"),
+                "promotions": evidence_count("evolution.promotion"),
+            },
+            "releases": {
+                "learnedOrHigher": learned_or_higher,
+                "certified": int(artifact_states.get(ArtifactState.CERTIFIED.value, 0)),
+                "core": int(artifact_states.get(ArtifactState.CORE.value, 0)),
+                "supplyChainBuilds": evidence_count("tool.build"),
+            },
+        }
+        return {
+            "task": task,
+            "views": views,
+            "activeLeases": active_leases,
+            "activeMounts": active_mounts,
+            "artifactStates": artifact_states,
+            "evidenceKinds": evidence_kinds,
+        }
 
     async def resolve(self, *, user_id, task_id, required, optional=(), forbidden=()):
         task = await self.tasks.require_active(user_id=user_id, task_id=task_id)
@@ -650,14 +759,63 @@ class CapabilityOsControlService:
                 credential_broker=self.credential_broker,
                 evidence=self.evidence,
             )
+        started_at_ms = int(self.clock_ms())
+        run = await self.store.create_run(
+            task_id=task_id,
+            capability_digest=capability_digest,
+            lease_id=lease.lease_id,
+            inputs=dict(inputs),
+            started_at_ms=started_at_ms,
+        )
         try:
-            result = await CapabilityVm(executor=executor, evidence=self.evidence, clock_ms=self.clock_ms).execute(
-                task_id=task_id, capability_digest=capability_digest, compiled=compiled, lease=lease,
-                inputs=dict(inputs), approval_id=approval_id)
+            try:
+                result = await CapabilityVm(
+                    executor=executor,
+                    evidence=self.evidence,
+                    clock_ms=self.clock_ms,
+                ).execute(
+                    task_id=task_id,
+                    capability_digest=capability_digest,
+                    compiled=compiled,
+                    lease=lease,
+                    inputs=dict(inputs),
+                    approval_id=approval_id,
+                )
+            except Exception as exc:
+                await self.store.complete_run(
+                    run.run_id,
+                    status="failed",
+                    completed_at_ms=int(self.clock_ms()),
+                    error_code=exc.__class__.__name__,
+                )
+                raise
+            completed_at_ms = int(self.clock_ms())
+            compensated = set(result.compensated_nodes)
+            for node_id in result.completed_nodes:
+                await self.store.record_run_step(
+                    run_id=run.run_id,
+                    node_id=node_id,
+                    status="compensated" if node_id in compensated else "completed",
+                    output=result.outputs.get(node_id),
+                    error_code=None,
+                    started_at_ms=started_at_ms,
+                    completed_at_ms=completed_at_ms,
+                )
+            await self.store.complete_run(
+                run.run_id,
+                status=result.status,
+                completed_at_ms=completed_at_ms,
+                error_code=("capability-execution-failed" if result.error else None),
+            )
         finally:
             if automatic:
                 await self._revoke_lease(lease.lease_id)
-        return {"task": _task(task), "result": asdict(result), "automaticLease": automatic}
+        return {
+            "task": _task(task),
+            "result": asdict(result),
+            "runId": run.run_id,
+            "automaticLease": automatic,
+        }
 
     async def acquire(self, *, user_id, task_id, operation, payload):
         operation = operation.strip().lower()
@@ -672,6 +830,23 @@ class CapabilityOsControlService:
                 if inspect.isawaitable(result):
                     await result
             return {"task": _task(task), "released": await self.fabric.release(mount_id, task_id=task_id)}
+
+        if operation == "discover-effects":
+            if self.mcp_acquisition is None:
+                raise CapabilityOsUnavailable("Capability OS MCP acquisition service is not configured")
+            allowed = {"requiredEffects", "forbiddenEffects", "refreshQuery", "limit"}
+            unknown = set(payload) - allowed
+            if unknown:
+                raise ValueError(f"unknown semantic MCP discovery field: {sorted(unknown)[0]}")
+            required_effects = tuple(str(item) for item in payload.get("requiredEffects") or ())
+            forbidden_effects = tuple(str(item) for item in payload.get("forbiddenEffects") or ())
+            matches = await self.mcp_acquisition.discover_by_effects(
+                required_effects=required_effects,
+                forbidden_effects=forbidden_effects,
+                refresh_query=(str(payload.get("refreshQuery") or "").strip() or None),
+                limit=int(payload.get("limit") or 20),
+            )
+            return {"task": _task(task), "matches": list(matches)}
 
         if operation in {"oauth-start", "oauth-status", "oauth-revoke"}:
             if self.mcp_oauth is None:
@@ -963,6 +1138,12 @@ class CapabilityOsControlService:
                 "sourceEvidenceId",
             },
             "evaluate": {"operation", "experimentId"},
+            "schedule": {
+                "operation",
+                "experimentId",
+                "taskDistributionFingerprint",
+                "cases",
+            },
             "status": {"operation", "experimentId"},
             "cancel": {"operation", "experimentId", "reason"},
             "promote": {"operation", "experimentId"},
@@ -1046,6 +1227,31 @@ class CapabilityOsControlService:
                 "evaluation": evaluation.to_api(),
                 "promoted": False,
             }
+        if operation == "schedule":
+            if self.experiment_scheduler is None:
+                raise CapabilityOsUnavailable("matched experiment scheduler is not configured")
+            raw_cases = experiment.get("cases")
+            if not isinstance(raw_cases, list) or not raw_cases:
+                raise ValueError("experiment schedule requires held-out cases")
+            cases = tuple(
+                HeldOutTaskCase(
+                    case_id=str(item.get("caseId") or ""),
+                    payload=dict(item.get("payload") or {}),
+                )
+                for item in raw_cases
+                if isinstance(item, dict)
+            )
+            if len(cases) != len(raw_cases):
+                raise ValueError("experiment schedule case must be an object")
+            scheduled = await self.experiment_scheduler.run(
+                task_id=task_id,
+                experiment_id=experiment_id,
+                task_distribution_fingerprint=str(
+                    experiment.get("taskDistributionFingerprint") or ""
+                ),
+                cases=cases,
+            )
+            return {"task": _task(task), "schedule": scheduled.to_api()}
         if operation == "cancel":
             evidence_id = await self.evolution_engine.cancel(
                 task_id=task_id,
