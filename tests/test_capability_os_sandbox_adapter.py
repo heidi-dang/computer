@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 
 from cptr.services.capability_os.contracts import CapabilityRequest
-from cptr.services.capability_os.runtime import RuntimeClass
+from cptr.services.capability_os.runtime import RuntimeClass, RuntimeUnavailable
 from cptr.services.capability_os.sandbox_adapter import BrokerToolBuilder, BrokerToolRunner
 
 
@@ -60,6 +60,19 @@ class CapabilityOsSandboxAdapterTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(PermissionError):
             await builder(runtime_class=RuntimeClass.GVISOR,
                           artifact=self.artifact({"memoryMiB": 512}), lease=self.lease({"memoryMiB": 256}))
+        self.assertEqual(client.requests, [])
+
+    async def test_builder_reports_namespace_dev_as_runtime_unavailable_before_broker(self):
+        client = _Client({})
+        builder = BrokerToolBuilder(client=client)
+        lease = self.lease()
+        lease.runtime_profile = RuntimeClass.NAMESPACE_DEV.value
+        with self.assertRaisesRegex(RuntimeUnavailable, "namespace-dev.*production"):
+            await builder(
+                runtime_class=RuntimeClass.NAMESPACE_DEV,
+                artifact=self.artifact(),
+                lease=lease,
+            )
         self.assertEqual(client.requests, [])
 
     async def test_runner_projects_inputs_and_returns_only_broker_result(self):

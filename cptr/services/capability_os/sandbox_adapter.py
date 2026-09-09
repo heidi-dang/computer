@@ -47,6 +47,8 @@ def _profile(artifact) -> str:
 
 
 def _require_sandbox_lease(*, runtime_class: RuntimeClass, artifact, lease, action: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], str]:
+    if runtime_class is RuntimeClass.NAMESPACE_DEV:
+        raise RuntimeUnavailable("namespace-dev is not an approved production broker runtime")
     if lease.artifact_digest != artifact.content_digest:
         raise PermissionError("sandbox lease does not match Tool artefact")
     if action == "runtime.build" and lease.task_id != artifact.task_origin:
