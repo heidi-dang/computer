@@ -593,22 +593,66 @@ class SqlMemoryStore:
             for row in rows
         ]
 
-    async def get_retrieval_profile(self, user_id: str, workspace: str) -> dict[str, Any]:
-        async with self._session() as db:
-            row = (
-                await db.execute(
-                    select(MemoryRetrievalProfile).where(
-                        MemoryRetrievalProfile.user_id == user_id,
-                        MemoryRetrievalProfile.workspace == _workspace(workspace),
+    async def get_retrieval_profile(self, user_id: str, workspace: str | None) -> dict[str, Any]:
+        baseline = normalize_retrieval_weights(None)
+        if workspace is not None:
+            async with self._session() as db:
+                row = (
+                    await db.execute(
+                        select(MemoryRetrievalProfile).where(
+                            MemoryRetrievalProfile.user_id == user_id,
+                            MemoryRetrievalProfile.workspace == _workspace(workspace),
+                        )
                     )
-                )
-            ).scalar_one_or_none()
+                ).scalar_one_or_none()
+            observations = int(row.observations or 0) if row is not None else 0
+            return {
+                "weights": normalize_retrieval_weights(
+                    row.weights if row is not None and isinstance(row.weights, dict) else None
+                ),
+                "observations": observations,
+                "updated_at_ms": int(row.updated_at_ms or 0) if row is not None else 0,
+                "mode": "learned" if observations > 0 else "baseline",
+                "profile_count": 1 if observations > 0 else 0,
+            }
+
+        async with self._session() as db:
+            rows = list(
+                (
+                    await db.scalars(
+                        select(MemoryRetrievalProfile).where(
+                            MemoryRetrievalProfile.user_id == user_id
+                        )
+                    )
+                ).all()
+            )
+        trained = [row for row in rows if int(row.observations or 0) > 0]
+        total_observations = sum(int(row.observations or 0) for row in trained)
+        if total_observations <= 0:
+            return {
+                "weights": baseline,
+                "observations": 0,
+                "updated_at_ms": 0,
+                "mode": "baseline",
+                "profile_count": 0,
+            }
+
+        aggregate = {key: 0.0 for key in DEFAULT_RETRIEVAL_WEIGHTS}
+        for row in trained:
+            observations = int(row.observations or 0)
+            weights = normalize_retrieval_weights(
+                row.weights if isinstance(row.weights, dict) else None
+            )
+            for key in aggregate:
+                aggregate[key] += weights[key] * observations
         return {
             "weights": normalize_retrieval_weights(
-                row.weights if row is not None and isinstance(row.weights, dict) else None
+                {key: value / total_observations for key, value in aggregate.items()}
             ),
-            "observations": int(row.observations or 0) if row is not None else 0,
-            "updated_at_ms": int(row.updated_at_ms or 0) if row is not None else 0,
+            "observations": total_observations,
+            "updated_at_ms": max(int(row.updated_at_ms or 0) for row in trained),
+            "mode": "aggregate",
+            "profile_count": len(trained),
         }
 
     async def learn_retrieval_profile(

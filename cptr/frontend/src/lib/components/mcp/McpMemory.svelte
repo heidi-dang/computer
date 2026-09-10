@@ -57,8 +57,14 @@
 		const start = starts.length ? Math.min(...starts) : end - 7 * 86_400_000;
 		return { start, end: Math.max(start + 1, end) };
 	});
+	const retrievalLearning = $derived(snapshot?.health.retrieval_learning);
+	const retrievalObservations = $derived(Number(retrievalLearning?.observations ?? 0));
+	const retrievalMode = $derived(
+		retrievalLearning?.mode ?? (retrievalObservations > 0 ? 'learned' : 'baseline')
+	);
+	const retrievalProfileCount = $derived(Number(retrievalLearning?.profile_count ?? 0));
 	const retrievalWeights = $derived(
-		Object.entries(snapshot?.health.retrieval_learning?.weights ?? {})
+		Object.entries(retrievalLearning?.weights ?? {})
 			.sort((a, b) => Number(b[1]) - Number(a[1]))
 			.slice(0, 6)
 	);
@@ -729,14 +735,28 @@
 					<div class="panel-heading border-b">
 						<div>
 							<p class="kicker">Self-improving recall</p>
-							<h3>Learned ranking weights</h3>
+							<h3>
+								{retrievalObservations > 0
+									? 'Adaptive ranking weights'
+									: 'Baseline ranking weights'}
+							</h3>
+							<p class="weight-status">
+								{#if retrievalMode === 'aggregate'}
+									{retrievalObservations} verified outcomes across {retrievalProfileCount} trained profiles
+								{:else if retrievalObservations > 0}
+									{retrievalObservations} verified outcomes in this workspace
+								{:else}
+									Production baseline · adapts after verified recall outcomes
+								{/if}
+							</p>
 						</div>
-						<span class="panel-count">{snapshot?.health.retrieval_learning?.observations ?? 0}</span
+						<span class="panel-count" title="Verified retrieval outcomes"
+							>{retrievalObservations}</span
 						>
 					</div>
 					<div class="weight-list">
 						{#if retrievalWeights.length === 0}<div class="panel-empty">
-								Weights initialize from the production retrieval policy and adapt after feedback.
+								No retrieval policy weights are available from the backend.
 							</div>{:else}
 							{#each retrievalWeights as [name, weight] (name)}
 								<div class="weight-row">
@@ -1371,6 +1391,12 @@
 		text-align: right;
 		font-size: 0.49rem;
 		color: var(--app-fg-subtle);
+	}
+	.weight-status {
+		margin-top: 0.2rem;
+		font-size: 0.52rem;
+		line-height: 1.35;
+		color: var(--app-fg-muted);
 	}
 	.weight-list {
 		display: grid;
