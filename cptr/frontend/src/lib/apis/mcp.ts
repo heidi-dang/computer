@@ -1028,6 +1028,8 @@ export interface McpMemorySnapshot {
 			weights?: Record<string, number>;
 			observations?: number;
 			updated_at_ms?: number;
+			mode?: 'baseline' | 'learned' | 'aggregate';
+			profile_count?: number;
 		};
 		open_conflicts?: number;
 		intelligence?: {
