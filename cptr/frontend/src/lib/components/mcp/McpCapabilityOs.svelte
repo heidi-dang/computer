@@ -36,6 +36,11 @@
 
 	const selectedTask = $derived(tasks.find((task) => task.taskId === selectedTaskId) ?? null);
 	const views = $derived(snapshot?.views ?? null);
+	const recentActions = $derived(snapshot?.recentActions ?? []);
+	const activeActionCount = $derived(
+		recentActions.filter((action) => action.status === 'started' || action.status === 'running')
+			.length
+	);
 	const artifactEntries = $derived(
 		Object.entries(snapshot?.artifactStates ?? {}).sort((a, b) => b[1] - a[1])
 	);
@@ -71,7 +76,7 @@
 		if (!snapshot) return 'waiting';
 		if (!snapshot.task.active) return 'idle';
 		if (!snapshot.task.executionAllowed) return 'blocked';
-		if (snapshot.views.taskCausality.activeRuns > 0) return 'running';
+		if (activeActionCount > 0 || snapshot.views.taskCausality.activeRuns > 0) return 'running';
 		return 'ready';
 	});
 
@@ -88,6 +93,29 @@
 			.filter(Boolean)
 			.map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
 			.join(' ');
+	}
+
+	function actionGlyph(operation: string): string {
+		if (operation === 'inspect') return '◎';
+		if (operation === 'resolve') return '⌘';
+		if (operation === 'forge') return '◇';
+		if (operation === 'execute') return '▶';
+		if (operation === 'acquire') return '⌁';
+		if (operation === 'reflect') return '◈';
+		return '•';
+	}
+
+	function actionStatusLabel(status: string): string {
+		if (status === 'started' || status === 'running') return 'Running';
+		if (status === 'ok') return 'Done';
+		if (status === 'error') return 'Failed';
+		if (status === 'cancelled') return 'Cancelled';
+		return titleCase(status);
+	}
+
+	function actionTiming(status: string, updatedAtMs: number, durationMs: number): string {
+		if (status === 'started' || status === 'running') return relativeTime(updatedAtMs);
+		return `${Math.max(0, Math.round(durationMs))}ms`;
 	}
 
 	function relativeTime(timestamp: number | null | undefined): string {
@@ -368,7 +396,7 @@
 
 					<button
 						class="orbit-node node-runs"
-						data-live={views.taskCausality.activeRuns > 0}
+						data-live={activeActionCount > 0 || views.taskCausality.activeRuns > 0}
 						type="button"
 						onclick={() => scrollToSection('task-causality')}
 						aria-label={`Runs: ${views.taskCausality.activeRuns} active`}
@@ -429,7 +457,7 @@
 					<div
 						class="task-core"
 						data-state={taskCoreState}
-						data-running={views.taskCausality.activeRuns > 0}
+						data-running={activeActionCount > 0 || views.taskCausality.activeRuns > 0}
 					>
 						<div class="core-halo core-halo-one" aria-hidden="true"></div>
 						<div class="core-halo core-halo-two" aria-hidden="true"></div>
@@ -443,6 +471,56 @@
 								>{snapshot.task.executionAllowed ? 'Execution allowed' : 'Execution blocked'}</span
 							>
 						</div>
+					</div>
+				</div>
+
+				<div class="live-action-rail" aria-live="polite" aria-label="Live Capability OS actions">
+					<div class="live-action-header">
+						<div>
+							<span class="action-kicker">ChatGPT → Capability OS</span>
+							<strong>Live actions</strong>
+						</div>
+						<span class="action-count" data-active={activeActionCount > 0}>
+							{activeActionCount > 0
+								? `${activeActionCount} active`
+								: `${recentActions.length} recent`}
+						</span>
+					</div>
+					<div class="live-action-list">
+						{#if recentActions.length === 0}
+							<div class="live-action-empty">
+								<span aria-hidden="true">◎</span><small>Waiting for Capability OS activity</small>
+							</div>
+						{:else}
+							{#each recentActions.slice(0, 6) as action (action.traceId)}
+								<div
+									class="live-action-row"
+									data-status={action.status}
+									data-active={action.status === 'started' || action.status === 'running'}
+								>
+									<span class="action-glyph" aria-hidden="true"
+										>{actionGlyph(action.operation)}</span
+									>
+									<div class="action-main">
+										<div>
+											<strong>{titleCase(action.operation)}</strong>
+											{#if action.suboperation}<span>{titleCase(action.suboperation)}</span>{/if}
+										</div>
+										<small>
+											{#if action.source === 'chatgpt'}<b>ChatGPT</b
+												>{:else if action.source === 'mcp'}<b>MCP</b>{:else}<b>Control</b>{/if}
+											<span aria-hidden="true">→</span><span>Capability OS</span>
+										</small>
+									</div>
+									<div class="action-state">
+										<span>{actionStatusLabel(action.status)}</span>
+										<small
+											>{actionTiming(action.status, action.updatedAtMs, action.durationMs)}</small
+										>
+									</div>
+								</div>
+							{/each}
+						{/if}
 					</div>
 				</div>
 
@@ -1232,6 +1310,176 @@
 	.node-evidence {
 		top: 43%;
 		left: 7%;
+	}
+	.live-action-rail {
+		position: relative;
+		z-index: 6;
+		display: grid;
+		gap: 0.65rem;
+		border-top: 1px solid var(--app-divider);
+		padding: 0.8rem 1rem 0.9rem;
+		background: color-mix(in oklab, var(--app-surface) 96%, transparent);
+	}
+	.live-action-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.8rem;
+	}
+	.live-action-header > div {
+		display: grid;
+		gap: 0.1rem;
+	}
+	.live-action-header strong {
+		font-size: 0.78rem;
+		font-weight: 760;
+	}
+	.action-kicker {
+		font-size: 0.5rem;
+		font-weight: 720;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--app-fg-muted);
+	}
+	.action-count {
+		display: inline-flex;
+		min-height: 1.65rem;
+		align-items: center;
+		border: 1px solid var(--app-border);
+		border-radius: 999px;
+		padding: 0 0.55rem;
+		background: var(--app-surface-subtle);
+		font-size: 0.54rem;
+		font-weight: 720;
+		color: var(--app-fg-muted);
+	}
+	.action-count[data-active='true'] {
+		border-color: color-mix(in oklab, var(--cos-success) 35%, var(--app-border));
+		background: color-mix(in oklab, var(--cos-success) 9%, var(--app-surface));
+		color: var(--cos-success);
+	}
+	.live-action-list {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 0.5rem;
+	}
+	.live-action-row {
+		position: relative;
+		display: grid;
+		min-width: 0;
+		min-height: 4rem;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: center;
+		gap: 0.55rem;
+		overflow: hidden;
+		border: 1px solid var(--app-border);
+		border-radius: 0.78rem;
+		padding: 0.62rem 0.7rem;
+		background: color-mix(in oklab, var(--app-surface-raised) 94%, transparent);
+		transition:
+			border-color 160ms ease,
+			background 160ms ease,
+			transform 160ms ease;
+	}
+	.live-action-row[data-active='true'] {
+		border-color: color-mix(in oklab, var(--app-accent) 46%, var(--app-border));
+		background: color-mix(in oklab, var(--app-accent) 7%, var(--app-surface-raised));
+	}
+	.live-action-row[data-active='true']::after {
+		position: absolute;
+		inset: auto 0 0;
+		height: 2px;
+		background: linear-gradient(
+			90deg,
+			transparent,
+			color-mix(in oklab, var(--app-accent) 82%, transparent),
+			transparent
+		);
+		content: '';
+		animation: action-scan 1.4s ease-in-out infinite;
+	}
+	.live-action-row[data-status='error'] {
+		border-color: color-mix(in oklab, var(--cos-danger) 40%, var(--app-border));
+	}
+	.live-action-row[data-status='ok'] .action-state > span {
+		color: var(--cos-success);
+	}
+	.live-action-row[data-status='error'] .action-state > span {
+		color: var(--cos-danger);
+	}
+	.action-glyph {
+		display: grid;
+		width: 2rem;
+		height: 2rem;
+		place-items: center;
+		border-radius: 0.62rem;
+		background: var(--app-accent-soft);
+		color: var(--app-accent);
+		font-size: 0.78rem;
+		font-weight: 760;
+	}
+	.action-main {
+		display: grid;
+		min-width: 0;
+		gap: 0.18rem;
+	}
+	.action-main > div,
+	.action-main small {
+		display: flex;
+		min-width: 0;
+		align-items: center;
+		gap: 0.35rem;
+	}
+	.action-main strong,
+	.action-main > div > span {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+	}
+	.action-main strong {
+		font-size: 0.68rem;
+		font-weight: 760;
+	}
+	.action-main > div > span {
+		font-size: 0.53rem;
+		color: var(--app-fg-muted);
+	}
+	.action-main small {
+		font-size: 0.5rem;
+		color: var(--app-fg-muted);
+	}
+	.action-main small b {
+		color: var(--app-fg);
+		font-weight: 720;
+	}
+	.action-state {
+		display: grid;
+		justify-items: end;
+		gap: 0.12rem;
+		white-space: nowrap;
+	}
+	.action-state > span {
+		font-size: 0.55rem;
+		font-weight: 760;
+		color: var(--app-accent);
+	}
+	.action-state small {
+		font-size: 0.48rem;
+		color: var(--app-fg-muted);
+	}
+	.live-action-empty {
+		display: flex;
+		min-height: 4rem;
+		grid-column: 1 / -1;
+		align-items: center;
+		justify-content: center;
+		gap: 0.45rem;
+		border: 1px dashed var(--app-border);
+		border-radius: 0.78rem;
+		color: var(--app-fg-muted);
+	}
+	.live-action-empty small {
+		font-size: 0.58rem;
 	}
 	.signal-strip {
 		position: absolute;
@@ -2029,6 +2277,9 @@
 		.node-evidence {
 			left: 3%;
 		}
+		.live-action-list {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
 		.signal-strip {
 			width: 96%;
 		}
@@ -2070,6 +2321,9 @@
 		.node-runtime {
 			bottom: 17%;
 			left: 9%;
+		}
+		.live-action-list {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}
 		.signal-strip {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2182,6 +2436,15 @@
 			bottom: 24%;
 			right: 4%;
 		}
+		.live-action-rail {
+			padding: 0.7rem 0.85rem 0.8rem;
+		}
+		.live-action-list {
+			grid-template-columns: 1fr;
+		}
+		.live-action-row {
+			min-height: 44px;
+		}
 		.signal-strip {
 			bottom: 0.45rem;
 			width: 98%;
@@ -2279,6 +2542,17 @@
 		}
 		.orbit-sweep {
 			display: none;
+		}
+	}
+	@keyframes action-scan {
+		0%,
+		100% {
+			opacity: 0.15;
+			transform: translateX(-45%);
+		}
+		50% {
+			opacity: 1;
+			transform: translateX(45%);
 		}
 	}
 	@keyframes live-pulse {

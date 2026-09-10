@@ -1,6 +1,9 @@
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -143,6 +146,61 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             capability_os_module.OperationRequest.model_validate(
                 {"operation": "discover", "payload": {}}
             )
+
+    async def test_router_records_correlated_capability_lifecycle(self):
+        request = SimpleNamespace(
+            headers={
+                "x-cptr-trace-id": "trace-capability-1",
+                "x-cptr-request-id": "request-1",
+                "x-cptr-mcp-session-id": "session-1",
+                "x-cptr-tool-name": "cptr_factory",
+            },
+            app=SimpleNamespace(state=SimpleNamespace()),
+        )
+        body = capability_os_module.ResolveRequest(
+            task_id="task-1",
+            required=[{"action": "fs.read", "resource": "workspace"}],
+        )
+        service = SimpleNamespace(
+            resolve=AsyncMock(return_value={"task": {"taskId": "task-1"}})
+        )
+
+        with (
+            patch.object(capability_os_module, "_user", new=AsyncMock(return_value="user-1")),
+            patch.object(capability_os_module, "_service", return_value=service),
+            patch.object(
+                capability_os_module.action_trace_store,
+                "append",
+                new=AsyncMock(return_value=True),
+            ) as append_trace,
+        ):
+            result = await capability_os_module.resolve_capability_os(request, body)
+
+        self.assertEqual(result["task"]["taskId"], "task-1")
+        self.assertEqual(append_trace.await_count, 2)
+        started = append_trace.await_args_list[0].kwargs
+        completed = append_trace.await_args_list[1].kwargs
+        self.assertEqual(started["trace_id"], "trace-capability-1")
+        self.assertEqual(started["task_id"], "task-1")
+        self.assertEqual(started["tool_name"], "cptr_factory")
+        self.assertEqual(started["name"], "capability_os.resolve")
+        self.assertEqual(started["status"], "started")
+        self.assertEqual(completed["name"], "capability_os.resolve")
+        self.assertEqual(completed["status"], "ok")
+        self.assertGreaterEqual(completed["duration_ms"], 0)
+
+    def test_all_six_operations_publish_capability_action_lifecycle(self):
+        for handler, operation in (
+            (capability_os_module.inspect_capability_os, "inspect"),
+            (capability_os_module.resolve_capability_os, "resolve"),
+            (capability_os_module.forge_capability_os, "forge"),
+            (capability_os_module.execute_capability_os, "execute"),
+            (capability_os_module.acquire_capability_os, "acquire"),
+            (capability_os_module.reflect_capability_os, "reflect"),
+        ):
+            source = inspect.getsource(handler)
+            self.assertIn("_capability_action_trace(", source)
+            self.assertIn(f'operation="{operation}"', source)
 
     def test_router_exposes_exact_compact_six_operation_surface(self):
         actual = {

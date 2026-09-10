@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 
+from cptr.services.action_traces import ActionTraceStore, action_trace_store
 from cptr.services.capability_os.contracts import ArtifactKind, ArtifactState
 from cptr.services.capability_os.evidence import EvidenceService
 from cptr.services.capability_os.runtime import RuntimeBroker
@@ -19,6 +20,7 @@ class CapabilityOsOperatorService:
         tasks: CapabilityTaskCoordinator,
         runtime: RuntimeBroker,
         evidence: EvidenceService | None = None,
+        traces: ActionTraceStore | None = None,
     ) -> None:
         self.store = store
         self.tasks = tasks
@@ -27,6 +29,7 @@ class CapabilityOsOperatorService:
             store=store,
             clock_ms=lambda: int(time.time() * 1000),
         )
+        self.traces = traces or action_trace_store
 
     async def list_tasks(self, *, user_id: str, limit: int = 20) -> dict[str, object]:
         tasks = await self.tasks.list_recent(user_id=user_id, limit=limit)
@@ -45,6 +48,48 @@ class CapabilityOsOperatorService:
                 for task in tasks
             ]
         }
+
+    async def recent_actions(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        limit: int = 10,
+    ) -> tuple[int, list[dict[str, object]]]:
+        trace_snapshot = await self.traces.summaries(
+            owner_id=user_id,
+            task_id=task_id,
+            limit=max(1, min(int(limit), 20)),
+        )
+        actions: list[dict[str, object]] = []
+        for trace in trace_snapshot.get("traces", []):
+            if not isinstance(trace, dict):
+                continue
+            action = str(trace.get("capability_action") or "").strip()
+            if not action:
+                continue
+            operation, separator, suboperation = action.partition(".")
+            layers = [str(layer) for layer in trace.get("layers", []) if isinstance(layer, str)]
+            source = "chatgpt" if "chatgpt" in layers else ("mcp" if "mcp" in layers else "control")
+            status = str(trace.get("capability_status") or trace.get("status") or "running")
+            actions.append(
+                {
+                    "traceId": str(trace.get("trace_id") or ""),
+                    "operation": operation,
+                    "suboperation": suboperation if separator else None,
+                    "status": status,
+                    "source": source,
+                    "toolName": trace.get("tool_name"),
+                    "startedAtMs": int(trace.get("started_at_ms") or 0),
+                    "updatedAtMs": int(
+                        trace.get("capability_updated_at_ms") or trace.get("updated_at_ms") or 0
+                    ),
+                    "durationMs": int(trace.get("duration_ms") or 0),
+                    "errorCode": trace.get("error_code"),
+                    "layers": layers,
+                }
+            )
+        return int(trace_snapshot.get("sequence") or 0), actions
 
     async def snapshot(
         self,
@@ -70,6 +115,11 @@ class CapabilityOsOperatorService:
         evidence = await self.store.list_evidence(task_id, limit=bounded_limit)
         evidence_chain = await self.evidence.verify_chain(task_id)
         relational = await self.store.operator_snapshot(task_id=task_id)
+        action_sequence, recent_actions = await self.recent_actions(
+            user_id=user_id,
+            task_id=task_id,
+            limit=10,
+        )
 
         artifact_kinds: dict[str, int] = {}
         artifact_states: dict[str, int] = {}
@@ -177,4 +227,6 @@ class CapabilityOsOperatorService:
             ],
             "artifactStates": artifact_states,
             "evidenceKinds": evidence_kinds,
+            "actionSequence": action_sequence,
+            "recentActions": recent_actions,
         }

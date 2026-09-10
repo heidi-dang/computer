@@ -76,6 +76,26 @@ test('Design A is spatial, compact, runtime-truthful, and contains no fake promp
 	assert.doesNotMatch(source, /placeholder=["'][^"']*prompt/i);
 });
 
+test('Capability OS renders real task-scoped ChatGPT action lifecycle from backend traces', async () => {
+	const [source, api] = await Promise.all([
+		read('lib/components/mcp/McpCapabilityOs.svelte'),
+		read('lib/apis/mcp.ts')
+	]);
+
+	assert.match(api, /export interface McpCapabilityOsLiveAction/);
+	assert.match(api, /recentActions:\s*McpCapabilityOsLiveAction\[\]/);
+	assert.match(api, /actionSequence:\s*number/);
+	assert.match(source, /class="live-action-rail"/);
+	assert.match(source, /class="live-action-row/);
+	assert.match(source, /activeActionCount/);
+	assert.match(source, /recentActions/);
+	assert.match(source, /action\.source === 'chatgpt'/);
+	assert.match(source, />ChatGPT</);
+	assert.match(source, /aria-live="polite"/);
+	assert.match(source, /data-status=\{action\.status\}/);
+	assert.doesNotMatch(source, /fake action|simulated action|demo action/i);
+});
+
 test('Capability OS keeps CPTR semantic theme authority and avoids a replacement palette', async () => {
 	const source = await read('lib/components/mcp/McpCapabilityOs.svelte');
 	for (const token of [
