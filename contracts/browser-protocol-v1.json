@@ -7,6 +7,8 @@
     "attach",
     "detach",
     "list_tabs",
+    "open_dedicated",
+    "batch",
     "get_tab",
     "activate_tab",
     "open_tab",
@@ -59,6 +61,7 @@
   "mutating_browser_actions": [
     "attach",
     "detach",
+    "batch",
     "activate_tab",
     "open_tab",
     "close_tab",
