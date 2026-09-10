@@ -1,5 +1,6 @@
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from cptr.services.supervisor import (
     AutonomousSupervisor,
@@ -473,6 +474,34 @@ class SupervisorCoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state.status, MonitorStatus.COMPLETE)
         self.assertEqual(len(agent.started), 2)
         self.assertEqual(director.final_gates, 2)
+
+    async def test_disabled_autonomous_destructive_guard_skips_approval_but_keeps_monitor_ownership(self):
+        store = InMemorySupervisorStore()
+        agent = FakeAgentService()
+        supervisor = AutonomousSupervisor(store=store, agent=agent, director=FakeDirector())
+        monitor = await supervisor.create_goal(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            goal="Ship the feature",
+            acceptance_criteria=["Feature is shipped"],
+            model_id="provider/model-1",
+        )
+        scope = monitor.scopes[0]
+
+        with patch(
+            "cptr.services.supervisor.guard_policy_service.is_enabled",
+            new=AsyncMock(return_value=False),
+        ) as guard_enabled:
+            await supervisor._try_delegate(monitor, scope, "deploy production")
+
+        guard_enabled.assert_awaited_once_with(
+            "user-1", "autonomous_destructive_approval"
+        )
+        self.assertEqual(monitor.status, MonitorStatus.RUNNING)
+        self.assertIsNone(monitor.approval_id)
+        self.assertEqual(scope.status, ScopeStatus.WORKING)
+        self.assertEqual(len(agent.started), 1)
+        self.assertIn("deploy production", agent.started[0][1])
 
     def test_approval_classifier_respects_negated_risky_actions(self):
         self.assertTrue(AutonomousSupervisor._requires_approval("deploy production"))

@@ -1093,6 +1093,48 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(executor.calls), 1)
 
+    async def test_disabled_capability_os_approval_guard_keeps_standing_policy_authoritative(self):
+        critical = CapabilityRequest("production.deploy", "service:cptr-backend")
+        artifact = create_artifact(
+            artifact_id="tool.production.deploy",
+            version="1",
+            kind=ArtifactKind.TOOL,
+            owner=ArtifactOwner.GENERATED,
+            origin=ArtifactOrigin.FORGE,
+            spec={"runtime": {"class": "gvisor"}},
+            created_at="2026-09-10T00:00:00Z",
+            user_id="user-1",
+            task_origin="task-1",
+            state=ArtifactState.QUALIFIED,
+        )
+        await self.store.persist_artifact(artifact)
+        self.service.policy_provider = StandingAuthorityPolicyProvider((
+            StandingAuthorityRule(
+                policy=TaskAuthorityPolicy(allowed=(critical,), max_lease_ms=5000),
+                user_id="user-1",
+                workspace_id="ws-1",
+            ),
+        ))
+
+        with patch(
+            "cptr.services.capability_os.control.guard_policy_service.is_enabled",
+            new=AsyncMock(return_value=False),
+        ) as guard_enabled:
+            lease, automatic = await self.service._lease(
+                task=self.service.tasks.context,
+                artifact_digest=artifact.metadata.content_digest,
+                workload_id="workload-critical",
+                permissions=(critical,),
+                runtime_profile="gvisor",
+            )
+
+        self.assertTrue(automatic)
+        self.assertIsNone(lease.approval_id)
+        guard_enabled.assert_awaited_once_with(
+            "user-1", "capability_os_external_approval"
+        )
+        await self.authority.revoke(lease.lease_id)
+
     async def test_execute_runs_content_addressed_generated_tool_with_separate_runtime_lease(self):
         tool = create_artifact(
             artifact_id="tool.vm.answer",

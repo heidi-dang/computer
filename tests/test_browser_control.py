@@ -1,6 +1,6 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from pydantic import ValidationError
@@ -11,6 +11,7 @@ from cptr.routers.coding import (
     _bounded_browser_snapshot,
     _settled_browser_snapshot,
     _validate_browser_url,
+    control_managed_browser,
     router as coding_router,
 )
 from cptr.utils.browser.cdp import CDPClient, _normalize_ref
@@ -95,6 +96,63 @@ class BrowserControlValidationTests(unittest.TestCase):
         self.assertEqual(_normalize_ref("@e33"), "@e33")
         self.assertEqual(_normalize_ref("e33"), "@e33")
         self.assertEqual(_normalize_ref("33"), "@e33")
+
+
+class BrowserControlGuardPolicyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disabled_network_guard_removes_flag_but_keeps_external_scope(self):
+        request = SimpleNamespace(
+            state=SimpleNamespace(control_scopes={"command:execute", "command:external"})
+        )
+        workspace = SimpleNamespace(path="/tmp/cptr-browser-control")
+        client = SimpleNamespace(
+            navigate=AsyncMock(return_value={"title": "Example"}),
+        )
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "cptr.routers.coding._managed_browser_client",
+                new=AsyncMock(return_value=client),
+            ),
+        ):
+            result = await control_managed_browser(
+                request,
+                "ws_1",
+                BrowserControlRequest(action="navigate", url="https://example.com"),
+            )
+
+        self.assertEqual(result["status"], "ok")
+        client.navigate.assert_awaited_once_with("https://example.com")
+
+    async def test_disabled_network_guard_does_not_bypass_external_scope(self):
+        request = SimpleNamespace(state=SimpleNamespace(control_scopes={"command:execute"}))
+        workspace = SimpleNamespace(path="/tmp/cptr-browser-control")
+        client = SimpleNamespace(navigate=AsyncMock())
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "cptr.routers.coding._managed_browser_client",
+                new=AsyncMock(return_value=client),
+            ),
+            self.assertRaises(HTTPException) as denied,
+        ):
+            await control_managed_browser(
+                request,
+                "ws_1",
+                BrowserControlRequest(action="navigate", url="https://example.com"),
+            )
+
+        self.assertEqual(denied.exception.status_code, 403)
+        client.navigate.assert_not_awaited()
 
 
 class BrowserSnapshotSettlingTests(unittest.IsolatedAsyncioTestCase):

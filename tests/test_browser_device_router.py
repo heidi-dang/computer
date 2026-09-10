@@ -560,6 +560,114 @@ class BrowserDeviceRouterTests(unittest.IsolatedAsyncioTestCase):
             token="approval_1", user_id="user_1", session_id="brs_1", expression="document.title"
         )
 
+    async def test_disabled_evaluate_guard_skips_token_but_keeps_agent_epoch_and_lease(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="AGENT_CONTROL")
+        completed = {
+            "type": "browser.command.completed",
+            "command_id": "cmd_eval_no_approval",
+            "payload": {"value": "Example"},
+        }
+        with (
+            patch(
+                "cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.get_session",
+                new=AsyncMock(return_value=session),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()
+            ) as assert_mutation,
+            patch(
+                "cptr.routers.browser_device.guard_policy_service.is_enabled",
+                new=AsyncMock(return_value=False),
+            ) as guard_enabled,
+            patch(
+                "cptr.routers.browser_device.browser_evaluate_approvals.consume"
+            ) as consume,
+            patch(
+                "cptr.routers.browser_device.browser_command_results.reserve", new=AsyncMock()
+            ) as reserve,
+            patch(
+                "cptr.routers.browser_device.browser_device_store.session_lease",
+                new=AsyncMock(return_value={"owner": "agent", "epoch": 4}),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.append_device_event",
+                new=AsyncMock(return_value=SimpleNamespace(sequence=51)),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(return_value=True),
+            ) as send,
+            patch(
+                "cptr.routers.browser_device.browser_command_results.wait",
+                new=AsyncMock(return_value=completed),
+            ),
+            patch("cptr.routers.browser_device._trace_browser_stage", new=AsyncMock()),
+        ):
+            result = await send_browser_command(
+                request,
+                "brs_1",
+                SendCommandBody(
+                    command_id="cmd_eval_no_approval",
+                    action="evaluate",
+                    expected_epoch=4,
+                    payload={"expression": "document.title"},
+                ),
+            )
+
+        self.assertTrue(result["accepted"])
+        guard_enabled.assert_awaited_once_with("user_1", "browser_evaluate_approval")
+        assert_mutation.assert_awaited_once_with(
+            session_id="brs_1", actor="agent", expected_epoch=4
+        )
+        consume.assert_not_called()
+        reserve.assert_awaited_once_with("cmd_eval_no_approval")
+        message = send.await_args.kwargs["message"]
+        self.assertEqual(message["payload"]["expected_epoch"], 4)
+        self.assertEqual(message["payload"]["action"], "evaluate")
+        self.assertEqual(message["payload"]["args"], {"expression": "document.title"})
+
+    async def test_disabled_evaluate_guard_still_requires_expression(self):
+        request = SimpleNamespace()
+        session = SimpleNamespace(device_id="bdv_1", surface_id="surf_1", state="AGENT_CONTROL")
+        with (
+            patch(
+                "cptr.routers.browser_device._control_user", new=AsyncMock(return_value="user_1")
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.get_session",
+                new=AsyncMock(return_value=session),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_store.assert_mutation", new=AsyncMock()
+            ),
+            patch(
+                "cptr.routers.browser_device.guard_policy_service.is_enabled",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "cptr.routers.browser_device.browser_device_connections.send_control",
+                new=AsyncMock(),
+            ) as send,
+            self.assertRaises(HTTPException) as denied,
+        ):
+            await send_browser_command(
+                request,
+                "brs_1",
+                SendCommandBody(
+                    command_id="cmd_eval_bad",
+                    action="evaluate",
+                    expected_epoch=4,
+                    payload={},
+                ),
+            )
+
+        self.assertEqual(denied.exception.status_code, 403)
+        send.assert_not_awaited()
+
     async def test_lease_transfer_rejects_cross_owner_session(self):
         request = SimpleNamespace()
         with (

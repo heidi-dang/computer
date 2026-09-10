@@ -26,6 +26,7 @@ from cptr.services.browser_protocol import (
     wire_browser_mode,
 )
 from cptr.services.control_auth import require_control_user
+from cptr.services.guard_controls import guard_policy_service
 
 logger = logging.getLogger(__name__)
 
@@ -868,22 +869,27 @@ async def send_browser_command(request: Request, session_id: str, body: SendComm
             raise HTTPException(status_code=409, detail=str(exc)) from exc
     if body.action == "evaluate":
         expression = body.payload.get("expression")
-        approval_token = body.payload.get("approval_token")
-        if not isinstance(expression, str) or not isinstance(approval_token, str):
+        if not isinstance(expression, str):
             raise HTTPException(
-                status_code=403, detail="browser evaluate requires explicit approval"
+                status_code=403, detail="browser evaluate requires an expression"
             )
-        approved = browser_evaluate_approvals.consume(
-            token=approval_token,
-            user_id=user_id,
-            session_id=session_id,
-            expression=expression,
-        )
-        if not approved:
-            raise HTTPException(
-                status_code=403,
-                detail="browser evaluate approval is invalid, expired, or already used",
+        if await guard_policy_service.is_enabled(user_id, "browser_evaluate_approval"):
+            approval_token = body.payload.get("approval_token")
+            if not isinstance(approval_token, str):
+                raise HTTPException(
+                    status_code=403, detail="browser evaluate requires explicit approval"
+                )
+            approved = browser_evaluate_approvals.consume(
+                token=approval_token,
+                user_id=user_id,
+                session_id=session_id,
+                expression=expression,
             )
+            if not approved:
+                raise HTTPException(
+                    status_code=403,
+                    detail="browser evaluate approval is invalid, expired, or already used",
+                )
     await browser_command_results.reserve(body.command_id)
     lease = await browser_device_store.session_lease(session_id=session_id)
     if lease is None:

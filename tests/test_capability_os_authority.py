@@ -123,6 +123,35 @@ class CapabilityOsAuthorityTests(unittest.IsolatedAsyncioTestCase):
         lease = await self.broker.issue(request, policy=policy, approval_id="approval-1")
         self.assertEqual(lease.approval_id, "approval-1")
 
+    async def test_relaxed_critical_approval_still_requires_standing_policy(self):
+        critical = CapabilityRequest("production.deploy", "service:cptr-backend")
+        request = LeaseRequest(
+            task_id="task-1",
+            workload_id="workload-1",
+            artifact_digest=self.artifact.metadata.content_digest,
+            permissions=(critical,),
+            runtime_profile="gvisor",
+            requested_lease_ms=10_000,
+        )
+        allowed_policy = TaskAuthorityPolicy(allowed=(critical,), max_lease_ms=30_000)
+        lease = await self.broker.issue(
+            request,
+            policy=allowed_policy,
+            require_critical_approval=False,
+        )
+        self.assertIsNone(lease.approval_id)
+
+        denied_policy = TaskAuthorityPolicy(
+            allowed=(CapabilityRequest("filesystem.read", "repo:cptr/**"),),
+            max_lease_ms=30_000,
+        )
+        with self.assertRaises(AuthorityDenied):
+            await self.broker.issue(
+                request,
+                policy=denied_policy,
+                require_critical_approval=False,
+            )
+
     async def test_request_resource_limits_cannot_widen_server_policy(self):
         policy = TaskAuthorityPolicy(
             allowed=(CapabilityRequest("filesystem.read", "repo:cptr/**"),),

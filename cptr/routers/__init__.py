@@ -26,6 +26,10 @@ from cptr.routers.files import router as files_router
 from cptr.routers.gateway import router as gateway_router
 from cptr.routers.gateway_extended import router as gateway_extended_router
 from cptr.routers.git import router as git_router
+from cptr.routers.guard_controls import (
+    control_router as guard_controls_control_router,
+    ui_router as guard_controls_ui_router,
+)
 from cptr.routers.images import router as images_router
 from cptr.routers.mcp import router as mcp_router
 from cptr.routers.memory import router as memory_router
@@ -67,6 +71,8 @@ __all__ = [
     "gateway_router",
     "gateway_extended_router",
     "git_router",
+    "guard_controls_control_router",
+    "guard_controls_ui_router",
     "images_router",
     "mcp_router",
     "memory_router",

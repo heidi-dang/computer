@@ -27,6 +27,7 @@ from cptr.services.agent_service import AgentService
 from cptr.services.control_auth import require_control_user
 from cptr.services.control_store import SqlSupervisorStore
 from cptr.services.direct_coding_workers import DirectCodingWorkerError, resolve_direct_worker_root
+from cptr.services.guard_controls import guard_policy_service
 from cptr.services.supervisor import AutonomousSupervisor, MonitorState, MonitorStatus
 from cptr.services.supervisor_director import LocalSupervisorDirector, OpenAISupervisorDirector
 from cptr.utils.db import get_db
@@ -71,9 +72,12 @@ def _require_delegation_marker(delegation_text: str) -> None:
         )
 
 
-def _require_explicit_delegation(model_id: str | None, delegation_text: str) -> str:
-    """Fail closed unless the delegated request is authorized and resolves to a qualified model/profile."""
-    _require_delegation_marker(delegation_text)
+def _require_explicit_delegation(
+    model_id: str | None, delegation_text: str, *, require_marker: bool = True
+) -> str:
+    """Require the configured prompt approval plus a qualified model/profile."""
+    if require_marker:
+        _require_delegation_marker(delegation_text)
     candidate = (model_id or "").strip()
     if not candidate:
         raise HTTPException(
@@ -1073,9 +1077,14 @@ async def create_task(request: Request, body: TaskCreateRequest):
         workspace_id=body.workspace_id,
         session_id=body.workbench_session_id,
     )
-    _require_delegation_marker(body.prompt)
+    delegation_approval_required = await guard_policy_service.is_enabled(
+        user_id, "delegation_prompt_approval"
+    )
+    review_required = await guard_policy_service.is_enabled(user_id, "task_review_approval")
     selected_model = body.model_id or await _default_model()
-    model_id = _require_explicit_delegation(selected_model, body.prompt)
+    model_id = _require_explicit_delegation(
+        selected_model, body.prompt, require_marker=delegation_approval_required
+    )
     agent, _ = _services(request)
     try:
         return await agent.start_task(
@@ -1086,6 +1095,7 @@ async def create_task(request: Request, body: TaskCreateRequest):
             idempotency_key=body.idempotency_key,
             execution_policy=body.execution_policy.model_dump(),
             request=request,
+            **({"review_required": False} if not review_required else {}),
             **(
                 {"workbench_session_id": body.workbench_session_id}
                 if body.workbench_session_id
@@ -1322,7 +1332,12 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
         workspace_id=body.workspace_id,
         session_id=body.workbench_session_id,
     )
-    model_id = _require_explicit_delegation(body.model_id, body.goal)
+    delegation_approval_required = await guard_policy_service.is_enabled(
+        user_id, "delegation_prompt_approval"
+    )
+    model_id = _require_explicit_delegation(
+        body.model_id, body.goal, require_marker=delegation_approval_required
+    )
     _, supervisor = _services(request)
     try:
         monitor = await supervisor.create_goal(

@@ -6,6 +6,28 @@ import { consumeMcpSseBuffer } from '$lib/utils/mcp-console';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
+export interface McpGuardControl {
+	id: string;
+	label: string;
+	description: string;
+	category: 'approval' | 'invariant';
+	risk: 'medium' | 'high' | 'critical';
+	mutable: boolean;
+	default_enabled: boolean;
+	enabled: boolean;
+	version: number;
+}
+
+export interface McpGuardControls {
+	guards: McpGuardControl[];
+	mutable_count: number;
+	enabled_mutable_count: number;
+	locked_count: number;
+	host_capabilities: {
+		local_root_grants: boolean;
+	};
+}
+
 export interface McpServer {
 	id: string;
 	name: string;
@@ -1242,6 +1264,20 @@ export function openMcpFactoryStream(
 	source.onerror = (event) => callbacks.onError?.(event);
 	return () => source.close();
 }
+
+export const getMcpGuardControls = () => fetchJSON<McpGuardControls>('/api/mcp/guards');
+
+export const updateMcpGuardControl = (guardId: string, enabled: boolean, expectedVersion: number) =>
+	fetchJSON<McpGuardControl>(`/api/mcp/guards/${encodeURIComponent(guardId)}`, {
+		...jsonBody({ enabled, expected_version: expectedVersion }),
+		method: 'PATCH'
+	});
+
+export const resetMcpGuardControls = (expectedVersions: Record<string, number>) =>
+	fetchJSON<McpGuardControls>('/api/mcp/guards/reset', {
+		...jsonBody({ expected_versions: expectedVersions }),
+		method: 'POST'
+	});
 
 export const getMcpTopologyConfig = () => fetchJSON<McpTopologyConfig>('/api/mcp/topology/config');
 

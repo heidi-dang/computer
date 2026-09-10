@@ -44,6 +44,7 @@ from cptr.services.capability_os.skill_forge import (
 from cptr.services.capability_os.store import SqlCapabilityOsStore
 from cptr.services.capability_os.tasks import CapabilityTaskCoordinator
 from cptr.services.capability_os.vm import CapabilityVm
+from cptr.services.guard_controls import guard_policy_service
 
 
 class CapabilityOsUnavailable(RuntimeError):
@@ -677,13 +678,17 @@ class CapabilityOsControlService:
                                                     workload_id=workload_id)
         if policy is None:
             raise AuthorityDenied("no standing authority policy covers this task")
+        require_critical_approval = await guard_policy_service.is_enabled(
+            task.user_id, "capability_os_external_approval"
+        )
         lease = await self.authority.issue(
             LeaseRequest(task_id=task.task_id, workload_id=workload_id, artifact_digest=artifact_digest,
                          permissions=tuple(permissions), runtime_profile=runtime_profile,
                          requested_lease_ms=policy.max_lease_ms, resource_limits=dict(resource_limits or {}),
                          network_destinations=tuple(network_destinations), credential_names=tuple(credential_names),
                          execution_context=execution_context),
-            policy=policy, approval_id=approval_id)
+            policy=policy, approval_id=approval_id,
+            require_critical_approval=require_critical_approval)
         return lease, True
 
     async def _invoke_packaged_mcp(

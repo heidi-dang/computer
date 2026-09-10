@@ -11,7 +11,7 @@ test('Services tab is registered next to Memory and lazy-loaded on /mcp', async 
 	const page = await read('routes/mcp/+page.svelte');
 	assert.match(
 		page,
-		/'topology' \| 'capability' \| 'console' \| 'factory' \| 'memory' \| 'services'/
+		/'topology' \| 'capability' \| 'console' \| 'factory' \| 'memory' \| 'guards' \| 'services'/
 	);
 	assert.match(page, /typeof import\('\$lib\/components\/mcp\/McpServices\.svelte'\)\.default/);
 	assert.match(page, /servicesLoad \?\?= import\('\$lib\/components\/mcp\/McpServices\.svelte'\)/);

@@ -1,12 +1,13 @@
 <script lang="ts">
 	import McpTopology from '$lib/components/mcp/McpTopology.svelte';
 
-	type McpView = 'topology' | 'capability' | 'console' | 'factory' | 'memory' | 'services';
+	type McpView = 'topology' | 'capability' | 'console' | 'factory' | 'memory' | 'guards' | 'services';
 	type McpCapabilityOsComponent =
 		typeof import('$lib/components/mcp/McpCapabilityOs.svelte').default;
 	type McpConsoleComponent = typeof import('$lib/components/mcp/McpConsole.svelte').default;
 	type McpDarkFactoryComponent = typeof import('$lib/components/mcp/McpDarkFactory.svelte').default;
 	type McpMemoryComponent = typeof import('$lib/components/mcp/McpMemory.svelte').default;
+	type McpGuardControlsComponent = typeof import('$lib/components/mcp/McpGuardControls.svelte').default;
 	type McpServicesComponent = typeof import('$lib/components/mcp/McpServices.svelte').default;
 	let view = $state<McpView>('topology');
 	let focusRequestId = $state<string | null>(null);
@@ -15,11 +16,13 @@
 	let LazyMcpConsole = $state<McpConsoleComponent | null>(null);
 	let LazyMcpDarkFactory = $state<McpDarkFactoryComponent | null>(null);
 	let LazyMcpMemory = $state<McpMemoryComponent | null>(null);
+	let LazyMcpGuardControls = $state<McpGuardControlsComponent | null>(null);
 	let LazyMcpServices = $state<McpServicesComponent | null>(null);
 	let capabilityLoad: Promise<McpCapabilityOsComponent> | null = null;
 	let consoleLoad: Promise<McpConsoleComponent> | null = null;
 	let factoryLoad: Promise<McpDarkFactoryComponent> | null = null;
 	let memoryLoad: Promise<McpMemoryComponent> | null = null;
+	let guardControlsLoad: Promise<McpGuardControlsComponent> | null = null;
 	let servicesLoad: Promise<McpServicesComponent> | null = null;
 
 	function ensureCapability(): Promise<McpCapabilityOsComponent> {
@@ -60,6 +63,16 @@
 		return memoryLoad;
 	}
 
+	function ensureGuardControls(): Promise<McpGuardControlsComponent> {
+		guardControlsLoad ??= import('$lib/components/mcp/McpGuardControls.svelte').then(
+			({ default: component }) => {
+				LazyMcpGuardControls = component;
+				return component;
+			}
+		);
+		return guardControlsLoad;
+	}
+
 	function ensureServices(): Promise<McpServicesComponent> {
 		servicesLoad ??= import('$lib/components/mcp/McpServices.svelte').then(
 			({ default: component }) => {
@@ -75,6 +88,7 @@
 		if (view === 'console' && !LazyMcpConsole) void ensureConsole();
 		if (view === 'factory' && !LazyMcpDarkFactory) void ensureFactory();
 		if (view === 'memory' && !LazyMcpMemory) void ensureMemory();
+		if (view === 'guards' && !LazyMcpGuardControls) void ensureGuardControls();
 		if (view === 'services' && !LazyMcpServices) void ensureServices();
 	});
 
@@ -133,7 +147,7 @@
 				<div class="min-w-0">
 					<h1 class="truncate text-sm font-semibold">MCP</h1>
 					<p class="hidden truncate text-[0.68rem] app-muted sm:block">
-						Live topology, Capability OS, console, Factory, memory, and service operations
+						Live topology, Capability OS, console, Factory, memory, Guard Controls, and services
 					</p>
 				</div>
 			</div>
@@ -200,6 +214,17 @@
 				</button>
 				<button
 					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
+					'guards'
+						? 'app-interactive-active'
+						: 'app-muted'}"
+					role="tab"
+					aria-selected={view === 'guards'}
+					onclick={() => (view = 'guards')}
+				>
+					Guard Controls
+				</button>
+				<button
+					class="app-interactive min-h-11 min-w-max flex-1 shrink-0 rounded-lg px-2.5 text-xs font-medium sm:min-h-0 sm:flex-none sm:py-1.5 {view ===
 					'services'
 						? 'app-interactive-active'
 						: 'app-muted'}"
@@ -246,6 +271,14 @@
 			{:else}
 				<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
 					Loading memory…
+				</div>
+			{/if}
+		{:else if view === 'guards'}
+			{#if LazyMcpGuardControls}
+				<LazyMcpGuardControls />
+			{:else}
+				<div class="flex h-full items-center justify-center text-xs app-muted" role="status">
+					Loading guard controls…
 				</div>
 			{/if}
 		{:else if LazyMcpServices}

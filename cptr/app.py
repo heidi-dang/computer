@@ -32,6 +32,8 @@ from cptr.routers import (
     gateway_router,
     gateway_extended_router,
     git_router,
+    guard_controls_control_router,
+    guard_controls_ui_router,
     images_router,
     mcp_router,
     memory_router,
@@ -472,6 +474,8 @@ app.include_router(files_router)
 app.include_router(gateway_router)
 app.include_router(gateway_extended_router)
 app.include_router(git_router)
+app.include_router(guard_controls_ui_router)
+app.include_router(guard_controls_control_router)
 app.include_router(images_router)
 app.include_router(mcp_router)
 app.include_router(memory_router)
