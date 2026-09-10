@@ -145,7 +145,7 @@ class FactoryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_phase_renews_run_lease_until_outcome_is_persisted(self):
         class SlowHandler:
             async def execute(self, _context):
-                await asyncio.sleep(0.45)
+                await asyncio.sleep(0.6)
                 return PhaseOutcome(
                     next_state=FactoryState.RECOVERING,
                     reason="slow phase completed under renewed lease",
@@ -155,13 +155,15 @@ class FactoryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             store=self.store,
             handlers={FactoryState.MISSION: SlowHandler()},
             owner_token="heartbeat-owner",
-            lease_ms=300,
+            lease_ms=1_200,
         )
         with patch.object(self.store, "renew_run", wraps=self.store.renew_run) as renew:
             observed = await orchestrator.run_once(self.run.id)
 
         self.assertEqual(observed.state, FactoryState.RECOVERING.value)
-        self.assertGreaterEqual(renew.await_count, 1)
+        # One renewal occurs before the handler starts; a second proves the
+        # heartbeat fired while the slow phase was still executing.
+        self.assertGreaterEqual(renew.await_count, 2)
 
     async def test_phase_heartbeat_refreshes_aged_claim_before_handler_starts(self):
         clock = [1_250]

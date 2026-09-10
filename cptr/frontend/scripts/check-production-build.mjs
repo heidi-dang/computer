@@ -25,7 +25,8 @@ const forbiddenWarnings = [
 const clientRoot = path.join(cwd, '.svelte-kit', 'output', 'client');
 const manifestPath = path.join(clientRoot, '.vite', 'manifest.json');
 const maxEntryBytes = 900 * 1024;
-const maxClientChunkBytes = 1400 * 1024;
+const maxClientChunkBytes = 900 * 1024;
+const maxPdfWorkerBytes = 1300 * 1024;
 const maxRootLayoutStaticBytes = 1000 * 1024;
 const maxMcpInitialStaticBytes = 900 * 1024;
 const maxHomeInitialStaticBytes = 1200 * 1024;
@@ -34,9 +35,19 @@ const bundleViolations = [];
 try {
 	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 	const seenFiles = new Set();
+	const seenPdfWorkers = new Set();
 
 	for (const [source, record] of Object.entries(manifest)) {
 		if (!record || typeof record !== 'object' || typeof record.file !== 'string') continue;
+		if (record.file.includes('pdf.worker') && !seenPdfWorkers.has(record.file)) {
+			seenPdfWorkers.add(record.file);
+			const workerBytes = statSync(path.join(clientRoot, record.file)).size;
+			if (workerBytes > maxPdfWorkerBytes) {
+				bundleViolations.push(
+					`${source}: ${(workerBytes / 1024).toFixed(1)} kB exceeds PDF worker limit ${(maxPdfWorkerBytes / 1024).toFixed(0)} kB`
+				);
+			}
+		}
 		if (!record.file.endsWith('.js') || seenFiles.has(record.file)) continue;
 		seenFiles.add(record.file);
 

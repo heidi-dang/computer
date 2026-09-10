@@ -8,6 +8,8 @@ BROWSER_ACTIONS = frozenset(
         "attach",
         "detach",
         "list_tabs",
+        "open_dedicated",
+        "batch",
         "get_tab",
         "activate_tab",
         "open_tab",
@@ -59,10 +61,32 @@ BROWSER_ACTIONS = frozenset(
     }
 )
 
+BATCHABLE_BROWSER_ACTIONS = frozenset(
+    {
+        "click",
+        "double_click",
+        "right_click",
+        "hover",
+        "type",
+        "fill",
+        "clear",
+        "press_key",
+        "key_down",
+        "key_up",
+        "scroll",
+        "drag",
+        "select_option",
+        "check",
+        "uncheck",
+        "focus",
+    }
+)
+
 MUTATING_BROWSER_ACTIONS = frozenset(
     {
         "attach",
         "detach",
+        "batch",
         "activate_tab",
         "open_tab",
         "close_tab",
