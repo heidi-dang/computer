@@ -193,6 +193,23 @@ DIRECT_CODING_IO_CONCURRENCY = max(1, _env_int("CPTR_DIRECT_CODING_IO_CONCURRENC
 DIRECT_WORKER_MAX_PER_WORKSPACE = max(1, _env_int("CPTR_DIRECT_WORKER_MAX_PER_WORKSPACE", 8))
 DIRECT_WORKTREE_ROOT = os.environ.get("CPTR_DIRECT_WORKTREE_ROOT", "").strip()
 
+# ── Automatic language intelligence ─────────────────────────
+# LSP is an internal coding accelerator, not part of the model-visible MCP
+# surface. Cold starts and requests are deliberately short so language
+# intelligence cannot dominate a normal Direct Coding filesystem operation.
+AUTOMATIC_LSP_ENABLED = _env_bool("CPTR_AUTOMATIC_LSP_ENABLED", "true")
+AUTOMATIC_LSP_STARTUP_WAIT_MS = max(
+    0, min(_env_int("CPTR_AUTOMATIC_LSP_STARTUP_WAIT_MS", 350), 2_000)
+)
+AUTOMATIC_LSP_REQUEST_TIMEOUT_MS = max(
+    50, min(_env_int("CPTR_AUTOMATIC_LSP_REQUEST_TIMEOUT_MS", 350), 2_000)
+)
+AUTOMATIC_LSP_IDLE_TTL_SECONDS = max(
+    30, min(_env_int("CPTR_AUTOMATIC_LSP_IDLE_TTL_SECONDS", 10 * 60), 24 * 60 * 60)
+)
+AUTOMATIC_LSP_MAX_SYMBOLS = max(1, min(_env_int("CPTR_AUTOMATIC_LSP_MAX_SYMBOLS", 80), 500))
+AUTOMATIC_LSP_MAX_DIAGNOSTICS = max(1, min(_env_int("CPTR_AUTOMATIC_LSP_MAX_DIAGNOSTICS", 80), 500))
+
 # ── FDX repository intelligence ─────────────────────────────
 FDX_ENABLED = _env_bool("CPTR_FDX_ENABLED", "true")
 FDX_BINARY = os.environ.get("CPTR_FDX_BINARY", "").strip()
@@ -214,12 +231,8 @@ CAPABILITY_OS_BUILD_MAX_CPU_MILLIS = max(
 CAPABILITY_OS_BUILD_MAX_MEMORY_MIB = max(
     64, _env_int("CPTR_CAPABILITY_OS_BUILD_MAX_MEMORY_MIB", 512)
 )
-CAPABILITY_OS_BUILD_MAX_DISK_MIB = max(
-    64, _env_int("CPTR_CAPABILITY_OS_BUILD_MAX_DISK_MIB", 1_024)
-)
-CAPABILITY_OS_BUILD_MAX_PIDS = max(
-    4, _env_int("CPTR_CAPABILITY_OS_BUILD_MAX_PIDS", 64)
-)
+CAPABILITY_OS_BUILD_MAX_DISK_MIB = max(64, _env_int("CPTR_CAPABILITY_OS_BUILD_MAX_DISK_MIB", 1_024))
+CAPABILITY_OS_BUILD_MAX_PIDS = max(4, _env_int("CPTR_CAPABILITY_OS_BUILD_MAX_PIDS", 64))
 CAPABILITY_OS_BUILD_MAX_WALL_TIME_MS = max(
     1_000, min(_env_int("CPTR_CAPABILITY_OS_BUILD_MAX_WALL_TIME_MS", 120_000), 600_000)
 )

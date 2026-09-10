@@ -23,6 +23,7 @@ MAX_LSP_SESSIONS_PER_USER = 8
 MAX_LSP_FRAME_BYTES = 2 * 1024 * 1024
 MAX_LSP_HEADER_BYTES = 64 * 1024
 MAX_LSP_STDERR_BYTES = 64 * 1024
+MAX_LSP_DIAGNOSTICS_PER_DOCUMENT = 200
 DEFAULT_LSP_TIMEOUT_SECONDS = 15.0
 
 _DEFAULT_SERVER_COMMANDS: dict[str, list[str]] = {
@@ -51,6 +52,7 @@ class _LspSession:
     reader_task: asyncio.Task[None] | None = None
     stderr_task: asyncio.Task[None] | None = None
     stderr_tail: bytearray = field(default_factory=bytearray)
+    diagnostics: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
 class LspManager:
@@ -256,7 +258,9 @@ class LspManager:
                 )
                 raise LspError(f"language server initialize failed: {message[:500]}")
             await self.notify(lsp_id=lsp_id, user_id=user_id, method="initialized", params={})
-        except Exception:
+        except BaseException:
+            # asyncio cancellation during backend shutdown must not orphan a
+            # partially initialized language-server process.
             await self._terminate(session)
             self._sessions.pop(lsp_id, None)
             raise
@@ -301,6 +305,10 @@ class LspManager:
     async def notify(self, *, lsp_id: str, user_id: str, method: str, params: Any = None) -> None:
         session = self._owned(lsp_id, user_id)
         await self._send(session, {"jsonrpc": "2.0", "method": method, "params": params})
+
+    def latest_diagnostics(self, *, lsp_id: str, user_id: str, uri: str) -> list[dict[str, Any]]:
+        session = self._owned(lsp_id, user_id)
+        return list(session.diagnostics.get(uri, ()))
 
     async def stop(self, *, lsp_id: str, user_id: str) -> dict[str, Any]:
         session = self._owned(lsp_id, user_id)
@@ -355,6 +363,9 @@ class LspManager:
                     continue
                 response_id = payload.get("id")
                 method = payload.get("method")
+                if response_id is None and method == "textDocument/publishDiagnostics":
+                    self._capture_diagnostics(session, payload.get("params"))
+                    continue
                 if response_id is not None and isinstance(method, str):
                     await self._reply_to_server_request(session, payload)
                     continue
@@ -372,6 +383,19 @@ class LspManager:
             for future in list(session.pending.values()):
                 if not future.done():
                     future.set_exception(LspError("language server connection closed"))
+
+    @staticmethod
+    def _capture_diagnostics(session: _LspSession, params: Any) -> None:
+        if not isinstance(params, dict):
+            return
+        uri = params.get("uri")
+        diagnostics = params.get("diagnostics")
+        if not isinstance(uri, str) or not uri or not isinstance(diagnostics, list):
+            return
+        bounded = [item for item in diagnostics if isinstance(item, dict)][
+            :MAX_LSP_DIAGNOSTICS_PER_DOCUMENT
+        ]
+        session.diagnostics[uri] = bounded
 
     async def _reply_to_server_request(self, session: _LspSession, payload: dict[str, Any]) -> None:
         method = str(payload.get("method") or "")

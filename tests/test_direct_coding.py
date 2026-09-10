@@ -15,6 +15,8 @@ from cptr.routers.coding import (
     ApplyEditsRequest,
     CommandRequest,
     EditRequest,
+    ReadRequest,
+    WriteRequest,
     SecretWriteRequest,
     TestTargetRequest as CodingTestTargetRequest,
     WorkspaceInspectRequest,
@@ -23,8 +25,10 @@ from cptr.routers.coding import (
     apply_workspace_edits,
     edit_workspace_file,
     inspect_workspace,
+    read_workspace_file,
     run_workspace_test_target,
     start_workspace_command,
+    write_workspace_file,
     write_workspace_secret,
     _cursor,
     _sha256,
@@ -184,6 +188,75 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
         for unsafe in ("../outside.py", "/etc/passwd", ".env", "config/.env.local"):
             with self.subTest(path=unsafe), self.assertRaises(HTTPException):
                 _relative_path(unsafe, root)
+
+    async def test_read_automatically_enriches_supported_source_with_lsp(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = ReadRequest(path="src/app.py")
+        intelligence = {
+            "provider": "lsp",
+            "server_id": "pyright",
+            "status": "ok",
+            "symbols": [{"name": "f"}],
+            "diagnostics": [],
+        }
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.Runtime.read_text_file",
+                new=AsyncMock(
+                    return_value={
+                        "binary": False,
+                        "size": 24,
+                        "content": "def f():\n    return 1\n",
+                    }
+                ),
+            ),
+            patch(
+                "cptr.routers.coding.identity_for_context",
+                new=AsyncMock(return_value=SimpleNamespace(is_pam=False)),
+            ),
+            patch(
+                "cptr.routers.coding.automatic_lsp_intelligence_service.enrich_read",
+                new=AsyncMock(return_value=intelligence),
+            ) as enrich,
+        ):
+            result = await read_workspace_file(request, "ws_1", body)
+
+        self.assertEqual(result["intelligence"], intelligence)
+        enrich.assert_awaited_once()
+        kwargs = enrich.await_args.kwargs
+        self.assertEqual(kwargs["root"], Path("/tmp/cptr-direct-coding"))
+        self.assertEqual(kwargs["path"], Path("/tmp/cptr-direct-coding/src/app.py"))
+        self.assertEqual(kwargs["content"], "def f():\n    return 1\n")
+
+    async def test_write_succeeds_when_automatic_lsp_enrichment_degrades(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = WriteRequest(path="src/app.py", content="value = 2\n", overwrite=True)
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.Runtime.read_file",
+                new=AsyncMock(return_value={"binary": False, "content": "value = 1\n"}),
+            ),
+            patch("cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})),
+            patch(
+                "cptr.routers.coding.identity_for_context",
+                new=AsyncMock(return_value=SimpleNamespace(is_pam=False)),
+            ),
+            patch(
+                "cptr.routers.coding.automatic_lsp_intelligence_service.enrich_after_write",
+                new=AsyncMock(side_effect=RuntimeError("synthetic lsp outage")),
+            ),
+        ):
+            result = await write_workspace_file(request, "ws_1", body)
+
+        self.assertEqual(result["sha256"], _sha256("value = 2\n"))
+        self.assertEqual(result["intelligence"]["provider"], "lsp")
+        self.assertEqual(result["intelligence"]["status"], "degraded")
 
     async def test_secret_write_requires_exact_prompt_approval_and_owned_workbench(self):
         request = SimpleNamespace()
@@ -424,10 +497,22 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})
             ) as write_file,
+            patch(
+                "cptr.routers.coding.identity_for_context",
+                new=AsyncMock(return_value=SimpleNamespace(is_pam=False)),
+            ),
+            patch(
+                "cptr.routers.coding.automatic_lsp_intelligence_service.enrich_after_write",
+                new=AsyncMock(
+                    return_value={"provider": "lsp", "server_id": "pyright", "status": "ok"}
+                ),
+            ) as enrich,
         ):
             result = await edit_workspace_file(request, "ws_1", body)
 
         self.assertEqual(result["path"], "src/app.py")
+        self.assertEqual(result["intelligence"]["status"], "ok")
+        enrich.assert_awaited_once()
         read_file.assert_awaited_once()
         write_file.assert_awaited_once_with(
             request,
@@ -457,6 +542,16 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "cptr.routers.coding.Runtime.write_file", new=AsyncMock(return_value={})
             ) as write_file,
+            patch(
+                "cptr.routers.coding.identity_for_context",
+                new=AsyncMock(return_value=SimpleNamespace(is_pam=False)),
+            ),
+            patch(
+                "cptr.routers.coding.automatic_lsp_intelligence_service.enrich_after_write",
+                new=AsyncMock(
+                    return_value={"provider": "lsp", "server_id": "pyright", "status": "ok"}
+                ),
+            ) as enrich,
         ):
             result = await apply_workspace_edits(request, "ws_1", body)
 
@@ -466,6 +561,8 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             "second\ndone\n",
         )
         self.assertEqual(result["sha256"], _sha256("second\ndone\n"))
+        self.assertEqual(result["intelligence"]["status"], "ok")
+        enrich.assert_awaited_once()
         self.assertIn("-first", result["diff"])
         self.assertIn("+done", result["diff"])
 
