@@ -1,4 +1,6 @@
+import socket
 import unittest
+from unittest import mock
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -15,6 +17,7 @@ from cptr.services.capability_os.contracts import (
 )
 from cptr.services.capability_os.credential_broker import CredentialBroker
 from cptr.services.capability_os.mcp_fabric import AcquisitionGoal, McpFabric, McpQualification
+from cptr.services.capability_os import mcp_remote
 from cptr.services.capability_os.mcp_remote import (
     ConfigRemoteMcpAuthProvider,
     McpAcquisitionService,
@@ -146,6 +149,21 @@ async def _auth_config(_key: str):
     ]
 
 
+class _RecordingNetworkBackend:
+    def __init__(self) -> None:
+        self.connects = []
+
+    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
+        self.connects.append((host, port))
+        return object()
+
+    async def connect_unix_socket(self, path, timeout=None, socket_options=None):
+        raise AssertionError("remote MCP must never use Unix sockets")
+
+    async def sleep(self, seconds):
+        return None
+
+
 class CapabilityOsRemoteMcpAuthTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -197,6 +215,49 @@ class CapabilityOsRemoteMcpAuthTests(unittest.IsolatedAsyncioTestCase):
             ),
             policy=policy,
         )
+
+    async def test_connect_boundary_rejects_dns_rebinding_before_socket_dial(self):
+        backend_type = getattr(mcp_remote, "_PublicOnlyNetworkBackend", None)
+        self.assertIsNotNone(
+            backend_type, "remote MCP client must use a public-only connect backend"
+        )
+        delegate = _RecordingNetworkBackend()
+        public = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", 443))]
+        private = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("127.0.0.1", 443))]
+        with mock.patch.object(socket, "getaddrinfo", side_effect=[public, private]):
+            validator = mcp_remote.PublicHttpsEndpointValidator()
+            self.assertEqual(
+                await validator.validate("https://mcp.example.test/mcp"),
+                "https://mcp.example.test/mcp",
+            )
+            backend = backend_type(delegate=delegate)
+            with self.assertRaises(RemoteMcpError):
+                await backend.connect_tcp("mcp.example.test", 443, timeout=1.0)
+        self.assertEqual(delegate.connects, [])
+
+    async def test_connect_boundary_dials_validated_ip_literal_not_hostname(self):
+        backend_type = getattr(mcp_remote, "_PublicOnlyNetworkBackend", None)
+        self.assertIsNotNone(backend_type)
+        delegate = _RecordingNetworkBackend()
+        public = [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("8.8.8.8", 443))]
+        with mock.patch.object(socket, "getaddrinfo", return_value=public):
+            stream = await backend_type(delegate=delegate).connect_tcp(
+                "mcp.example.test", 443, timeout=1.0
+            )
+        self.assertIsNotNone(stream)
+        self.assertEqual(delegate.connects, [("8.8.8.8", 443)])
+
+    async def test_http_client_installs_public_only_connect_backend(self):
+        backend_type = getattr(mcp_remote, "_PublicOnlyNetworkBackend", None)
+        self.assertIsNotNone(
+            backend_type, "remote MCP client must use a public-only connect backend"
+        )
+        connector = StreamableHttpMcpConnector(endpoint_validator=_ExactEndpointValidator())
+        client = connector._http_client()
+        try:
+            self.assertIsInstance(client._transport._pool._network_backend, backend_type)
+        finally:
+            await client.aclose()
 
     async def test_server_owned_auth_binding_is_exact_and_fail_closed(self):
         provider = ConfigRemoteMcpAuthProvider(config_getter=_auth_config)
