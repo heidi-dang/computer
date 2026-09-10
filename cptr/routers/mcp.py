@@ -20,6 +20,7 @@ POST /api/mcp/servers/{server_id}/resources/read  – read a specific MCP resour
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
@@ -136,6 +137,15 @@ def _bounded_env_float(name: str, default: float, minimum: float, maximum: float
 
 def _memory_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
+
+
+def _capability_os_sse(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, separators=(',', ':'), default=str)}\n\n"
+
+
+def _capability_os_snapshot_fingerprint(snapshot: dict[str, Any]) -> str:
+    encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
@@ -428,6 +438,64 @@ async def get_capability_os_operator_snapshot(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Capability OS task not found") from exc
+
+
+@router.get("/capability-os/stream")
+async def stream_capability_os_operator(
+    request: Request,
+    task_id: str = Query(min_length=1, max_length=200),
+    limit: int = Query(default=100, ge=1, le=100),
+):
+    """Stream changed owner-scoped Capability OS operator snapshots to the admin UI."""
+    admin = require_admin(request)
+
+    async def _event_stream():
+        previous_fingerprint: str | None = None
+        interval_seconds = _bounded_env_float(
+            "CPTR_CAPABILITY_OS_STREAM_INTERVAL_SECONDS", 1.0, 0.25, 5.0
+        )
+        keepalive_seconds = _bounded_env_float(
+            "CPTR_CAPABILITY_OS_STREAM_KEEPALIVE_SECONDS", 15.0, 5.0, 60.0
+        )
+        loop = asyncio.get_running_loop()
+        last_emit_at = loop.time()
+        yield "retry: 1500\n\n"
+
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                snapshot = await capability_os_operator.snapshot(
+                    user_id=admin.user_id,
+                    task_id=task_id,
+                    limit=limit,
+                )
+            except KeyError:
+                yield _capability_os_sse(
+                    "capability_os_error",
+                    {"code": "CAPABILITY_OS_TASK_NOT_FOUND", "task_id": task_id},
+                )
+                break
+
+            fingerprint = _capability_os_snapshot_fingerprint(snapshot)
+            if fingerprint != previous_fingerprint:
+                previous_fingerprint = fingerprint
+                last_emit_at = loop.time()
+                yield _capability_os_sse("snapshot", snapshot)
+            elif loop.time() - last_emit_at >= keepalive_seconds:
+                last_emit_at = loop.time()
+                yield ": keepalive\n\n"
+
+            await asyncio.sleep(interval_seconds)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/factory/snapshot")
