@@ -1844,6 +1844,76 @@ async def run_fdx_intelligence(request: Request, workspace_id: str, body: FdxInt
     return result
 
 
+async def _focused_node_test_argv(
+    request: Request, *, cwd: Path, test_file: Path
+) -> list[str]:
+    """Build a bounded focused Node test command without re-running broad npm globs."""
+    try:
+        relative_test = test_file.relative_to(cwd).as_posix()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="node_test test_path must be inside the selected path",
+        ) from exc
+
+    manifest_path = cwd / "package.json"
+    try:
+        manifest = await Runtime.read_file(request, str(manifest_path))
+    except FileError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="focused node_test requires package.json in the selected path",
+        ) from exc
+    if manifest.get("binary"):
+        raise HTTPException(status_code=422, detail="package.json must be a text file")
+    try:
+        package = json.loads(str(manifest.get("content") or ""))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="package.json contains invalid JSON") from exc
+    scripts = package.get("scripts") if isinstance(package, dict) else None
+    test_script = scripts.get("test") if isinstance(scripts, dict) else None
+    if not isinstance(test_script, str) or not test_script.strip():
+        raise HTTPException(status_code=422, detail="package.json has no test script")
+
+    try:
+        tokens = shlex.split(test_script, posix=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="package test script is not parseable") from exc
+    if not tokens or any(token in {"&&", "||", ";", "|", ">", ">>", "<"} for token in tokens):
+        raise HTTPException(
+            status_code=422,
+            detail="focused node_test requires a simple node --test or tsx --test script",
+        )
+
+    executable = tokens[0]
+    runner = Path(executable).name
+    if runner not in {"node", "tsx"} or "--test" not in tokens[1:]:
+        raise HTTPException(
+            status_code=422,
+            detail="focused node_test requires a simple node --test or tsx --test script",
+        )
+
+    selector_started = False
+    for token in tokens[1:]:
+        if token == "--test":
+            if selector_started:
+                raise HTTPException(
+                    status_code=422,
+                    detail="focused node_test cannot safely preserve this test script",
+                )
+            continue
+        if token.startswith("-"):
+            raise HTTPException(
+                status_code=422,
+                detail="focused node_test cannot safely preserve extra runner options",
+            )
+        selector_started = True
+
+    if runner == "node":
+        return ["node", "--test", relative_test]
+    return ["npm", "exec", "--offline", "--", "tsx", "--test", relative_test]
+
+
 @router.post("/workspaces/{workspace_id}/coding/test-targets")
 async def run_workspace_test_target(request: Request, workspace_id: str, body: TestTargetRequest):
     """Run one fixed local validation profile; callers cannot provide arbitrary commands."""
@@ -1855,10 +1925,11 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
         session_id=body.workbench_session_id,
     )
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
-    _, relative_cwd = _relative_path(body.path, root)
+    cwd, relative_cwd = _relative_path(body.path, root)
+    test_file = None
     test_relative = None
     if body.test_path:
-        _, test_relative = _relative_path(body.test_path, root)
+        test_file, test_relative = _relative_path(body.test_path, root)
     profiles: dict[str, list[str]] = {
         "python_pytest": [
             sys.executable,
@@ -1866,7 +1937,7 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
             "pytest",
             *([test_relative] if test_relative else []),
         ],
-        "node_test": ["npm", "test", "--", *([test_relative] if test_relative else [])],
+        "node_test": ["npm", "test", "--"],
         "node_vitest": [
             "./node_modules/.bin/vitest",
             "run",
@@ -1874,7 +1945,10 @@ async def run_workspace_test_target(request: Request, workspace_id: str, body: T
         ],
         "node_build": ["npm", "run", "build"],
     }
-    argv = profiles[body.target]
+    if body.target == "node_test" and test_file is not None:
+        argv = await _focused_node_test_argv(request, cwd=cwd, test_file=test_file)
+    else:
+        argv = profiles[body.target]
     command = shlex.join(argv)
     _validate_command(command, False)
     response = await run_command(

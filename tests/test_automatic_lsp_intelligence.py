@@ -118,6 +118,32 @@ class AutomaticLspIntelligenceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(manager.notifications[0][1]["textDocument"]["version"], 1)
         self.assertEqual(manager.notifications[1][1]["textDocument"]["version"], 2)
 
+    async def test_unchanged_document_is_not_resynchronized_on_repeated_read(self):
+        manager = _FakeManager()
+        service = AutomaticLspIntelligenceService(
+            manager=manager,
+            enabled=True,
+            startup_wait_seconds=1.0,
+            request_timeout_seconds=0.5,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "sample.py"
+            identity = _identity(temp)
+            for _ in range(2):
+                result = await service.enrich_read(
+                    user_id="user-1",
+                    workspace_id="ws-1",
+                    root=root,
+                    path=source,
+                    content="value = 1\n",
+                    identity=identity,
+                )
+                self.assertEqual(result["status"], "ok")
+
+        methods = [method for method, _ in manager.notifications]
+        self.assertEqual(methods, ["textDocument/didOpen"])
+
     async def test_diagnostics_and_symbols_are_bounded(self):
         manager = _FakeManager()
         manager.diagnostics = [{"message": f"diagnostic-{index}"} for index in range(10)]
