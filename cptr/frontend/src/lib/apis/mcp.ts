@@ -452,6 +452,20 @@ export interface McpCapabilityOsStreamError {
 	message?: string;
 }
 
+export interface McpCapabilityOsLiveAction {
+	traceId: string;
+	operation: string;
+	suboperation: string | null;
+	status: 'started' | 'running' | 'ok' | 'error' | 'cancelled' | string;
+	source: 'chatgpt' | 'mcp' | 'control' | string;
+	toolName: string | null;
+	startedAtMs: number;
+	updatedAtMs: number;
+	durationMs: number;
+	errorCode: string | null;
+	layers: string[];
+}
+
 export interface McpCapabilityOsStreamCallbacks {
 	onSnapshot: (snapshot: McpCapabilityOsOperatorSnapshot) => void;
 	onOpen?: () => void;
@@ -506,6 +520,8 @@ export interface McpCapabilityOsOperatorSnapshot {
 	}>;
 	artifactStates: Record<string, number>;
 	evidenceKinds: Record<string, number>;
+	actionSequence: number;
+	recentActions: McpCapabilityOsLiveAction[];
 }
 
 export interface McpFactoryRunSummary {
