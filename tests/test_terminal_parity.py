@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 
 from cptr.routers.coding import CommandRequest, _command_snapshot, start_workspace_command
 from cptr.services.live_events import LiveEventHub, LiveEventStore, command_target_key
-from cptr.services.lsp_manager import LspManager
+from cptr.services.lsp_manager import LspError, LspManager
 from cptr.utils.tools import (
     _fast_pty_argv,
     command_sessions,
@@ -343,6 +343,58 @@ class LspManagerTests(unittest.IsolatedAsyncioTestCase):
         servers = {item["server_id"]: item for item in discovered["servers"]}
         self.assertTrue(servers["typescript"]["available"])
         self.assertTrue(servers["pyright"]["available"])
+
+    def test_typescript_fallback_uses_managed_runtime_typescript(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp, "home")
+            tsserver = (
+                home / ".cptr" / "lsp" / "node_modules" / "typescript" / "lib" / "tsserver.js"
+            )
+            tsserver.parent.mkdir(parents=True)
+            tsserver.write_text("// managed TypeScript\n", encoding="utf-8")
+
+            resolved = LspManager._typescript_fallback_path(env={"HOME": str(home), "PATH": ""})
+
+        self.assertEqual(resolved, str(tsserver.resolve()))
+
+    async def test_start_rejects_language_server_initialize_error_response(self):
+        source = textwrap.dedent(r"""
+            import json, sys
+
+            def read_message():
+                headers = {}
+                while True:
+                    line = sys.stdin.buffer.readline()
+                    if not line:
+                        raise SystemExit(0)
+                    if line in (b"\r\n", b"\n"):
+                        break
+                    key, value = line.decode().split(":", 1)
+                    headers[key.lower()] = value.strip()
+                body = sys.stdin.buffer.read(int(headers.get("content-length", "0")))
+                return json.loads(body)
+
+            def send_message(message):
+                payload = json.dumps(message).encode()
+                sys.stdout.buffer.write(f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+                sys.stdout.buffer.flush()
+
+            while True:
+                msg = read_message()
+                if msg.get("method") == "initialize" and "id" in msg:
+                    send_message({
+                        "jsonrpc": "2.0",
+                        "id": msg["id"],
+                        "error": {"code": -32603, "message": "missing runtime dependency"},
+                    })
+        """)
+        with tempfile.TemporaryDirectory() as root:
+            script = Path(root, "error_lsp.py")
+            script.write_text(source, encoding="utf-8")
+            manager = LspManager(server_commands={"fake": [sys.executable, str(script)]})
+            with self.assertRaisesRegex(LspError, "initialize failed.*missing runtime dependency"):
+                await manager.start(server_id="fake", root=Path(root), user_id="user_1")
+            self.assertEqual(manager._sessions, {})
 
     async def test_fake_language_server_round_trip_and_lifecycle(self):
         source = textwrap.dedent(r"""

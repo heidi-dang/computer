@@ -108,6 +108,19 @@ class LspManager:
             directories.extend(part for part in existing_path.split(os.pathsep) if part)
         return os.pathsep.join(dict.fromkeys(directories))
 
+    @staticmethod
+    def _typescript_fallback_path(*, env: dict[str, str] | None) -> str | None:
+        environment = env or os.environ
+        home = str(environment.get("HOME") or "").strip()
+        if not home:
+            return None
+        candidate = (
+            Path(home) / ".cptr" / "lsp" / "node_modules" / "typescript" / "lib" / "tsserver.js"
+        )
+        if candidate.is_file():
+            return str(candidate.resolve())
+        return None
+
     @classmethod
     def _resolve_argv(
         cls,
@@ -214,19 +227,34 @@ class LspManager:
             self._stderr_loop(session), name=f"cptr-lsp-stderr-{lsp_id}"
         )
         try:
+            initialize_params: dict[str, Any] = {
+                "processId": os.getpid(),
+                "rootUri": root.as_uri(),
+                "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
+                "capabilities": {},
+                "clientInfo": {"name": "CPTR", "version": "1"},
+            }
+            if server_id == "typescript":
+                fallback_path = self._typescript_fallback_path(env=process_env)
+                if fallback_path:
+                    initialize_params["initializationOptions"] = {
+                        "tsserver": {"fallbackPath": fallback_path}
+                    }
             initialize = await self.request(
                 lsp_id=lsp_id,
                 user_id=user_id,
                 method="initialize",
-                params={
-                    "processId": os.getpid(),
-                    "rootUri": root.as_uri(),
-                    "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
-                    "capabilities": {},
-                    "clientInfo": {"name": "CPTR", "version": "1"},
-                },
+                params=initialize_params,
                 timeout_seconds=DEFAULT_LSP_TIMEOUT_SECONDS,
             )
+            initialize_error = initialize.get("error")
+            if initialize_error is not None:
+                message = (
+                    str(initialize_error.get("message") or "unknown error")
+                    if isinstance(initialize_error, dict)
+                    else str(initialize_error)
+                )
+                raise LspError(f"language server initialize failed: {message[:500]}")
             await self.notify(lsp_id=lsp_id, user_id=user_id, method="initialized", params={})
         except Exception:
             await self._terminate(session)

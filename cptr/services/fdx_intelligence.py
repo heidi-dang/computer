@@ -119,6 +119,24 @@ _MAX_STRING_CHARS = 24_000
 _FDX_RAW_STREAM_LIMIT_BYTES = max(128 * 1024, FDX_MAX_RESPONSE_BYTES * 4)
 
 
+def _fdx_process_environment(identity: ExecutionIdentity, root: Path) -> dict[str, str]:
+    """Expose only deterministic workspace/user-managed tool locations to FDX."""
+    environment = env_for(identity, root)
+    home = Path(identity.home)
+    directories = [
+        root / "node_modules" / ".bin",
+        home / ".cptr" / "lsp" / "node_modules" / ".bin",
+        home / ".cptr" / "bin",
+        home / ".cargo" / "bin",
+        home / ".local" / "bin",
+    ]
+    existing_path = environment.get("PATH") or ""
+    entries = [str(path) for path in directories]
+    entries.extend(part for part in existing_path.split(os.pathsep) if part)
+    environment["PATH"] = os.pathsep.join(dict.fromkeys(entries))
+    return environment
+
+
 class FdxIntelligenceError(RuntimeError):
     def __init__(self, code: str, message: str, *, retriable: bool = True):
         super().__init__(message)
@@ -184,7 +202,7 @@ class FdxDaemon:
     async def start(self) -> None:
         if self.process is not None and self.process.returncode is None:
             return
-        environment = env_for(self.identity, self.root)
+        environment = _fdx_process_environment(self.identity, self.root)
         kwargs: dict[str, Any] = {
             "cwd": str(self.root),
             "env": environment,
@@ -401,7 +419,7 @@ class FdxIntelligenceService:
         argv: list[str],
     ) -> Any:
         binary = self._resolve_binary(identity)
-        environment = env_for(identity, root)
+        environment = _fdx_process_environment(identity, root)
         kwargs: dict[str, Any] = {
             "cwd": str(root),
             "env": environment,

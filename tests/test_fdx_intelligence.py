@@ -277,6 +277,44 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
                 resolved = service._resolve_binary(_identity(temp))
         self.assertEqual(resolved, str(binary.resolve()))
 
+    async def test_cli_environment_exposes_managed_semantic_provider_bin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            home = Path(temp) / "home"
+            managed_bin = home / ".cptr" / "lsp" / "node_modules" / ".bin"
+            managed_bin.mkdir(parents=True)
+            scip = managed_bin / "scip-typescript"
+            scip.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            scip.chmod(0o755)
+            binary = root / "fdx"
+            binary.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import json
+                    import os
+                    import shutil
+                    print(json.dumps({
+                        "path": os.environ.get("PATH", ""),
+                        "scip": shutil.which("scip-typescript"),
+                    }))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            service = FdxIntelligenceService()
+            with patch("cptr.services.fdx_intelligence.FDX_BINARY", str(binary)):
+                result = await service._run_cli(
+                    root=root,
+                    identity=_identity(str(home)),
+                    argv=["semantic", "status"],
+                )
+
+        self.assertEqual(result["scip"], str(scip.resolve()))
+        self.assertIn(str(managed_bin), result["path"].split(os.pathsep))
+
     async def test_unavailable_binary_returns_typed_fallback_instead_of_failing_direct_coding(self):
         with tempfile.TemporaryDirectory() as temp:
             service = FdxIntelligenceService()
