@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 25
     env:
       EXPECTED_PYTHON: ${{ matrix.python-version }}
+      CPTR_MANAGED_BROWSER_STARTUP_TIMEOUT_SECONDS: "60"
     strategy:
       fail-fast: false
       matrix:
