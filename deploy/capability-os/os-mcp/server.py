@@ -15,11 +15,11 @@ HEADERS = {"Authorization": "Bearer " + TOKEN, "Content-Type": "application/json
 mcp = FastMCP(
     name="os-mcp",
     instructions=(
-        "Capability OS MCP surface: 6-op API. Fresh clients must call "
-        "cptr_forge(operation='bootstrap') once, then use the returned task.taskId "
-        "for inspect/resolve/forge/execute/acquire/reflect calls."
+        "Capability OS MCP surface: 6-op API. Fresh clients call cptr_forge(operation='bootstrap'); "
+        "task_id is optional for bootstrap and ignored if a stale client schema supplies it. Then use "
+        "the returned task.taskId for inspect/resolve/forge/execute/acquire/reflect calls."
     ),
-    version="2.2.0",
+    version="2.2.1",
 )
 
 
@@ -169,9 +169,10 @@ def cptr_resolve(
 
 @mcp.tool(
     description=(
-        "Forge tools with Capability OS. Fresh clients may call operation=bootstrap without task_id "
-        "to create an owner-bound Capability OS task context. Other operations require task_id. "
-        "Tool operations include create/modify/fork/build/run/persist/destroy plus supported skill operations."
+        "Forge tools with Capability OS. Bootstrap does not require task_id; if a stale client schema "
+        "still supplies one, it is ignored and the server creates a fresh owner-bound task context. "
+        "Other operations require task_id. Tool operations include create/modify/fork/build/run/persist/"
+        "destroy plus supported skill operations."
     )
 )
 def cptr_forge(operation: str, task_id: Optional[str] = None, payload_json: str = "{}") -> dict:
@@ -180,8 +181,6 @@ def cptr_forge(operation: str, task_id: Optional[str] = None, payload_json: str 
         return error
     normalized_operation = operation.strip().lower()
     if normalized_operation == "bootstrap":
-        if task_id is not None and task_id.strip():
-            return {"error": "bootstrap must not include task_id"}
         if payload:
             return {"error": "bootstrap accepts no payload"}
         return _request(

@@ -1,6 +1,8 @@
 import ast
+import json
 import unittest
 from pathlib import Path
+from typing import Optional
 
 
 ADAPTER_PATH = (
@@ -26,6 +28,16 @@ def _default_for(function: ast.FunctionDef, parameter: str):
     if index < first_default:
         raise LookupError(f"parameter {parameter} is required")
     return function.args.defaults[index - first_default]
+
+
+def _standalone_function(tree: ast.Module, name: str, namespace: dict):
+    function = _function(tree, name)
+    function.decorator_list = []
+    module = ast.Module(body=[function], type_ignores=[])
+    ast.fix_missing_locations(module)
+    scope = dict(namespace)
+    exec(compile(module, str(ADAPTER_PATH), "exec"), scope)
+    return scope[name]
 
 
 class CapabilityOsMcpAdapterDeployTests(unittest.TestCase):
@@ -64,7 +76,46 @@ class CapabilityOsMcpAdapterDeployTests(unittest.TestCase):
 
         self.assertIn('operation == "bootstrap"', source)
         self.assertIn('"operation": "bootstrap"', source)
-        self.assertIn('version="2.2.0"', source)
+        self.assertNotIn("bootstrap must not include task_id", source)
+        self.assertIn('version="2.2.1"', source)
+
+    def test_bootstrap_tolerates_stale_required_task_id_but_never_forwards_it(self):
+        source = ADAPTER_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        calls = []
+
+        def parse_json(raw: str, label: str):
+            value = json.loads(raw)
+            if not isinstance(value, dict):
+                return None, {"error": f"{label} JSON must decode to an object"}
+            return value, None
+
+        def request(method: str, path: str, *, timeout: float, **kwargs):
+            calls.append((method, path, timeout, kwargs))
+            return {"bootstrapped": True}
+
+        forge = _standalone_function(
+            tree,
+            "cptr_forge",
+            {"Optional": Optional, "_json_object": parse_json, "_request": request},
+        )
+        result = forge(
+            operation="bootstrap",
+            task_id="required-by-stale-client-schema",
+        )
+
+        self.assertEqual(result, {"bootstrapped": True})
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "POST",
+                    "/forge",
+                    15,
+                    {"json": {"operation": "bootstrap", "payload": {}}},
+                )
+            ],
+        )
 
 
 if __name__ == "__main__":
