@@ -101,6 +101,7 @@ class _TraceRecord:
         "request_id",
         "mcp_session_id",
         "tool_name",
+        "task_ids",
         "created_at_ms",
         "updated_at_ms",
         "stages",
@@ -126,6 +127,7 @@ class _TraceRecord:
         self.request_id = request_id
         self.mcp_session_id = mcp_session_id
         self.tool_name = tool_name
+        self.task_ids: set[str] = set()
         self.created_at_ms = now_ms
         self.updated_at_ms = now_ms
         self.stages: deque[dict[str, object]] = deque(maxlen=max_stages)
@@ -240,6 +242,7 @@ class ActionTraceStore:
         mcp_session_id: str | None = None,
         tool_name: str | None = None,
         workspace_id: str | None = None,
+        task_id: str | None = None,
         entity_type: EntityType | None = None,
         entity_id: str | None = None,
         error_code: str | None = None,
@@ -291,6 +294,7 @@ class ActionTraceStore:
             safe_request_id = _safe_id(request_id) or record.request_id
             safe_tool_name = _safe_tool(tool_name) or record.tool_name
             safe_workspace_id = _safe_id(workspace_id)
+            safe_task_id = _safe_id(task_id)
             safe_error_code = _safe_tool(error_code)
             if safe_request_id:
                 stage["request_id"] = safe_request_id
@@ -298,6 +302,9 @@ class ActionTraceStore:
                 stage["tool_name"] = safe_tool_name
             if safe_workspace_id:
                 stage["workspace_id"] = safe_workspace_id
+            if safe_task_id:
+                stage["task_id"] = safe_task_id
+                record.task_ids.add(safe_task_id)
             if entity_type is not None and safe_entity_id is not None:
                 stage["entity_type"] = entity_type
                 stage["entity_id"] = safe_entity_id
@@ -403,6 +410,7 @@ class ActionTraceStore:
         )
         status = "running"
         error_code: str | None = None
+        capability_stage: dict[str, object] | None = None
         if ordered_stages:
             statuses = [str(stage.get("status") or "") for stage in ordered_stages]
             if "error" in statuses:
@@ -412,9 +420,17 @@ class ActionTraceStore:
             elif statuses[-1] == "ok":
                 status = "ok"
             for stage in reversed(ordered_stages):
+                name = stage.get("name")
+                if (
+                    capability_stage is None
+                    and isinstance(name, str)
+                    and name.startswith("capability_os.")
+                ):
+                    capability_stage = stage
                 value = stage.get("error_code")
-                if isinstance(value, str) and value:
+                if error_code is None and isinstance(value, str) and value:
                     error_code = value
+                if capability_stage is not None and error_code is not None:
                     break
         # Trace-level timestamps remain authoritative even when the bounded stage
         # deque evicts early detail. This preserves true end-to-end duration while
@@ -444,6 +460,7 @@ class ActionTraceStore:
             "request_id": record.request_id,
             "mcp_session_id": record.mcp_session_id,
             "tool_name": record.tool_name,
+            "task_ids": sorted(record.task_ids),
             "status": status,
             "started_at_ms": first_ms,
             "updated_at_ms": last_ms,
@@ -451,6 +468,19 @@ class ActionTraceStore:
             "stage_count": len(record.stages),
             "layers": ActionTraceStore._layers(record),
             "error_code": error_code,
+            "capability_action": (
+                str(capability_stage.get("name"))[len("capability_os.") :]
+                if capability_stage is not None
+                else None
+            ),
+            "capability_status": (
+                str(capability_stage.get("status")) if capability_stage is not None else None
+            ),
+            "capability_updated_at_ms": (
+                int(capability_stage.get("timestamp_ms") or 0)
+                if capability_stage is not None
+                else None
+            ),
             "entities": {
                 entity_type: sorted(entity_ids)
                 for entity_type, entity_ids in record.entities.items()
@@ -540,9 +570,16 @@ class ActionTraceStore:
                     accepted += 1
         return accepted
 
-    async def summaries(self, *, owner_id: str, limit: int = 20) -> dict[str, object]:
+    async def summaries(
+        self,
+        *,
+        owner_id: str,
+        limit: int = 20,
+        task_id: str | None = None,
+    ) -> dict[str, object]:
         safe_owner_id = _safe_id(owner_id)
-        if safe_owner_id is None:
+        safe_task_id = _safe_id(task_id) if task_id is not None else None
+        if safe_owner_id is None or (task_id is not None and safe_task_id is None):
             return {"version": 1, "sequence": 0, "traces": []}
         bounded_limit = max(1, min(int(limit), 50))
         async with self._lock:
@@ -550,6 +587,7 @@ class ActionTraceStore:
                 record
                 for (record_owner, _), record in reversed(self._traces.items())
                 if record_owner == safe_owner_id
+                and (safe_task_id is None or safe_task_id in record.task_ids)
             ][:bounded_limit]
             return {
                 "version": 1,

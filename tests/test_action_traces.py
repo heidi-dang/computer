@@ -176,6 +176,51 @@ class ActionTraceStoreTests(unittest.IsolatedAsyncioTestCase):
             [stage["name"] for stage in detail["stages"]], ["mcp.tool.started", "backend.request"]
         )
 
+    async def test_task_scoped_capability_actions_are_projected_without_payloads(self):
+        store = ActionTraceStore(max_traces=8, max_stages_per_trace=12)
+        await store.append(
+            owner_id="user-1",
+            trace_id="trace-capability-1",
+            layer="backend",
+            name="capability_os.resolve",
+            status="started",
+            timestamp_ms=100,
+            task_id="task-1",
+            tool_name="cptr_factory",
+        )
+        await store.append(
+            owner_id="user-1",
+            trace_id="trace-capability-1",
+            layer="backend",
+            name="capability_os.resolve",
+            status="ok",
+            timestamp_ms=140,
+            duration_ms=40,
+            task_id="task-1",
+            tool_name="cptr_factory",
+        )
+        await store.append(
+            owner_id="user-1",
+            trace_id="trace-capability-2",
+            layer="backend",
+            name="capability_os.inspect",
+            status="ok",
+            timestamp_ms=150,
+            task_id="task-2",
+            tool_name="cptr_factory",
+        )
+
+        summaries = await store.summaries(owner_id="user-1", task_id="task-1", limit=10)
+        self.assertEqual(len(summaries["traces"]), 1)
+        action = summaries["traces"][0]
+        self.assertEqual(action["trace_id"], "trace-capability-1")
+        self.assertEqual(action["task_ids"], ["task-1"])
+        self.assertEqual(action["capability_action"], "resolve")
+        self.assertEqual(action["capability_status"], "ok")
+        self.assertEqual(action["capability_updated_at_ms"], 140)
+        self.assertNotIn("payload", action)
+        self.assertNotIn("inputs", action)
+
     async def test_command_event_projection_is_payload_free_and_keeps_original_trace(self):
         session = {
             "trace_id": "trace-command",

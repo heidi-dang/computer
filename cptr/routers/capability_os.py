@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -18,6 +19,7 @@ from cptr.env import (
     CAPABILITY_OS_SANDBOX_SOCKET,
     DATA_DIR,
 )
+from cptr.services.action_traces import action_trace_store, trace_context_from_request
 from cptr.services.capability_os.authority import AuthorityBroker, AuthorityDenied
 from cptr.services.capability_os.compiler import CapabilityCompileError, CapabilityCompiler
 from cptr.services.capability_os.control import CapabilityOsControlService, CapabilityOsUnavailable
@@ -348,6 +350,96 @@ def _reqs(values: list[dict[str, Any]]) -> tuple[CapabilityRequest, ...]:
     return tuple(CapabilityRequest.from_dict(item) for item in values)
 
 
+def _capability_action_name(operation: str, suboperation: str | None = None) -> str:
+    detail = "".join(
+        ch for ch in str(suboperation or "").strip().lower() if ch.isalnum() or ch in "._:-"
+    )[:80]
+    return f"capability_os.{operation}{f'.{detail}' if detail else ''}"
+
+
+async def _record_capability_action(
+    request: Request,
+    *,
+    user_id: str,
+    task_id: str | None,
+    operation: str,
+    status: str,
+    started_at_ms: int,
+    suboperation: str | None = None,
+    error_code: str | None = None,
+) -> None:
+    context = trace_context_from_request(request)
+    safe_task_id = str(task_id or "").strip()
+    if context is None or not safe_task_id:
+        return
+    now_ms = int(time.time() * 1000)
+    try:
+        await action_trace_store.append(
+            owner_id=user_id,
+            trace_id=context.trace_id,
+            layer="backend",
+            name=_capability_action_name(operation, suboperation),
+            status=status,  # type: ignore[arg-type]
+            timestamp_ms=now_ms,
+            duration_ms=max(0, now_ms - started_at_ms) if status in {"ok", "error", "cancelled"} else None,
+            request_id=context.request_id,
+            mcp_session_id=context.mcp_session_id,
+            tool_name=context.tool_name,
+            task_id=safe_task_id,
+            error_code=error_code,
+            dedupe_key=f"capability:{operation}:{suboperation or ''}:{status}",
+        )
+    except Exception:
+        return
+
+
+@asynccontextmanager
+async def _capability_action_trace(
+    request: Request,
+    *,
+    user_id: str,
+    task_id: str | None,
+    operation: str,
+    suboperation: str | None = None,
+) -> AsyncIterator[None]:
+    started_at_ms = int(time.time() * 1000)
+    await _record_capability_action(
+        request,
+        user_id=user_id,
+        task_id=task_id,
+        operation=operation,
+        suboperation=suboperation,
+        status="started",
+        started_at_ms=started_at_ms,
+    )
+    try:
+        yield
+    except Exception as exc:
+        detail = _error(exc).detail
+        error_code = detail.get("code") if isinstance(detail, dict) else "CAPABILITY_OS_FAILED"
+        await _record_capability_action(
+            request,
+            user_id=user_id,
+            task_id=task_id,
+            operation=operation,
+            suboperation=suboperation,
+            status="error",
+            started_at_ms=started_at_ms,
+            error_code=str(error_code),
+        )
+        raise
+    else:
+        await _record_capability_action(
+            request,
+            user_id=user_id,
+            task_id=task_id,
+            operation=operation,
+            suboperation=suboperation,
+            status="ok",
+            started_at_ms=started_at_ms,
+        )
+
+
 @mcp_oauth_callback_router.get("/api/oauth/mcp/callback", include_in_schema=False)
 async def complete_mcp_oauth_callback(
     request: Request,
@@ -386,9 +478,12 @@ async def inspect_capability_os(request: Request, task_id: str = Query(min_lengt
                                 limit: int = Query(default=50, ge=1, le=100)):
     user_id = await _user(request, "capability:read")
     try:
-        with _span("inspect", task_id=task_id, artifact_digest=artifact_digest):
-            return await _service(request).inspect(user_id=user_id, task_id=task_id,
-                                                   artifact_digest=artifact_digest, limit=limit)
+        async with _capability_action_trace(
+            request, user_id=user_id, task_id=task_id, operation="inspect"
+        ):
+            with _span("inspect", task_id=task_id, artifact_digest=artifact_digest):
+                return await _service(request).inspect(user_id=user_id, task_id=task_id,
+                                                       artifact_digest=artifact_digest, limit=limit)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -397,10 +492,13 @@ async def inspect_capability_os(request: Request, task_id: str = Query(min_lengt
 async def resolve_capability_os(request: Request, body: ResolveRequest):
     user_id = await _user(request, "capability:read")
     try:
-        with _span("resolve", task_id=body.task_id):
-            return await _service(request).resolve(user_id=user_id, task_id=body.task_id,
-                                                   required=_reqs(body.required), optional=_reqs(body.optional),
-                                                   forbidden=_reqs(body.forbidden))
+        async with _capability_action_trace(
+            request, user_id=user_id, task_id=body.task_id, operation="resolve"
+        ):
+            with _span("resolve", task_id=body.task_id):
+                return await _service(request).resolve(user_id=user_id, task_id=body.task_id,
+                                                       required=_reqs(body.required), optional=_reqs(body.optional),
+                                                       forbidden=_reqs(body.forbidden))
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -409,18 +507,25 @@ async def resolve_capability_os(request: Request, body: ResolveRequest):
 async def forge_capability_os(request: Request, body: ForgeRequest):
     user_id = await _user(request, "capability:write")
     try:
-        with _span(
-            "forge",
+        async with _capability_action_trace(
+            request,
+            user_id=user_id,
             task_id=body.task_id,
-            artifact_digest=str(body.payload.get("contentDigest") or "") or None,
+            operation="forge",
             suboperation=body.operation,
         ):
-            return await _service(request).forge(
-                user_id=user_id,
-                task_id=body.task_id or "",
-                operation=body.operation,
-                payload=body.payload,
-            )
+            with _span(
+                "forge",
+                task_id=body.task_id,
+                artifact_digest=str(body.payload.get("contentDigest") or "") or None,
+                suboperation=body.operation,
+            ):
+                return await _service(request).forge(
+                    user_id=user_id,
+                    task_id=body.task_id or "",
+                    operation=body.operation,
+                    payload=body.payload,
+                )
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -429,15 +534,18 @@ async def forge_capability_os(request: Request, body: ForgeRequest):
 async def execute_capability_os(request: Request, body: ExecuteRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        with _span(
-            "execute",
-            task_id=body.task_id,
-            artifact_digest=body.capability_digest,
-            lease_id=body.lease_id,
+        async with _capability_action_trace(
+            request, user_id=user_id, task_id=body.task_id, operation="execute"
         ):
-            return await _service(request).execute(user_id=user_id, task_id=body.task_id,
-                                                   capability_digest=body.capability_digest, lease_id=body.lease_id,
-                                                   spec=body.spec, inputs=body.inputs, approval_id=body.approval_id)
+            with _span(
+                "execute",
+                task_id=body.task_id,
+                artifact_digest=body.capability_digest,
+                lease_id=body.lease_id,
+            ):
+                return await _service(request).execute(user_id=user_id, task_id=body.task_id,
+                                                       capability_digest=body.capability_digest, lease_id=body.lease_id,
+                                                       spec=body.spec, inputs=body.inputs, approval_id=body.approval_id)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -446,15 +554,22 @@ async def execute_capability_os(request: Request, body: ExecuteRequest):
 async def acquire_capability_os(request: Request, body: OperationRequest):
     user_id = await _user(request, "capability:execute")
     try:
-        with _span(
-            "acquire",
+        async with _capability_action_trace(
+            request,
+            user_id=user_id,
             task_id=body.task_id,
-            artifact_digest=str(body.payload.get("artifactDigest") or "") or None,
-            lease_id=str(body.payload.get("leaseId") or "") or None,
+            operation="acquire",
             suboperation=body.operation,
         ):
-            return await _service(request).acquire(user_id=user_id, task_id=body.task_id,
-                                                   operation=body.operation, payload=body.payload)
+            with _span(
+                "acquire",
+                task_id=body.task_id,
+                artifact_digest=str(body.payload.get("artifactDigest") or "") or None,
+                lease_id=str(body.payload.get("leaseId") or "") or None,
+                suboperation=body.operation,
+            ):
+                return await _service(request).acquire(user_id=user_id, task_id=body.task_id,
+                                                       operation=body.operation, payload=body.payload)
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -468,20 +583,27 @@ async def reflect_capability_os(request: Request, body: ReflectRequest):
         if isinstance(body.experiment, dict):
             experiment_id = str(body.experiment.get("experimentId") or "") or None
             experiment_operation = str(body.experiment.get("operation") or "") or None
-        with _span(
-            "reflect",
+        async with _capability_action_trace(
+            request,
+            user_id=user_id,
             task_id=body.task_id,
-            artifact_digest=body.artifact_digest,
-            lease_id=body.lease_id,
-            experiment_id=experiment_id,
-            suboperation=experiment_operation,
+            operation="reflect",
+            suboperation=experiment_operation or body.kind,
         ):
-            return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
-                                                   claims=body.claims, artifact_digest=body.artifact_digest,
-                                                   lease_id=body.lease_id, comparison=body.comparison,
-                                                   experiment=body.experiment,
-                                                   change_class=body.change_class,
-                                                   promotion_target_state=body.promotion_target_state,
-                                                   owner_approval_id=body.owner_approval_id)
+            with _span(
+                "reflect",
+                task_id=body.task_id,
+                artifact_digest=body.artifact_digest,
+                lease_id=body.lease_id,
+                experiment_id=experiment_id,
+                suboperation=experiment_operation,
+            ):
+                return await _service(request).reflect(user_id=user_id, task_id=body.task_id, kind=body.kind,
+                                                       claims=body.claims, artifact_digest=body.artifact_digest,
+                                                       lease_id=body.lease_id, comparison=body.comparison,
+                                                       experiment=body.experiment,
+                                                       change_class=body.change_class,
+                                                       promotion_target_state=body.promotion_target_state,
+                                                       owner_approval_id=body.owner_approval_id)
     except Exception as exc:
         raise _error(exc) from exc
