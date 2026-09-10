@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from cptr.models import Base, FactoryApproval
+from cptr.models import Base, FactoryApproval, FactoryRun
 from cptr.routers.factory import (
     FactoryApprovalRequest,
     FactoryControlRequest,
@@ -206,8 +206,21 @@ class FactoryApiTests(unittest.IsolatedAsyncioTestCase):
                 idempotency_key=f"api-evidence-{index}",
             )
 
+        async with self.sessions() as db:
+            persistent = await db.get(FactoryRun, run.id)
+            assert persistent is not None
+            persistent.policy = {
+                **dict(persistent.policy or {}),
+                "oauth_context": {"state": "oauth-state-secret"},
+            }
+            await db.commit()
+
         status = await self.service.status(user_id="user-1", run_id=run.id)
         self.assertEqual(status["run_id"], run.id)
+        self.assertEqual(status["state"], FactoryState.MISSION.value)
+        self.assertIsNotNone(status["cycle"])
+        self.assertEqual(status["cycle"]["state"], FactoryState.MISSION.value)
+        self.assertEqual(status["policy"]["oauth_context"]["state"], "[REDACTED]")
         self.assertNotIn("lease_token", status)
         self.assertNotIn("config_fingerprint", status)
 
