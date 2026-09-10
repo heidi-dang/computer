@@ -14,14 +14,14 @@ ADAPTER_PATH = (
 )
 
 
-def _function(tree: ast.Module, name: str) -> ast.FunctionDef:
+def _function(tree: ast.Module, name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
     for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name == name:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
             return node
     raise AssertionError(f"missing function {name}")
 
 
-def _default_for(function: ast.FunctionDef, parameter: str):
+def _default_for(function: ast.FunctionDef | ast.AsyncFunctionDef, parameter: str):
     names = [argument.arg for argument in function.args.args]
     first_default = len(names) - len(function.args.defaults)
     index = names.index(parameter)
@@ -41,7 +41,7 @@ def _standalone_function(tree: ast.Module, name: str, namespace: dict):
 
 
 class CapabilityOsMcpAdapterDeployTests(unittest.TestCase):
-    def test_adapter_keeps_six_tool_surface_and_exposes_explicit_bootstrap(self):
+    def test_adapter_keeps_six_core_tools_plus_parallel_spawn_and_explicit_bootstrap(self):
         self.assertTrue(ADAPTER_PATH.is_file(), "versioned os-mcp adapter is missing")
         source = ADAPTER_PATH.read_text(encoding="utf-8")
         tree = ast.parse(source)
@@ -77,7 +77,21 @@ class CapabilityOsMcpAdapterDeployTests(unittest.TestCase):
         self.assertIn('operation == "bootstrap"', source)
         self.assertIn('"operation": "bootstrap"', source)
         self.assertNotIn("bootstrap must not include task_id", source)
-        self.assertIn('version="2.2.1"', source)
+        self.assertIn('version="2.3.1"', source)
+        spawn = _function(tree, "spawn_multiple_subagents")
+        self.assertIsInstance(spawn, ast.AsyncFunctionDef)
+        self.assertIn("/spawn-multiple-subagents", source)
+        self.assertIn("mcp_types.InputRequiredResult", source)
+        self.assertIn("mcp_types.CreateMessageRequest", source)
+        self.assertIn("ctx.request_state", source)
+        self.assertIn("ctx.input_responses", source)
+        self.assertIn("await ctx.set_state", source)
+        self.assertIn("await ctx.delete_state", source)
+        self.assertIn("asyncio.gather", source)
+        self.assertNotIn("ctx.sample", source)
+        self.assertNotIn("cptr_agent_task", source)
+        self.assertNotIn("AgentService", source)
+        self.assertNotIn("OpenAISamplingHandler", source)
 
     def test_bootstrap_tolerates_stale_required_task_id_but_never_forwards_it(self):
         source = ADAPTER_PATH.read_text(encoding="utf-8")
@@ -116,6 +130,22 @@ class CapabilityOsMcpAdapterDeployTests(unittest.TestCase):
                 )
             ],
         )
+
+    def test_spawn_multiple_subagents_batches_all_pending_sampling_requests_in_one_round(self):
+        source = ADAPTER_PATH.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        spawn = _function(tree, "spawn_multiple_subagents")
+        spawn_source = ast.get_source_segment(source, spawn) or ""
+
+        self.assertIn('state_key = ctx.request_state', spawn_source)
+        self.assertIn('input_requests=_sampling_input_requests(state)', spawn_source)
+        self.assertIn('responses = ctx.input_responses', spawn_source)
+        self.assertIn('await asyncio.gather', spawn_source)
+        self.assertIn('"samplingRequestsBatchedInSingleRound": True', spawn_source)
+        self.assertIn('"hostParallelInferenceVerified": False', spawn_source)
+        self.assertIn('"fallback": "none"', spawn_source)
+        self.assertNotIn('ctx.sample', spawn_source)
+        self.assertNotIn('cptr_agent_task', source)
 
 
 if __name__ == "__main__":

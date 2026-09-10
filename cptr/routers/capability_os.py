@@ -1,4 +1,4 @@
-"""Authenticated six-operation Control API for Capability OS."""
+"""Authenticated Capability OS Control API: six core operations plus parallel fan-out."""
 from __future__ import annotations
 
 import time
@@ -110,6 +110,11 @@ class ReflectRequest(BaseModel):
     change_class: str | None = Field(default=None, max_length=80)
     promotion_target_state: str | None = Field(default=None, max_length=80)
     owner_approval_id: str | None = Field(default=None, max_length=200)
+
+
+class SpawnMultipleSubagentsRequest(BaseModel):
+    task_id: str = Field(min_length=1, max_length=200)
+    objectives: list[str] = Field(min_length=2, max_length=10)
 
 
 async def _user(request: Request, scope: str) -> str:
@@ -525,6 +530,28 @@ async def forge_capability_os(request: Request, body: ForgeRequest):
                     task_id=body.task_id or "",
                     operation=body.operation,
                     payload=body.payload,
+                )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@capability_os_router.post("/spawn-multiple-subagents")
+async def spawn_multiple_subagents_capability_os(
+    request: Request, body: SpawnMultipleSubagentsRequest
+):
+    user_id = await _user(request, "capability:write")
+    try:
+        async with _capability_action_trace(
+            request,
+            user_id=user_id,
+            task_id=body.task_id,
+            operation="spawn_multiple_subagents",
+        ):
+            with _span("spawn_multiple_subagents", task_id=body.task_id):
+                return await _service(request).spawn_multiple_subagents(
+                    user_id=user_id,
+                    task_id=body.task_id,
+                    objectives=tuple(body.objectives),
                 )
     except Exception as exc:
         raise _error(exc) from exc
