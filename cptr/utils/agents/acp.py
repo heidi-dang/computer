@@ -6,7 +6,7 @@ import asyncio
 import json
 import os
 from contextlib import suppress
-from typing import Any, AsyncIterator
+from typing import Any
 
 from cptr.utils.processes import terminate_process_group
 
@@ -405,8 +405,3 @@ def acp_models_from_setup(setup: dict[str, Any]) -> list[str]:
             if isinstance(model, str) and model.strip():
                 result.append(model.strip())
     return result
-
-
-async def acp_event_stream(client: AcpClient) -> AsyncIterator[dict[str, Any]]:
-    while True:
-        yield await client.events.get()

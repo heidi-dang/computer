@@ -1073,7 +1073,7 @@ class EmbeddedMemoryService:
             user_id=user_id,
             workspace=workspace,
         )
-        profile = await self.store.get_retrieval_profile(user_id, str(workspace or ""))
+        profile = await self.store.get_retrieval_profile(user_id, workspace)
         jobs = await self.job_store.counts(user_id=user_id, workspace=workspace)
         return {
             "status": "degraded" if self._index_errors else "healthy",

@@ -314,6 +314,63 @@ class MemoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(snapshot["fingerprint"]), 64)
 
+    async def test_all_memory_snapshot_aggregates_trained_retrieval_profiles(self):
+        core = SqlMemoryStore(session_factory=self.sessions)
+        await core.learn_retrieval_profile(
+            "user-1",
+            "/repo-1",
+            features={"bm25": 1.0, "vector": 0.0},
+            positive=True,
+        )
+        first = await core.learn_retrieval_profile(
+            "user-1",
+            "/repo-1",
+            features={"bm25": 1.0, "vector": 0.0},
+            positive=True,
+        )
+        second = await core.learn_retrieval_profile(
+            "user-1",
+            "/repo-extra",
+            features={"bm25": 0.0, "vector": 1.0},
+            positive=True,
+        )
+        baseline = await core.get_retrieval_profile("user-1", "/untrained")
+        self.assertEqual(baseline["mode"], "baseline")
+        self.assertEqual(baseline["observations"], 0)
+        self.assertEqual(baseline["profile_count"], 0)
+
+        service = MemoryObservabilityService(
+            session_factory=self.sessions,
+            store=self.store,
+            core_store=core,
+            inventory_builder=lambda *_args, **_kwargs: {
+                "nodes": [],
+                "edges": [],
+                "metrics": {
+                    "memory_nodes": 0,
+                    "user_memory_nodes": 0,
+                    "workspace_memory_nodes": 0,
+                    "scope_nodes": 0,
+                    "edge_count": 0,
+                    "file_count": 0,
+                    "total_bytes": 0,
+                },
+            },
+            settings_loader=AsyncMock(return_value={"enabled": True}),
+        )
+        snapshot = await service.snapshot(user_id="user-1")
+        learning = snapshot["health"]["retrieval_learning"]
+        self.assertEqual(learning["mode"], "aggregate")
+        self.assertEqual(learning["observations"], 3)
+        self.assertEqual(learning["profile_count"], 2)
+        self.assertEqual(snapshot["metrics"]["retrieval_learning_observations"], 3)
+        self.assertAlmostEqual(sum(learning["weights"].values()), 1.0)
+        for key in first["weights"]:
+            self.assertAlmostEqual(
+                learning["weights"][key],
+                (first["weights"][key] * 2 + second["weights"][key]) / 3,
+            )
+
     async def test_snapshot_projects_canonical_temporal_graph_lifecycle_and_queue_state(self):
         core = SqlMemoryStore(session_factory=self.sessions)
         graph = MemoryGraphStore(session_factory=self.sessions)

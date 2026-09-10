@@ -822,6 +822,99 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
             __use_pty=False,
         )
 
+    async def test_node_test_target_with_test_path_uses_focused_offline_tsx_runner(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CodingTestTargetRequest(
+            target="node_test",
+            path=".",
+            test_path="tests/auth.test.ts",
+            wait_seconds=0,
+        )
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.Runtime.read_file",
+                new=AsyncMock(
+                    return_value={
+                        "binary": False,
+                        "content": (
+                            '{"scripts":{"test":'
+                            '"tsx --test tests/*.test.ts tests/*.test.mjs"}}'
+                        ),
+                    }
+                ),
+            ),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: running"),
+            ) as run,
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(
+                    return_value={
+                        "command_id": "deadbeef",
+                        "status": "RUNNING",
+                        "exit_code": None,
+                        "output": "",
+                        "next_offset": 0,
+                        "duration_ms": 0,
+                        "output_truncated": False,
+                        "timed_out": False,
+                    }
+                ),
+            ),
+        ):
+            result = await run_workspace_test_target(request, "ws_1", body)
+
+        self.assertEqual(result["target"], "node_test")
+        run.assert_awaited_once_with(
+            "npm exec --offline -- tsx --test tests/auth.test.ts",
+            ".",
+            0,
+            __context__={
+                "workspace": "/tmp/cptr-direct-coding",
+                "workspace_id": "ws_1",
+                "request": request,
+                "user_id": "user_1",
+            },
+            __argv=["npm", "exec", "--offline", "--", "tsx", "--test", "tests/auth.test.ts"],
+            __use_pty=False,
+        )
+
+    async def test_node_test_target_rejects_complex_script_instead_of_broadening(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CodingTestTargetRequest(
+            target="node_test",
+            path=".",
+            test_path="tests/auth.test.ts",
+        )
+        run = AsyncMock(return_value="Task deadbeef: running")
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.Runtime.read_file",
+                new=AsyncMock(
+                    return_value={
+                        "binary": False,
+                        "content": (
+                            '{"scripts":{"test":'
+                            '"prepare-tests && tsx --test tests/*.test.ts"}}'
+                        ),
+                    }
+                ),
+            ),
+            patch("cptr.routers.coding.run_command", new=run),
+            self.assertRaises(HTTPException) as rejected,
+        ):
+            await run_workspace_test_target(request, "ws_1", body)
+
+        self.assertEqual(rejected.exception.status_code, 422)
+        run.assert_not_awaited()
+
     async def test_python_test_target_uses_current_interpreter(self):
         request = SimpleNamespace()
         workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
