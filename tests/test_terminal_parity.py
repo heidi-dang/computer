@@ -396,6 +396,90 @@ class LspManagerTests(unittest.IsolatedAsyncioTestCase):
                 await manager.start(server_id="fake", root=Path(root), user_id="user_1")
             self.assertEqual(manager._sessions, {})
 
+    async def test_publish_diagnostics_are_captured_and_bounded(self):
+        source = textwrap.dedent(r"""
+            import json, sys
+
+            def read_message():
+                headers = {}
+                while True:
+                    line = sys.stdin.buffer.readline()
+                    if not line:
+                        raise SystemExit(0)
+                    if line in (b"\r\n", b"\n"):
+                        break
+                    key, value = line.decode().split(":", 1)
+                    headers[key.lower()] = value.strip()
+                body = sys.stdin.buffer.read(int(headers.get("content-length", "0")))
+                return json.loads(body)
+
+            def send_message(message):
+                payload = json.dumps(message).encode()
+                sys.stdout.buffer.write(f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+                sys.stdout.buffer.flush()
+
+            while True:
+                msg = read_message()
+                if msg.get("method") == "initialize" and "id" in msg:
+                    send_message({
+                        "jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}
+                    })
+                    continue
+                if msg.get("method") == "textDocument/didOpen":
+                    uri = msg["params"]["textDocument"]["uri"]
+                    send_message({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {
+                            "uri": uri,
+                            "diagnostics": [
+                                {
+                                    "range": {
+                                        "start": {"line": 0, "character": 0},
+                                        "end": {"line": 0, "character": 1},
+                                    },
+                                    "severity": 1,
+                                    "message": f"problem-{index}",
+                                }
+                                for index in range(300)
+                            ],
+                        },
+                    })
+        """)
+        with tempfile.TemporaryDirectory() as root:
+            script = Path(root, "diagnostic_lsp.py")
+            script.write_text(source, encoding="utf-8")
+            source_file = Path(root, "sample.py")
+            source_file.write_text("x = 1\n", encoding="utf-8")
+            manager = LspManager(server_commands={"fake": [sys.executable, str(script)]})
+            started = await manager.start(server_id="fake", root=Path(root), user_id="user_1")
+            try:
+                await manager.notify(
+                    lsp_id=started["lsp_id"],
+                    user_id="user_1",
+                    method="textDocument/didOpen",
+                    params={
+                        "textDocument": {
+                            "uri": source_file.as_uri(),
+                            "languageId": "python",
+                            "version": 1,
+                            "text": "x = 1\n",
+                        }
+                    },
+                )
+                for _ in range(50):
+                    diagnostics = manager.latest_diagnostics(
+                        lsp_id=started["lsp_id"], user_id="user_1", uri=source_file.as_uri()
+                    )
+                    if diagnostics:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertEqual(len(diagnostics), 200)
+                self.assertEqual(diagnostics[0]["message"], "problem-0")
+                self.assertEqual(diagnostics[-1]["message"], "problem-199")
+            finally:
+                await manager.stop(lsp_id=started["lsp_id"], user_id="user_1")
+
     async def test_fake_language_server_round_trip_and_lifecycle(self):
         source = textwrap.dedent(r"""
             import json, sys

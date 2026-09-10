@@ -153,6 +153,47 @@ class DirectCodingIoPerformanceTests(unittest.IsolatedAsyncioTestCase):
             [f"file-{index}.txt" for index in range(4)],
         )
 
+    async def test_read_many_uses_one_identity_lookup_and_enriches_supported_files(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-perf", user_id="user-1")
+        body = ReadManyRequest(
+            files=[BatchFileRequest(path="one.py"), BatchFileRequest(path="two.ts")],
+            max_chars=10_000,
+        )
+        batch_read = AsyncMock(
+            return_value={
+                "files": [
+                    {"binary": False, "content": "one = 1\n"},
+                    {"binary": False, "content": "export const two = 2;\n"},
+                ]
+            }
+        )
+        identity = SimpleNamespace(is_pam=False)
+        enrich = AsyncMock(
+            side_effect=[
+                {"provider": "lsp", "server_id": "pyright", "status": "ok"},
+                {"provider": "lsp", "server_id": "typescript", "status": "ok"},
+            ]
+        )
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch("cptr.routers.coding.Runtime.read_text_files", batch_read),
+            patch(
+                "cptr.routers.coding.identity_for_context", new=AsyncMock(return_value=identity)
+            ) as identity_lookup,
+            patch(
+                "cptr.routers.coding.automatic_lsp_intelligence_service.enrich_read",
+                new=enrich,
+            ),
+        ):
+            result = await read_many_workspace_files(request, "ws-1", body)
+
+        self.assertEqual(identity_lookup.await_count, 1)
+        self.assertEqual(enrich.await_count, 2)
+        self.assertEqual(result["files"][0]["intelligence"]["server_id"], "pyright")
+        self.assertEqual(result["files"][1]["intelligence"]["server_id"], "typescript")
+
     async def test_search_context_reads_each_source_only_once(self):
         request = SimpleNamespace()
         workspace = SimpleNamespace(path="/tmp/cptr-perf", user_id="user-1")
@@ -506,7 +547,9 @@ class CommandSessionRetentionTests(unittest.TestCase):
         )
 
         with (
-            patch.object(registry, "reconcile", side_effect=AssertionError("passive telemetry reconciled")),
+            patch.object(
+                registry, "reconcile", side_effect=AssertionError("passive telemetry reconciled")
+            ),
             patch.object(
                 registry,
                 "reconcile_launch_reservations",

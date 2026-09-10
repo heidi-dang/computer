@@ -40,6 +40,7 @@ from cptr.env import (
 )
 from cptr.memory.observations import observe_execution_outcome
 from cptr.models import ControlIdempotency, Workspace
+from cptr.services.automatic_lsp_intelligence import service as automatic_lsp_intelligence_service
 from cptr.services.control_auth import require_control_user
 from cptr.services.direct_coding_workers import (
     DirectCodingWorkerError,
@@ -460,6 +461,146 @@ def _command_context(
     if workbench_session_id:
         context["workbench_session_id"] = workbench_session_id
     return context
+
+
+async def _automatic_lsp_identity(
+    *,
+    request: Request,
+    user_id: str,
+    workspace_id: str,
+    root: Path,
+    worker_id: str | None,
+):
+    try:
+        identity = await identity_for_context(
+            _command_context(
+                request=request,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                workspace_path=str(root),
+                worker_id=worker_id,
+            )
+        )
+        return identity, None
+    except IdentityUnavailable:
+        return None, "execution identity is unavailable"
+    except Exception:
+        # Automatic LSP enrichment is advisory. An identity-resolution problem
+        # must not change the success/failure contract of the underlying coding
+        # filesystem operation.
+        return None, "execution identity could not be resolved for automatic LSP"
+
+
+def _automatic_lsp_unavailable(path: Path, reason: str) -> dict[str, Any] | None:
+    language = automatic_lsp_intelligence_service.language_for_path(path)
+    if language is None:
+        return None
+    server_id, _ = language
+    return {
+        "provider": "lsp",
+        "server_id": server_id,
+        "status": "unavailable",
+        "reason": reason[:300],
+    }
+
+
+async def _automatic_lsp_read_result(
+    *,
+    request: Request,
+    user_id: str,
+    workspace_id: str,
+    root: Path,
+    worker_id: str | None,
+    path: Path,
+    content: str,
+    position: dict[str, int] | None = None,
+    identity=None,
+    identity_error: str | None = None,
+) -> dict[str, Any] | None:
+    if automatic_lsp_intelligence_service.language_for_path(path) is None:
+        return None
+    if identity is None and identity_error is None:
+        identity, identity_error = await _automatic_lsp_identity(
+            request=request,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            root=root,
+            worker_id=worker_id,
+        )
+    if identity is None:
+        return _automatic_lsp_unavailable(
+            path, identity_error or "execution identity is unavailable"
+        )
+    try:
+        return await automatic_lsp_intelligence_service.enrich_read(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            root=root,
+            path=path,
+            content=content,
+            identity=identity,
+            position=position,
+        )
+    except Exception:
+        return {
+            "provider": "lsp",
+            "server_id": automatic_lsp_intelligence_service.language_for_path(path)[0],
+            "status": "degraded",
+            "reason": "automatic LSP intelligence is temporarily unavailable",
+        }
+
+
+async def _automatic_lsp_write_result(
+    *,
+    request: Request,
+    user_id: str,
+    workspace_id: str,
+    root: Path,
+    worker_id: str | None,
+    path: Path,
+    content: str,
+) -> dict[str, Any] | None:
+    if automatic_lsp_intelligence_service.language_for_path(path) is None:
+        return None
+    identity, identity_error = await _automatic_lsp_identity(
+        request=request,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        root=root,
+        worker_id=worker_id,
+    )
+    if identity is None:
+        return _automatic_lsp_unavailable(
+            path, identity_error or "execution identity is unavailable"
+        )
+    try:
+        return await automatic_lsp_intelligence_service.enrich_after_write(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            root=root,
+            path=path,
+            content=content,
+            identity=identity,
+        )
+    except Exception:
+        return {
+            "provider": "lsp",
+            "server_id": automatic_lsp_intelligence_service.language_for_path(path)[0],
+            "status": "degraded",
+            "reason": "automatic LSP intelligence is temporarily unavailable",
+        }
+
+
+def _automatic_lsp_position(content: str, start_line: int, end_line: int) -> dict[str, int] | None:
+    if not start_line and not end_line:
+        return None
+    lines = content.splitlines()
+    if not lines:
+        return None
+    index = max(0, min(len(lines) - 1, max(1, start_line) - 1))
+    line = lines[index]
+    character = len(line) - len(line.lstrip())
+    return {"line": index, "character": character}
 
 
 def _relative_path(path: str, root: Path) -> tuple[Path, str]:
@@ -1834,10 +1975,21 @@ async def read_workspace_file(request: Request, workspace_id: str, body: ReadReq
         raise HTTPException(
             status_code=415, detail="binary files are not available through direct coding"
         )
+    raw_content = str(data.get("content") or "")
     content, start_line, end_line, total_lines = _line_slice(
-        str(data.get("content") or ""), body.start_line, body.end_line
+        raw_content, body.start_line, body.end_line
     )
-    return {
+    intelligence = await _automatic_lsp_read_result(
+        request=request,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        root=root,
+        worker_id=body.worker_id,
+        path=full,
+        content=raw_content,
+        position=_automatic_lsp_position(raw_content, body.start_line, body.end_line),
+    )
+    response = {
         "workspace_id": workspace_id,
         "path": relative,
         "content": content,
@@ -1845,8 +1997,11 @@ async def read_workspace_file(request: Request, workspace_id: str, body: ReadReq
         "end_line": end_line,
         "total_lines": total_lines,
         "size": size,
-        "content_sha256": _sha256(str(data.get("content") or "")),
+        "content_sha256": _sha256(raw_content),
     }
+    if intelligence is not None:
+        response["intelligence"] = intelligence
+    return response
 
 
 @router.post("/workspaces/{workspace_id}/coding/search")
@@ -1951,12 +2106,24 @@ async def write_workspace_file(request: Request, workspace_id: str, body: WriteR
         await Runtime.write_file(request, str(full), body.content)
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return {
+    intelligence = await _automatic_lsp_write_result(
+        request=request,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        root=root,
+        worker_id=body.worker_id,
+        path=full,
+        content=body.content,
+    )
+    response = {
         "workspace_id": workspace_id,
         "path": relative,
         "bytes_written": len(body.content.encode("utf-8")),
         "sha256": _sha256(body.content),
     }
+    if intelligence is not None:
+        response["intelligence"] = intelligence
+    return response
 
 
 @router.post("/workspaces/{workspace_id}/coding/materialize-secret")
@@ -2121,7 +2288,16 @@ async def edit_workspace_file(request: Request, workspace_id: str, body: EditReq
         await Runtime.write_file(request, str(full), updated)
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
-    return {
+    intelligence = await _automatic_lsp_write_result(
+        request=request,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        root=root,
+        worker_id=body.worker_id,
+        path=full,
+        content=updated,
+    )
+    response = {
         "workspace_id": workspace_id,
         "path": relative,
         "replaced_characters": len(body.target),
@@ -2129,6 +2305,9 @@ async def edit_workspace_file(request: Request, workspace_id: str, body: EditReq
         "sha256": _sha256(updated),
         "diff": _bounded_diff(content, updated, relative)[0],
     }
+    if intelligence is not None:
+        response["intelligence"] = intelligence
+    return response
 
 
 @router.post("/workspaces/{workspace_id}/coding/read-many")
@@ -2152,7 +2331,7 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
         )
 
     loaded = []
-    for item, (_, relative), data in zip(body.files, resolved, data_files, strict=True):
+    for item, (full, relative), data in zip(body.files, resolved, data_files, strict=True):
         if data.get("binary"):
             raise HTTPException(
                 status_code=415,
@@ -2162,6 +2341,7 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
         sliced, start, end, lines = _line_slice(raw, item.start_line, item.end_line)
         loaded.append(
             {
+                "full": full,
                 "path": relative,
                 "raw": raw,
                 "sliced": sliced,
@@ -2170,6 +2350,45 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
                 "total_lines": lines,
             }
         )
+    supported = [
+        item
+        for item in loaded
+        if automatic_lsp_intelligence_service.language_for_path(item["full"]) is not None
+    ]
+    identity = None
+    identity_error = None
+    if supported:
+        identity, identity_error = await _automatic_lsp_identity(
+            request=request,
+            user_id=user_id,
+            workspace_id=workspace_id,
+            root=root,
+            worker_id=body.worker_id,
+        )
+        semaphore = asyncio.Semaphore(DIRECT_CODING_IO_CONCURRENCY)
+
+        async def enrich_loaded(item: dict[str, Any]) -> dict[str, Any] | None:
+            async with semaphore:
+                return await _automatic_lsp_read_result(
+                    request=request,
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    root=root,
+                    worker_id=body.worker_id,
+                    path=item["full"],
+                    content=str(item["raw"]),
+                    position=_automatic_lsp_position(
+                        str(item["raw"]), int(item["start_line"]), int(item["end_line"])
+                    ),
+                    identity=identity,
+                    identity_error=identity_error,
+                )
+
+        enriched = await asyncio.gather(*(enrich_loaded(item) for item in supported))
+        for item, intelligence in zip(supported, enriched, strict=True):
+            if intelligence is not None:
+                item["intelligence"] = intelligence
+
     total = 0
     files = []
     any_truncated = False
@@ -2180,17 +2399,18 @@ async def read_many_workspace_files(request: Request, workspace_id: str, body: R
         file_truncated = len(text) < len(sliced)
         any_truncated = any_truncated or file_truncated
         total += len(text)
-        files.append(
-            {
-                "path": item["path"],
-                "content": text,
-                "content_sha256": _sha256(str(item["raw"])),
-                "truncated": file_truncated,
-                "start_line": item["start_line"],
-                "end_line": item["end_line"],
-                "total_lines": item["total_lines"],
-            }
-        )
+        file_result = {
+            "path": item["path"],
+            "content": text,
+            "content_sha256": _sha256(str(item["raw"])),
+            "truncated": file_truncated,
+            "start_line": item["start_line"],
+            "end_line": item["end_line"],
+            "total_lines": item["total_lines"],
+        }
+        if item.get("intelligence") is not None:
+            file_result["intelligence"] = item["intelligence"]
+        files.append(file_result)
     return {
         "workspace_id": workspace_id,
         "files": files,
@@ -2265,13 +2485,25 @@ async def apply_workspace_edits(request: Request, workspace_id: str, body: Apply
     except FileError as exc:
         raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
+    intelligence = await _automatic_lsp_write_result(
+        request=request,
+        user_id=user_id,
+        workspace_id=workspace_id,
+        root=root,
+        worker_id=body.worker_id,
+        path=full,
+        content=updated,
+    )
     diff, _ = _bounded_diff(original, updated, relative)
-    return {
+    response = {
         "workspace_id": workspace_id,
         "path": relative,
         "diff": diff,
         "sha256": _sha256(updated),
     }
+    if intelligence is not None:
+        response["intelligence"] = intelligence
+    return response
 
 
 @router.post("/workspaces/{workspace_id}/coding/directories")
