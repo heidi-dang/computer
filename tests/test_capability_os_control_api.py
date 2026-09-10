@@ -81,6 +81,22 @@ class _Tasks:
     async def require_executable(self, *, user_id, task_id):
         return await self.require_active(user_id=user_id, task_id=task_id)
 
+    async def fork_many(self, *, user_id, parent_task_id, count):
+        await self.require_executable(user_id=user_id, task_id=parent_task_id)
+        return tuple(
+            CapabilityTaskContext(
+                task_id=f"child-{index + 1}",
+                user_id=user_id,
+                workspace_id=self.context.workspace_id,
+                source="workbench",
+                status="OPEN",
+                active=True,
+                execution_allowed=True,
+                label=f"Capability OS Subagent {index + 1:02d}",
+            )
+            for index in range(count)
+        )
+
 
 class _Executor:
     def __init__(self):
@@ -189,7 +205,7 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completed["status"], "ok")
         self.assertGreaterEqual(completed["duration_ms"], 0)
 
-    def test_all_six_operations_publish_capability_action_lifecycle(self):
+    def test_all_core_operations_and_parallel_spawn_publish_capability_action_lifecycle(self):
         for handler, operation in (
             (capability_os_module.inspect_capability_os, "inspect"),
             (capability_os_module.resolve_capability_os, "resolve"),
@@ -197,12 +213,13 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             (capability_os_module.execute_capability_os, "execute"),
             (capability_os_module.acquire_capability_os, "acquire"),
             (capability_os_module.reflect_capability_os, "reflect"),
+            (capability_os_module.spawn_multiple_subagents_capability_os, "spawn_multiple_subagents"),
         ):
             source = inspect.getsource(handler)
             self.assertIn("_capability_action_trace(", source)
             self.assertIn(f'operation="{operation}"', source)
 
-    def test_router_exposes_exact_compact_six_operation_surface(self):
+    def test_router_exposes_six_core_operations_plus_parallel_spawn(self):
         actual = {
             (route.path.rsplit("/", 1)[-1], tuple(sorted(route.methods or ())))
             for route in capability_os_router.routes
@@ -216,8 +233,24 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
                 ("execute", ("POST",)),
                 ("acquire", ("POST",)),
                 ("reflect", ("POST",)),
+                ("spawn-multiple-subagents", ("POST",)),
             },
         )
+
+    async def test_parallel_spawn_prepares_isolated_child_contexts_without_agent_fallback(self):
+        result = await self.service.spawn_multiple_subagents(
+            user_id="user-1",
+            task_id="task-1",
+            objectives=("audit auth", "audit tests", "audit runtime"),
+        )
+
+        self.assertEqual(result["dispatch"]["count"], 3)
+        self.assertTrue(result["dispatch"]["parallel"])
+        self.assertEqual(result["dispatch"]["startBarrier"], "all-child-contexts-ready")
+        self.assertEqual(result["dispatch"]["fallback"], "none")
+        children = result["dispatch"]["subagents"]
+        self.assertEqual([item["task"]["taskId"] for item in children], ["child-1", "child-2", "child-3"])
+        self.assertTrue(all(item["status"] == "READY_FOR_CLIENT_SAMPLING" for item in children))
 
     async def test_acquire_exposes_oauth_lifecycle_as_suboperations_without_seventh_primitive(self):
         class Started:

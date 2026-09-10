@@ -226,6 +226,40 @@ class CapabilityOsControlService:
                 "evidenceChain": evidence_chain,
                 "runtime": self.runtime.production_snapshot()}
 
+    async def spawn_multiple_subagents(
+        self, *, user_id: str, task_id: str, objectives: tuple[str, ...]
+    ) -> dict:
+        parent = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
+        normalized = tuple(str(item or "").strip() for item in objectives)
+        if any(not item for item in normalized):
+            raise ValueError("every parallel subagent objective must be non-empty")
+        if any(len(item) > 20_000 for item in normalized):
+            raise ValueError("every parallel subagent objective must be at most 20000 characters")
+        children = await self.tasks.fork_many(
+            user_id=user_id,
+            parent_task_id=task_id,
+            count=len(normalized),
+        )
+        return {
+            "task": _task(parent),
+            "dispatch": {
+                "mode": "mcp-client-sampling",
+                "parallel": True,
+                "startBarrier": "all-child-contexts-ready",
+                "fallback": "none",
+                "count": len(children),
+                "subagents": [
+                    {
+                        "ordinal": index + 1,
+                        "task": _task(child),
+                        "objective": normalized[index],
+                        "status": "READY_FOR_CLIENT_SAMPLING",
+                    }
+                    for index, child in enumerate(children)
+                ],
+            },
+        }
+
     async def operator_snapshot(self, *, user_id: str, task_id: str, limit: int = 100):
         snapshot = await self.inspect(
             user_id=user_id,

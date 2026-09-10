@@ -3,7 +3,11 @@ import unittest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models import Base, FactoryRun, WorkbenchSession
-from cptr.services.capability_os.tasks import CapabilityTaskCoordinator, CapabilityTaskNotFound
+from cptr.services.capability_os.tasks import (
+    CapabilityTaskCoordinator,
+    CapabilityTaskNotExecutable,
+    CapabilityTaskNotFound,
+)
 
 
 class CapabilityOsTaskCoordinatorTests(unittest.IsolatedAsyncioTestCase):
@@ -87,6 +91,43 @@ class CapabilityOsTaskCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(CapabilityTaskNotFound):
             await self.coordinator.require_active(
                 user_id="user-2", task_id=task.task_id
+            )
+
+    async def test_fork_many_creates_owner_bound_isolated_children_in_one_cohort(self):
+        children = await self.coordinator.fork_many(
+            user_id="user-1", parent_task_id="wbs_active", count=3
+        )
+
+        self.assertEqual(len(children), 3)
+        self.assertEqual(len({child.task_id for child in children}), 3)
+        for index, child in enumerate(children, start=1):
+            self.assertEqual(child.user_id, "user-1")
+            self.assertEqual(child.workspace_id, "workspace-1")
+            self.assertEqual(child.source, "workbench")
+            self.assertEqual(child.status, "OPEN")
+            self.assertTrue(child.active)
+            self.assertTrue(child.execution_allowed)
+            self.assertEqual(child.label, f"Capability OS Subagent {index:02d}")
+            resolved = await self.coordinator.require_executable(
+                user_id="user-1", task_id=child.task_id
+            )
+            self.assertEqual(resolved.task_id, child.task_id)
+            with self.assertRaises(CapabilityTaskNotFound):
+                await self.coordinator.require_active(
+                    user_id="user-2", task_id=child.task_id
+                )
+
+    async def test_fork_many_rejects_invalid_cohort_sizes(self):
+        for count in (1, 11):
+            with self.assertRaisesRegex(ValueError, "between 2 and 10"):
+                await self.coordinator.fork_many(
+                    user_id="user-1", parent_task_id="wbs_active", count=count
+                )
+
+    async def test_fork_many_rejects_non_workbench_parent_to_preserve_authority_boundary(self):
+        with self.assertRaisesRegex(CapabilityTaskNotExecutable, "requires a workbench parent"):
+            await self.coordinator.fork_many(
+                user_id="user-1", parent_task_id="factory_active", count=2
             )
 
     async def test_wrong_owner_and_terminal_task_fail_closed(self):

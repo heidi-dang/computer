@@ -85,6 +85,51 @@ class CapabilityTaskCoordinator:
                 updated_at_ms=int(session.updated_at or now),
             )
 
+    async def fork_many(
+        self, *, user_id: str, parent_task_id: str, count: int
+    ) -> tuple[CapabilityTaskContext, ...]:
+        """Atomically create isolated Capability OS child contexts for host-native fan-out."""
+        parent = await self.require_executable(user_id=user_id, task_id=parent_task_id)
+        if parent.source != "workbench":
+            raise CapabilityTaskNotExecutable(
+                "parallel subagent fan-out requires a workbench parent task"
+            )
+        bounded_count = int(count)
+        if bounded_count < 2 or bounded_count > 10:
+            raise ValueError("parallel subagent count must be between 2 and 10")
+        now = int(time.time() * 1000)
+        sessions = [
+            WorkbenchSession(
+                user_id=parent.user_id,
+                name=f"Capability OS Subagent {index + 1:02d}",
+                workspace_id=parent.workspace_id,
+                status="OPEN",
+                event_count=0,
+                created_at=now,
+                updated_at=now,
+            )
+            for index in range(bounded_count)
+        ]
+        async with self._session_factory() as db:
+            db.add_all(sessions)
+            await db.commit()
+            for session in sessions:
+                await db.refresh(session)
+        return tuple(
+            CapabilityTaskContext(
+                task_id=session.id,
+                user_id=session.user_id,
+                workspace_id=session.workspace_id,
+                source="workbench",
+                status="OPEN",
+                active=True,
+                execution_allowed=True,
+                label=str(session.name),
+                updated_at_ms=int(session.updated_at or now),
+            )
+            for session in sessions
+        )
+
     async def resolve(self, *, user_id: str, task_id: str) -> CapabilityTaskContext | None:
         if not user_id.strip() or not task_id.strip():
             return None
