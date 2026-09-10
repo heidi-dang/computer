@@ -1,9 +1,11 @@
 import asyncio
 import json
 import os
+import secrets
 from typing import Any, Optional
 
 import httpx
+import mcp_types
 from dotenv import load_dotenv
 from fastmcp import Context, FastMCP
 
@@ -20,10 +22,10 @@ mcp = FastMCP(
         "Fresh clients call cptr_forge(operation='bootstrap'); task_id is optional for bootstrap and "
         "ignored if a stale client schema supplies it. Then use the returned task.taskId for "
         "inspect/resolve/forge/execute/acquire/reflect calls. spawn_multiple_subagents requests "
-        "multiple isolated client-model continuations concurrently when the MCP client advertises "
-        "sampling with tool support."
+        "multiple isolated client-model continuations in one MCP multi-round input batch when the "
+        "client supports sampling with tools."
     ),
-    version="2.3.0",
+    version="2.3.1",
 )
 
 
@@ -163,7 +165,7 @@ async def _async_capability_digest(task_id: str, capability_id: str) -> tuple[st
     return digest, None
 
 
-def _bound_sampling_tools(task_id: str) -> list:
+def _bound_sampling_tools(task_id: str) -> dict[str, Any]:
     async def cptr_inspect(limit: int = 20) -> dict:
         """Inspect this subagent's isolated Capability OS task state."""
         return await _async_request(
@@ -283,14 +285,167 @@ def _bound_sampling_tools(task_id: str) -> list:
             },
         )
 
+    return {
+        "cptr_inspect": cptr_inspect,
+        "cptr_resolve": cptr_resolve,
+        "cptr_forge": cptr_forge,
+        "cptr_execute": cptr_execute,
+        "cptr_acquire": cptr_acquire,
+        "cptr_reflect": cptr_reflect,
+    }
+
+
+_MAX_SAMPLING_ROUNDS = 6
+_MAX_TOOL_CALLS_PER_BRANCH = 48
+_MAX_TOOL_INPUT_CHARS = 100_000
+_MAX_TOOL_RESULT_CHARS = 20_000
+
+
+def _sampling_tool_definitions() -> list:
     return [
-        cptr_inspect,
-        cptr_resolve,
-        cptr_forge,
-        cptr_execute,
-        cptr_acquire,
-        cptr_reflect,
+        mcp_types.Tool(
+            name="cptr_inspect",
+            description="Inspect this isolated Capability OS child task.",
+            input_schema={
+                "type": "object",
+                "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
+                "additionalProperties": False,
+            },
+        ),
+        mcp_types.Tool(
+            name="cptr_resolve",
+            description="Resolve task-visible capabilities for required effects.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "required_effects": {"type": "array", "items": {}},
+                    "optional_effects": {"type": ["array", "null"], "items": {}},
+                    "forbidden_effects": {"type": ["array", "null"], "items": {}},
+                },
+                "required": ["required_effects"],
+                "additionalProperties": False,
+            },
+        ),
+        mcp_types.Tool(
+            name="cptr_forge",
+            description="Forge or evolve a tool inside this isolated Capability OS child task.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "minLength": 1},
+                    "payload_json": {"type": "string"},
+                },
+                "required": ["operation"],
+                "additionalProperties": False,
+            },
+        ),
+        mcp_types.Tool(
+            name="cptr_execute",
+            description="Execute a task-visible Capability in this isolated child task.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "capability_id": {"type": "string", "minLength": 1},
+                    "inputs_json": {"type": "string"},
+                },
+                "required": ["capability_id"],
+                "additionalProperties": False,
+            },
+        ),
+        mcp_types.Tool(
+            name="cptr_acquire",
+            description="Discover, qualify, mount, invoke, or release MCP capabilities for this child task.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "minLength": 1},
+                    "payload_json": {"type": "string"},
+                },
+                "required": ["operation"],
+                "additionalProperties": False,
+            },
+        ),
+        mcp_types.Tool(
+            name="cptr_reflect",
+            description="Record an evidence-backed observation for this isolated child task.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "observation_type": {
+                        "type": "string",
+                        "enum": ["bug", "friction", "gap", "hypothesis", "success"],
+                    },
+                    "description": {"type": "string", "minLength": 1},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["info", "low", "medium", "high", "critical"],
+                    },
+                    "context_json": {"type": "string"},
+                },
+                "required": ["observation_type", "description"],
+                "additionalProperties": False,
+            },
+        ),
     ]
+
+
+def _branch_prompt(index: int, total: int, objective: str, child_task_id: str) -> str:
+    return (
+        "You are an isolated parallel continuation of the calling ChatGPT. Work only on the assigned "
+        "objective below. You already own an isolated Capability OS task; do not bootstrap another task "
+        "and do not delegate to CPTR native/delegated agents or any external model worker. Use the bound "
+        "Capability OS tools to inspect, resolve required effects, forge or acquire missing capabilities, "
+        "execute them, and collect concrete evidence. Do not claim work you did not verify. Return a compact "
+        "result with status, findings, evidence, changes, blockers, and next action.\n\n"
+        f"CHILD TASK: {child_task_id}\n"
+        f"BRANCH {index + 1}/{total} OBJECTIVE:\n{objective}"
+    )
+
+
+def _message_json(message: Any) -> dict:
+    return message.model_dump(by_alias=True, mode="json", exclude_none=True)
+
+
+def _sampling_request(messages: list[dict], max_tokens: int):
+    return mcp_types.CreateMessageRequest(
+        params=mcp_types.CreateMessageRequestParams(
+            messages=[mcp_types.SamplingMessage.model_validate(item) for item in messages],
+            max_tokens=max_tokens,
+            tools=_sampling_tool_definitions(),
+            tool_choice=mcp_types.ToolChoice(mode="auto"),
+        )
+    )
+
+
+def _sampling_input_requests(state: dict) -> dict:
+    return {
+        branch["key"]: _sampling_request(branch["messages"], int(state["max_tokens"]))
+        for branch in state["branches"]
+        if branch["status"] == "pending"
+    }
+
+
+def _result_text(blocks: list[Any]) -> str:
+    return "\n".join(
+        block.text for block in blocks if isinstance(block, mcp_types.TextContent) and block.text
+    ).strip()
+
+
+async def _execute_sampling_tool(child_task_id: str, tool_use: Any) -> Any:
+    tools = _bound_sampling_tools(child_task_id)
+    tool = tools.get(tool_use.name)
+    if tool is None:
+        return {"error": f"unknown Capability OS sampling tool: {tool_use.name}"}
+    raw_input = json.dumps(tool_use.input, sort_keys=True, separators=(",", ":"), default=str)
+    if len(raw_input) > _MAX_TOOL_INPUT_CHARS:
+        return {"error": "sampling tool input exceeds the bounded size limit"}
+    try:
+        return await tool(**dict(tool_use.input))
+    except Exception as exc:
+        return {
+            "error": "Capability OS sampling tool execution failed",
+            "error_type": type(exc).__name__,
+        }
 
 
 @mcp.tool(description="Inspect Capability OS state for a task: capabilities, evidence, leases, mounts, and runtime state.")
@@ -481,10 +636,10 @@ def cptr_reflect(
 
 @mcp.tool(
     description=(
-        "Atomically prepare 2-10 isolated Capability OS child contexts, then issue all client-model "
-        "sampling requests concurrently through one start barrier. Each sampled continuation gets only "
-        "the six Capability OS operations bound to its own child task. There is no delegated-agent or "
-        "external-model fallback; the connected MCP client must support sampling with tools."
+        "Atomically prepare 2-10 isolated Capability OS child contexts and request all client-model "
+        "continuations in one MCP 2026 multi-round input batch. Every branch gets only the six Capability "
+        "OS operations bound to its own child task. No delegated-agent or external-model fallback exists; "
+        "the connected client must support sampling with tools."
     )
 )
 async def spawn_multiple_subagents(
@@ -492,7 +647,7 @@ async def spawn_multiple_subagents(
     tasks: list[str],
     ctx: Context,
     max_tokens: int = 4096,
-) -> dict:
+) -> Any:
     task_id, error = _required_task_id(task_id)
     if error:
         return error
@@ -508,88 +663,180 @@ async def spawn_multiple_subagents(
         normalized.append(objective)
     token_limit = max(128, min(int(max_tokens), 32_000))
 
-    prepared = await _async_request(
-        "POST",
-        "/spawn-multiple-subagents",
-        timeout=15,
-        json={"task_id": task_id, "objectives": normalized},
-    )
-    if "error" in prepared or "detail" in prepared:
-        return prepared
-    dispatch = prepared.get("dispatch")
-    if not isinstance(dispatch, dict):
-        return {"error": "Capability OS returned an invalid parallel subagent dispatch"}
-    children = dispatch.get("subagents")
-    if not isinstance(children, list) or len(children) != len(normalized):
-        return {"error": "Capability OS returned an invalid parallel subagent cohort"}
-    child_ids = [
-        str(((item.get("task") or {}).get("taskId")) or "").strip()
-        for item in children
-        if isinstance(item, dict)
-    ]
-    if len(child_ids) != len(normalized) or any(not value for value in child_ids):
-        return {"error": "Capability OS returned a child without a task_id"}
-    if len(set(child_ids)) != len(child_ids):
-        return {"error": "Capability OS returned duplicate child task_ids"}
-
-    start_gate = asyncio.Event()
-
-    async def run_branch(index: int, objective: str, child_task_id: str) -> dict:
-        await start_gate.wait()
-        prompt = (
-            "You are an isolated parallel continuation of the calling ChatGPT. Work only on the assigned "
-            "objective below. You already own an isolated Capability OS task; do not bootstrap another task "
-            "and do not delegate to CPTR native/delegated agents or any external model worker. Use the bound "
-            "Capability OS tools to inspect, resolve required effects, forge or acquire missing capabilities, "
-            "execute them, and collect concrete evidence. Do not claim work you did not verify. Return a compact "
-            "result with status, findings, evidence, changes, blockers, and next action.\n\n"
-            f"CHILD TASK: {child_task_id}\n"
-            f"BRANCH {index + 1}/{len(normalized)} OBJECTIVE:\n{objective}"
+    state_key = ctx.request_state
+    if state_key is None:
+        prepared = await _async_request(
+            "POST",
+            "/spawn-multiple-subagents",
+            timeout=15,
+            json={"task_id": task_id, "objectives": normalized},
         )
-        try:
-            result = await ctx.sample(
-                messages=prompt,
-                tools=_bound_sampling_tools(child_task_id),
-                max_tokens=token_limit,
-                tool_concurrency=0,
-                mask_error_details=True,
-            )
-            return {
-                "index": index,
-                "task_id": child_task_id,
-                "objective": objective,
-                "status": "complete",
-                "output": result.text or "",
-            }
-        except Exception as exc:
-            return {
-                "index": index,
-                "task_id": child_task_id,
-                "objective": objective,
-                "status": "client_sampling_failed",
-                "error": "connected MCP client sampling request failed",
-                "error_type": type(exc).__name__,
-            }
+        if "error" in prepared or "detail" in prepared:
+            return prepared
+        dispatch = prepared.get("dispatch")
+        if not isinstance(dispatch, dict):
+            return {"error": "Capability OS returned an invalid parallel subagent dispatch"}
+        children = dispatch.get("subagents")
+        if not isinstance(children, list) or len(children) != len(normalized):
+            return {"error": "Capability OS returned an invalid parallel subagent cohort"}
+        child_ids = [
+            str(((item.get("task") or {}).get("taskId")) or "").strip()
+            for item in children
+            if isinstance(item, dict)
+        ]
+        if len(child_ids) != len(normalized) or any(not value for value in child_ids):
+            return {"error": "Capability OS returned a child without a task_id"}
+        if len(set(child_ids)) != len(child_ids):
+            return {"error": "Capability OS returned duplicate child task_ids"}
 
-    workers = [
-        asyncio.create_task(run_branch(index, objective, child_ids[index]))
-        for index, objective in enumerate(normalized)
+        state_key = "parallel-subagents:" + secrets.token_urlsafe(18)
+        branches = []
+        for index, objective in enumerate(normalized):
+            prompt = _branch_prompt(index, len(normalized), objective, child_ids[index])
+            initial = mcp_types.SamplingMessage(
+                role="user",
+                content=mcp_types.TextContent(text=prompt),
+            )
+            branches.append(
+                {
+                    "key": f"branch-{index + 1}",
+                    "index": index,
+                    "task_id": child_ids[index],
+                    "objective": objective,
+                    "status": "pending",
+                    "rounds": 0,
+                    "tool_calls": 0,
+                    "messages": [_message_json(initial)],
+                    "output": "",
+                    "error": "",
+                }
+            )
+        state = {
+            "parent_task_id": task_id,
+            "objectives": normalized,
+            "max_tokens": token_limit,
+            "task": prepared.get("task"),
+            "dispatch": dispatch,
+            "branches": branches,
+        }
+        await ctx.set_state(state_key, state)
+        return mcp_types.InputRequiredResult(
+            input_requests=_sampling_input_requests(state),
+            request_state=state_key,
+        )
+
+    state = await ctx.get_state(state_key)
+    if not isinstance(state, dict):
+        return {"error": "parallel subagent state expired or is unavailable; start a new fan-out"}
+    if (
+        state.get("parent_task_id") != task_id
+        or state.get("objectives") != normalized
+        or int(state.get("max_tokens") or 0) != token_limit
+    ):
+        await ctx.delete_state(state_key)
+        return {"error": "parallel subagent retry arguments do not match the original fan-out"}
+
+    responses = ctx.input_responses
+    if not isinstance(responses, dict):
+        return {"error": "parallel subagent retry did not include client sampling responses"}
+
+    jobs: list[tuple[dict, Any]] = []
+    for branch in state["branches"]:
+        if branch["status"] != "pending":
+            continue
+        response = responses.get(branch["key"])
+        if not isinstance(
+            response,
+            (mcp_types.CreateMessageResult, mcp_types.CreateMessageResultWithTools),
+        ):
+            branch["status"] = "client_sampling_failed"
+            branch["error"] = "client did not return a sampling result for this branch"
+            continue
+        blocks = response.content if isinstance(response.content, list) else [response.content]
+        assistant_message = mcp_types.SamplingMessage(role="assistant", content=blocks)
+        branch["messages"].append(_message_json(assistant_message))
+        tool_uses = [block for block in blocks if isinstance(block, mcp_types.ToolUseContent)]
+        if not tool_uses:
+            branch["status"] = "complete"
+            branch["output"] = _result_text(blocks)
+            continue
+        branch["rounds"] += 1
+        branch["tool_calls"] += len(tool_uses)
+        if branch["rounds"] > _MAX_SAMPLING_ROUNDS:
+            branch["status"] = "limit_exceeded"
+            branch["error"] = "sampling round limit exceeded"
+            continue
+        if branch["tool_calls"] > _MAX_TOOL_CALLS_PER_BRANCH:
+            branch["status"] = "limit_exceeded"
+            branch["error"] = "sampling tool-call limit exceeded"
+            continue
+        jobs.extend((branch, tool_use) for tool_use in tool_uses)
+
+    if jobs:
+        tool_results = await asyncio.gather(
+            *(_execute_sampling_tool(branch["task_id"], tool_use) for branch, tool_use in jobs)
+        )
+        by_branch: dict[str, list[Any]] = {}
+        for (branch, tool_use), result in zip(jobs, tool_results):
+            serialized = json.dumps(result, sort_keys=True, separators=(",", ":"), default=str)
+            text = serialized[:_MAX_TOOL_RESULT_CHARS]
+            structured = (
+                json.loads(serialized)
+                if len(serialized) <= _MAX_TOOL_RESULT_CHARS
+                else {"truncated": True, "text": text}
+            )
+            is_error = isinstance(result, dict) and ("error" in result or "detail" in result)
+            by_branch.setdefault(branch["key"], []).append(
+                mcp_types.ToolResultContent(
+                    tool_use_id=tool_use.id,
+                    content=[mcp_types.TextContent(text=text)],
+                    structured_content=structured,
+                    is_error=is_error,
+                )
+            )
+        for branch in state["branches"]:
+            results_for_branch = by_branch.get(branch["key"])
+            if branch["status"] == "pending" and results_for_branch:
+                branch["messages"].append(
+                    _message_json(
+                        mcp_types.SamplingMessage(role="user", content=results_for_branch)
+                    )
+                )
+
+    await ctx.set_state(state_key, state)
+    requests = _sampling_input_requests(state)
+    if requests:
+        return mcp_types.InputRequiredResult(
+            input_requests=requests,
+            request_state=state_key,
+        )
+
+    await ctx.delete_state(state_key)
+    results = [
+        {
+            "index": branch["index"],
+            "task_id": branch["task_id"],
+            "objective": branch["objective"],
+            "status": branch["status"],
+            "output": branch["output"],
+            **({"error": branch["error"]} if branch["error"] else {}),
+        }
+        for branch in state["branches"]
     ]
-    await asyncio.sleep(0)
-    start_gate.set()
-    results = await asyncio.gather(*workers)
     completed = sum(item["status"] == "complete" for item in results)
+    dispatch = state["dispatch"]
     return {
-        "task": prepared.get("task"),
+        "task": state.get("task"),
         "requested": len(normalized),
         "completed": completed,
         "failed": len(normalized) - completed,
         "dispatch": {
             **dispatch,
-            "protocol": "MCP sampling/createMessage",
-            "samplingRequestsIssuedConcurrently": True,
+            "protocol": "MCP 2026 multi-round input_required sampling",
+            "samplingRequestsBatchedInSingleRound": True,
             "hostParallelInferenceVerified": False,
             "nativeSubagentMapping": "client-defined",
+            "fallback": "none",
         },
         "results": results,
     }
