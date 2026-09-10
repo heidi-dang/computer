@@ -36,6 +36,7 @@ class FactoryState(str, Enum):
     REPAIR_REQUIRED = "REPAIR_REQUIRED"
     COMMITTING = "COMMITTING"
     PUSHING = "PUSHING"
+    PR_CREATING = "PR_CREATING"
     CI_VERIFYING = "CI_VERIFYING"
     CYCLE_COMPLETE = "CYCLE_COMPLETE"
     PAUSED = "PAUSED"
@@ -108,7 +109,8 @@ _ALLOWED.update(
             FactoryState.REPAIR_REQUIRED,
         },
         FactoryState.COMMITTING: {FactoryState.PUSHING},
-        FactoryState.PUSHING: {FactoryState.CI_VERIFYING},
+        FactoryState.PUSHING: {FactoryState.PR_CREATING},
+        FactoryState.PR_CREATING: {FactoryState.CI_VERIFYING},
         FactoryState.CI_VERIFYING: {
             FactoryState.CYCLE_COMPLETE,
             FactoryState.REPAIR_REQUIRED,

@@ -37,6 +37,7 @@
 		'VICTORY_JUDGING',
 		'COMMITTING',
 		'PUSHING',
+		'PR_CREATING',
 		'CI_VERIFYING',
 		'CYCLE_COMPLETE',
 		'COMPLETE'
@@ -247,6 +248,7 @@
 			SECURITY_REVIEW: 'Security',
 			LIVE_VERIFYING: 'Live verify',
 			VICTORY_JUDGING: 'Victory',
+			PR_CREATING: 'Open PR',
 			CI_VERIFYING: 'CI',
 			CYCLE_COMPLETE: 'Cycle done'
 		};

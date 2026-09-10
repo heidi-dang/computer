@@ -322,7 +322,7 @@ class FactoryObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress["effective_state"], FactoryState.BASELINING.value)
         self.assertEqual(progress["basis"], "server_state_machine")
         self.assertEqual(progress["phase_index"], 3)
-        self.assertEqual(progress["phase_count"], 25)
+        self.assertEqual(progress["phase_count"], 26)
         self.assertGreater(progress["percent"], 0)
         self.assertLess(progress["percent"], 100)
         self.assertEqual(progress["outcome"], "running")

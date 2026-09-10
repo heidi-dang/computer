@@ -228,7 +228,8 @@ class FactoryOrchestratorTests(unittest.IsolatedAsyncioTestCase):
             FactoryState.SECURITY_REVIEW: FactoryState.LIVE_VERIFYING,
             FactoryState.LIVE_VERIFYING: FactoryState.VICTORY_JUDGING,
             FactoryState.COMMITTING: FactoryState.PUSHING,
-            FactoryState.PUSHING: FactoryState.CI_VERIFYING,
+            FactoryState.PUSHING: FactoryState.PR_CREATING,
+            FactoryState.PR_CREATING: FactoryState.CI_VERIFYING,
             FactoryState.CI_VERIFYING: FactoryState.CYCLE_COMPLETE,
         }
         handlers = {
