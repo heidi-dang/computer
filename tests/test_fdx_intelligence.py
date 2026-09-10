@@ -277,6 +277,44 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
                 resolved = service._resolve_binary(_identity(temp))
         self.assertEqual(resolved, str(binary.resolve()))
 
+    async def test_cli_environment_exposes_managed_semantic_provider_bin(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "repo"
+            root.mkdir()
+            home = Path(temp) / "home"
+            managed_bin = home / ".cptr" / "lsp" / "node_modules" / ".bin"
+            managed_bin.mkdir(parents=True)
+            scip = managed_bin / "scip-typescript"
+            scip.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            scip.chmod(0o755)
+            binary = root / "fdx"
+            binary.write_text(
+                textwrap.dedent(
+                    """\
+                    #!/usr/bin/env python3
+                    import json
+                    import os
+                    import shutil
+                    print(json.dumps({
+                        "path": os.environ.get("PATH", ""),
+                        "scip": shutil.which("scip-typescript"),
+                    }))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            binary.chmod(0o755)
+            service = FdxIntelligenceService()
+            with patch("cptr.services.fdx_intelligence.FDX_BINARY", str(binary)):
+                result = await service._run_cli(
+                    root=root,
+                    identity=_identity(str(home)),
+                    argv=["semantic", "status"],
+                )
+
+        self.assertEqual(result["scip"], str(scip.resolve()))
+        self.assertIn(str(managed_bin), result["path"].split(os.pathsep))
+
     async def test_unavailable_binary_returns_typed_fallback_instead_of_failing_direct_coding(self):
         with tempfile.TemporaryDirectory() as temp:
             service = FdxIntelligenceService()
@@ -376,6 +414,169 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--format", argv)
         self.assertIn("json", argv)
 
+    async def test_index_status_self_heals_absent_repository_index(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            service = FdxIntelligenceService()
+            run_cli = AsyncMock(
+                side_effect=[
+                    {"text": "INDEX absent\nschema=0\ngeneration=0\nfiles=0"},
+                    {"text": "INDEX fresh\nfiles=12\nchanged=12\ngeneration=1"},
+                    {"text": "INDEX fresh\nschema=10\ngeneration=1\nfiles=12"},
+                ]
+            )
+            with patch.object(service, "_run_cli", new=run_cli):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="index_status",
+                    options={},
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("generation=1", result["data"]["text"])
+        self.assertEqual(
+            [call.kwargs["argv"] for call in run_cli.await_args_list],
+            [["index", "status"], ["index", "--refresh"], ["index", "status"]],
+        )
+
+    async def test_build_graph_self_heals_stale_build_providers_before_query(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            service = FdxIntelligenceService()
+            run_cli = AsyncMock(
+                side_effect=[
+                    {
+                        "text": (
+                            "provider=builtin-package-json\n"
+                            "  health=misconfigured\n"
+                            "  freshness=stale\n"
+                            "  generation=0"
+                        )
+                    },
+                    {"text": "REFRESH provider=builtin-package-json ok nodes=10 edges=9 gen=1"},
+                    {"nodes": [{"id": "pkg"}], "edges": []},
+                ]
+            )
+            with patch.object(service, "_run_cli", new=run_cli):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="build_graph",
+                    options={},
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["data"]["nodes"], [{"id": "pkg"}])
+        self.assertEqual(
+            [call.kwargs["argv"] for call in run_cli.await_args_list],
+            [["build", "status"], ["build", "refresh"], ["build", "graph", "--format", "json"]],
+        )
+
+    async def test_semantic_refresh_stays_read_only_without_root_project_config(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            (root / "src.ts").write_text("export const value = 1;\n", encoding="utf-8")
+            service = FdxIntelligenceService()
+            run_cli = AsyncMock(
+                side_effect=[
+                    {"text": "INDEX fresh\nschema=10\ngeneration=1\nfiles=1"},
+                    {"text": "SEMANTIC no providers"},
+                    {
+                        "text": "source=TreeSitter completeness=Conservative strength=Structural degraded=true"
+                    },
+                ]
+            )
+            with patch.object(service, "_run_cli", new=run_cli):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="semantic_references",
+                    options={"symbol": "value", "lang": "typescript"},
+                )
+
+        self.assertEqual(result["status"], "degraded")
+        self.assertFalse((root / "tsconfig.json").exists())
+        self.assertEqual(
+            [call.kwargs["argv"] for call in run_cli.await_args_list],
+            [
+                ["index", "status"],
+                ["semantic", "status"],
+                [
+                    "semantic",
+                    "references",
+                    "value",
+                    "--lang",
+                    "typescript",
+                    "--intent",
+                    "reference_complete",
+                ],
+            ],
+        )
+
+    async def test_semantic_references_self_heal_missing_semantic_provider(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / ".git").mkdir()
+            (root / "tsconfig.json").write_text("{}", encoding="utf-8")
+            service = FdxIntelligenceService()
+            run_cli = AsyncMock(
+                side_effect=[
+                    {"text": "INDEX fresh\nschema=10\ngeneration=1\nfiles=12"},
+                    {"text": "SEMANTIC no providers"},
+                    {
+                        "text": (
+                            "SEMANTIC scip-typescript fresh documents=10 occurrences=20 "
+                            "nodes=8 edges=12 generation=1"
+                        )
+                    },
+                    {
+                        "text": (
+                            "source=SCIP completeness=Complete strength=Semantic "
+                            "degraded=false matches=2"
+                        )
+                    },
+                ]
+            )
+            with patch.object(service, "_run_cli", new=run_cli):
+                result = await service.execute(
+                    user_id="user_1",
+                    workspace_id="ws_1",
+                    root=root,
+                    identity=_identity(temp),
+                    action="semantic_references",
+                    options={"symbol": "PaymentService", "lang": "typescript"},
+                )
+
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("degraded=false", result["data"]["text"])
+        self.assertEqual(
+            [call.kwargs["argv"] for call in run_cli.await_args_list],
+            [
+                ["index", "status"],
+                ["semantic", "status"],
+                ["semantic", "refresh"],
+                [
+                    "semantic",
+                    "references",
+                    "PaymentService",
+                    "--lang",
+                    "typescript",
+                    "--intent",
+                    "reference_complete",
+                ],
+            ],
+        )
+
     async def test_degraded_assurance_preserves_data_and_recommends_fallback(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -405,15 +606,23 @@ class FdxIntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
             root = Path(temp)
             (root / ".git").mkdir()
             service = FdxIntelligenceService()
-            with patch.object(
-                service,
-                "_run_cli",
-                new=AsyncMock(
-                    return_value={
+            run_cli = AsyncMock(
+                side_effect=[
+                    {"text": "INDEX fresh\nschema=10\ngeneration=1\nfiles=12"},
+                    {
+                        "text": (
+                            "provider=scip-typescript\n"
+                            "  health=available\n"
+                            "  freshness=fresh\n"
+                            "  generation=1"
+                        )
+                    },
+                    {
                         "text": "source=TreeSitter completeness=Conservative strength=Structural degraded=true"
-                    }
-                ),
-            ):
+                    },
+                ]
+            )
+            with patch.object(service, "_run_cli", new=run_cli):
                 result = await service.execute(
                     user_id="user_1",
                     workspace_id="ws_1",

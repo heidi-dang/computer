@@ -6,7 +6,7 @@
 	import { Markdown } from '@tiptap/markdown';
 	import Placeholder from '@tiptap/extension-placeholder';
 	import CodeBlockLowlight from '@tiptap/extension-code-block-lowlight';
-	import { all, createLowlight } from 'lowlight';
+	import { common, createLowlight } from 'lowlight';
 	import { toast } from 'svelte-sonner';
 
 	import { createFileMention, extractMentionedFiles, type FileMentionAttrs } from './FileMention';
@@ -163,7 +163,7 @@
 	}
 
 	// ── Lowlight setup ──────────────────────────────
-	const lowlight = createLowlight(all);
+	const lowlight = createLowlight(common);
 	const _origHighlight = lowlight.highlight.bind(lowlight);
 	lowlight.highlight = (lang, value, opts) => {
 		if (!lowlight.registered(lang)) return lowlight.highlightAuto(value);

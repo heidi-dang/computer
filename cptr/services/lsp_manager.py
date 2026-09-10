@@ -80,22 +80,75 @@ class LspManager:
         return commands
 
     @staticmethod
-    def _resolve_argv(argv: list[str]) -> list[str] | None:
+    def _search_path(*, root: Path | None, env: dict[str, str] | None) -> str:
+        directories: list[str] = []
+        if root is not None:
+            root = root.resolve()
+            directories.extend(
+                [
+                    str(root / "node_modules" / ".bin"),
+                    str(root / ".venv" / ("Scripts" if os.name == "nt" else "bin")),
+                    str(root / "venv" / ("Scripts" if os.name == "nt" else "bin")),
+                ]
+            )
+        environment = env or os.environ
+        home = str(environment.get("HOME") or "").strip()
+        if home:
+            home_path = Path(home)
+            directories.extend(
+                [
+                    str(home_path / ".cptr" / "lsp" / "node_modules" / ".bin"),
+                    str(home_path / ".cptr" / "bin"),
+                    str(home_path / ".cargo" / "bin"),
+                    str(home_path / ".local" / "bin"),
+                ]
+            )
+        existing_path = str(environment.get("PATH") or "")
+        if existing_path:
+            directories.extend(part for part in existing_path.split(os.pathsep) if part)
+        return os.pathsep.join(dict.fromkeys(directories))
+
+    @staticmethod
+    def _typescript_fallback_path(*, env: dict[str, str] | None) -> str | None:
+        environment = env or os.environ
+        home = str(environment.get("HOME") or "").strip()
+        if not home:
+            return None
+        candidate = (
+            Path(home) / ".cptr" / "lsp" / "node_modules" / "typescript" / "lib" / "tsserver.js"
+        )
+        if candidate.is_file():
+            return str(candidate.resolve())
+        return None
+
+    @classmethod
+    def _resolve_argv(
+        cls,
+        argv: list[str],
+        *,
+        root: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> list[str] | None:
         executable = argv[0]
         if os.path.isabs(executable):
             if not Path(executable).is_file():
                 return None
             resolved = executable
         else:
-            resolved = shutil.which(executable)
+            resolved = shutil.which(executable, path=cls._search_path(root=root, env=env))
             if not resolved:
                 return None
         return [resolved, *argv[1:]]
 
-    def discover(self) -> dict[str, Any]:
+    def discover(
+        self,
+        *,
+        root: Path | None = None,
+        env: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         servers = []
         for server_id, argv in sorted(self._server_commands.items()):
-            resolved = self._resolve_argv(argv)
+            resolved = self._resolve_argv(argv, root=root, env=env)
             servers.append(
                 {
                     "server_id": server_id,
@@ -131,7 +184,7 @@ class LspManager:
         argv = self._server_commands.get(server_id)
         if argv is None:
             raise LspError(f"unknown language server: {server_id}")
-        resolved = self._resolve_argv(argv)
+        resolved = self._resolve_argv(argv, root=root, env=env)
         if resolved is None:
             raise LspError(f"language server is not installed: {server_id}")
         root = root.resolve()
@@ -143,9 +196,12 @@ class LspManager:
             if active >= MAX_LSP_SESSIONS_PER_USER:
                 raise LspError("too many active language server sessions")
 
+        process_env = dict(env) if env is not None else None
+        if process_env is not None:
+            process_env["PATH"] = self._search_path(root=root, env=process_env)
         kwargs: dict[str, Any] = {
             "cwd": str(root),
-            "env": env,
+            "env": process_env,
             "stdin": asyncio.subprocess.PIPE,
             "stdout": asyncio.subprocess.PIPE,
             "stderr": asyncio.subprocess.PIPE,
@@ -171,19 +227,34 @@ class LspManager:
             self._stderr_loop(session), name=f"cptr-lsp-stderr-{lsp_id}"
         )
         try:
+            initialize_params: dict[str, Any] = {
+                "processId": os.getpid(),
+                "rootUri": root.as_uri(),
+                "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
+                "capabilities": {},
+                "clientInfo": {"name": "CPTR", "version": "1"},
+            }
+            if server_id == "typescript":
+                fallback_path = self._typescript_fallback_path(env=process_env)
+                if fallback_path:
+                    initialize_params["initializationOptions"] = {
+                        "tsserver": {"fallbackPath": fallback_path}
+                    }
             initialize = await self.request(
                 lsp_id=lsp_id,
                 user_id=user_id,
                 method="initialize",
-                params={
-                    "processId": os.getpid(),
-                    "rootUri": root.as_uri(),
-                    "workspaceFolders": [{"uri": root.as_uri(), "name": root.name}],
-                    "capabilities": {},
-                    "clientInfo": {"name": "CPTR", "version": "1"},
-                },
+                params=initialize_params,
                 timeout_seconds=DEFAULT_LSP_TIMEOUT_SECONDS,
             )
+            initialize_error = initialize.get("error")
+            if initialize_error is not None:
+                message = (
+                    str(initialize_error.get("message") or "unknown error")
+                    if isinstance(initialize_error, dict)
+                    else str(initialize_error)
+                )
+                raise LspError(f"language server initialize failed: {message[:500]}")
             await self.notify(lsp_id=lsp_id, user_id=user_id, method="initialized", params={})
         except Exception:
             await self._terminate(session)

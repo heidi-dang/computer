@@ -90,12 +90,51 @@ _REPOSITORY_BOUND_ACTIONS = frozenset(
         "plan",
     }
 )
+_INDEX_READY_ACTIONS = frozenset(
+    {
+        "index_status",
+        "impact_v2",
+        "why",
+        "evidence_graph",
+        "semantic_status",
+        "semantic_references",
+        "plan",
+    }
+)
+_BUILD_READY_ACTIONS = frozenset(
+    {
+        "build_status",
+        "build_graph",
+        "impact_v2",
+        "why",
+        "plan",
+    }
+)
+_SEMANTIC_READY_ACTIONS = frozenset({"semantic_status", "semantic_references"})
 _REF_RE = re.compile(r"^[A-Za-z0-9._/@{}~^:+-]+$")
 _UNIX_ABS_RE = re.compile(r"(?<![A-Za-z0-9_.-])/(?:[A-Za-z0-9._~+-]+/)+[A-Za-z0-9._~+-]+")
 _WINDOWS_ABS_RE = re.compile(r"\b[A-Za-z]:\\(?:[^\\\s\"'<>]+\\)*[^\\\s\"'<>]*")
 _MAX_COLLECTION_ITEMS = 100
 _MAX_STRING_CHARS = 24_000
 _FDX_RAW_STREAM_LIMIT_BYTES = max(128 * 1024, FDX_MAX_RESPONSE_BYTES * 4)
+
+
+def _fdx_process_environment(identity: ExecutionIdentity, root: Path) -> dict[str, str]:
+    """Expose only deterministic workspace/user-managed tool locations to FDX."""
+    environment = env_for(identity, root)
+    home = Path(identity.home)
+    directories = [
+        root / "node_modules" / ".bin",
+        home / ".cptr" / "lsp" / "node_modules" / ".bin",
+        home / ".cptr" / "bin",
+        home / ".cargo" / "bin",
+        home / ".local" / "bin",
+    ]
+    existing_path = environment.get("PATH") or ""
+    entries = [str(path) for path in directories]
+    entries.extend(part for part in existing_path.split(os.pathsep) if part)
+    environment["PATH"] = os.pathsep.join(dict.fromkeys(entries))
+    return environment
 
 
 class FdxIntelligenceError(RuntimeError):
@@ -163,7 +202,7 @@ class FdxDaemon:
     async def start(self) -> None:
         if self.process is not None and self.process.returncode is None:
             return
-        environment = env_for(self.identity, self.root)
+        environment = _fdx_process_environment(self.identity, self.root)
         kwargs: dict[str, Any] = {
             "cwd": str(self.root),
             "env": environment,
@@ -380,7 +419,7 @@ class FdxIntelligenceService:
         argv: list[str],
     ) -> Any:
         binary = self._resolve_binary(identity)
-        environment = env_for(identity, root)
+        environment = _fdx_process_environment(identity, root)
         kwargs: dict[str, Any] = {
             "cwd": str(root),
             "env": environment,
@@ -452,6 +491,89 @@ class FdxIntelligenceService:
             return json.loads(text)
         except json.JSONDecodeError:
             return {"text": text}
+
+    @staticmethod
+    def _result_text(value: Any) -> str:
+        if isinstance(value, dict):
+            return str(value.get("text") or "")
+        return str(value or "")
+
+    @classmethod
+    def _index_requires_refresh(cls, value: Any) -> bool:
+        text = cls._result_text(value).lower()
+        return (
+            "index absent" in text
+            or "index stale" in text
+            or "schema=0" in text
+            or "generation=0" in text
+        )
+
+    @classmethod
+    def _build_requires_refresh(cls, value: Any) -> bool:
+        text = cls._result_text(value).lower()
+        return "health=misconfigured" in text or "freshness=stale" in text or "generation=0" in text
+
+    @classmethod
+    def _semantic_requires_refresh(cls, value: Any) -> bool:
+        text = cls._result_text(value).lower()
+        return (
+            "semantic no providers" in text
+            or "health=misconfigured" in text
+            or "freshness=stale" in text
+            or "generation=0" in text
+        )
+
+    async def _prepare_repository_intelligence(
+        self,
+        *,
+        action: str,
+        root: Path,
+        identity: ExecutionIdentity,
+    ) -> None:
+        if action in _INDEX_READY_ACTIONS:
+            index_status = await self._run_cli(
+                root=root,
+                identity=identity,
+                argv=["index", "status"],
+            )
+            if self._index_requires_refresh(index_status):
+                await self._run_cli(
+                    root=root,
+                    identity=identity,
+                    argv=["index", "--refresh"],
+                )
+        if action in _BUILD_READY_ACTIONS:
+            build_status = await self._run_cli(
+                root=root,
+                identity=identity,
+                argv=["build", "status"],
+            )
+            if self._build_requires_refresh(build_status):
+                await self._run_cli(
+                    root=root,
+                    identity=identity,
+                    argv=["build", "refresh"],
+                )
+        if action in _SEMANTIC_READY_ACTIONS:
+            semantic_status = await self._run_cli(
+                root=root,
+                identity=identity,
+                argv=["semantic", "status"],
+            )
+            if self._semantic_requires_refresh(semantic_status):
+                # scip-typescript's --infer-tsconfig writes tsconfig.json into
+                # the target repository. FDX enables that mode when no root
+                # project config exists, so auto-refresh only when a real
+                # root config makes the provider operation read-only.
+                semantic_configured = (root / "tsconfig.json").is_file() or (
+                    root / "jsconfig.json"
+                ).is_file()
+                if semantic_configured:
+                    await self._run_cli(
+                        root=root,
+                        identity=identity,
+                        argv=["semantic", "refresh"],
+                    )
 
     @staticmethod
     def _validate_ref(value: str | None, field_name: str) -> str | None:
@@ -772,6 +894,11 @@ class FdxIntelligenceService:
             options["head"] = head
 
         try:
+            await self._prepare_repository_intelligence(
+                action=action,
+                root=root,
+                identity=identity,
+            )
             if action == "status":
                 daemon = await self._daemon(
                     user_id=user_id, workspace_id=workspace_id, root=root, identity=identity
