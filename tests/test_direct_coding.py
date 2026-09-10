@@ -205,6 +205,46 @@ class DirectCodingApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(denied.exception.status_code, 403)
         private_write.assert_not_awaited()
 
+    async def test_disabled_secret_write_guard_removes_prompt_token_but_keeps_workbench_boundary(self):
+        request = SimpleNamespace()
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = SecretWriteRequest(
+            path=".env",
+            secret="PASSWORD=synthetic-test-secret\n",
+            workbench_session_id="wbs_1234567890abcdef",
+            overwrite=True,
+        )
+        session = {
+            "session_id": "wbs_1234567890abcdef",
+            "workspace_id": "ws_1",
+            "status": "OPEN",
+            "archived_at": None,
+        }
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(return_value=False),
+            ) as guard_enabled,
+            patch(
+                "cptr.routers.coding.workbench_session_store.get",
+                new=AsyncMock(return_value=session),
+            ) as get_session,
+            patch(
+                "cptr.routers.coding.Runtime.write_private_file",
+                new=AsyncMock(return_value={"status": "saved"}),
+            ) as private_write,
+        ):
+            result = await write_workspace_secret(request, "ws_1", body)
+
+        guard_enabled.assert_awaited_once_with("user_1", "secret_write_prompt_approval")
+        get_session.assert_awaited_once_with(
+            owner_id="user_1", session_id="wbs_1234567890abcdef"
+        )
+        private_write.assert_awaited_once()
+        self.assertTrue(result["materialized"])
+
     async def test_prompt_approved_secret_write_can_materialize_dotenv_without_exposing_secret_metadata(
         self,
     ):
@@ -1124,6 +1164,153 @@ class DirectCodingHttpFlowTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DirectCodingGuardPolicyTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _snapshot():
+        return {
+            "command_id": "deadbeef",
+            "status": "COMPLETE",
+            "exit_code": 0,
+            "output": "ok",
+            "next_offset": 2,
+            "duration_ms": 1,
+            "output_truncated": False,
+            "timed_out": False,
+        }
+
+    @staticmethod
+    def _guard_side_effect(overrides: dict[str, bool]):
+        async def enabled(_user_id: str, guard_id: str) -> bool:
+            return overrides.get(guard_id, True)
+
+        return enabled
+
+    async def test_disabled_network_guard_removes_per_call_flag_but_keeps_external_scope(self):
+        request = SimpleNamespace(
+            state=SimpleNamespace(control_scopes={"command:execute", "command:external"})
+        )
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(command="git fetch origin")
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(
+                    side_effect=self._guard_side_effect({"network_operation_approval": False})
+                ),
+            ),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: exited (code 0)"),
+            ) as run,
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(return_value=self._snapshot()),
+            ),
+        ):
+            result = await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        run.assert_awaited_once()
+
+    async def test_disabled_network_guard_does_not_manufacture_external_scope(self):
+        request = SimpleNamespace(state=SimpleNamespace(control_scopes={"command:execute"}))
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(command="git fetch origin")
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(
+                    side_effect=self._guard_side_effect({"network_operation_approval": False})
+                ),
+            ),
+            self.assertRaises(HTTPException) as denied,
+        ):
+            await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(denied.exception.status_code, 403)
+        self.assertIn("command:external", denied.exception.detail)
+
+    async def test_package_install_guard_requires_explicit_install_flag(self):
+        request = SimpleNamespace(
+            state=SimpleNamespace(control_scopes={"command:execute", "command:external"})
+        )
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(command="npm install example-package", allow_network=True)
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(side_effect=self._guard_side_effect({})),
+            ),
+            self.assertRaises(HTTPException) as denied,
+        ):
+            await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(denied.exception.status_code, 403)
+        self.assertIn("allow_package_install", denied.exception.detail)
+
+    async def test_disabled_package_install_guard_skips_only_package_flag(self):
+        request = SimpleNamespace(
+            state=SimpleNamespace(control_scopes={"command:execute", "command:external"})
+        )
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(command="npm install example-package", allow_network=True)
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(
+                    side_effect=self._guard_side_effect({"package_install_approval": False})
+                ),
+            ),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: exited (code 0)"),
+            ) as run,
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(return_value=self._snapshot()),
+            ),
+        ):
+            result = await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        run.assert_awaited_once()
+
+    async def test_disabled_destructive_shell_guard_removes_classifier_without_granting_root(self):
+        request = SimpleNamespace(state=SimpleNamespace(control_scopes={"command:execute"}))
+        workspace = SimpleNamespace(path="/tmp/cptr-direct-coding")
+        body = CommandRequest(command="rm -rf build")
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(
+                    side_effect=self._guard_side_effect({"destructive_shell_approval": False})
+                ),
+            ),
+            patch(
+                "cptr.routers.coding.run_command",
+                new=AsyncMock(return_value="Task deadbeef: exited (code 0)"),
+            ) as run,
+            patch(
+                "cptr.routers.coding._command_snapshot",
+                new=AsyncMock(return_value=self._snapshot()),
+            ),
+        ):
+            result = await start_workspace_command(request, "ws_1", body)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        self.assertNotIn("local_root_unrestricted", run.await_args.kwargs["__context__"])
 
 
 class DirectCodingExternalCommandScopeTests(unittest.IsolatedAsyncioTestCase):

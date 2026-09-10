@@ -28,6 +28,7 @@ except ImportError:  # Python 3.10 compatibility
 from typing import Any, Protocol
 
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
+from cptr.services.guard_controls import guard_policy_service
 from cptr.services.verification import DefaultIndependentVerifier, IndependentVerifier
 from cptr.utils.redaction import redact_sensitive
 from cptr.utils.workspace_fingerprint import changed_paths
@@ -1048,8 +1049,12 @@ class AutonomousSupervisor:
         if not await self._monitor_is_running(monitor.monitor_id):
             return
         approval_operation = assignment[:120]
+        approval_guard_enabled = await guard_policy_service.is_enabled(
+            monitor.user_id, "autonomous_destructive_approval"
+        )
         if (
-            self._requires_approval(assignment)
+            approval_guard_enabled
+            and self._requires_approval(assignment)
             and approval_operation not in monitor.approved_operations
         ):
             approval = await self.store.create_approval(

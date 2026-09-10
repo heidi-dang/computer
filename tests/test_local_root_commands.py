@@ -83,6 +83,7 @@ class LocalRootCommandRouteTests(unittest.IsolatedAsyncioTestCase):
         body = CommandRequest(
             command=f"{ROOT_GRANT_MARKER}\nprintf ok",
             workbench_session_id="wbs_1234567890abcdef",
+            root_prompt_approved=True,
         )
         grant = AsyncMock(return_value={})
         with (
@@ -103,6 +104,7 @@ class LocalRootCommandRouteTests(unittest.IsolatedAsyncioTestCase):
         body = CommandRequest(
             command=f"{ROOT_GRANT_MARKER}\nrm -rf build",
             workbench_session_id="wbs_1234567890abcdef",
+            root_prompt_approved=True,
             wait_seconds=0,
         )
         with (
@@ -132,6 +134,64 @@ class LocalRootCommandRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             kwargs["__context__"]["root_workbench_session_id"],
             "wbs_1234567890abcdef",
+        )
+
+    async def test_enabled_root_guard_requires_prompt_approval_signal(self):
+        request = self._request()
+        workspace = SimpleNamespace(path="/tmp/cptr-root-workspace")
+        body = CommandRequest(
+            command=f"{ROOT_GRANT_MARKER}\nprintf ok",
+            workbench_session_id="wbs_1234567890abcdef",
+        )
+        grant = AsyncMock()
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(return_value=True),
+            ) as guard_enabled,
+            patch("cptr.routers.coding.local_root_grant_store.grant", new=grant),
+            self.assertRaises(HTTPException) as denied,
+        ):
+            await start_workspace_command(request, "ws-1", body)
+
+        self.assertEqual(denied.exception.status_code, 403)
+        self.assertIn("prompt authorization", str(denied.exception.detail))
+        guard_enabled.assert_awaited_once_with("user-1", "root_prompt_approval")
+        grant.assert_not_awaited()
+
+    async def test_disabled_root_guard_skips_prompt_signal_but_keeps_host_and_workbench_gates(self):
+        request = self._request()
+        workspace = SimpleNamespace(path="/tmp/cptr-root-workspace")
+        root_identity = SimpleNamespace(app_user_id="user-1", is_pam=False, uid=0)
+        body = CommandRequest(
+            command=f"{ROOT_GRANT_MARKER}\nprintf ok",
+            workbench_session_id="wbs_1234567890abcdef",
+        )
+        with (
+            patch("cptr.routers.coding._user", new=AsyncMock(return_value="user-1")),
+            patch("cptr.routers.coding._workspace", new=AsyncMock(return_value=workspace)),
+            patch(
+                "cptr.routers.coding.guard_policy_service.is_enabled",
+                new=AsyncMock(return_value=False),
+            ) as guard_enabled,
+            patch("cptr.routers.coding.identity_for_context", new=AsyncMock(return_value=root_identity)),
+            patch("cptr.routers.coding.unrestricted_root_identity", return_value=root_identity),
+            patch("cptr.routers.coding.local_root_grant_store.grant", new=AsyncMock(return_value={})) as grant,
+            patch("cptr.routers.coding.local_root_grant_store.is_active", new=AsyncMock(return_value=False)),
+            patch("cptr.routers.coding.run_command", new=AsyncMock(return_value="Task deadbeef: exited (code 0)")),
+            patch("cptr.routers.coding._command_snapshot", new=AsyncMock(return_value=self._snapshot())),
+            patch("cptr.routers.coding._touch_worker", new=AsyncMock(return_value=None)),
+        ):
+            result = await start_workspace_command(request, "ws-1", body)
+
+        self.assertEqual(result["status"], "COMPLETE")
+        guard_enabled.assert_any_await("user-1", "root_prompt_approval")
+        grant.assert_awaited_once_with(
+            owner_id="user-1",
+            session_id="wbs_1234567890abcdef",
+            ttl_seconds=None,
         )
 
     async def test_active_session_grant_applies_to_later_local_root_commands_without_marker(self):
@@ -179,6 +239,7 @@ class LocalRootCommandRouteTests(unittest.IsolatedAsyncioTestCase):
         body = CommandRequest(
             command=f"{ROOT_GRANT_MARKER}\nnpm install example-package",
             workbench_session_id="wbs_1234567890abcdef",
+            root_prompt_approved=True,
             allow_network=True,
         )
         grant = AsyncMock(return_value={})
@@ -212,6 +273,7 @@ class LocalRootCommandRouteTests(unittest.IsolatedAsyncioTestCase):
         body = CommandRequest(
             command=f"{ROOT_GRANT_MARKER}\nprintf ok",
             workbench_session_id="wbs_1234567890abcdef",
+            root_prompt_approved=True,
         )
         grant = AsyncMock(return_value={})
         with (

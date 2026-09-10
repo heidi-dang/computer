@@ -174,6 +174,7 @@ class AuthorityBroker:
         *,
         policy: TaskAuthorityPolicy,
         approval_id: str | None = None,
+        require_critical_approval: bool = True,
     ) -> CapabilityLease:
         decision_id = f"policy_{uuid.uuid4().hex}"
         decision_at = int(self._clock_ms())
@@ -198,7 +199,8 @@ class AuthorityBroker:
                 if _critical(permission.action):
                     critical_permissions.append(permission)
 
-            await self._verify_approval(approval_id, request, tuple(critical_permissions))
+            if require_critical_approval:
+                await self._verify_approval(approval_id, request, tuple(critical_permissions))
 
             if request.credential_names:
                 unknown_credentials = set(request.credential_names) - set(policy.credential_names)

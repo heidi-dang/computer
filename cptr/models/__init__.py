@@ -69,6 +69,7 @@ from cptr.models.factory_lifecycle import FactoryCiRun, FactoryCommitIntent
 from cptr.models.factory_metrics import FactoryCapabilityOutcome, FactoryMetricProjection
 from cptr.models.factory_workers import FactoryWorkerAssignment
 from cptr.models.files import File
+from cptr.models.guard_controls import GuardSetting, GuardSettingEvent
 from cptr.models.memory_core import (
     MemoryBranch,
     MemoryCheckpoint,
@@ -149,6 +150,8 @@ __all__ = [
     "FactoryRun",
     "FactoryWorkerAssignment",
     "File",
+    "GuardSetting",
+    "GuardSettingEvent",
     "McpEngineeringSession",
     "McpUsageEvent",
     "MemoryBranch",

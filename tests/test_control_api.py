@@ -158,6 +158,63 @@ class ControlApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["id"], "task_default")
         self.assertEqual(agent.start_task.await_args.kwargs["model_id"], "provider/default-model")
 
+    async def test_disabled_delegation_guard_allows_qualified_task_without_prompt_marker(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(
+            start_task=AsyncMock(
+                return_value={"id": "task_relaxed", "workspace_id": "ws_1", "status": "RUNNING"}
+            )
+        )
+        body = TaskCreateRequest(
+            workspace_id="ws_1",
+            prompt="Audit this workspace",
+            model_id="provider/model_1",
+        )
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+            patch(
+                "cptr.routers.control.guard_policy_service.is_enabled",
+                new=AsyncMock(side_effect=lambda _user, guard: guard != "delegation_prompt_approval"),
+            ) as guard_enabled,
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+        ):
+            result = await create_task(request, body)
+
+        self.assertEqual(result["id"], "task_relaxed")
+        guard_enabled.assert_any_await("user_1", "delegation_prompt_approval")
+        agent.start_task.assert_awaited_once()
+        self.assertEqual(agent.start_task.await_args.kwargs["model_id"], "provider/model_1")
+
+    async def test_disabled_task_review_guard_starts_task_without_review_requirement(self):
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+        agent = SimpleNamespace(
+            start_task=AsyncMock(
+                return_value={"id": "task_no_review", "workspace_id": "ws_1", "status": "RUNNING"}
+            )
+        )
+        body = TaskCreateRequest(
+            workspace_id="ws_1",
+            prompt="Run tests allow:delegate",
+            model_id="provider/model_1",
+        )
+
+        async def guard_state(_user_id: str, guard_id: str) -> bool:
+            return guard_id != "task_review_approval"
+
+        with (
+            patch("cptr.routers.control._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=object())),
+            patch(
+                "cptr.routers.control.guard_policy_service.is_enabled",
+                new=AsyncMock(side_effect=guard_state),
+            ),
+            patch("cptr.routers.control._services", return_value=(agent, SimpleNamespace())),
+        ):
+            await create_task(request, body)
+
+        self.assertFalse(agent.start_task.await_args.kwargs["review_required"])
+
     async def test_task_creation_rejects_missing_delegation_marker_before_agent_start(self):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
         services = patch("cptr.routers.control._services")

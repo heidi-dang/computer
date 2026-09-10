@@ -47,6 +47,7 @@ from cptr.services.direct_coding_workers import (
     service as direct_worker_service,
 )
 from cptr.services.fdx_intelligence import service as fdx_intelligence_service
+from cptr.services.guard_controls import guard_policy_service
 from cptr.services.lsp_manager import LspError, lsp_manager
 from cptr.services.local_root_grants import (
     LocalRootGrantDenied,
@@ -118,6 +119,13 @@ _SSH_TRANSPORT_COMMAND = re.compile(
 )
 
 
+_PACKAGE_INSTALL_COMMAND = re.compile(
+    r"(?:^|[;&|]\s*|\s)(?:(?:npm|pnpm|yarn)\s+(?:install|add)\b|"
+    r"pip(?:3)?\s+install\b|uv\s+(?:pip\s+install|sync)\b)",
+    re.IGNORECASE,
+)
+
+
 class WorkerTargetRequest(BaseModel):
     worker_id: str | None = Field(default=None, min_length=1, max_length=200)
 
@@ -177,6 +185,8 @@ class CommandRequest(WorkerTargetRequest):
     cwd: str = Field(default=".", min_length=1, max_length=1_000)
     wait_seconds: int = Field(default=0, ge=0, le=COMMAND_INLINE_WAIT_MAX_SECONDS)
     allow_network: bool = False
+    allow_package_install: bool = False
+    root_prompt_approved: bool = False
     measure_lifecycle: bool = False
     pty: bool = False
     rows: int = Field(default=24, ge=5, le=300)
@@ -566,6 +576,7 @@ def _command_request_fingerprint(
         "command": body.command,
         "cwd": relative_cwd,
         "allow_network": body.allow_network,
+        "allow_package_install": body.allow_package_install,
         "root_unrestricted": root_unrestricted,
         "workbench_session_id": body.workbench_session_id,
         "pty": body.pty,
@@ -1964,7 +1975,10 @@ async def write_workspace_secret(request: Request, workspace_id: str, body: Secr
     """Materialize a secret only for the exact prompt-approved Workbench operation."""
     user_id = await _user(request, "coding:write")
     workspace = await _workspace(user_id, workspace_id)
-    if body.user_approval != "allow:secret-write":
+    if (
+        await guard_policy_service.is_enabled(user_id, "secret_write_prompt_approval")
+        and body.user_approval != "allow:secret-write"
+    ):
         raise HTTPException(
             status_code=403,
             detail="secret materialization requires explicit prompt approval: allow:secret-write",
@@ -2408,6 +2422,15 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
             status_code=403,
             detail="root grant changes require an owned Workbench session",
         )
+    if (
+        directive.grant
+        and await guard_policy_service.is_enabled(user_id, "root_prompt_approval")
+        and not body.root_prompt_approved
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="local root grant requires explicit prompt authorization",
+        )
     body.command = directive.command
     root_feature_enabled = local_root_grants_enabled()
     if directive.grant and not root_feature_enabled:
@@ -2428,19 +2451,38 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
             session_id=body.workbench_session_id,
         )
     )
-    # Validate the requested effect before persisting a new authority grant. A
-    # rejected command must never leave root authority behind as a side effect.
+    # Guard Controls may remove only their named approval friction. The actual
+    # authority boundary remains the intersection of request effects, bearer
+    # scopes, host/root prerequisites and the dedicated SSH boundary.
     root_unrestricted = bool(directive.grant or existing_root_grant)
+    network_approval_required = await guard_policy_service.is_enabled(
+        user_id, "network_operation_approval"
+    )
+    destructive_approval_required = await guard_policy_service.is_enabled(
+        user_id, "destructive_shell_approval"
+    )
+    package_approval_required = await guard_policy_service.is_enabled(
+        user_id, "package_install_approval"
+    )
+    external_effect = bool(_EXTERNAL_COMMAND.search(body.command))
+    package_install_effect = bool(_PACKAGE_INSTALL_COMMAND.search(body.command))
+    effective_network_approval = bool(body.allow_network or not network_approval_required)
+    destructive_allowed = bool(root_unrestricted or not destructive_approval_required)
     _validate_command(
         body.command,
-        body.allow_network,
-        root_unrestricted=root_unrestricted,
+        effective_network_approval,
+        root_unrestricted=destructive_allowed,
     )
     scopes = set(getattr(getattr(request, "state", None), "control_scopes", set()))
-    if body.allow_network and "command:external" not in scopes:
+    if external_effect and "command:external" not in scopes:
         raise HTTPException(
             status_code=403,
             detail="external commands require the command:external scope",
+        )
+    if package_install_effect and package_approval_required and not body.allow_package_install:
+        raise HTTPException(
+            status_code=403,
+            detail="package installation requires explicit allow_package_install=true",
         )
     if directive.grant and body.workbench_session_id:
         probe_context = _command_context(
@@ -2884,7 +2926,14 @@ async def control_managed_browser(request: Request, workspace_id: str, body: Bro
             if body.action == "navigate":
                 if not body.url:
                     raise HTTPException(status_code=422, detail="navigate requires url")
-                url = _validate_browser_url(request, body.url, allow_network=body.allow_network)
+                network_approval_required = await guard_policy_service.is_enabled(
+                    user_id, "network_operation_approval"
+                )
+                url = _validate_browser_url(
+                    request,
+                    body.url,
+                    allow_network=bool(body.allow_network or not network_approval_required),
+                )
                 navigation = await asyncio.wait_for(
                     client.navigate(url), timeout=_BROWSER_OPERATION_TIMEOUT_SECONDS
                 )
