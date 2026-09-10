@@ -86,6 +86,62 @@ class FactoryApiTests(unittest.IsolatedAsyncioTestCase):
             idempotency_key=key,
         )
 
+    async def test_start_defaults_to_parallel_models_and_automatic_victory_delivery(self):
+        run = await self._start(key="auto-delivery-defaults")
+        self.assertEqual(run.policy["parallel_model_runs"], 5)
+        self.assertTrue(run.policy["push_required"])
+        self.assertTrue(run.policy["auto_push_after_victory"])
+        self.assertTrue(run.policy["open_pr_required"])
+
+        for parallelism in (4, 11):
+            with self.subTest(parallelism=parallelism):
+                with self.assertRaisesRegex(ValueError, "between 5 and 10"):
+                    await self.service.start(
+                        user_id="user-1",
+                        workspace_id="workspace-1",
+                        mission="invalid parallelism",
+                        acceptance_criteria=("criterion",),
+                        policy={
+                            "parallel_model_runs": parallelism,
+                            "verification_targets": [
+                                {
+                                    "gate_id": "acceptance",
+                                    "phase": "full",
+                                    "target": "python_pytest",
+                                    "acceptance_ids": [1],
+                                }
+                            ],
+                        },
+                        budget={},
+                        model_id="configured-model",
+                        idempotency_key=f"invalid-parallelism-{parallelism}",
+                    )
+
+        local_only = await self.service.start(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="local-only no delivery",
+            acceptance_criteria=("criterion",),
+            policy={
+                "push_required": False,
+                "parallel_model_runs": 10,
+                "verification_targets": [
+                    {
+                        "gate_id": "acceptance",
+                        "phase": "full",
+                        "target": "python_pytest",
+                        "acceptance_ids": [1],
+                    }
+                ],
+            },
+            budget={},
+            model_id="configured-model",
+            idempotency_key="explicit-no-delivery",
+        )
+        self.assertEqual(local_only.policy["parallel_model_runs"], 10)
+        self.assertFalse(local_only.policy["auto_push_after_victory"])
+        self.assertFalse(local_only.policy["open_pr_required"])
+
     async def test_start_is_user_scoped_and_idempotent_only_for_the_same_request(self):
         first = await self._start()
         replay = await self._start()

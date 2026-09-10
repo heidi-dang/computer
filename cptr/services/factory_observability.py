@@ -68,6 +68,7 @@ _PROGRESS_STATES = (
     FactoryState.VICTORY_JUDGING,
     FactoryState.COMMITTING,
     FactoryState.PUSHING,
+    FactoryState.PR_CREATING,
     FactoryState.CI_VERIFYING,
     FactoryState.CYCLE_COMPLETE,
     FactoryState.COMPLETE,

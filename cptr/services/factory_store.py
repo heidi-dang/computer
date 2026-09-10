@@ -943,10 +943,12 @@ class SqlFactoryStore:
         seen: set[str] = set()
         for row in rows:
             payload = row.payload if isinstance(row.payload, dict) else {}
-            task_id = str(payload.get("task_id") or "").strip()
-            if task_id and task_id not in seen:
-                seen.add(task_id)
-                task_ids.append(task_id)
+            candidates = [*(payload.get("task_ids") or ()), payload.get("task_id")]
+            for raw_task_id in candidates:
+                task_id = str(raw_task_id or "").strip()
+                if task_id and task_id not in seen:
+                    seen.add(task_id)
+                    task_ids.append(task_id)
         return task_ids
 
     async def list_evidence_page(

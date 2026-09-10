@@ -22,6 +22,8 @@ from cptr.services.factory_production import (
     FactoryProductionRunner,
     ImplementationPhaseHandler,
     ProductionCiPhaseHandler,
+    ProductionPullRequestPhaseHandler,
+    ProductionPushPhaseHandler,
     SkillSelectionPhaseHandler,
     TrustEvaluationPhaseHandler,
     _reset_isolated_reproduction,
@@ -279,6 +281,109 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["execution_scope"], "source_read_only")
         self.assertFalse(agent.start_task.await_args.kwargs["execution_policy"]["allow_commands"])
         self.assertNotIn("state", payload)
+
+    async def test_advisory_parallel_models_start_diverse_read_only_lanes(self):
+        agent = SimpleNamespace(
+            start_task=AsyncMock(side_effect=[{"id": f"task-{index}"} for index in range(5)])
+        )
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.AUDITING,
+            next_state=FactoryState.SELECTING_FINDING,
+            agent=agent,
+        )
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-parallel",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="audit broadly",
+                acceptance_criteria=("find production defects",),
+                model_id="local:model",
+                policy={"parallel_model_runs": 5},
+            ),
+            cycle=SimpleNamespace(id="cycle-parallel", attempt_count=0),
+            evidence=(),
+            gates=(),
+            steering_messages=(),
+        )
+
+        outcome = await handler.execute(context)
+
+        self.assertEqual(agent.start_task.await_count, 5)
+        prompts = [call.kwargs["prompt"] for call in agent.start_task.await_args_list]
+        self.assertEqual(len(set(prompts)), 5)
+        self.assertTrue(all("PARALLEL LANE" in prompt for prompt in prompts))
+        self.assertTrue(
+            all(not call.kwargs["execution_policy"]["allow_file_writes"] for call in agent.start_task.await_args_list)
+        )
+        payload = outcome.artifacts[0].payload
+        self.assertEqual(payload["parallelism"], 5)
+        self.assertEqual(payload["task_ids"], [f"task-{index}" for index in range(5)])
+        self.assertEqual(len(payload["lanes"]), 5)
+
+    async def test_advisory_parallel_models_consolidate_lane_outputs_deterministically(self):
+        async def get_task(task_id, *, user_id):
+            return {
+                "id": task_id,
+                "status": "COMPLETE",
+                "created_at": 1,
+                "raw_output": [],
+            }
+
+        async def get_output(task_id, *, user_id):
+            return {"content": f"finding from {task_id}"}
+
+        agent = SimpleNamespace(
+            get_task=AsyncMock(side_effect=get_task),
+            get_output=AsyncMock(side_effect=get_output),
+            cancel_task=AsyncMock(),
+        )
+        handler = AdvisoryPhaseHandler(
+            state=FactoryState.AUDITING,
+            next_state=FactoryState.SELECTING_FINDING,
+            agent=agent,
+        )
+        lanes = [
+            {"lane": index + 1, "focus": f"focus-{index + 1}", "task_id": f"task-{index}"}
+            for index in range(5)
+        ]
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-parallel",
+                user_id="user-1",
+                workspace_id="workspace-1",
+                mission="audit broadly",
+                acceptance_criteria=("find production defects",),
+                model_id="local:model",
+                policy={"parallel_model_runs": 5},
+            ),
+            cycle=SimpleNamespace(id="cycle-parallel", attempt_count=0),
+            evidence=(
+                SimpleNamespace(
+                    kind="factory_phase_task",
+                    payload={
+                        "phase_state": "AUDITING",
+                        "attempt": 0,
+                        "task_ids": [f"task-{index}" for index in range(5)],
+                        "lanes": lanes,
+                        "parallelism": 5,
+                    },
+                    idempotency_key="factory:run-parallel:cycle-parallel:AUDITING:attempt-0",
+                ),
+            ),
+            gates=(),
+            steering_messages=(),
+        )
+
+        outcome = await handler.execute(context)
+
+        self.assertEqual(outcome.next_state, FactoryState.SELECTING_FINDING)
+        summary = outcome.artifacts[0].payload["summary"]
+        for index in range(5):
+            self.assertIn(f"finding from task-{index}", summary)
+        self.assertLess(summary.index("task-0"), summary.index("task-4"))
+        self.assertEqual(outcome.artifacts[0].payload["parallelism"], 5)
+        self.assertEqual(agent.get_output.await_count, 5)
 
     async def test_advisory_handoff_reuses_meaningful_prior_evidence_and_tightens_budget(self):
         agent = SimpleNamespace(start_task=AsyncMock(return_value={"id": "task-handoff"}))
@@ -1107,6 +1212,143 @@ class FactoryProductionRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(resumed.current_cycle_id)
         cycles = await self.store.list_cycles(run.id)
         self.assertEqual(len(cycles), 1)
+
+    async def test_parallel_phase_task_registry_returns_every_lane_for_quiescence(self):
+        run = await self.store.create_run(
+            user_id="user-1",
+            workspace_id="workspace-1",
+            mission="track every parallel task",
+            acceptance_criteria=["all tasks are cancellable"],
+            policy={},
+            budget={},
+            model_id="local:model",
+            idempotency_key="parallel-task-registry-run",
+        )
+        cycle = await self.store.create_cycle(
+            run.id,
+            base_revision=None,
+            base_fingerprint=None,
+            idempotency_key="parallel-task-registry-cycle",
+        )
+        await self.store.append_evidence(
+            run_id=run.id,
+            cycle_id=cycle.id,
+            gate_id=None,
+            kind="factory_phase_task",
+            source="cptr-agent-service",
+            authority=SimpleNamespace(value="MACHINE"),
+            revision=None,
+            fingerprint=None,
+            payload={"task_ids": [f"task-{index}" for index in range(5)]},
+            idempotency_key="parallel-task-registry-evidence",
+        )
+
+        task_ids = await self.store.list_execution_task_ids(run.id)
+
+        self.assertEqual(task_ids, [f"task-{index}" for index in range(5)])
+
+    async def test_automatic_victory_push_uses_machine_authorization_and_advances_to_pr(self):
+        revision = "a" * 40
+        git = SimpleNamespace(
+            get_intent_for_cycle=AsyncMock(
+                return_value=SimpleNamespace(
+                    id="intent-auto-push", status="COMMITTED", commit_sha=revision
+                )
+            ),
+            push_commit=AsyncMock(
+                return_value=SimpleNamespace(
+                    commit_sha=revision,
+                    push_remote="origin",
+                    push_branch="factory/verified-fix",
+                )
+            ),
+        )
+        control = SimpleNamespace(resolve_push_authorization=AsyncMock())
+        handler = ProductionPushPhaseHandler(control=control, git_service=git)
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-auto-push",
+                policy={
+                    "push_required": True,
+                    "auto_push_after_victory": True,
+                    "push_remote": "origin",
+                    "push_branch": "factory/verified-fix",
+                },
+            ),
+            cycle=SimpleNamespace(id="cycle-auto-push", target_fingerprint="fingerprint"),
+        )
+
+        with patch(
+            "cptr.services.factory_production._verification_root",
+            new=AsyncMock(return_value="/repo"),
+        ):
+            outcome = await handler.execute(context)
+
+        self.assertEqual(outcome.next_state, FactoryState.PR_CREATING)
+        control.resolve_push_authorization.assert_not_awaited()
+        authorization = git.push_commit.await_args.kwargs["authorization"]
+        self.assertTrue(authorization.approved)
+        self.assertEqual(authorization.revision, revision)
+        self.assertEqual(authorization.remote, "origin")
+        self.assertEqual(authorization.branch, "factory/verified-fix")
+        self.assertTrue(authorization.approval_id.startswith("machine-victory:"))
+
+    async def test_pull_request_phase_creates_restart_safe_pr_for_pushed_revision(self):
+        revision = "b" * 40
+        git = SimpleNamespace(
+            get_intent_for_cycle=AsyncMock(
+                return_value=SimpleNamespace(status="COMMITTED", commit_sha=revision)
+            )
+        )
+        handler = ProductionPullRequestPhaseHandler(git_service=git)
+        context = SimpleNamespace(
+            run=SimpleNamespace(
+                id="run-pr",
+                user_id="user-1",
+                mission="repair verified defect",
+                policy={
+                    "push_required": True,
+                    "open_pr_required": True,
+                    "push_branch": "factory/verified-fix",
+                    "pr_title": "factory: repair verified defect",
+                },
+            ),
+            cycle=SimpleNamespace(id="cycle-pr", target_fingerprint="fingerprint"),
+        )
+        identity = SimpleNamespace()
+        gh_results = [
+            (0, "[]", ""),
+            (0, '{"defaultBranchRef":{"name":"main"}}', ""),
+            (0, "https://github.com/example/repo/pull/42\n", ""),
+        ]
+
+        with (
+            patch(
+                "cptr.services.factory_production._verification_root",
+                new=AsyncMock(return_value="/repo"),
+            ),
+            patch(
+                "cptr.services.factory_production.identity_for_user_id",
+                new=AsyncMock(return_value=identity),
+            ),
+            patch(
+                "cptr.services.factory_production.gh.run_gh",
+                new=AsyncMock(side_effect=gh_results),
+            ) as run_gh,
+        ):
+            outcome = await handler.execute(context)
+
+        self.assertEqual(outcome.next_state, FactoryState.CI_VERIFYING)
+        self.assertEqual(outcome.artifacts[0].kind, "pull_request")
+        self.assertEqual(outcome.artifacts[0].revision, revision)
+        self.assertEqual(outcome.artifacts[0].payload["number"], 42)
+        self.assertEqual(
+            outcome.artifacts[0].payload["url"], "https://github.com/example/repo/pull/42"
+        )
+        self.assertFalse(outcome.artifacts[0].payload["existing"])
+        self.assertEqual(run_gh.await_count, 3)
+        self.assertEqual(run_gh.await_args_list[0].args[0][:3], ["pr", "list", "--head"])
+        self.assertEqual(run_gh.await_args_list[2].args[0][:3], ["pr", "create", "--title"])
 
     async def test_ci_pending_observation_is_replay_safe_until_terminal(self):
         revision = "a" * 40

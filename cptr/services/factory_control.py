@@ -198,9 +198,33 @@ class FactoryControlService:
         model_id: str | None,
         idempotency_key: str | None,
     ) -> FactoryRun:
+        policy = dict(policy or {})
+        budget = dict(budget or {})
         implementation_required = bool(policy.get("implementation_required", True))
         if implementation_required and not str(model_id or "").strip():
             raise ValueError("factory implementation requires an explicit model_id")
+
+        if implementation_required or "parallel_model_runs" in policy:
+            raw_parallelism = policy.get("parallel_model_runs", 5)
+            if isinstance(raw_parallelism, bool):
+                raise ValueError("factory parallel_model_runs must be between 5 and 10")
+            try:
+                parallelism = int(raw_parallelism)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("factory parallel_model_runs must be between 5 and 10") from exc
+            if parallelism < 5 or parallelism > 10:
+                raise ValueError("factory parallel_model_runs must be between 5 and 10")
+            policy["parallel_model_runs"] = parallelism
+
+        if implementation_required:
+            policy.setdefault("push_required", True)
+        push_required = bool(policy.get("push_required", False))
+        policy.setdefault("auto_push_after_victory", push_required and implementation_required)
+        policy.setdefault("open_pr_required", push_required and implementation_required)
+        if bool(policy.get("auto_push_after_victory", False)) and not push_required:
+            raise ValueError("auto_push_after_victory requires push_required")
+        if bool(policy.get("open_pr_required", False)) and not push_required:
+            raise ValueError("open_pr_required requires push_required")
 
         # Compile the machine-verification/CI contract before creating durable
         # state. Invalid missions fail immediately instead of consuming several

@@ -37,6 +37,7 @@ class FactoryDomainTests(unittest.TestCase):
                 "REPAIR_REQUIRED",
                 "COMMITTING",
                 "PUSHING",
+                "PR_CREATING",
                 "CI_VERIFYING",
                 "CYCLE_COMPLETE",
                 "PAUSED",
@@ -96,6 +97,11 @@ class FactoryDomainTests(unittest.TestCase):
         )
         validate_factory_transition(
             FactoryState.PUSHING,
+            FactoryState.PR_CREATING,
+            FactoryActor.SYSTEM,
+        )
+        validate_factory_transition(
+            FactoryState.PR_CREATING,
             FactoryState.CI_VERIFYING,
             FactoryActor.SYSTEM,
         )
