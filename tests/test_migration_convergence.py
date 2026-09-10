@@ -58,7 +58,7 @@ class MigrationConvergenceTests(unittest.TestCase):
 
     def test_merged_history_has_one_head_and_supports_fresh_and_both_legacy_lineages(self):
         script = ScriptDirectory.from_config(self._config(Path("unused.db")))
-        self.assertEqual(script.get_heads(), ["0035"])
+        self.assertEqual(script.get_heads(), ["0036"])
 
         browser_tables = [
             Base.metadata.tables[name]
@@ -75,7 +75,7 @@ class MigrationConvergenceTests(unittest.TestCase):
 
             fresh = root / "fresh.db"
             command.upgrade(self._config(fresh), "head")
-            self.assertEqual(self._version(fresh), "0035")
+            self.assertEqual(self._version(fresh), "0036")
             self.assertTrue(
                 {
                     "factory_runs",
@@ -104,6 +104,8 @@ class MigrationConvergenceTests(unittest.TestCase):
                     "capability_os_observations",
                     "capability_os_mcp_discovery_entries",
                     "capability_os_retention_jobs",
+                    "guard_settings",
+                    "guard_setting_events",
                 }
                 <= self._tables(fresh)
             )
@@ -122,7 +124,7 @@ class MigrationConvergenceTests(unittest.TestCase):
             self.assertNotIn("capability_os_runs", self._tables(fresh))
             self.assertNotIn("capability_os_mcp_discovery_entries", self._tables(fresh))
             command.upgrade(self._config(fresh), "head")
-            self.assertEqual(self._version(fresh), "0035")
+            self.assertEqual(self._version(fresh), "0036")
             self.assertTrue(
                 {
                     "capability_os_mcp_oauth_flows",
@@ -135,7 +137,7 @@ class MigrationConvergenceTests(unittest.TestCase):
             command.upgrade(self._config(factory), "0025")
             self.assertNotIn("browser_devices", self._tables(factory))
             command.upgrade(self._config(factory), "head")
-            self.assertEqual(self._version(factory), "0035")
+            self.assertEqual(self._version(factory), "0036")
             self.assertTrue(
                 {
                     "browser_devices",
@@ -163,7 +165,7 @@ class MigrationConvergenceTests(unittest.TestCase):
             self.assertIn("browser_devices", self._tables(legacy_main))
 
             command.upgrade(self._config(legacy_main), "head")
-            self.assertEqual(self._version(legacy_main), "0035")
+            self.assertEqual(self._version(legacy_main), "0036")
             self.assertTrue(
                 {
                     "factory_runs",
