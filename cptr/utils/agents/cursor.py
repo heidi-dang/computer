@@ -9,12 +9,7 @@ from typing import Any, AsyncIterator
 
 from cptr.utils.agents.attachments import PreparedAgentAttachments
 from cptr.utils.agents.environment import agent_env
-from cptr.utils.agents.acp import (
-    AcpClient,
-    acp_event_stream,
-    acp_text_from_update,
-    acp_tool_from_update,
-)
+from cptr.utils.agents.acp import AcpClient, acp_text_from_update, acp_tool_from_update
 from cptr.utils.agents.events import (
     AgentDone,
     AgentError,
@@ -84,7 +79,32 @@ async def run_cursor_agent(
         ]
         prompt_task = asyncio.create_task(client.prompt(prompt, images=images))
         try:
-            async for event in acp_event_stream(client):
+            while True:
+                if prompt_task.done():
+                    try:
+                        event = client.events.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                else:
+                    event_task = asyncio.create_task(client.events.get())
+                    try:
+                        done, _ = await asyncio.wait(
+                            {prompt_task, event_task},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                    except asyncio.CancelledError:
+                        event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await event_task
+                        raise
+                    if event_task in done:
+                        event = event_task.result()
+                    else:
+                        event_task.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await event_task
+                        continue
+
                 params = event.get("params") if isinstance(event.get("params"), dict) else {}
                 text = acp_text_from_update(params)
                 if text:
@@ -92,22 +112,7 @@ async def run_cursor_agent(
                 tool = acp_tool_from_update(params)
                 if tool:
                     yield AgentToolUpdate(**tool)
-                if prompt_task.done():
-                    try:
-                        next_event = await asyncio.wait_for(client.events.get(), timeout=0.25)
-                    except asyncio.TimeoutError:
-                        break
-                    next_params = (
-                        next_event.get("params")
-                        if isinstance(next_event.get("params"), dict)
-                        else {}
-                    )
-                    next_text = acp_text_from_update(next_params)
-                    if next_text:
-                        yield AgentTextDelta(next_text)
-                    next_tool = acp_tool_from_update(next_params)
-                    if next_tool:
-                        yield AgentToolUpdate(**next_tool)
+
             await prompt_task
         finally:
             if not prompt_task.done():
