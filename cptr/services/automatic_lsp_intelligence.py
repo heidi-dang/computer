@@ -13,6 +13,7 @@ turn an otherwise-valid filesystem read/write into a failure.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -72,6 +73,7 @@ class _AutomaticSession:
     root: Path
     capabilities: dict[str, Any]
     document_versions: dict[str, int] = field(default_factory=dict)
+    document_fingerprints: dict[str, str] = field(default_factory=dict)
     last_used: float = field(default_factory=time.monotonic)
 
 
@@ -273,6 +275,11 @@ class AutomaticLspIntelligenceService:
     ) -> str:
         uri = path.resolve().as_uri()
         previous = session.document_versions.get(uri)
+        fingerprint = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if previous is not None and session.document_fingerprints.get(uri) == fingerprint:
+            session.last_used = time.monotonic()
+            await asyncio.sleep(0)
+            return uri
         version = (previous or 0) + 1
         if previous is None:
             method = "textDocument/didOpen"
@@ -300,6 +307,7 @@ class AutomaticLspIntelligenceService:
             timeout=self._request_timeout_seconds,
         )
         session.document_versions[uri] = version
+        session.document_fingerprints[uri] = fingerprint
         session.last_used = time.monotonic()
         await asyncio.sleep(0)
         return uri
