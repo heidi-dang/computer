@@ -446,6 +446,18 @@ export interface McpCapabilityOsTask {
 	updatedAtMs: number;
 }
 
+export interface McpCapabilityOsStreamError {
+	code: string;
+	task_id?: string;
+	message?: string;
+}
+
+export interface McpCapabilityOsStreamCallbacks {
+	onSnapshot: (snapshot: McpCapabilityOsOperatorSnapshot) => void;
+	onOpen?: () => void;
+	onError?: (error: unknown, detail?: McpCapabilityOsStreamError) => void;
+}
+
 export interface McpCapabilityOsOperatorSnapshot {
 	task: Omit<McpCapabilityOsTask, 'label' | 'updatedAtMs'>;
 	views: {
@@ -1130,6 +1142,43 @@ export const getMcpCapabilityOsOperatorSnapshot = (taskId: string, limit = 100) 
 		`/api/mcp/capability-os/operator?${params.toString()}`
 	);
 };
+
+export function openMcpCapabilityOsStream(
+	taskId: string,
+	callbacks: McpCapabilityOsStreamCallbacks,
+	limit = 100
+): () => void {
+	const params = new URLSearchParams({ task_id: taskId, limit: String(limit) });
+	const source = new EventSource(`/api/mcp/capability-os/stream?${params.toString()}`);
+
+	const parseSnapshot = (message: MessageEvent<string>) => {
+		try {
+			callbacks.onSnapshot(JSON.parse(message.data) as McpCapabilityOsOperatorSnapshot);
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+	const parseError = (message: MessageEvent<string>) => {
+		try {
+			const detail = JSON.parse(message.data) as McpCapabilityOsStreamError;
+			callbacks.onError?.(
+				new Error(detail.message || detail.code || 'Capability OS stream failed'),
+				detail
+			);
+			if (detail.code === 'CAPABILITY_OS_TASK_NOT_FOUND') source.close();
+		} catch (error) {
+			callbacks.onError?.(error);
+		}
+	};
+
+	source.addEventListener('snapshot', (event) => parseSnapshot(event as MessageEvent<string>));
+	source.addEventListener('capability_os_error', (event) =>
+		parseError(event as MessageEvent<string>)
+	);
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+	return () => source.close();
+}
 
 export const getMcpFactorySnapshot = (runId?: string | null, runLimit = 20) => {
 	const params = new URLSearchParams({ run_limit: String(runLimit) });
