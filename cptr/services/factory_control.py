@@ -290,7 +290,16 @@ class FactoryControlService:
             "pending_approval": _approval_dict(pending_approval) if pending_approval else None,
             "gates": gate_summary,
         }
-        return redact_external(payload)
+        redacted = redact_external(payload)
+        # Generic boundary redaction intentionally treats a dictionary key named
+        # "state" as sensitive because OAuth/query state values are secrets. Factory
+        # lifecycle state is a different, server-owned enum, so restore only these
+        # two validated domain fields after the generic redaction pass. Nested
+        # caller-controlled `state` values (for example inside policy) stay redacted.
+        redacted["state"] = FactoryState(run.state).value
+        if cycle is not None and isinstance(redacted.get("cycle"), dict):
+            redacted["cycle"]["state"] = FactoryState(cycle.state).value
+        return redacted
 
     async def events(
         self,
