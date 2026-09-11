@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -454,6 +455,18 @@ class WorkspaceContextServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Workspace Context Snapshot", compiled)
 
 
+def _configure_test_git_identity(repo: str) -> None:
+    """Keep live-Git tests independent of developer or CI global Git config."""
+    subprocess.run(
+        ["git", "-C", repo, "config", "user.name", "CPTR Tests"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", repo, "config", "user.email", "cptr-tests@example.invalid"],
+        check=True,
+    )
+
+
 class LiveWorkspaceContextIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_live_git_repo_evidence_capture(self):
         temp_dir = tempfile.mkdtemp(prefix="cptr_test_ws_")
@@ -462,6 +475,7 @@ class LiveWorkspaceContextIntegrationTests(unittest.IsolatedAsyncioTestCase):
             import cptr.utils.git as git
 
             await git.init_repo(temp_dir)
+            _configure_test_git_identity(temp_dir)
 
             test_file = Path(temp_dir) / "sample.py"
             test_file.write_text("print('hello world')\n")
@@ -507,6 +521,7 @@ class LiveWorkspaceContextIntegrationTests(unittest.IsolatedAsyncioTestCase):
             import cptr.utils.git as git
 
             await git.init_repo(temp_dir)
+            _configure_test_git_identity(temp_dir)
             f = Path(temp_dir) / "initial.txt"
             f.write_text("v1")
             await git.stage(temp_dir, ["initial.txt"])
