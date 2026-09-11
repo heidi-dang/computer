@@ -99,6 +99,18 @@ def _manifest_paths(manifest: list[dict[str, str]]) -> set[str]:
     return paths
 
 
+def _blocks_worker_creation(item: dict[str, Any]) -> bool:
+    """Return whether a source status entry represents user/repository state.
+
+    FDX indexes are CPTR-owned derived state. An untracked .fdx tree is
+    intentionally excluded from a new Git worktree and therefore must not make
+    an otherwise clean repository unusable as a worker base. Tracked changes,
+    including tracked files under .fdx, still fail closed.
+    """
+    path = str(item.get("path") or "").replace("\\", "/").strip("/")
+    return not (item.get("status") == "untracked" and (path == ".fdx" or path.startswith(".fdx/")))
+
+
 async def create_worker_worktree(
     *,
     source_root: Path,
@@ -115,7 +127,8 @@ async def create_worker_worktree(
             status_code=422,
         )
     source_status = await status(str(source_root), identity)
-    if source_status.get("files"):
+    source_files = source_status.get("files") or []
+    if any(_blocks_worker_creation(item) for item in source_files):
         raise DirectCodingWorkerError(
             "DIRECT_WORKER_DIRTY_BASE",
             "create direct coding workers before modifying the source workspace; the source repository must be clean",
