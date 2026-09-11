@@ -45,9 +45,9 @@ class WorkspaceChatIdentityMigrationTests(unittest.TestCase):
                             "INSERT INTO chats "
                             "(id,user_id,title,summary,current_message_id,meta,created_at,"
                             "updated_at,last_read_at) "
-                            "VALUES ('chat1','u1','Legacy',NULL,NULL,"
-                            "'{\"workspace\":\"/repo/a\"}',1,1,NULL)"
-                        )
+                            "VALUES ('chat1','u1','Legacy',NULL,NULL,:meta,1,1,NULL)"
+                        ),
+                        {"meta": '{"workspace":"/repo/a"}'},
                     )
             finally:
                 engine.dispose()
@@ -87,9 +87,9 @@ class WorkspaceChatIdentityMigrationTests(unittest.TestCase):
                             "INSERT INTO chats "
                             "(id,user_id,title,summary,current_message_id,meta,created_at,"
                             "updated_at,last_read_at) "
-                            "VALUES ('chat1','u1','Legacy',NULL,NULL,"
-                            "'{\"workspace\":\"/missing\"}',1,1,NULL)"
-                        )
+                            "VALUES ('chat1','u1','Legacy',NULL,NULL,:meta,1,1,NULL)"
+                        ),
+                        {"meta": '{"workspace":"/missing"}'},
                     )
             finally:
                 engine.dispose()
