@@ -74,9 +74,7 @@ def choose_workspace_ref(
             raise WorkspaceRefAmbiguous(ref, [_candidate(ws) for ws in matches])
 
     alias_workspace_ids = {
-        str(alias.workspace_id)
-        for alias in aliases
-        if str(alias.alias or "").strip() == ref
+        str(alias.workspace_id) for alias in aliases if str(alias.alias or "").strip() == ref
     }
     if alias_workspace_ids:
         matches = [ws for ws in candidates if str(ws.id) in alias_workspace_ids]
@@ -110,9 +108,7 @@ async def resolve_workspace_ref(
     async with await get_db() as db:
         aliases = list(
             (
-                await db.scalars(
-                    select(WorkspaceAlias).where(WorkspaceAlias.user_id == user_id)
-                )
+                await db.scalars(select(WorkspaceAlias).where(WorkspaceAlias.user_id == user_id))
             ).all()
         )
     return choose_workspace_ref(
