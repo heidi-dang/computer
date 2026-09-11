@@ -64,6 +64,7 @@ from cptr.utils.identity import (
     env_for,
     expand_user_path,
     identity_for_context,
+    identity_for_request,
     preexec_for,
     unrestricted_root_identity,
 )
@@ -237,6 +238,7 @@ class WorkspaceInspectRequest(WorkerTargetRequest):
         "dependencies",
         "scripts",
         "release",
+        "health",
     ]
     path: str = Field(default=".", min_length=1, max_length=1_000)
     paths: list[str] = Field(default_factory=list, max_length=20)
@@ -406,6 +408,19 @@ async def _workspace(user_id: str, workspace_id: str) -> Workspace:
     return workspace
 
 
+async def _are_workspaces_equivalent(user_id: str, ws_a: str, ws_b: str) -> bool:
+    if ws_a == ws_b:
+        return True
+    try:
+        from cptr.services.workspace_refs import resolve_workspace_ref
+
+        res_a = await resolve_workspace_ref(user_id=user_id, reference=ws_a)
+        res_b = await resolve_workspace_ref(user_id=user_id, reference=ws_b)
+        return str(res_a.workspace.id) == str(res_b.workspace.id)
+    except Exception:
+        return False
+
+
 async def _validate_workbench_routing(
     *, user_id: str, workspace_id: str, session_id: str | None
 ) -> dict[str, Any] | None:
@@ -418,7 +433,8 @@ async def _validate_workbench_routing(
         raise HTTPException(status_code=409, detail="workbench session is archived")
     bound_workspace = session.get("workspace_id")
     if bound_workspace and str(bound_workspace) != workspace_id:
-        raise HTTPException(status_code=404, detail="workbench session not found")
+        if not await _are_workspaces_equivalent(user_id, str(bound_workspace), workspace_id):
+            raise HTTPException(status_code=404, detail="workbench session not found")
     return session
 
 
@@ -1758,6 +1774,30 @@ async def direct_workers_overview(request: Request, workspace_id: str):
     }
 
 
+@router.get("/workspaces/{workspace_id}/coding/health")
+async def workspace_coding_health(request: Request, workspace_id: str):
+    user_id = await _user(request, "coding:read")
+    workspace = await _workspace(user_id, workspace_id)
+    identity = await identity_for_request(request)
+    return await direct_worker_service.classify_health(
+        user_id=user_id,
+        workspace=workspace,
+        identity=identity,
+    )
+
+
+@router.post("/workspaces/{workspace_id}/coding/reconcile")
+async def workspace_coding_reconcile(request: Request, workspace_id: str):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    identity = await identity_for_request(request)
+    return await direct_worker_service.conservative_reconcile(
+        user_id=user_id,
+        workspace=workspace,
+        identity=identity,
+    )
+
+
 @router.post("/workspaces/{workspace_id}/coding/workers-integrate")
 async def integrate_direct_workers(
     request: Request, workspace_id: str, body: DirectWorkersIntegrateRequest
@@ -1796,6 +1836,14 @@ async def close_direct_worker(
 async def inspect_workspace(request: Request, workspace_id: str, body: WorkspaceInspectRequest):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
+    if body.kind == "health":
+        identity = await identity_for_request(request)
+        report = await direct_worker_service.classify_health(
+            user_id=user_id,
+            workspace=workspace,
+            identity=identity,
+        )
+        return {"workspace_id": workspace_id, "kind": body.kind, **report}
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     try:
         result = await _workspace_insight(request, root=root, body=body, user_id=user_id)
@@ -1844,9 +1892,7 @@ async def run_fdx_intelligence(request: Request, workspace_id: str, body: FdxInt
     return result
 
 
-async def _focused_node_test_argv(
-    request: Request, *, cwd: Path, test_file: Path
-) -> list[str]:
+async def _focused_node_test_argv(request: Request, *, cwd: Path, test_file: Path) -> list[str]:
     """Build a bounded focused Node test command without re-running broad npm globs."""
     try:
         relative_test = test_file.relative_to(cwd).as_posix()

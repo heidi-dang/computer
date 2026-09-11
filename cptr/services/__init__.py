@@ -1,1 +1,62 @@
 """Application services shared by CPTR API surfaces."""
+
+from cptr.services.workspace_tasks import WorkspaceTaskError, WorkspaceTaskService
+
+from cptr.services.workspace_resolver import (
+    AmbiguousWorkspaceError,
+    ResolutionResult,
+    ResolutionStage,
+    UnsafeResolutionError,
+    WorkspaceNotFoundError,
+    WorkspaceResolver,
+    WorkspaceResolverError,
+    resolve_workspace,
+    resolve_workspace_for_user,
+)
+
+from cptr.services.workspace_context import (
+    BoundedWorkersEvidence,
+    CheckpointDivergence,
+    EnvironmentEvidence,
+    FdxEvidence,
+    InstructionContext,
+    LspEvidence,
+    MemoryEvidence,
+    ProjectEvidence,
+    RepoEvidence,
+    WorkspaceContextCompiler,
+    WorkspaceContextCompilerProtocol,
+    WorkspaceContextService,
+    WorkspaceContextSnapshot,
+    WorkspaceContextSnapshotService,
+    workspace_context_service,
+)
+
+__all__ = [
+    "AmbiguousWorkspaceError",
+    "BoundedWorkersEvidence",
+    "CheckpointDivergence",
+    "EnvironmentEvidence",
+    "FdxEvidence",
+    "InstructionContext",
+    "LspEvidence",
+    "MemoryEvidence",
+    "ProjectEvidence",
+    "ResolutionResult",
+    "ResolutionStage",
+    "RepoEvidence",
+    "UnsafeResolutionError",
+    "WorkspaceNotFoundError",
+    "WorkspaceResolver",
+    "WorkspaceResolverError",
+    "WorkspaceTaskError",
+    "WorkspaceTaskService",
+    "WorkspaceContextCompiler",
+    "WorkspaceContextCompilerProtocol",
+    "WorkspaceContextService",
+    "WorkspaceContextSnapshot",
+    "WorkspaceContextSnapshotService",
+    "resolve_workspace",
+    "resolve_workspace_for_user",
+    "workspace_context_service",
+]

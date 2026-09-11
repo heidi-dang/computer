@@ -97,6 +97,24 @@ from cptr.models.memory_core import (
 from cptr.models.memory_fabric import MemoryFabricEvent
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
+from cptr.models.workspace_tasks import (
+    WorkspaceTask,
+    WorkspaceTaskEvidence,
+    WorkspaceTaskRepositoryPin,
+    WorkspaceTaskWorkerLink,
+)
+from cptr.models.workspace_context import (
+    BoundedWorkersEvidence,
+    CheckpointDivergence,
+    EnvironmentEvidence,
+    FdxEvidence,
+    InstructionContext,
+    LspEvidence,
+    MemoryEvidence,
+    ProjectEvidence,
+    RepoEvidence,
+    WorkspaceContextSnapshot,
+)
 from cptr.models.workspaces import (
     Repository,
     RepositoryCheckout,
@@ -104,6 +122,7 @@ from cptr.models.workspaces import (
     WorkspaceAlias,
     WorkspaceGroup,
     WorkspaceGroupMember,
+    WorkspaceInstructionVersion,
     WorkspaceRepository,
 )
 
@@ -117,6 +136,9 @@ __all__ = [
     "AutonomousScope",
     "AutonomousWorkspaceLease",
     "Base",
+    "BoundedWorkersEvidence",
+    "CheckpointDivergence",
+    "EnvironmentEvidence",
     "EnvironmentProfile",
     "EnvironmentProfileVersion",
     "EnvironmentProfileVersionImmutableError",
@@ -167,9 +189,12 @@ __all__ = [
     "FactoryReasoningCall",
     "FactoryRun",
     "FactoryWorkerAssignment",
+    "FdxEvidence",
     "File",
     "GuardSetting",
     "GuardSettingEvent",
+    "InstructionContext",
+    "LspEvidence",
     "McpEngineeringSession",
     "McpUsageEvent",
     "MemoryBranch",
@@ -189,6 +214,9 @@ __all__ = [
     "MemoryRetrievalFeedback",
     "MemoryRetrievalProfile",
     "MemorySnapshot",
+    "MemoryEvidence",
+    "ProjectEvidence",
+    "RepoEvidence",
     "User",
     "UserStates",
     "Repository",
@@ -197,7 +225,13 @@ __all__ = [
     "WorkspaceAlias",
     "WorkspaceGroup",
     "WorkspaceGroupMember",
+    "WorkspaceInstructionVersion",
+    "WorkspaceContextSnapshot",
     "WorkspaceRepository",
+    "WorkspaceTask",
+    "WorkspaceTaskEvidence",
+    "WorkspaceTaskRepositoryPin",
+    "WorkspaceTaskWorkerLink",
     "WorkbenchSession",
     "WorkbenchSessionEvent",
     "internal_status",

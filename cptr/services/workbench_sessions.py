@@ -24,6 +24,7 @@ MAX_EVENT_DETAIL_CHARS = 8_000
 MAX_EVENT_DETAILS_KEYS = 32
 MAX_EVENT_LIST_LIMIT = 200
 DELETE_CONFIRMATION_TTL_MS = 5 * 60 * 1000
+_UNSET = object()
 _ALLOWED_TARGET_TYPES = {"task", "command", "monitor"}
 _TERMINAL_TARGET_STATES = {"COMPLETE", "FAILED", "CANCELLED"}
 _ALLOWED_STATES = {
@@ -82,7 +83,9 @@ def _safe_json(value: object) -> dict[str, Any]:
     return output
 
 
-def _session_dict(session: WorkbenchSession) -> dict[str, Any]:
+def _session_dict(session: WorkbenchSession | Any) -> dict[str, Any]:
+    env_override = getattr(session, "environment_profile_override", None)
+    role_ctx = getattr(session, "role_context", None)
     return {
         "session_id": session.id,
         "name": session.name,
@@ -96,6 +99,13 @@ def _session_dict(session: WorkbenchSession) -> dict[str, Any]:
         "updated_at": int(session.updated_at),
         "last_event_at": int(session.last_event_at) if session.last_event_at is not None else None,
         "archived_at": int(session.archived_at) if session.archived_at is not None else None,
+        "environment_profile_id": getattr(session, "environment_profile_id", None),
+        "environment_profile_override": dict(env_override)
+        if isinstance(env_override, dict)
+        else None,
+        "admin_role": getattr(session, "admin_role", None),
+        "role_context": dict(role_ctx) if isinstance(role_ctx, dict) else None,
+        "last_context_snapshot_id": getattr(session, "last_context_snapshot_id", None),
     }
 
 
@@ -122,18 +132,38 @@ def _event_dict(event: WorkbenchSessionEvent) -> dict[str, Any]:
 
 class WorkbenchSessionStore:
     async def create(
-        self, *, owner_id: str, name: str | None = None, workspace_id: str | None = None
+        self,
+        *,
+        owner_id: str,
+        name: str | None = None,
+        workspace_id: str | None = None,
+        environment_profile_id: str | None = None,
+        environment_profile_override: dict[str, Any] | None = None,
+        admin_role: str | None = None,
+        role_context: dict[str, Any] | None = None,
+        last_context_snapshot_id: str | None = None,
     ) -> dict[str, Any]:
         now = _now_ms()
         async with await get_db() as db:
             session = WorkbenchSession(
                 user_id=owner_id,
                 name=_safe_name(name),
-                workspace_id=workspace_id,
+                workspace_id=_clip(workspace_id, 200) if workspace_id else None,
                 status="OPEN",
                 event_count=0,
                 created_at=now,
                 updated_at=now,
+                environment_profile_id=_clip(environment_profile_id, 200)
+                if environment_profile_id
+                else None,
+                environment_profile_override=_safe_json(environment_profile_override)
+                if environment_profile_override
+                else None,
+                admin_role=_clip(admin_role, 120) if admin_role else None,
+                role_context=_safe_json(role_context) if role_context else None,
+                last_context_snapshot_id=_clip(last_context_snapshot_id, 200)
+                if last_context_snapshot_id
+                else None,
             )
             db.add(session)
             await db.commit()
@@ -355,6 +385,8 @@ class WorkbenchSessionStore:
         target_type: str,
         target_id: str,
         workspace_id: str | None = None,
+        last_context_snapshot_id: str | None = None,
+        make_sticky: bool = False,
     ) -> dict[str, Any] | None:
         if target_type not in _ALLOWED_TARGET_TYPES or not target_id.strip():
             raise ValueError("invalid workbench target")
@@ -371,7 +403,21 @@ class WorkbenchSessionStore:
                 return None
             session.active_target_type = target_type
             session.active_target_id = _clip(target_id, 200)
-            session.active_workspace_id = _clip(workspace_id, 200) if workspace_id else None
+            target_ws = _clip(workspace_id, 200) if workspace_id else None
+            if target_ws:
+                session.active_workspace_id = target_ws
+                if session.workspace_id is None or make_sticky:
+                    session.workspace_id = target_ws
+            elif session.workspace_id:
+                session.active_workspace_id = session.workspace_id
+            else:
+                session.active_workspace_id = None
+
+            if last_context_snapshot_id is not None:
+                session.last_context_snapshot_id = (
+                    _clip(last_context_snapshot_id, 200) if last_context_snapshot_id else None
+                )
+
             session.status = "RUNNING"
             session.archived_at = None
             session.updated_at = now
@@ -448,7 +494,19 @@ class WorkbenchSessionStore:
                 await db.commit()
             return len(claimed_sessions)
 
-    async def rename(self, *, owner_id: str, session_id: str, name: str) -> dict[str, Any] | None:
+    async def update(
+        self,
+        *,
+        owner_id: str,
+        session_id: str,
+        name: str | None = None,
+        workspace_id: str | None = _UNSET,
+        environment_profile_id: str | None = _UNSET,
+        environment_profile_override: dict[str, Any] | None = _UNSET,
+        admin_role: str | None = _UNSET,
+        role_context: dict[str, Any] | None = _UNSET,
+        last_context_snapshot_id: str | None = _UNSET,
+    ) -> dict[str, Any] | None:
         now = _now_ms()
         async with await get_db() as db:
             session = await db.scalar(
@@ -460,11 +518,89 @@ class WorkbenchSessionStore:
             )
             if session is None:
                 return None
-            session.name = _safe_name(name)
+            if name is not None:
+                session.name = _safe_name(name)
+            if workspace_id is not _UNSET:
+                session.workspace_id = _clip(workspace_id, 200) if workspace_id else None
+            if environment_profile_id is not _UNSET:
+                session.environment_profile_id = (
+                    _clip(environment_profile_id, 200) if environment_profile_id else None
+                )
+            if environment_profile_override is not _UNSET:
+                session.environment_profile_override = (
+                    _safe_json(environment_profile_override)
+                    if environment_profile_override
+                    else None
+                )
+            if admin_role is not _UNSET:
+                session.admin_role = _clip(admin_role, 120) if admin_role else None
+            if role_context is not _UNSET:
+                session.role_context = _safe_json(role_context) if role_context else None
+            if last_context_snapshot_id is not _UNSET:
+                session.last_context_snapshot_id = (
+                    _clip(last_context_snapshot_id, 200) if last_context_snapshot_id else None
+                )
             session.updated_at = now
             await db.commit()
             await db.refresh(session)
             return _session_dict(session)
+
+    async def rename(self, *, owner_id: str, session_id: str, name: str) -> dict[str, Any] | None:
+        return await self.update(owner_id=owner_id, session_id=session_id, name=name)
+
+    async def reconcile_restart(self, *, now_ms: int | None = None) -> int:
+        """Reconcile transient targets left dangling after a backend process restart.
+
+        Preserves sticky Workspace OS bindings (workspace_id, environment_profile,
+        admin_role, role_context, last_context_snapshot_id) while releasing active
+        in-process targets left dangling by the restart.
+        """
+        now = _now_ms() if now_ms is None else int(now_ms)
+        async with await get_db() as db:
+            rows = await db.scalars(
+                select(WorkbenchSession).where(
+                    WorkbenchSession.deleted_at.is_(None),
+                    WorkbenchSession.archived_at.is_(None),
+                    WorkbenchSession.active_target_type == "command",
+                )
+            )
+            sessions = list(rows.all())
+            for session in sessions:
+                old_target_id = session.active_target_id
+                old_workspace_id = session.active_workspace_id
+                session.event_count = int(session.event_count or 0) + 1
+                session.active_target_type = None
+                session.active_target_id = None
+                session.active_workspace_id = None
+                session.status = "OPEN"
+                session.updated_at = now
+                session.last_event_at = now
+                db.add(
+                    WorkbenchSessionEvent(
+                        session_id=session.id,
+                        user_id=session.user_id,
+                        sequence=int(session.event_count),
+                        source="backend",
+                        actor="cptr_runtime",
+                        event_type="workbench.restart_reconciled",
+                        state="OPEN",
+                        target_type="command",
+                        target_id=_clip(old_target_id, 200) if old_target_id else None,
+                        workspace_id=_clip(old_workspace_id or session.workspace_id, 200)
+                        if (old_workspace_id or session.workspace_id)
+                        else None,
+                        summary="Transient target cleared after backend process restart; Workbench remains open.",
+                        details=_safe_json(
+                            {"reconciled_after_restart": True, "target_id": old_target_id}
+                        ),
+                        metrics={},
+                        policy={},
+                        created_at=now,
+                    )
+                )
+            if sessions:
+                await db.commit()
+            return len(sessions)
 
     async def archive(self, *, owner_id: str, session_id: str) -> dict[str, Any] | None:
         now = _now_ms()
@@ -576,6 +712,4 @@ async def workbench_session_reaper_loop() -> None:
 
         await reconcile_inactive_task_authority()
         heartbeat_worker("workbench_reaper", success=True)
-        await heartbeat_sleep(
-            "workbench_reaper", WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS
-        )
+        await heartbeat_sleep("workbench_reaper", WORKBENCH_SESSION_REAPER_INTERVAL_SECONDS)

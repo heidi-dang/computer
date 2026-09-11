@@ -876,6 +876,41 @@ async def current_revision(root: str, identity: ExecutionIdentity | None = None)
     return out.strip()
 
 
+async def current_branch(root: str, identity: ExecutionIdentity | None = None) -> str:
+    """Return the current active branch name, or empty string if detached."""
+    code, out, _ = await _run(
+        "rev-parse", "--abbrev-ref", "HEAD", cwd=root, check=False, identity=identity
+    )
+    if code != 0:
+        return ""
+    branch = out.strip()
+    return "" if branch == "HEAD" else branch
+
+
+async def revision_divergence(
+    root: str,
+    base_revision: str,
+    target_revision: str = "HEAD",
+    identity: ExecutionIdentity | None = None,
+) -> dict[str, int]:
+    """Return commits behind and ahead between base_revision and target_revision."""
+    code, out, _ = await _run(
+        "rev-list",
+        "--left-right",
+        "--count",
+        f"{base_revision}...{target_revision}",
+        cwd=root,
+        check=False,
+        identity=identity,
+    )
+    if code != 0 or not out.strip():
+        return {"behind": 0, "ahead": 0}
+    parts = out.strip().split()
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        return {"behind": int(parts[0]), "ahead": int(parts[1])}
+    return {"behind": 0, "ahead": 0}
+
+
 async def create_worktree(
     root: str,
     branch: str,
