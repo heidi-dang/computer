@@ -70,6 +70,42 @@ class DirectCodingWorkerMechanicsTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(caught.exception.code, "DIRECT_WORKER_DIRTY_BASE")
 
+    async def test_worker_creation_allows_untracked_cptr_fdx_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp) / "repo"
+            base.mkdir()
+            _repo(base)
+            fdx = base / ".fdx"
+            fdx.mkdir()
+            (fdx / "index.sqlite").write_bytes(b"derived")
+            (fdx / "tee").mkdir()
+            (fdx / "tee" / "search.log").write_text("derived\n", encoding="utf-8")
+
+            created = await create_worker_worktree(
+                source_root=base,
+                worker_root=Path(temp) / "workers" / "fdx",
+                branch="cptr/direct/test-fdx",
+            )
+
+            self.assertTrue(Path(created).is_dir())
+            self.assertFalse(Path(created, ".fdx").exists())
+
+    async def test_worker_creation_rejects_untracked_non_cptr_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp) / "repo"
+            base.mkdir()
+            _repo(base)
+            (base / "notes.txt").write_text("user work\n", encoding="utf-8")
+
+            with self.assertRaises(DirectCodingWorkerError) as caught:
+                await create_worker_worktree(
+                    source_root=base,
+                    worker_root=Path(temp) / "workers" / "dirty-untracked",
+                    branch="cptr/direct/test-dirty-untracked",
+                )
+
+            self.assertEqual(caught.exception.code, "DIRECT_WORKER_DIRTY_BASE")
+
     async def test_integration_copies_non_overlapping_worker_changes_without_committing(self):
         with tempfile.TemporaryDirectory() as temp:
             base = Path(temp) / "repo"
