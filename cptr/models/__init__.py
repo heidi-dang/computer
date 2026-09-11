@@ -96,6 +96,8 @@ from cptr.models.workspaces import (
     RepositoryCheckout,
     Workspace,
     WorkspaceAlias,
+    WorkspaceGroup,
+    WorkspaceGroupMember,
     WorkspaceRepository,
 )
 
@@ -183,6 +185,8 @@ __all__ = [
     "RepositoryCheckout",
     "Workspace",
     "WorkspaceAlias",
+    "WorkspaceGroup",
+    "WorkspaceGroupMember",
     "WorkspaceRepository",
     "WorkbenchSession",
     "WorkbenchSessionEvent",
