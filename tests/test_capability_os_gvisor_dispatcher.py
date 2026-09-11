@@ -19,6 +19,8 @@ class CapabilityOsGvisorDispatcherTests(unittest.TestCase):
         (self.source / "main.py").write_text("print(1)\n", encoding="utf-8")
         self.rootfs = root / "rootfs"
         (self.rootfs / "usr" / "bin").mkdir(parents=True)
+        for directory in (self.rootfs, self.rootfs / "usr", self.rootfs / "usr" / "bin"):
+            os.chmod(directory, 0o755)
         (self.rootfs / "usr" / "bin" / "python3").write_text("fixture", encoding="utf-8")
         os.chmod(self.rootfs / "usr" / "bin" / "python3", 0o755)
         self.runsc = root / "runsc"
