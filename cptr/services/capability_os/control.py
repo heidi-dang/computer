@@ -227,7 +227,8 @@ class CapabilityOsControlService:
                 "runtime": self.runtime.production_snapshot()}
 
     async def spawn_multiple_subagents(
-        self, *, user_id: str, task_id: str, objectives: tuple[str, ...]
+        self, *, user_id: str, task_id: str, objectives: tuple[str, ...],
+        cohort_id: str | None = None
     ) -> dict:
         parent = await self.tasks.require_executable(user_id=user_id, task_id=task_id)
         normalized = tuple(str(item or "").strip() for item in objectives)
@@ -235,14 +236,19 @@ class CapabilityOsControlService:
             raise ValueError("every parallel subagent objective must be non-empty")
         if any(len(item) > 20_000 for item in normalized):
             raise ValueError("every parallel subagent objective must be at most 20000 characters")
+        cohort = str(cohort_id or "").strip()
+        if len(cohort) > 200:
+            raise ValueError("parallel subagent cohort_id must be at most 200 characters")
         children = await self.tasks.fork_many(
             user_id=user_id,
             parent_task_id=task_id,
             count=len(normalized),
+            cohort_id=cohort or None,
         )
         return {
             "task": _task(parent),
             "dispatch": {
+                "cohortId": cohort or None,
                 "mode": "mcp-client-sampling",
                 "parallel": True,
                 "startBarrier": "all-child-contexts-ready",

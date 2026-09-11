@@ -6,10 +6,13 @@ and Control task records instead of creating a parallel task namespace.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
+import hashlib
 import time
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from cptr.models import ControlTask, FactoryRun, WorkbenchSession
@@ -54,6 +57,7 @@ class CapabilityTaskContext:
 class CapabilityTaskCoordinator:
     def __init__(self, *, session_factory: async_sessionmaker | None = None) -> None:
         self._session_factory = session_factory or get_session_factory()
+        self._cohort_create_lock = asyncio.Lock()
 
     async def bootstrap(self, *, user_id: str) -> CapabilityTaskContext:
         owner_id = user_id.strip()
@@ -86,9 +90,15 @@ class CapabilityTaskCoordinator:
             )
 
     async def fork_many(
-        self, *, user_id: str, parent_task_id: str, count: int
+        self,
+        *,
+        user_id: str,
+        parent_task_id: str,
+        count: int,
+        cohort_id: str | None = None,
+        _cohort_lock_held: bool = False,
     ) -> tuple[CapabilityTaskContext, ...]:
-        """Atomically create isolated Capability OS child contexts for host-native fan-out."""
+        """Atomically create or recover isolated child contexts for one fan-out cohort."""
         parent = await self.require_executable(user_id=user_id, task_id=parent_task_id)
         if parent.source != "workbench":
             raise CapabilityTaskNotExecutable(
@@ -97,33 +107,113 @@ class CapabilityTaskCoordinator:
         bounded_count = int(count)
         if bounded_count < 2 or bounded_count > 10:
             raise ValueError("parallel subagent count must be between 2 and 10")
+        cohort = str(cohort_id or "").strip()
+        if len(cohort) > 200:
+            raise ValueError("parallel subagent cohort_id must be at most 200 characters")
+        if cohort and not _cohort_lock_held:
+            async with self._cohort_create_lock:
+                return await self.fork_many(
+                    user_id=user_id,
+                    parent_task_id=parent_task_id,
+                    count=bounded_count,
+                    cohort_id=cohort,
+                    _cohort_lock_held=True,
+                )
         now = int(time.time() * 1000)
-        sessions = [
-            WorkbenchSession(
-                user_id=parent.user_id,
-                name=f"Capability OS Subagent {index + 1:02d}",
-                workspace_id=parent.workspace_id,
-                status="OPEN",
-                event_count=0,
-                created_at=now,
-                updated_at=now,
-            )
-            for index in range(bounded_count)
-        ]
+        child_ids = (
+            [
+                "wbs_"
+                + hashlib.sha256(
+                    (
+                        "cptr.parallel-subagent.v1\0"
+                        f"{parent.user_id}\0{parent_task_id}\0{cohort}\0{index}"
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                for index in range(bounded_count)
+            ]
+            if cohort
+            else [None] * bounded_count
+        )
         async with self._session_factory() as db:
-            db.add_all(sessions)
-            await db.commit()
-            for session in sessions:
-                await db.refresh(session)
+            existing_by_id: dict[str, WorkbenchSession] = {}
+            deterministic_ids = [value for value in child_ids if value is not None]
+            if deterministic_ids:
+                rows = await db.scalars(
+                    select(WorkbenchSession).where(WorkbenchSession.id.in_(deterministic_ids))
+                )
+                existing_by_id = {str(row.id): row for row in rows.all()}
+
+            sessions: list[WorkbenchSession] = []
+            created: list[WorkbenchSession] = []
+            for index, child_id in enumerate(child_ids):
+                expected_name = f"Capability OS Subagent {index + 1:02d}"
+                existing = existing_by_id.get(child_id or "")
+                if existing is not None:
+                    if (
+                        existing.user_id != parent.user_id
+                        or existing.workspace_id != parent.workspace_id
+                        or str(existing.name) != expected_name
+                        or existing.deleted_at is not None
+                    ):
+                        raise CapabilityTaskNotExecutable(
+                            "parallel subagent cohort identity conflicts with an existing task"
+                        )
+                    sessions.append(existing)
+                    continue
+                session = WorkbenchSession(
+                    **({"id": child_id} if child_id is not None else {}),
+                    user_id=parent.user_id,
+                    name=expected_name,
+                    workspace_id=parent.workspace_id,
+                    status="OPEN",
+                    event_count=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+                sessions.append(session)
+                created.append(session)
+            if created:
+                db.add_all(created)
+                try:
+                    await db.commit()
+                except IntegrityError:
+                    if not deterministic_ids:
+                        raise
+                    await db.rollback()
+                    rows = await db.scalars(
+                        select(WorkbenchSession).where(WorkbenchSession.id.in_(deterministic_ids))
+                    )
+                    recovered_by_id = {str(row.id): row for row in rows.all()}
+                    if len(recovered_by_id) != len(deterministic_ids):
+                        raise
+                    sessions = [recovered_by_id[str(child_id)] for child_id in child_ids]
+                    for index, session in enumerate(sessions):
+                        expected_name = f"Capability OS Subagent {index + 1:02d}"
+                        if (
+                            session.user_id != parent.user_id
+                            or session.workspace_id != parent.workspace_id
+                            or str(session.name) != expected_name
+                            or session.deleted_at is not None
+                        ):
+                            raise CapabilityTaskNotExecutable(
+                                "parallel subagent cohort identity conflicts with an existing task"
+                            )
+                else:
+                    for session in created:
+                        await db.refresh(session)
+
         return tuple(
             CapabilityTaskContext(
                 task_id=session.id,
                 user_id=session.user_id,
                 workspace_id=session.workspace_id,
                 source="workbench",
-                status="OPEN",
-                active=True,
-                execution_allowed=True,
+                status=str(session.status or "OPEN").upper(),
+                active=str(session.status or "OPEN").upper() not in _WORKBENCH_TERMINAL,
+                execution_allowed=(
+                    str(session.status or "OPEN").upper() not in _WORKBENCH_TERMINAL
+                    and str(session.status or "OPEN").upper() not in _WORKBENCH_WAITING
+                ),
                 label=str(session.name),
                 updated_at_ms=int(session.updated_at or now),
             )

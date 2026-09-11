@@ -81,8 +81,9 @@ class _Tasks:
     async def require_executable(self, *, user_id, task_id):
         return await self.require_active(user_id=user_id, task_id=task_id)
 
-    async def fork_many(self, *, user_id, parent_task_id, count):
+    async def fork_many(self, *, user_id, parent_task_id, count, cohort_id=None):
         await self.require_executable(user_id=user_id, task_id=parent_task_id)
+        self.cohort_id = cohort_id
         return tuple(
             CapabilityTaskContext(
                 task_id=f"child-{index + 1}",
@@ -242,8 +243,11 @@ class CapabilityOsControlApiTests(unittest.IsolatedAsyncioTestCase):
             user_id="user-1",
             task_id="task-1",
             objectives=("audit auth", "audit tests", "audit runtime"),
+            cohort_id="cohort-77",
         )
 
+        self.assertEqual(result["dispatch"]["cohortId"], "cohort-77")
+        self.assertEqual(self.service.tasks.cohort_id, "cohort-77")
         self.assertEqual(result["dispatch"]["count"], 3)
         self.assertTrue(result["dispatch"]["parallel"])
         self.assertEqual(result["dispatch"]["startBarrier"], "all-child-contexts-ready")
