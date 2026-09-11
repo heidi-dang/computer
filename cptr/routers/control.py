@@ -20,6 +20,12 @@ from cptr.memory.domain import RetrievalFeedback
 from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import MemoryUnavailableError
 from cptr.models import Workspace, ControlTask, Config, AutonomousMonitor, ControlIdempotency
+from cptr.services.workspace_actions import (
+    READ_ACTIONS as WORKSPACE_READ_ACTIONS,
+    WRITE_ACTIONS as WORKSPACE_WRITE_ACTIONS,
+    WorkspaceActionError,
+    workspace_action_service,
+)
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.workbench_sessions import workbench_session_store
 from cptr.routers.state import _resolve_request_workspace_path
@@ -457,6 +463,13 @@ async def get_runtime_metrics(request: Request):
     }
 
 
+class WorkspaceActionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = Field(min_length=1, max_length=64)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
 class WorkspaceCreateRequest(BaseModel):
     path: str = Field(min_length=1, max_length=4000)
     name: str | None = Field(default=None, min_length=1, max_length=160)
@@ -572,6 +585,52 @@ async def _workspace_create_idempotency_put(
                 return _workspace_create_replay(existing, request_fingerprint)
             except HTTPException as conflict:
                 raise conflict from exc
+
+
+@router.post("/workspace-os/action")
+async def workspace_os_action(request: Request, body: WorkspaceActionRequest):
+    action = body.action.strip().lower()
+    if action in WORKSPACE_READ_ACTIONS:
+        scope = "workspace:read"
+    elif action in WORKSPACE_WRITE_ACTIONS:
+        scope = "workspace:write"
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "WORKSPACE_ACTION_UNSUPPORTED",
+                "message": f"unsupported Workspace OS action: {action}",
+                "retriable": False,
+                "supported_actions": sorted(WORKSPACE_READ_ACTIONS | WORKSPACE_WRITE_ACTIONS),
+            },
+        )
+
+    user_id = await _user(request, scope)
+    try:
+        return await workspace_action_service.execute(
+            user_id=user_id,
+            action=action,
+            payload=body.payload,
+        )
+    except WorkspaceActionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "retriable": exc.status_code >= 500,
+                **({"details": exc.details} if exc.details else {}),
+            },
+        ) from exc
+    except TypeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "WORKSPACE_ACTION_INVALID_PAYLOAD",
+                "message": str(exc),
+                "retriable": False,
+            },
+        ) from exc
 
 
 @router.post("/workspaces")

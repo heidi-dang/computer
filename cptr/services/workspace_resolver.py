@@ -545,6 +545,31 @@ class WorkspaceResolver:
         )
         return result.workspace
 
+    async def resolve_detailed_for_user(
+        self,
+        user_id: str,
+        query: str,
+        *,
+        aliases: Sequence[Any] | None = None,
+        destructive: bool = False,
+        allow_fuzzy: bool = True,
+        include_archived: bool = False,
+    ) -> ResolutionResult:
+        if not (user_id or "").strip():
+            raise ValueError("user_id must not be blank")
+        from cptr.models.workspaces import Workspace
+
+        workspaces = await Workspace.get_by_user(user_id)
+        if not include_archived:
+            workspaces = [ws for ws in workspaces if not bool(_get_data(ws).get("_cptr_archived"))]
+        return self.resolve_detailed(
+            query,
+            workspaces=workspaces,
+            aliases=aliases,
+            destructive=destructive,
+            allow_fuzzy=allow_fuzzy,
+        )
+
     async def resolve_for_user(
         self,
         user_id: str,
@@ -555,20 +580,15 @@ class WorkspaceResolver:
         allow_fuzzy: bool = True,
         include_archived: bool = False,
     ) -> Any:
-        if not (user_id or "").strip():
-            raise ValueError("user_id must not be blank")
-        from cptr.models.workspaces import Workspace
-
-        workspaces = await Workspace.get_by_user(user_id)
-        if not include_archived:
-            workspaces = [ws for ws in workspaces if not bool(_get_data(ws).get("_cptr_archived"))]
-        return self.resolve(
-            query,
-            workspaces=workspaces,
+        result = await self.resolve_detailed_for_user(
+            user_id=user_id,
+            query=query,
             aliases=aliases,
             destructive=destructive,
             allow_fuzzy=allow_fuzzy,
+            include_archived=include_archived,
         )
+        return result.workspace
 
 
 def resolve_workspace(
