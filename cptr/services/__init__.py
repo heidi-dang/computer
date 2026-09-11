@@ -1,5 +1,7 @@
 """Application services shared by CPTR API surfaces."""
 
+from cptr.services.workspace_tasks import WorkspaceTaskError, WorkspaceTaskService
+
 from cptr.services.workspace_resolver import (
     AmbiguousWorkspaceError,
     ResolutionResult,
@@ -47,6 +49,8 @@ __all__ = [
     "WorkspaceNotFoundError",
     "WorkspaceResolver",
     "WorkspaceResolverError",
+    "WorkspaceTaskError",
+    "WorkspaceTaskService",
     "WorkspaceContextCompiler",
     "WorkspaceContextCompilerProtocol",
     "WorkspaceContextService",

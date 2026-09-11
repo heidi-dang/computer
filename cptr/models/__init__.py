@@ -97,6 +97,12 @@ from cptr.models.memory_core import (
 from cptr.models.memory_fabric import MemoryFabricEvent
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
+from cptr.models.workspace_tasks import (
+    WorkspaceTask,
+    WorkspaceTaskEvidence,
+    WorkspaceTaskRepositoryPin,
+    WorkspaceTaskWorkerLink,
+)
 from cptr.models.workspace_context import (
     BoundedWorkersEvidence,
     CheckpointDivergence,
@@ -222,6 +228,10 @@ __all__ = [
     "WorkspaceInstructionVersion",
     "WorkspaceContextSnapshot",
     "WorkspaceRepository",
+    "WorkspaceTask",
+    "WorkspaceTaskEvidence",
+    "WorkspaceTaskRepositoryPin",
+    "WorkspaceTaskWorkerLink",
     "WorkbenchSession",
     "WorkbenchSessionEvent",
     "internal_status",
