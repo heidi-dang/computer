@@ -325,6 +325,7 @@ class MemoryMcpAdapter:
                     raise ValueError("task_key is required to save checkpoint")
                 state = args.get("state") if isinstance(args.get("state"), dict) else {}
                 from cptr.memory.domain import CheckpointState
+
                 cp = await self.service.checkpoint(
                     CheckpointState(
                         user_id=self.user_id,

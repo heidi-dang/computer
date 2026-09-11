@@ -398,8 +398,12 @@ class EmbeddedMemoryService:
         heading: str = "",
     ) -> dict[str, Any]:
         row = await self.store.get_memory(memory_id)
-        if row["user_id"] != user_id or row["workspace"] != str(workspace or ""):
+        if row["user_id"] != user_id:
             raise KeyError("memory not found")
+        if row["workspace"] != "":
+            ns = await self.store.resolve_namespace(user_id, workspace)
+            if not ns.matches(row["workspace"]):
+                raise KeyError("memory not found")
         projected = await self.graph_store.project_memory(
             user_id=user_id,
             workspace=workspace,

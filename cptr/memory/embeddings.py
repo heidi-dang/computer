@@ -214,7 +214,9 @@ class SqlVectorIndex:
             MemoryEmbedding.user_id == user_id,
             MemoryEmbedding.model_id == self.provider.model_id,
         ]
-        ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
+        ns = await resolve_workspace_namespace(
+            user_id, workspace, session_factory=self._session_factory
+        )
         if not ns.is_user_scope:
             predicates.append(
                 or_(MemoryEmbedding.workspace == "", MemoryEmbedding.workspace.in_(ns.aliases))
@@ -257,7 +259,9 @@ class SqlVectorIndex:
             MemoryEmbedding.model_id == self.provider.model_id,
         ]
         if workspace is not None:
-            ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
+            ns = await resolve_workspace_namespace(
+                user_id, workspace, session_factory=self._session_factory
+            )
             if not ns.is_user_scope:
                 predicates.append(MemoryEmbedding.workspace.in_(ns.aliases))
             else:

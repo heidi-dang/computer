@@ -95,7 +95,9 @@ class MemoryLexicalIndex:
             MemoryLexicalDocument.memory_id.in_(candidates),
             MemoryLexicalDocument.user_id == user_id,
         ]
-        ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
+        ns = await resolve_workspace_namespace(
+            user_id, workspace, session_factory=self._session_factory
+        )
         if not ns.is_user_scope:
             document_predicates.append(
                 or_(
@@ -193,7 +195,9 @@ class MemoryLexicalIndex:
     async def coverage(self, *, user_id: str, workspace: str | None = None) -> int:
         predicates = [MemoryLexicalDocument.user_id == user_id]
         if workspace is not None:
-            ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
+            ns = await resolve_workspace_namespace(
+                user_id, workspace, session_factory=self._session_factory
+            )
             if not ns.is_user_scope:
                 predicates.append(MemoryLexicalDocument.workspace.in_(ns.aliases))
             else:

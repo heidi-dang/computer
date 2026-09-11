@@ -277,7 +277,9 @@ class MemoryGraphStore:
         query_terms = set(re.findall(r"[a-z0-9_.:/#-]+", normalized_query))
         if not normalized_query or not query_terms:
             return {}
-        ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
+        ns = await resolve_workspace_namespace(
+            user_id, workspace, session_factory=self._session_factory
+        )
         entity_predicates = [MemoryEntity.user_id == user_id, MemoryEntity.status == "active"]
         relationship_predicates = [
             MemoryRelationship.user_id == user_id,
@@ -288,7 +290,9 @@ class MemoryGraphStore:
                 or_(MemoryEntity.workspace == "", MemoryEntity.workspace.in_(ns.aliases))
             )
             relationship_predicates.append(
-                or_(MemoryRelationship.workspace == "", MemoryRelationship.workspace.in_(ns.aliases))
+                or_(
+                    MemoryRelationship.workspace == "", MemoryRelationship.workspace.in_(ns.aliases)
+                )
             )
         else:
             entity_predicates.append(MemoryEntity.workspace == "")
@@ -432,7 +436,9 @@ class MemoryGraphStore:
             MemoryRelationship.status == "active",
         ]
         if workspace is not None:
-            ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
+            ns = await resolve_workspace_namespace(
+                user_id, workspace, session_factory=self._session_factory
+            )
             if not ns.is_user_scope:
                 predicates.append(
                     or_(MemoryEntity.workspace == "", MemoryEntity.workspace.in_(ns.aliases))

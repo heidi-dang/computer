@@ -22,7 +22,6 @@ from cptr.memory.mcp_adapter import MemoryMcpAdapter
 from cptr.memory.service import EmbeddedMemoryService
 from cptr.memory.store import SqlMemoryStore
 from cptr.memory.workspace import (
-    WorkspaceNamespace,
     clear_workspace_namespace_cache,
     resolve_workspace_namespace,
 )
@@ -142,7 +141,9 @@ class WorkspaceMemoryNamespaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results_by_uuid[0].memory_id, ref1.memory_id)
 
         # Inspecting by stable UUID also resolves and matches
-        inspected = await service.inspect(ref1.memory_id, user_id="user-1", workspace="ws-uuid-1234")
+        inspected = await service.inspect(
+            ref1.memory_id, user_id="user-1", workspace="ws-uuid-1234"
+        )
         self.assertEqual(inspected["memory_id"], ref1.memory_id)
 
         # Deduplication: consolidating identical text with stable UUID reuses existing record
@@ -326,7 +327,9 @@ class WorkspaceMemoryNamespaceTests(unittest.IsolatedAsyncioTestCase):
 
         request = SimpleNamespace(state=SimpleNamespace())
         with (
-            patch("cptr.routers.control._user", new=AsyncMock(return_value="user-1")) as require_user,
+            patch(
+                "cptr.routers.control._user", new=AsyncMock(return_value="user-1")
+            ) as require_user,
             patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=workspace)),
             patch("cptr.routers.control.MemoryMcpAdapter", return_value=adapter),
         ):
@@ -347,7 +350,9 @@ class WorkspaceMemoryNamespaceTests(unittest.IsolatedAsyncioTestCase):
             return_value={"workspace_id": "ws-uuid-1234", "total_records": 5}
         )
         with (
-            patch("cptr.routers.control._user", new=AsyncMock(return_value="user-1")) as require_user,
+            patch(
+                "cptr.routers.control._user", new=AsyncMock(return_value="user-1")
+            ) as require_user,
             patch("cptr.routers.control._ensure_workspace", new=AsyncMock(return_value=workspace)),
             patch("cptr.routers.control.MemoryMcpAdapter", return_value=adapter),
         ):
