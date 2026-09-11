@@ -473,6 +473,8 @@ class MemoryAdvancedTests(unittest.IsolatedAsyncioTestCase):
                 "memory.rebuild",
                 "memory.conflicts",
                 "memory.health",
+                "memory.compact_summary",
+                "memory.checkpoint",
             },
         )
         result = await adapter.call_tool(

@@ -186,9 +186,7 @@ class TaskCreateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=100_000)
     model_id: str | None = Field(default=None, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=200)
-    workbench_session_id: str | None = Field(
-        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
-    )
+    workbench_session_id: str | None = Field(default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$")
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
 
@@ -209,9 +207,7 @@ class AutonomousCreateRequest(BaseModel):
     acceptance_criteria: list[str] = Field(min_length=1, max_length=100)
     model_id: str = Field(min_length=1, max_length=500)
     idempotency_key: str | None = Field(default=None, max_length=200)
-    workbench_session_id: str | None = Field(
-        default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$"
-    )
+    workbench_session_id: str | None = Field(default=None, pattern=r"^wbs_[A-Za-z0-9_-]{16,80}$")
     execution_policy: TaskExecutionPolicy = Field(default_factory=TaskExecutionPolicy)
 
 
@@ -226,10 +222,19 @@ class MemoryReadRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action: Literal["search", "inspect", "timeline", "health"]
+    action: Literal[
+        "search",
+        "inspect",
+        "timeline",
+        "health",
+        "compact_summary",
+        "summary",
+        "checkpoint",
+    ]
     workspace_id: str | None = Field(default=None, min_length=1, max_length=200)
     query: str | None = Field(default=None, min_length=1, max_length=12_000)
     memory_id: str | None = Field(default=None, min_length=1, max_length=200)
+    task_key: str | None = Field(default=None, max_length=200)
     at_ms: int | None = Field(default=None, ge=0)
     known_at_ms: int | None = Field(default=None, ge=0)
     limit: int = Field(default=8, ge=1, le=20)
@@ -879,6 +884,21 @@ async def read_memory(request: Request, body: MemoryReadRequest):
                     if isinstance(item, dict)
                 ],
             }
+        elif body.action in ("compact_summary", "summary"):
+            result = await adapter.call_tool(
+                "memory.compact_summary",
+                {
+                    **({"task_key": body.task_key} if body.task_key else {}),
+                    "limit": body.limit,
+                },
+            )
+        elif body.action == "checkpoint":
+            result = await adapter.call_tool(
+                "memory.checkpoint",
+                {
+                    **({"task_key": body.task_key} if body.task_key else {}),
+                },
+            )
         else:
             result = await adapter.call_tool("memory.health", {})
     except HTTPException:

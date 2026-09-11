@@ -398,8 +398,12 @@ class EmbeddedMemoryService:
         heading: str = "",
     ) -> dict[str, Any]:
         row = await self.store.get_memory(memory_id)
-        if row["user_id"] != user_id or row["workspace"] != str(workspace or ""):
+        if row["user_id"] != user_id:
             raise KeyError("memory not found")
+        if row["workspace"] != "":
+            ns = await self.store.resolve_namespace(user_id, workspace)
+            if not ns.matches(row["workspace"]):
+                raise KeyError("memory not found")
         projected = await self.graph_store.project_memory(
             user_id=user_id,
             workspace=workspace,
@@ -706,8 +710,12 @@ class EmbeddedMemoryService:
 
     async def inspect(self, memory_id: str, *, user_id: str, workspace: str) -> dict[str, Any]:
         row = await self.store.get_memory(memory_id)
-        if row["user_id"] != user_id or row["workspace"] not in {"", str(workspace or "")}:
+        if row["user_id"] != user_id:
             raise KeyError("memory not found")
+        if workspace and row["workspace"] != "":
+            ns = await self.store.resolve_namespace(user_id, workspace)
+            if not ns.matches(row["workspace"]):
+                raise KeyError("memory not found")
         return row
 
     async def index_memory(self, memory_id: str, *, user_id: str, workspace: str) -> None:
@@ -1132,6 +1140,34 @@ class EmbeddedMemoryService:
         )
         return ref
 
+    async def compact_summary(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        task_key: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        summary = await self.store.compact_summary(
+            user_id, workspace, task_key=task_key, limit=limit
+        )
+        try:
+            health = await self.health(user_id=user_id, workspace=workspace)
+            summary["health"] = {
+                "enabled": health.get("enabled", True),
+                "status": health.get("advanced_status", "healthy"),
+            }
+        except Exception:
+            summary["health"] = {"enabled": True, "status": "healthy"}
+        try:
+            conflicts = await self.list_conflicts(
+                user_id=user_id, workspace=workspace, status="open", limit=10
+            )
+            summary["open_conflicts"] = len(conflicts)
+        except Exception:
+            summary["open_conflicts"] = 0
+        return summary
+
 
 _default_service: EmbeddedMemoryService | None = None
 
@@ -1144,6 +1180,5 @@ def get_memory_service() -> EmbeddedMemoryService:
 
 
 def set_memory_service(service: EmbeddedMemoryService | None) -> None:
-    """Test/runtime injection point; CPTR callers still depend on the service port."""
     global _default_service
     _default_service = service

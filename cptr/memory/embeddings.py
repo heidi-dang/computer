@@ -19,6 +19,8 @@ from typing import Any, Protocol
 import httpx
 from sqlalchemy import delete, or_, select
 
+from cptr.memory.workspace import resolve_workspace_namespace
+
 from cptr.models import MemoryEmbedding
 from cptr.utils.db import get_session_factory
 
@@ -212,9 +214,12 @@ class SqlVectorIndex:
             MemoryEmbedding.user_id == user_id,
             MemoryEmbedding.model_id == self.provider.model_id,
         ]
-        if workspace:
+        ns = await resolve_workspace_namespace(
+            user_id, workspace, session_factory=self._session_factory
+        )
+        if not ns.is_user_scope:
             predicates.append(
-                or_(MemoryEmbedding.workspace == "", MemoryEmbedding.workspace == workspace)
+                or_(MemoryEmbedding.workspace == "", MemoryEmbedding.workspace.in_(ns.aliases))
             )
         else:
             predicates.append(MemoryEmbedding.workspace == "")
@@ -254,7 +259,13 @@ class SqlVectorIndex:
             MemoryEmbedding.model_id == self.provider.model_id,
         ]
         if workspace is not None:
-            predicates.append(MemoryEmbedding.workspace == str(workspace or ""))
+            ns = await resolve_workspace_namespace(
+                user_id, workspace, session_factory=self._session_factory
+            )
+            if not ns.is_user_scope:
+                predicates.append(MemoryEmbedding.workspace.in_(ns.aliases))
+            else:
+                predicates.append(MemoryEmbedding.workspace == "")
         async with self._session() as db:
             rows = list(
                 (await db.scalars(select(MemoryEmbedding.memory_id).where(*predicates))).all()
