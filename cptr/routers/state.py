@@ -98,7 +98,7 @@ def _workspace_display_name(path: str) -> str:
     return name or path
 
 
-async def _workspace_summaries(user_id: str) -> list[dict[str, str | int]]:
+async def _workspace_summaries(user_id: str) -> list[dict[str, str | int | None]]:
     workspaces = await Workspace.get_by_user(user_id)
     summaries = [
         (path, workspace)
@@ -112,8 +112,11 @@ async def _workspace_summaries(user_id: str) -> list[dict[str, str | int]]:
     )
     return [
         {
+            "workspace_id": str(workspace.id),
             "path": path,
             "name": workspace.name or _workspace_display_name(path),
+            "slug": str(workspace.slug) if workspace.slug else None,
+            "workspace_type": str(workspace.workspace_type or "project"),
             "unread_count": unread_counts.get(path, 0),
         }
         for path, workspace in summaries
@@ -179,7 +182,10 @@ async def get_workspace(request: Request, path: str = Query(...)):
         workspace_data["fileBrowserCwd"] = file_browser_path or workspace_path
     return {
         **workspace_data,
+        "workspace_id": str(workspace.id),
         "name": workspace.name or _workspace_display_name(workspace_path),
+        "slug": str(workspace.slug) if workspace.slug else None,
+        "workspace_type": str(workspace.workspace_type or "project"),
         "path": workspace_path,
     }
 
@@ -202,8 +208,13 @@ async def put_workspace(request: Request, path: str = Query(...)):
             else _workspace_display_name(workspace_path)
         )
     workspace_data.pop("path", None)
-    # Everything else is workspace data (groups, tabs, etc.)
-    await Workspace.upsert(user_id, workspace_path, name, workspace_data)
+    # Workspace OS identity is authoritative model state, never opaque UI layout data.
+    workspace_data.pop("workspace_id", None)
+    workspace_data.pop("slug", None)
+    workspace_data.pop("workspace_type", None)
+    workspace_data.pop("current_instruction_version_id", None)
+    # Everything else is workspace UI state (groups, tabs, etc.)
+    saved_workspace = await Workspace.upsert(user_id, workspace_path, name, workspace_data)
 
     old_paths = [
         workspace.path
@@ -212,7 +223,13 @@ async def put_workspace(request: Request, path: str = Query(...)):
     ]
     await Workspace.archive_by_paths(user_id, old_paths)
 
-    return {"status": "saved", "path": workspace_path}
+    return {
+        "status": "saved",
+        "workspace_id": str(saved_workspace.id),
+        "slug": str(saved_workspace.slug) if saved_workspace.slug else None,
+        "workspace_type": str(saved_workspace.workspace_type or "project"),
+        "path": workspace_path,
+    }
 
 
 @router.delete("/workspace")
@@ -256,7 +273,10 @@ async def get_welcome(request: Request):
         )
         recent = [
             {
+                "workspace_id": str(workspace.id),
                 "name": workspace.name or _workspace_display_name(path),
+                "slug": str(workspace.slug) if workspace.slug else None,
+                "workspace_type": str(workspace.workspace_type or "project"),
                 "path": path,
             }
             for path, workspace in recents[:10]

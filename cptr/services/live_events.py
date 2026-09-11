@@ -45,6 +45,7 @@ def _remember_workbench_route(
         oldest = next(iter(cache))
         cache.pop(oldest, None)
 
+
 _SAFE_SGR_RE = re.compile(r"^\x1b\[[0-9;]*m$")
 _STOP_WRITER = object()
 
@@ -667,6 +668,10 @@ def workbench_target_key(session_id: str) -> str:
     return f"workbench:{session_id}"
 
 
+def workspace_target_key(workspace_id: str) -> str:
+    return f"workspace:{workspace_id}"
+
+
 def _projected_target(event: LiveEventEnvelope, workspace_id: str | None = None) -> dict[str, str]:
     target_type, _, remainder = event.target_key.partition(":")
     if target_type == "command":
@@ -677,6 +682,12 @@ def _projected_target(event: LiveEventEnvelope, workspace_id: str | None = None)
             "type": "command",
             "id": command_id,
             "workspace_id": workspace_id or embedded_workspace,
+        }
+    if target_type == "workspace":
+        return {
+            "type": "workspace",
+            "id": remainder,
+            "workspace_id": remainder,
         }
     if target_type not in {"task", "monitor"} or not remainder:
         raise ValueError("unsupported live target key")
@@ -861,6 +872,13 @@ async def publish_terminal_event(
             event_type=event_type,
             payload=payload,
         )
+    elif target_type == "workspace":
+        event = await publish_workspace_event(
+            user_id=user_id,
+            workspace_id=target_id,
+            event_type=event_type,
+            payload=payload,
+        )
     else:
         raise ValueError("unsupported live terminal target")
     if workbench_session_id:
@@ -940,4 +958,45 @@ async def safe_publish_monitor_event(**kwargs: Any) -> LiveEventEnvelope | None:
         return await publish_monitor_event(**kwargs)
     except Exception:
         logger.debug("live monitor event unavailable", exc_info=True)
+        return None
+
+
+async def publish_workspace_event(
+    *,
+    user_id: str,
+    workspace_id: str,
+    event_type: str,
+    payload: dict[str, Any] | None = None,
+    workbench_session_id: str | None = None,
+    hub: LiveEventHub | None = None,
+) -> LiveEventEnvelope:
+    """Publish a live event bound to a workspace, optionally mirrored to workbench."""
+    target_hub = hub or live_event_hub
+    event = await target_hub.publish(
+        user_id=user_id,
+        target_key=workspace_target_key(workspace_id),
+        event_type=event_type,
+        payload=payload,
+    )
+    try:
+        from cptr.services.workspace_observability import workspace_projection_service
+
+        workspace_projection_service.record_live_event(event)
+    except Exception:
+        pass
+    if workbench_session_id:
+        await project_live_event_to_workbench(
+            hub=target_hub,
+            event=event,
+            workbench_session_id=workbench_session_id,
+            workspace_id=workspace_id,
+        )
+    return event
+
+
+async def safe_publish_workspace_event(**kwargs: Any) -> LiveEventEnvelope | None:
+    try:
+        return await publish_workspace_event(**kwargs)
+    except Exception:
+        logger.debug("live workspace event unavailable", exc_info=True)
         return None

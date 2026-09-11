@@ -386,7 +386,7 @@ class WorkspaceContextSnapshot:
         return self.fdx.status
 
     def compute_digest(self) -> str:
-        """Compute stable SHA-256 digest of canonical snapshot state."""
+        """Compute stable SHA-256 digest of canonical context-bearing state."""
         canonical_state = {
             "version": self.version,
             "workspace_root": self.workspace_root,
@@ -398,17 +398,38 @@ class WorkspaceContextSnapshot:
                 "branch": self.repo.branch,
                 "staged_count": self.repo.staged_count,
                 "unstaged_count": self.repo.unstaged_count,
+                "untracked_count": self.repo.untracked_count,
+            },
+            "fdx": {
+                "status": self.fdx.status,
+                "semantic_status": self.fdx.semantic_status,
+                "index_status": self.fdx.index_status,
+            },
+            "lsp": {
+                "status": self.lsp.status,
+                "active_servers": self.lsp.active_servers,
+                "diagnostics_count": self.lsp.diagnostics_count,
+                "symbols_count": self.lsp.symbols_count,
             },
             "divergence": {
                 "is_diverged": self.divergence.is_diverged,
                 "is_stale": self.divergence.is_stale,
                 "checkpoint_id": self.divergence.checkpoint_id,
+                "checkpoint_revision": self.divergence.checkpoint_revision,
+                "checkpoint_memory_version": self.divergence.checkpoint_memory_version,
+                "commits_ahead": self.divergence.commits_ahead,
+                "commits_behind": self.divergence.commits_behind,
                 "memory_drift": self.divergence.memory_drift,
+                "divergence_reasons": self.divergence.divergence_reasons,
             },
             "memory": {
                 "memory_version": self.memory.memory_version,
-                "canonical_count": len(self.memory.canonical_memories),
+                "canonical_memories": self.memory.canonical_memories,
+                "managed_context": self.memory.managed_context,
+                "snippets": self.memory.snippets,
             },
+            "environment": self.environment.to_dict(),
+            "instructions": self.instructions.to_dict(),
         }
         encoded = _safe_json_dumps(canonical_state).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()

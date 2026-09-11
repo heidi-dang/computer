@@ -10,6 +10,14 @@ from pydantic import BaseModel, Field
 from cptr.models import AutonomousMonitor, ControlTask, Workspace
 from cptr.services.action_traces import action_trace_store, trace_context_from_request
 from cptr.services.control_auth import require_control_user
+from cptr.services.local_root_grants import local_root_grant_store, local_root_grants_enabled
+from cptr.services.privilege_broker import (
+    AdminSessionGrantDenied,
+    DEFAULT_ADMIN_TTL_SECONDS,
+    MAX_ADMIN_TTL_SECONDS,
+    admin_session_grant_store,
+    privilege_broker,
+)
 from cptr.services.workbench_sessions import MAX_EVENT_LIST_LIMIT, workbench_session_store
 from cptr.utils.db import get_db
 from cptr.utils.tools import get_command_session
@@ -70,6 +78,14 @@ class AppendWorkbenchSessionEventRequest(BaseModel):
 
 class DeleteWorkbenchSessionRequest(BaseModel):
     confirmation_id: str = Field(min_length=16, max_length=200)
+
+
+class AdminGrantRequest(BaseModel):
+    ttl_seconds: int = Field(
+        default=DEFAULT_ADMIN_TTL_SECONDS,
+        ge=1,
+        le=MAX_ADMIN_TTL_SECONDS,
+    )
 
 
 async def _user(request: Request, scope: str) -> str:
@@ -465,6 +481,71 @@ async def rename_workbench_session(
     if session is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
     return session
+
+
+@router.post("/workbench-sessions/{session_id}/admin-grant")
+async def grant_workbench_session_admin(
+    request: Request,
+    session_id: str,
+    body: AdminGrantRequest = AdminGrantRequest(),
+):
+    user_id = await _user(request, "task:write")
+    try:
+        return await admin_session_grant_store.grant(
+            owner_id=user_id,
+            session_id=session_id,
+            ttl_seconds=body.ttl_seconds,
+            actor="control_api",
+        )
+    except (AdminSessionGrantDenied, ValueError) as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/workbench-sessions/{session_id}/admin-revoke")
+async def revoke_workbench_session_admin(request: Request, session_id: str):
+    user_id = await _user(request, "task:write")
+    try:
+        count = await admin_session_grant_store.revoke(
+            owner_id=user_id,
+            session_id=session_id,
+            actor="control_api",
+        )
+    except AdminSessionGrantDenied as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "session_id": session_id,
+        "revoked": count > 0,
+        "revoked_count": count,
+    }
+
+
+@router.get("/workbench-sessions/{session_id}/privilege")
+async def get_workbench_session_privilege(request: Request, session_id: str):
+    user_id = await _user(request, "task:read")
+    session = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+
+    admin_status = await admin_session_grant_store.status(
+        owner_id=user_id,
+        session_id=session_id,
+    )
+    root_active = bool(
+        local_root_grants_enabled()
+        and await local_root_grant_store.is_active(
+            owner_id=user_id,
+            session_id=session_id,
+        )
+    )
+    return {
+        "session_id": session_id,
+        "privilege": await privilege_broker.resolve_privilege(
+            owner_id=user_id,
+            session_id=session_id,
+        ),
+        "admin_grant": admin_status,
+        "local_root_grant_active": root_active,
+    }
 
 
 @router.post("/workbench-sessions/{session_id}/archive")

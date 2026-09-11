@@ -2250,7 +2250,11 @@ async def run_command(
                 "workspace": workspace,
                 "user_id": user_id,
                 "identity": identity,
-                "privilege": "root" if bool(__context__.get("local_root_unrestricted")) else "user",
+                "privilege": (
+                    "root"
+                    if bool(__context__.get("local_root_unrestricted"))
+                    else ("admin" if bool(__context__.get("admin_active")) else "user")
+                ),
                 "chat_id": __context__.get("chat_id"),
                 "message_id": __context__.get("message_id"),
                 "call_id": __context__.get("call_id"),

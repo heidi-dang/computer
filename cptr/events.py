@@ -58,6 +58,71 @@ class EventDefinitions:
         "A manual notification was sent.",
         "Notification",
     )
+    WORKSPACE_CREATED = EventDefinition(
+        "workspace.created",
+        "A workspace was created.",
+        "Workspace created",
+    )
+    WORKSPACE_UPDATED = EventDefinition(
+        "workspace.updated",
+        "A workspace was updated.",
+        "Workspace updated",
+    )
+    WORKSPACE_DELETED = EventDefinition(
+        "workspace.deleted",
+        "A workspace was deleted.",
+        "Workspace deleted",
+    )
+    WORKSPACE_CONTEXT_UPDATED = EventDefinition(
+        "workspace.context.updated",
+        "Workspace context snapshot was compiled or refreshed.",
+        "Workspace context updated",
+    )
+    WORKSPACE_CONTEXT_INVALIDATED = EventDefinition(
+        "workspace.context.invalidated",
+        "Workspace context cache was invalidated.",
+        "Workspace context invalidated",
+    )
+    WORKSPACE_PROJECTION_UPDATED = EventDefinition(
+        "workspace.projection.updated",
+        "Workspace live projection was updated.",
+        "Workspace projection updated",
+    )
+    WORKSPACE_REVISION_CHANGED = EventDefinition(
+        "workspace.revision.changed",
+        "A workspace repository revision changed.",
+        "Workspace revision changed",
+    )
+    WORKSPACE_ROLE_CHANGED = EventDefinition(
+        "workspace.role.changed",
+        "A workspace repository role was changed.",
+        "Workspace role changed",
+    )
+    WORKSPACE_CHECKOUT_CHANGED = EventDefinition(
+        "workspace.checkout.changed",
+        "A workspace repository checkout or canonical target was changed.",
+        "Workspace checkout changed",
+    )
+    WORKSPACE_CHECKPOINT_CHANGED = EventDefinition(
+        "workspace.checkpoint.changed",
+        "A workspace checkpoint was created or changed.",
+        "Workspace checkpoint changed",
+    )
+    WORKSPACE_MEMORY_CHANGED = EventDefinition(
+        "workspace.memory.changed",
+        "Workspace memory or procedures were updated.",
+        "Workspace memory changed",
+    )
+    WORKSPACE_ENVIRONMENT_CHANGED = EventDefinition(
+        "workspace.environment.changed",
+        "Workspace environment profile or configuration was changed.",
+        "Workspace environment changed",
+    )
+    WORKSPACE_INSTRUCTIONS_CHANGED = EventDefinition(
+        "workspace.instructions.changed",
+        "Workspace steering or system instructions were changed.",
+        "Workspace instructions changed",
+    )
 
 
 EVENTS = EventDefinitions()

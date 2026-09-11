@@ -56,6 +56,7 @@ from cptr.services.local_root_grants import (
     local_root_grants_enabled,
     parse_root_command_directive,
 )
+from cptr.services.privilege_broker import admin_session_grant_store
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.workbench_sessions import workbench_session_store
 from cptr.utils.db import get_db
@@ -2803,6 +2804,13 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
             session_id=body.workbench_session_id,
         )
     )
+    admin_active = bool(
+        body.workbench_session_id
+        and await admin_session_grant_store.is_active(
+            owner_id=user_id,
+            session_id=body.workbench_session_id,
+        )
+    )
     # Guard Controls may remove only their named approval friction. The actual
     # authority boundary remains the intersection of request effects, bearer
     # scopes, host/root prerequisites and the dedicated SSH boundary.
@@ -2948,6 +2956,8 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
     if root_unrestricted:
         command_context["local_root_unrestricted"] = True
         command_context["root_workbench_session_id"] = body.workbench_session_id
+    if admin_active:
+        command_context["admin_active"] = True
     if body.measure_lifecycle:
         now = time.perf_counter()
         lifecycle_timing["route_pre_run_ms"] = round((now - phase_started) * 1000.0, 3)
@@ -2986,7 +2996,7 @@ async def start_workspace_command(request: Request, workspace_id: str, body: Com
         session["memory_command"] = body.command
         session["memory_metadata"] = {
             "transport": "local-root-command" if root_unrestricted else "local-command",
-            "privilege": "root" if root_unrestricted else "user",
+            "privilege": ("root" if root_unrestricted else ("admin" if admin_active else "user")),
         }
     if body.measure_lifecycle:
         now = time.perf_counter()

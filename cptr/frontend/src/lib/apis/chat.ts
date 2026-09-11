@@ -165,7 +165,8 @@ export const sendMessage = (
 	parentId?: string | null,
 	params: ChatSendParams = {},
 	regenerationPrompt?: string,
-	files?: { id: string; name: string; url: string; type: string }[]
+	files?: { id: string; name: string; url: string; type: string }[],
+	workspaceId?: string
 ) =>
 	fetchJSON<SendMessageResult>(
 		'/api/chats',
@@ -173,6 +174,7 @@ export const sendMessage = (
 			content,
 			model_id: modelId,
 			...(workspace ? { workspace } : {}),
+			...(workspaceId ? { workspace_id: workspaceId } : {}),
 			chat_id: chatId,
 			parent_id: parentId ?? null,
 			regeneration_prompt: regenerationPrompt,

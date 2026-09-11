@@ -503,6 +503,49 @@ class SqlMemoryStore:
             "created_at_ms": int(row.created_at_ms),
         }
 
+    async def list_checkpoints(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        task_key: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return bounded checkpoint history for one owned workspace namespace."""
+        ns = await self.resolve_namespace(user_id, workspace)
+        query = select(MemoryCheckpoint).where(
+            MemoryCheckpoint.user_id == user_id,
+            MemoryCheckpoint.workspace.in_(ns.aliases),
+        )
+        task_str = str(task_key or "").strip()
+        if task_str:
+            query = query.where(MemoryCheckpoint.task_key == task_str)
+        bounded_limit = max(1, min(int(limit), 200))
+        async with self._session() as db:
+            rows = list(
+                (
+                    await db.scalars(
+                        query.order_by(
+                            MemoryCheckpoint.created_at_ms.desc(),
+                            MemoryCheckpoint.version.desc(),
+                        ).limit(bounded_limit)
+                    )
+                ).all()
+            )
+        return [
+            {
+                "checkpoint_id": row.id,
+                "task_key": row.task_key,
+                "version": int(row.version),
+                "stage": row.stage,
+                "state": row.state if isinstance(row.state, dict) else {},
+                "memory_version": int(row.memory_version or 0),
+                "parent_checkpoint_id": row.parent_checkpoint_id,
+                "created_at_ms": int(row.created_at_ms),
+            }
+            for row in rows
+        ]
+
     async def _ns_owns(self, user_id: str, workspace: str, record_workspace: str) -> bool:
         """Return True when *record_workspace* is an alias for the caller's workspace.
 

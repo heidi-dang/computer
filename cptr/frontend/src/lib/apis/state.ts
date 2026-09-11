@@ -18,8 +18,11 @@ export const savePreferences = (data: Record<string, unknown>) =>
 // ── Workspace list (sidebar) ────────────────────────────────────
 
 export interface WorkspaceListItem {
+	workspace_id: string;
 	path: string;
 	name: string;
+	slug: string | null;
+	workspace_type: string;
 	unread_count: number;
 }
 

@@ -15,8 +15,19 @@ from sqlalchemy import select
 from cptr.memory.domain import PrepareContextInput
 from cptr.memory.service import MemoryUnavailableError, get_memory_service
 from cptr.memory.workspace import resolve_workspace_namespace
-from cptr.models.workspaces import Workspace, WorkspaceAlias
-from cptr.services.environment_profile import EnvironmentProfileService
+from cptr.models.workspaces import (
+    Repository,
+    RepositoryCheckout,
+    Workspace,
+    WorkspaceAlias,
+    WorkspaceRepository,
+)
+from cptr.services.environment_profile import (
+    EnvironmentProfileError,
+    EnvironmentProfileNotFoundError,
+    EnvironmentProfileService,
+)
+from cptr.services.environment_target import EnvironmentTargetError
 from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.workspace_context import workspace_context_service
 from cptr.services.workspace_groups import (
@@ -32,7 +43,10 @@ from cptr.services.workspace_health import (
     classify_workspace_health,
     conservative_reconcile_workspace,
 )
-from cptr.services.workspace_instructions import WorkspaceInstructionService
+from cptr.services.workspace_instructions import (
+    WorkspaceInstructionError,
+    WorkspaceInstructionService,
+)
 from cptr.services.workspace_resolver import (
     AmbiguousWorkspaceError,
     UnsafeResolutionError,
@@ -45,7 +59,21 @@ from cptr.utils.identity import identity_for_user_id
 from cptr.utils.redaction import redact_sensitive
 
 
-READ_ACTIONS = frozenset({"resolve", "context", "health", "groups"})
+READ_ACTIONS = frozenset(
+    {
+        "resolve",
+        "context",
+        "health",
+        "groups",
+        "repositories",
+        "repository_catalog",
+        "instructions",
+        "instruction_history",
+        "instruction_preview",
+        "environment_profiles",
+        "checkpoints",
+    }
+)
 WRITE_ACTIONS = frozenset(
     {
         "reconcile",
@@ -55,6 +83,15 @@ WRITE_ACTIONS = frozenset(
         "group_remove_member",
         "group_update_member",
         "group_reorder",
+        "instruction_save",
+        "environment_create",
+        "environment_version_create",
+        "environment_set_active_version",
+        "environment_set_target",
+        "workspace_update",
+        "repository_add",
+        "repository_update",
+        "repository_remove",
     }
 )
 SUPPORTED_ACTIONS = READ_ACTIONS | WRITE_ACTIONS
@@ -102,6 +139,55 @@ def _map_group_error(exc: WorkspaceGroupError) -> WorkspaceActionError:
         str(exc),
         status_code=status_code,
     )
+
+
+def _safe_environment_version(version: Any) -> dict[str, Any] | None:
+    if version is None:
+        return None
+    credential_refs = version.credential_refs if isinstance(version.credential_refs, list) else []
+    packages = version.packages if isinstance(version.packages, (dict, list)) else {}
+    settings = version.settings if isinstance(version.settings, dict) else {}
+    env = version.environment_variables if isinstance(version.environment_variables, dict) else {}
+    return {
+        "version_id": str(version.id),
+        "version_number": int(version.version_number),
+        "digest": str(version.digest),
+        "runtime_profile": str(version.runtime_profile),
+        "environment_variable_names": sorted(str(key) for key in env),
+        "package_count": len(packages),
+        "setting_keys": sorted(str(key) for key in settings),
+        "credential_refs": [
+            {
+                "logical_name": ref.get("logical_name"),
+                "source_type": ref.get("source_type"),
+                "target_env_var": ref.get("target_env_var"),
+                "consumers": list(ref.get("consumers") or []),
+            }
+            for ref in credential_refs
+            if isinstance(ref, dict)
+        ],
+        "parent_version_id": (
+            str(version.parent_version_id) if version.parent_version_id else None
+        ),
+        "created_at_ms": int(version.created_at_ms),
+    }
+
+
+def _safe_environment_profile(profile: Any, version: Any = None) -> dict[str, Any]:
+    return {
+        "profile_id": str(profile.id),
+        "workspace_id": str(profile.workspace_id) if profile.workspace_id else None,
+        "name": str(profile.name),
+        "description": str(profile.description) if profile.description else None,
+        "active_version_id": (
+            str(profile.active_version_id) if profile.active_version_id else None
+        ),
+        "target_name": str(profile.target_name) if profile.target_name else None,
+        "is_archived": bool(profile.is_archived),
+        "created_at_ms": int(profile.created_at_ms),
+        "updated_at_ms": int(profile.updated_at_ms),
+        "active_version": _safe_environment_version(version),
+    }
 
 
 def _candidate_summary(value: Any) -> dict[str, Any]:
@@ -326,6 +412,9 @@ class WorkspaceActionService:
         workspace: Workspace,
         current_message: str,
         max_chars: int,
+        task_key: str = "",
+        recent_messages: list[dict[str, Any]] | None = None,
+        mentioned_files: list[str] | None = None,
     ) -> tuple[Any | None, list[str]]:
         diagnostics: list[str] = []
         namespace = await resolve_workspace_namespace(user_id, str(workspace.id))
@@ -334,8 +423,10 @@ class WorkspaceActionService:
                 PrepareContextInput(
                     user_id=user_id,
                     workspace=namespace.workspace_id or str(workspace.id),
-                    task_key="",
+                    task_key=str(task_key or ""),
                     current_message=current_message,
+                    recent_messages=recent_messages or [],
+                    mentioned_files=mentioned_files or [],
                     max_chars=max_chars,
                 )
             )
@@ -439,7 +530,730 @@ class WorkspaceActionService:
             environment_input = {"extra": safe_profile}
             return environment_input, safe_profile, diagnostics
 
-    async def context(
+    async def _invalidate_axis(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str,
+        axis: str,
+    ) -> None:
+        """Invalidate cached context and publish the matching Workspace OS event."""
+        from cptr.events import EVENTS
+        from cptr.services.live_events import safe_publish_workspace_event
+        from cptr.services.workspace_observability import workspace_context_cache
+
+        event_names = {
+            "instructions": EVENTS.WORKSPACE_INSTRUCTIONS_CHANGED.name,
+            "environment": EVENTS.WORKSPACE_ENVIRONMENT_CHANGED.name,
+            "memory": EVENTS.WORKSPACE_MEMORY_CHANGED.name,
+            "checkpoint": EVENTS.WORKSPACE_CHECKPOINT_CHANGED.name,
+            "revision": EVENTS.WORKSPACE_REVISION_CHANGED.name,
+            "role": EVENTS.WORKSPACE_ROLE_CHANGED.name,
+            "canonical_checkout": EVENTS.WORKSPACE_CHECKOUT_CHANGED.name,
+        }
+        await workspace_context_cache.invalidate(
+            workspace_id,
+            reason=axis,
+            user_id=user_id,
+        )
+        event_name = event_names.get(axis)
+        if event_name:
+            await safe_publish_workspace_event(
+                user_id=user_id,
+                workspace_id=workspace_id,
+                event_type=event_name,
+                payload={"workspace_id": workspace_id, "axis": axis},
+            )
+
+    async def workspace_update(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        name: str | None = None,
+        slug: str | None = None,
+        workspace_type: str | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        try:
+            updated = await Workspace.update_identity(
+                user_id,
+                str(workspace.id),
+                name=name,
+                slug=slug,
+                workspace_type=workspace_type,
+            )
+        except ValueError as exc:
+            code = (
+                "WORKSPACE_SLUG_CONFLICT"
+                if "slug is already in use" in str(exc)
+                else "WORKSPACE_IDENTITY_INVALID"
+            )
+            raise WorkspaceActionError(
+                code,
+                str(exc),
+                status_code=409 if code == "WORKSPACE_SLUG_CONFLICT" else 422,
+            ) from exc
+        return {"workspace": _workspace_summary(updated)}
+
+    async def repository_catalog(
+        self,
+        *,
+        user_id: str,
+    ) -> dict[str, Any]:
+        async with await get_db() as db:
+            repositories = list(
+                (
+                    await db.scalars(
+                        select(Repository)
+                        .where(Repository.user_id == user_id)
+                        .order_by(Repository.name, Repository.canonical_remote_identity)
+                    )
+                ).all()
+            )
+        return {
+            "repositories": [
+                {
+                    "repository_id": str(repository.id),
+                    "name": str(repository.name),
+                    "canonical_remote_identity": str(repository.canonical_remote_identity),
+                    "provider": str(repository.provider) if repository.provider else None,
+                    "default_branch": (
+                        str(repository.default_branch) if repository.default_branch else None
+                    ),
+                }
+                for repository in repositories
+            ]
+        }
+
+    async def _workspace_membership(
+        self,
+        *,
+        db: Any,
+        user_id: str,
+        workspace_id: str,
+        repository_id: str,
+    ) -> tuple[Repository, WorkspaceRepository | None]:
+        repository = await db.scalar(
+            select(Repository).where(
+                Repository.id == repository_id,
+                Repository.user_id == user_id,
+            )
+        )
+        if repository is None:
+            raise WorkspaceActionError(
+                "REPOSITORY_NOT_FOUND",
+                f"repository not found: {repository_id}",
+                status_code=404,
+            )
+        membership = await db.get(
+            WorkspaceRepository,
+            {"workspace_id": workspace_id, "repository_id": repository_id},
+        )
+        return repository, membership
+
+    async def repository_add(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        repository_id: str,
+        role: str = "repository",
+        primary: bool = False,
+        sort_order: int = 0,
+        enabled: bool = True,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        workspace_id = str(workspace.id)
+        async with await get_db() as db:
+            repository, membership = await self._workspace_membership(
+                db=db,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                repository_id=repository_id,
+            )
+            if membership is not None:
+                raise WorkspaceActionError(
+                    "REPOSITORY_ALREADY_IN_WORKSPACE",
+                    f"repository is already in workspace: {repository_id}",
+                    status_code=409,
+                )
+            if primary:
+                existing = list(
+                    (
+                        await db.scalars(
+                            select(WorkspaceRepository).where(
+                                WorkspaceRepository.workspace_id == workspace_id,
+                                WorkspaceRepository.primary.is_(True),
+                            )
+                        )
+                    ).all()
+                )
+                for row in existing:
+                    row.primary = False
+            membership = WorkspaceRepository(
+                workspace_id=workspace_id,
+                repository_id=str(repository.id),
+                role=str(role or "repository").strip() or "repository",
+                primary=bool(primary),
+                sort_order=int(sort_order),
+                enabled=bool(enabled),
+                config=redact_sensitive(dict(config or {})),
+            )
+            db.add(membership)
+            await db.commit()
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            axis="canonical_checkout",
+        )
+        return await self.repositories(user_id=user_id, reference=workspace_id)
+
+    async def repository_update(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        repository_id: str,
+        role: str | None = None,
+        primary: bool | None = None,
+        sort_order: int | None = None,
+        enabled: bool | None = None,
+        config: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        workspace_id = str(workspace.id)
+        async with await get_db() as db:
+            _, membership = await self._workspace_membership(
+                db=db,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                repository_id=repository_id,
+            )
+            if membership is None:
+                raise WorkspaceActionError(
+                    "WORKSPACE_REPOSITORY_NOT_FOUND",
+                    "repository membership not found",
+                    status_code=404,
+                )
+            if primary is True:
+                existing = list(
+                    (
+                        await db.scalars(
+                            select(WorkspaceRepository).where(
+                                WorkspaceRepository.workspace_id == workspace_id,
+                                WorkspaceRepository.primary.is_(True),
+                                WorkspaceRepository.repository_id != repository_id,
+                            )
+                        )
+                    ).all()
+                )
+                for row in existing:
+                    row.primary = False
+            if role is not None:
+                membership.role = str(role).strip() or "repository"
+            if primary is not None:
+                membership.primary = bool(primary)
+            if sort_order is not None:
+                membership.sort_order = int(sort_order)
+            if enabled is not None:
+                membership.enabled = bool(enabled)
+            if config is not None:
+                membership.config = redact_sensitive(dict(config))
+            await db.commit()
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            axis="canonical_checkout",
+        )
+        return await self.repositories(user_id=user_id, reference=workspace_id)
+
+    async def repository_remove(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        repository_id: str,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        workspace_id = str(workspace.id)
+        async with await get_db() as db:
+            _, membership = await self._workspace_membership(
+                db=db,
+                user_id=user_id,
+                workspace_id=workspace_id,
+                repository_id=repository_id,
+            )
+            if membership is None:
+                raise WorkspaceActionError(
+                    "WORKSPACE_REPOSITORY_NOT_FOUND",
+                    "repository membership not found",
+                    status_code=404,
+                )
+            await db.delete(membership)
+            await db.commit()
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            axis="canonical_checkout",
+        )
+        return await self.repositories(user_id=user_id, reference=workspace_id)
+
+    async def repositories(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        workspace_id = str(workspace.id)
+        async with await get_db() as db:
+            rows = list(
+                (
+                    await db.execute(
+                        select(WorkspaceRepository, Repository)
+                        .join(
+                            Repository,
+                            Repository.id == WorkspaceRepository.repository_id,
+                        )
+                        .where(
+                            WorkspaceRepository.workspace_id == workspace_id,
+                            Repository.user_id == user_id,
+                        )
+                        .order_by(
+                            WorkspaceRepository.sort_order,
+                            Repository.name,
+                        )
+                    )
+                ).all()
+            )
+            repo_ids = [str(repository.id) for _, repository in rows]
+            checkouts_by_repo: dict[str, list[Any]] = {repo_id: [] for repo_id in repo_ids}
+            if repo_ids:
+                checkout_rows = list(
+                    (
+                        await db.scalars(
+                            select(RepositoryCheckout)
+                            .where(RepositoryCheckout.repository_id.in_(repo_ids))
+                            .order_by(
+                                RepositoryCheckout.repository_id,
+                                RepositoryCheckout.canonical.desc(),
+                                RepositoryCheckout.created_at,
+                            )
+                        )
+                    ).all()
+                )
+                for checkout in checkout_rows:
+                    checkouts_by_repo.setdefault(str(checkout.repository_id), []).append(checkout)
+
+        repositories: list[dict[str, Any]] = []
+        for membership, repository in rows:
+            repository_id = str(repository.id)
+            checkouts = checkouts_by_repo.get(repository_id, [])
+            repositories.append(
+                {
+                    "repository_id": repository_id,
+                    "name": str(repository.name),
+                    "canonical_remote_identity": str(repository.canonical_remote_identity),
+                    "provider": str(repository.provider) if repository.provider else None,
+                    "default_branch": (
+                        str(repository.default_branch) if repository.default_branch else None
+                    ),
+                    "role": str(membership.role),
+                    "primary": bool(membership.primary),
+                    "sort_order": int(membership.sort_order or 0),
+                    "enabled": bool(membership.enabled),
+                    "config": redact_sensitive(
+                        membership.config if isinstance(membership.config, dict) else {}
+                    ),
+                    "checkouts": [
+                        {
+                            "checkout_id": str(checkout.id),
+                            "checkout_kind": str(checkout.checkout_kind),
+                            "canonical": bool(checkout.canonical),
+                            "branch": str(checkout.branch) if checkout.branch else None,
+                            "upstream": str(checkout.upstream) if checkout.upstream else None,
+                            "last_seen_revision": (
+                                str(checkout.last_seen_revision)
+                                if checkout.last_seen_revision
+                                else None
+                            ),
+                            "available": bool(checkout.available),
+                            "last_seen_at": int(checkout.last_seen_at),
+                        }
+                        for checkout in checkouts
+                    ],
+                }
+            )
+        return {
+            "workspace": _workspace_summary(workspace),
+            "repositories": repositories,
+            "repository_count": len(repositories),
+        }
+
+    async def instructions(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        current = await self._instructions.get_current_instruction(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+        )
+        return {
+            "workspace": _workspace_summary(workspace),
+            "instruction": current.to_dict() if current is not None else None,
+        }
+
+    async def instruction_history(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        rows, total = await self._instructions.get_instruction_history(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            limit=max(1, min(int(limit), 100)),
+            offset=max(0, int(offset)),
+        )
+        return {
+            "workspace": _workspace_summary(workspace),
+            "instructions": [row.to_dict() for row in rows],
+            "total": int(total),
+        }
+
+    async def instruction_preview(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        candidate_content: str | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        preview = await self._instructions.compile_preview(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            candidate_content=candidate_content,
+        )
+        return {
+            "workspace": _workspace_summary(workspace),
+            "preview": preview.to_dict(),
+        }
+
+    async def instruction_save(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        content: str,
+        expected_version: int | None = None,
+        change_summary: str | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        row = await self._instructions.save_instruction_version(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            content=str(content),
+            expected_version=expected_version,
+            change_summary=change_summary,
+        )
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="instructions",
+        )
+        return {
+            "workspace": _workspace_summary(workspace),
+            "instruction": row.to_dict(),
+        }
+
+    async def environment_profiles(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        include_archived: bool = False,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        async with await get_db() as db:
+            profiles = await EnvironmentProfileService.list_profiles(
+                db,
+                user_id=user_id,
+                workspace_id=str(workspace.id),
+                include_archived=bool(include_archived),
+            )
+            result: list[dict[str, Any]] = []
+            for profile in profiles:
+                version = (
+                    await EnvironmentProfileService.get_version(db, str(profile.active_version_id))
+                    if profile.active_version_id
+                    else None
+                )
+                result.append(_safe_environment_profile(profile, version))
+        return {
+            "workspace": _workspace_summary(workspace),
+            "profiles": result,
+        }
+
+    async def _owned_environment_profile(
+        self,
+        *,
+        db: Any,
+        user_id: str,
+        workspace_id: str,
+        profile_id: str,
+    ) -> Any:
+        profile = await EnvironmentProfileService.get_profile(db, profile_id)
+        if profile is None:
+            raise WorkspaceActionError(
+                "ENVIRONMENT_PROFILE_NOT_FOUND",
+                f"environment profile not found: {profile_id}",
+                status_code=404,
+            )
+        if str(profile.user_id) != str(user_id):
+            raise WorkspaceActionError(
+                "ENVIRONMENT_PROFILE_ACCESS_DENIED",
+                "environment profile is not owned by the authenticated user",
+                status_code=403,
+            )
+        if str(profile.workspace_id or "") != str(workspace_id):
+            raise WorkspaceActionError(
+                "ENVIRONMENT_WORKSPACE_MISMATCH",
+                "environment profile belongs to a different workspace",
+                status_code=409,
+            )
+        return profile
+
+    async def environment_create(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        name: str,
+        description: str | None = None,
+        initial_spec: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        async with await get_db() as db:
+            profile, version = await EnvironmentProfileService.create_profile(
+                db,
+                user_id=user_id,
+                workspace_id=str(workspace.id),
+                name=name,
+                description=description,
+                initial_spec=initial_spec,
+            )
+            await db.commit()
+            await db.refresh(profile)
+            if version is not None:
+                await db.refresh(version)
+            safe = _safe_environment_profile(profile, version)
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="environment",
+        )
+        return {"workspace": _workspace_summary(workspace), "profile": safe}
+
+    async def environment_version_create(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        profile_id: str,
+        spec: dict[str, Any],
+        make_active: bool = True,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        async with await get_db() as db:
+            profile = await self._owned_environment_profile(
+                db=db,
+                user_id=user_id,
+                workspace_id=str(workspace.id),
+                profile_id=profile_id,
+            )
+            version = await EnvironmentProfileService.create_version(
+                db,
+                profile_id=str(profile.id),
+                spec=spec,
+                created_by=user_id,
+                make_active=bool(make_active),
+            )
+            await db.commit()
+            await db.refresh(profile)
+            await db.refresh(version)
+            safe = _safe_environment_profile(profile, version if make_active else None)
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="environment",
+        )
+        return {
+            "workspace": _workspace_summary(workspace),
+            "profile": safe,
+            "version": _safe_environment_version(version),
+        }
+
+    async def environment_set_active_version(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        profile_id: str,
+        version_id: str,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        async with await get_db() as db:
+            profile = await self._owned_environment_profile(
+                db=db,
+                user_id=user_id,
+                workspace_id=str(workspace.id),
+                profile_id=profile_id,
+            )
+            profile = await EnvironmentProfileService.set_active_version(
+                db,
+                profile_id=str(profile.id),
+                version_id=version_id,
+            )
+            await db.commit()
+            version = await EnvironmentProfileService.get_version(
+                db, str(profile.active_version_id)
+            )
+            safe = _safe_environment_profile(profile, version)
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="environment",
+        )
+        return {"workspace": _workspace_summary(workspace), "profile": safe}
+
+    async def environment_set_target(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        profile_id: str,
+        target_name: str | None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        async with await get_db() as db:
+            profile = await self._owned_environment_profile(
+                db=db,
+                user_id=user_id,
+                workspace_id=str(workspace.id),
+                profile_id=profile_id,
+            )
+            profile = await EnvironmentProfileService.set_profile_target(
+                db,
+                profile_id=str(profile.id),
+                target_name=target_name,
+                user_id=user_id,
+            )
+            await db.commit()
+            version = (
+                await EnvironmentProfileService.get_version(db, str(profile.active_version_id))
+                if profile.active_version_id
+                else None
+            )
+            safe = _safe_environment_profile(profile, version)
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="environment",
+        )
+        return {"workspace": _workspace_summary(workspace), "profile": safe}
+
+    async def checkpoints(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        task_key: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        store = get_memory_service().store
+        checkpoints = await store.list_checkpoints(
+            user_id,
+            str(workspace.id),
+            task_key=task_key,
+            limit=max(1, min(int(limit), 200)),
+        )
+        memory_version = await store.namespace_version(user_id, str(workspace.id))
+        return {
+            "workspace": _workspace_summary(workspace),
+            "memory_version": int(memory_version),
+            "checkpoints": checkpoints,
+        }
+
+    async def _context_impl(
         self,
         *,
         user_id: str,
@@ -449,6 +1263,9 @@ class WorkspaceActionService:
         current_message: str = "",
         max_chars: int = 9000,
         memory_max_chars: int = 3000,
+        memory_task_key: str = "",
+        recent_messages: list[dict[str, Any]] | None = None,
+        mentioned_files: list[str] | None = None,
     ) -> dict[str, Any]:
         workbench = await self._workbench(
             user_id=user_id,
@@ -485,6 +1302,9 @@ class WorkspaceActionService:
             workspace=workspace,
             current_message=str(current_message or ""),
             max_chars=max(500, min(int(memory_max_chars), 6000)),
+            task_key=memory_task_key,
+            recent_messages=recent_messages,
+            mentioned_files=mentioned_files,
         )
         environment_input, environment_profile, env_diagnostics = await self._environment_input(
             user_id=user_id,
@@ -527,6 +1347,53 @@ class WorkspaceActionService:
                 "environment_profile": environment_profile,
                 "context": bundle,
             }
+        )
+
+    async def context(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str | None = None,
+        reference: str | None = None,
+        workbench_session_id: str | None = None,
+        current_message: str = "",
+        max_chars: int = 9000,
+        memory_max_chars: int = 3000,
+    ) -> dict[str, Any]:
+        """Compile read-only Workspace context without message-scoped checkpoint side effects."""
+        return await self._context_impl(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            reference=reference,
+            workbench_session_id=workbench_session_id,
+            current_message=current_message,
+            max_chars=max_chars,
+            memory_max_chars=memory_max_chars,
+            memory_task_key="",
+        )
+
+    async def context_for_chat(
+        self,
+        *,
+        user_id: str,
+        workspace_id: str,
+        current_message: str = "",
+        recent_messages: list[dict[str, Any]] | None = None,
+        mentioned_files: list[str] | None = None,
+        memory_task_key: str = "",
+        max_chars: int = 9000,
+        memory_max_chars: int = 3000,
+    ) -> dict[str, Any]:
+        """Compile authoritative Workspace context for an owned chat reasoning turn."""
+        return await self._context_impl(
+            user_id=user_id,
+            workspace_id=workspace_id,
+            current_message=current_message,
+            recent_messages=recent_messages,
+            mentioned_files=mentioned_files,
+            memory_task_key=memory_task_key,
+            max_chars=max_chars,
+            memory_max_chars=memory_max_chars,
         )
 
     async def health(
@@ -607,13 +1474,65 @@ class WorkspaceActionService:
             return await self.resolve(user_id=user_id, **body)
         if op == "context":
             return await self.context(user_id=user_id, **body)
-        if op == "health":
+        if op in {
+            "health",
+            "reconcile",
+            "repositories",
+            "instructions",
+            "instruction_history",
+            "instruction_preview",
+            "instruction_save",
+            "environment_profiles",
+            "environment_create",
+            "environment_version_create",
+            "environment_set_active_version",
+            "environment_set_target",
+            "checkpoints",
+            "workspace_update",
+            "repository_add",
+            "repository_update",
+            "repository_remove",
+        }:
             ref = body.pop("reference", None) or body.pop("workspace_id", None)
-            return await self.health(user_id=user_id, reference=str(ref or ""))
-        if op == "reconcile":
-            ref = body.pop("reference", None) or body.pop("workspace_id", None)
-            return await self.reconcile(user_id=user_id, reference=str(ref or ""))
+            body["reference"] = str(ref or "")
+
         try:
+            if op == "health":
+                return await self.health(user_id=user_id, **body)
+            if op == "reconcile":
+                return await self.reconcile(user_id=user_id, **body)
+            if op == "repositories":
+                return await self.repositories(user_id=user_id, **body)
+            if op == "repository_catalog":
+                return await self.repository_catalog(user_id=user_id)
+            if op == "repository_add":
+                return await self.repository_add(user_id=user_id, **body)
+            if op == "repository_update":
+                return await self.repository_update(user_id=user_id, **body)
+            if op == "repository_remove":
+                return await self.repository_remove(user_id=user_id, **body)
+            if op == "instructions":
+                return await self.instructions(user_id=user_id, **body)
+            if op == "instruction_history":
+                return await self.instruction_history(user_id=user_id, **body)
+            if op == "instruction_preview":
+                return await self.instruction_preview(user_id=user_id, **body)
+            if op == "instruction_save":
+                return await self.instruction_save(user_id=user_id, **body)
+            if op == "environment_profiles":
+                return await self.environment_profiles(user_id=user_id, **body)
+            if op == "environment_create":
+                return await self.environment_create(user_id=user_id, **body)
+            if op == "environment_version_create":
+                return await self.environment_version_create(user_id=user_id, **body)
+            if op == "environment_set_active_version":
+                return await self.environment_set_active_version(user_id=user_id, **body)
+            if op == "environment_set_target":
+                return await self.environment_set_target(user_id=user_id, **body)
+            if op == "checkpoints":
+                return await self.checkpoints(user_id=user_id, **body)
+            if op == "workspace_update":
+                return await self.workspace_update(user_id=user_id, **body)
             if op == "groups":
                 return await self.groups(user_id=user_id, **body)
             if op == "group_create":
@@ -660,6 +1579,24 @@ class WorkspaceActionService:
                 }
         except WorkspaceGroupError as exc:
             raise _map_group_error(exc) from exc
+        except WorkspaceInstructionError as exc:
+            raise WorkspaceActionError(
+                str(getattr(exc, "code", "WORKSPACE_INSTRUCTION_ERROR")),
+                str(exc),
+                status_code=int(getattr(exc, "status_code", 400)),
+            ) from exc
+        except EnvironmentProfileNotFoundError as exc:
+            raise WorkspaceActionError(
+                "ENVIRONMENT_PROFILE_NOT_FOUND",
+                str(exc),
+                status_code=404,
+            ) from exc
+        except (EnvironmentProfileError, EnvironmentTargetError, ValueError) as exc:
+            raise WorkspaceActionError(
+                "ENVIRONMENT_PROFILE_INVALID",
+                str(exc),
+                status_code=422,
+            ) from exc
         raise AssertionError(f"unreachable Workspace OS action: {op}")
 
 

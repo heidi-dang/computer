@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -92,11 +93,10 @@ async def resolve_workspace_namespace(
             factory = session_factory or get_db
             if callable(factory):
                 session_cm = factory()
+                if inspect.isawaitable(session_cm):
+                    session_cm = await session_cm
                 if hasattr(session_cm, "__aenter__"):
                     async with session_cm as session:
-                        row = await _lookup(session)
-                else:
-                    async with await factory() as session:
                         row = await _lookup(session)
             elif hasattr(factory, "__aenter__"):
                 async with factory as session:

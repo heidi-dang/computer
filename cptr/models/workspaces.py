@@ -153,6 +153,56 @@ class Workspace(Base):
             return ws
 
     @staticmethod
+    async def update_identity(
+        user_id: str,
+        workspace_id: str,
+        *,
+        name: str | None = None,
+        slug: str | None = None,
+        workspace_type: str | None = None,
+    ) -> "Workspace":
+        async with await get_db() as db:
+            result = await db.execute(
+                select(Workspace).where(
+                    Workspace.id == workspace_id,
+                    Workspace.user_id == user_id,
+                )
+            )
+            workspace = result.scalar_one_or_none()
+            if workspace is None:
+                raise ValueError("workspace not found")
+
+            if name is not None:
+                normalized_name = str(name).strip()
+                if not normalized_name:
+                    raise ValueError("workspace name must not be blank")
+                workspace.name = normalized_name
+
+            if slug is not None:
+                normalized_slug = _slugify(slug)
+                conflict = await db.scalar(
+                    select(Workspace.id).where(
+                        Workspace.user_id == user_id,
+                        Workspace.slug == normalized_slug,
+                        Workspace.id != workspace_id,
+                    )
+                )
+                if conflict is not None:
+                    raise ValueError(f"workspace slug is already in use: {normalized_slug}")
+                workspace.slug = normalized_slug
+
+            if workspace_type is not None:
+                normalized_type = str(workspace_type).strip().lower()
+                if normalized_type not in {"project", "single_repo", "multi_repo", "general"}:
+                    raise ValueError("unsupported workspace_type")
+                workspace.workspace_type = normalized_type
+
+            workspace.updated_at = int(time.time())
+            await db.commit()
+            await db.refresh(workspace)
+            return workspace
+
+    @staticmethod
     async def archive_by_paths(user_id: str, paths: list[str]) -> int:
         if not paths:
             return 0

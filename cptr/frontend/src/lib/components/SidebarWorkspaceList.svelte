@@ -23,6 +23,7 @@
 	import ChatItem from './common/ChatItem.svelte';
 	import DropdownMenu from './DropdownMenu.svelte';
 	import Icon from './Icon.svelte';
+	import WorkspaceSettingsModal from './WorkspaceSettingsModal.svelte';
 
 	interface Props {
 		onaddworkspace: () => void;
@@ -31,6 +32,13 @@
 	let { onaddworkspace }: Props = $props();
 	let wsMenuPath = $state<string | null>(null);
 	let wsMenuAnchor = $state<HTMLElement | null>(null);
+	let workspaceSettingsTarget = $state<{
+		workspace_id: string;
+		path: string;
+		name: string;
+		slug: string | null;
+		workspace_type: string;
+	} | null>(null);
 	let chatMenu = $state<{ chatId: string; wsPath: string; anchor: HTMLElement } | null>(null);
 	let wsListEl: HTMLDivElement | undefined = $state();
 	let sortable: Sortable | null = null;
@@ -144,6 +152,19 @@
 
 	function closeChatMenu() {
 		chatMenu = null;
+	}
+
+	function openWorkspaceSettings(path: string) {
+		const target = $workspaceList.find((workspace) => workspace.path === path);
+		closeWsMenu();
+		if (!target?.workspace_id) return;
+		workspaceSettingsTarget = {
+			workspace_id: target.workspace_id,
+			path: target.path,
+			name: target.name,
+			slug: target.slug,
+			workspace_type: target.workspace_type
+		};
 	}
 
 	async function handleRemoveWorkspace(path: string) {
@@ -463,12 +484,24 @@
 		anchor={wsMenuAnchor}
 		items={[
 			{
+				label: 'Workspace settings',
+				icon: 'settings',
+				onclick: () => openWorkspaceSettings(wsMenuPath!)
+			},
+			{
 				label: $t('sidebar.remove'),
 				icon: 'xmark',
 				onclick: () => handleRemoveWorkspace(wsMenuPath!)
 			}
 		]}
 		onclose={closeWsMenu}
+	/>
+{/if}
+
+{#if workspaceSettingsTarget}
+	<WorkspaceSettingsModal
+		workspace={workspaceSettingsTarget}
+		onclose={() => (workspaceSettingsTarget = null)}
 	/>
 {/if}
 
