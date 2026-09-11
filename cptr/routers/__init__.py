@@ -21,6 +21,7 @@ from cptr.routers.coding import router as coding_router
 from cptr.routers.control import router as control_router
 from cptr.routers.control_stream import router as control_stream_router
 from cptr.routers.events import router as events_router
+from cptr.routers.environment_profiles import router as environment_profiles_router
 from cptr.routers.factory import router as factory_router
 from cptr.routers.files import router as files_router
 from cptr.routers.gateway import router as gateway_router
@@ -67,6 +68,7 @@ __all__ = [
     "control_router",
     "control_stream_router",
     "events_router",
+    "environment_profiles_router",
     "factory_router",
     "files_router",
     "gateway_router",

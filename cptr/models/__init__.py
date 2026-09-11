@@ -2,6 +2,12 @@
 
 from cptr.models.automations import Automation, AutomationRun
 from cptr.models.base import Base
+from cptr.models.environment_profile import (
+    EnvironmentProfile,
+    EnvironmentProfileVersion,
+    EnvironmentProfileVersionImmutableError,
+    compute_version_digest,
+)
 from cptr.models.browser_device import (
     BrowserDevice,
     BrowserDeviceEvent,
@@ -111,6 +117,10 @@ __all__ = [
     "AutonomousScope",
     "AutonomousWorkspaceLease",
     "Base",
+    "EnvironmentProfile",
+    "EnvironmentProfileVersion",
+    "EnvironmentProfileVersionImmutableError",
+    "compute_version_digest",
     "BrowserDevice",
     "BrowserDeviceEvent",
     "BrowserLease",
