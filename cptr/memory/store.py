@@ -7,7 +7,9 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
+
+from cptr.memory.workspace import WorkspaceNamespace, resolve_workspace_namespace
 
 from cptr.memory.domain import BranchRef, Checkpoint, MemoryRecordRef, SnapshotRef
 from cptr.models import (
@@ -91,25 +93,34 @@ class SqlMemoryStore:
         async with self._session_factory() as db:
             yield db
 
+    async def resolve_namespace(
+        self, user_id: str, workspace: str | None, db: Any | None = None
+    ) -> WorkspaceNamespace:
+        return await resolve_workspace_namespace(
+            user_id, workspace, db=db, session_factory=self._session_factory
+        )
+
     async def _namespace_in_session(self, db, user_id: str, workspace: str) -> MemoryNamespaceState:
-        workspace = _workspace(workspace)
-        row = (
+        ns = await self.resolve_namespace(user_id, workspace, db=db)
+        rows = (
             await db.execute(
                 select(MemoryNamespaceState).where(
                     MemoryNamespaceState.user_id == user_id,
-                    MemoryNamespaceState.workspace == workspace,
-                )
+                    MemoryNamespaceState.workspace.in_(ns.aliases),
+                ).order_by(MemoryNamespaceState.version.desc())
             )
-        ).scalar_one_or_none()
-        if row is None:
-            row = MemoryNamespaceState(
-                user_id=user_id,
-                workspace=workspace,
-                version=0,
-                updated_at_ms=_now_ms(),
-            )
-            db.add(row)
-            await db.flush()
+        ).scalars().all()
+        if rows:
+            canonical_row = next((r for r in rows if r.workspace == ns.workspace_id), rows[0])
+            return canonical_row
+        row = MemoryNamespaceState(
+            user_id=user_id,
+            workspace=ns.workspace_id,
+            version=0,
+            updated_at_ms=_now_ms(),
+        )
+        db.add(row)
+        await db.flush()
         return row
 
     async def _bump_version_in_session(self, db, user_id: str, workspace: str) -> int:
@@ -119,12 +130,13 @@ class SqlMemoryStore:
         return int(namespace.version)
 
     async def namespace_version(self, user_id: str, workspace: str) -> int:
+        ns = await self.resolve_namespace(user_id, workspace)
         async with self._session() as db:
             row = (
                 await db.execute(
-                    select(MemoryNamespaceState.version).where(
+                    select(func.max(MemoryNamespaceState.version)).where(
                         MemoryNamespaceState.user_id == user_id,
-                        MemoryNamespaceState.workspace == _workspace(workspace),
+                        MemoryNamespaceState.workspace.in_(ns.aliases),
                     )
                 )
             ).scalar_one_or_none()
@@ -211,9 +223,10 @@ class SqlMemoryStore:
         *,
         branch_id: str | None = None,
     ) -> dict[str, Any] | None:
+        ns = await self.resolve_namespace(user_id, workspace)
         predicates = [
             MemoryRecord.user_id == user_id,
-            MemoryRecord.workspace == _workspace(workspace),
+            MemoryRecord.workspace.in_(ns.aliases),
             MemoryRecord.content_hash == content_hash,
             MemoryRecord.status == "active",
         ]
@@ -258,14 +271,19 @@ class SqlMemoryStore:
         branch_id: str | None = None,
         limit: int = 500,
     ) -> list[dict[str, Any]]:
-        workspace = _workspace(workspace)
+        ns = await self.resolve_namespace(user_id, workspace)
         predicates = [MemoryRecord.user_id == user_id]
-        if workspace:
-            predicates.append(
-                or_(MemoryRecord.workspace == "", MemoryRecord.workspace == workspace)
-            )
-        else:
+        if scope == "user":
             predicates.append(MemoryRecord.workspace == "")
+        elif scope == "workspace":
+            predicates.append(MemoryRecord.workspace.in_(ns.aliases))
+        else:
+            if not ns.is_user_scope:
+                predicates.append(
+                    or_(MemoryRecord.workspace == "", MemoryRecord.workspace.in_(ns.aliases))
+                )
+            else:
+                predicates.append(MemoryRecord.workspace == "")
         if not include_historical:
             predicates.append(MemoryRecord.status == "active")
         if scope in {"user", "workspace"}:
@@ -403,15 +421,15 @@ class SqlMemoryStore:
         state: dict[str, Any],
         memory_version: int | None,
     ) -> Checkpoint:
-        workspace = _workspace(workspace)
         async with self._session() as db:
             async with db.begin():
+                ns = await self.resolve_namespace(user_id, workspace, db=db)
                 latest = (
                     await db.execute(
                         select(MemoryCheckpoint)
                         .where(
                             MemoryCheckpoint.user_id == user_id,
-                            MemoryCheckpoint.workspace == workspace,
+                            MemoryCheckpoint.workspace.in_(ns.aliases),
                             MemoryCheckpoint.task_key == task_key,
                         )
                         .order_by(MemoryCheckpoint.version.desc())
@@ -423,13 +441,13 @@ class SqlMemoryStore:
                     int(memory_version)
                     if memory_version is not None
                     else int(
-                        (await self._namespace_in_session(db, user_id, workspace)).version or 0
+                        (await self._namespace_in_session(db, user_id, ns.workspace_id)).version or 0
                     )
                 )
                 now = _now_ms()
                 row = MemoryCheckpoint(
                     user_id=user_id,
-                    workspace=workspace,
+                    workspace=ns.workspace_id,
                     task_key=task_key,
                     version=version,
                     stage=stage,
@@ -444,21 +462,23 @@ class SqlMemoryStore:
                 return Checkpoint(row.id, version, stage, current_memory_version, now)
 
     async def latest_checkpoint(
-        self, user_id: str, workspace: str, task_key: str
+        self, user_id: str, workspace: str, task_key: str | None = None
     ) -> dict[str, Any] | None:
-        if not task_key:
-            return None
+        ns = await self.resolve_namespace(user_id, workspace)
+        query = select(MemoryCheckpoint).where(
+            MemoryCheckpoint.user_id == user_id,
+            MemoryCheckpoint.workspace.in_(ns.aliases),
+        )
+        task_str = str(task_key or "").strip()
+        if task_str:
+            query = query.where(MemoryCheckpoint.task_key == task_str)
         async with self._session() as db:
             row = (
                 await db.execute(
-                    select(MemoryCheckpoint)
-                    .where(
-                        MemoryCheckpoint.user_id == user_id,
-                        MemoryCheckpoint.workspace == _workspace(workspace),
-                        MemoryCheckpoint.task_key == task_key,
-                    )
-                    .order_by(MemoryCheckpoint.version.desc())
-                    .limit(1)
+                    query.order_by(
+                        MemoryCheckpoint.version.desc(),
+                        MemoryCheckpoint.created_at_ms.desc(),
+                    ).limit(1)
                 )
             ).scalar_one_or_none()
         if row is None:
@@ -1107,12 +1127,12 @@ class SqlMemoryStore:
     ) -> dict[str, Any]:
         """Return bounded owner-scoped canonical state for the Memory Observatory."""
         safe_limit = max(25, min(int(limit), 2_000))
-        workspace_value = None if workspace is None else _workspace(workspace)
+        ns = await self.resolve_namespace(user_id, workspace) if workspace is not None else None
         memory_predicates = [MemoryRecord.user_id == user_id]
-        if workspace_value is not None:
-            if workspace_value:
+        if ns is not None:
+            if not ns.is_user_scope:
                 memory_predicates.append(
-                    or_(MemoryRecord.workspace == "", MemoryRecord.workspace == workspace_value)
+                    or_(MemoryRecord.workspace == "", MemoryRecord.workspace.in_(ns.aliases))
                 )
             else:
                 memory_predicates.append(MemoryRecord.workspace == "")
@@ -1135,15 +1155,21 @@ class SqlMemoryStore:
             namespace_query = select(MemoryNamespaceState).where(
                 MemoryNamespaceState.user_id == user_id
             )
-            if workspace_value is not None:
-                snapshot_query = snapshot_query.where(MemorySnapshot.workspace == workspace_value)
-                branch_query = branch_query.where(MemoryBranch.workspace == workspace_value)
-                checkpoint_query = checkpoint_query.where(
-                    MemoryCheckpoint.workspace == workspace_value
-                )
-                namespace_query = namespace_query.where(
-                    MemoryNamespaceState.workspace == workspace_value
-                )
+            if ns is not None:
+                if not ns.is_user_scope:
+                    snapshot_query = snapshot_query.where(MemorySnapshot.workspace.in_(ns.aliases))
+                    branch_query = branch_query.where(MemoryBranch.workspace.in_(ns.aliases))
+                    checkpoint_query = checkpoint_query.where(
+                        MemoryCheckpoint.workspace.in_(ns.aliases)
+                    )
+                    namespace_query = namespace_query.where(
+                        MemoryNamespaceState.workspace.in_(ns.aliases)
+                    )
+                else:
+                    snapshot_query = snapshot_query.where(MemorySnapshot.workspace == "")
+                    branch_query = branch_query.where(MemoryBranch.workspace == "")
+                    checkpoint_query = checkpoint_query.where(MemoryCheckpoint.workspace == "")
+                    namespace_query = namespace_query.where(MemoryNamespaceState.workspace == "")
 
             snapshots = list(
                 (
@@ -1244,6 +1270,81 @@ class SqlMemoryStore:
                 "active_branch_id": namespace.active_branch_id,
                 "active_snapshot_id": namespace.active_snapshot_id,
                 "snapshot_memory_ids": memory_ids,
+            }
+
+    async def compact_summary(
+            self,
+            user_id: str,
+            workspace: str,
+            *,
+            task_key: str | None = None,
+            limit: int = 10,
+        ) -> dict[str, Any]:
+            ns = await self.resolve_namespace(user_id, workspace)
+            safe_limit = max(1, min(int(limit), 50))
+            memory_version = await self.namespace_version(user_id, workspace)
+            checkpoint = await self.latest_checkpoint(user_id, workspace, task_key=task_key)
+            active_scope = await self.active_restore_scope(user_id, workspace)
+
+            async with self._session() as db:
+                predicates = [
+                    MemoryRecord.user_id == user_id,
+                    MemoryRecord.status == "active",
+                ]
+                if not ns.is_user_scope:
+                    predicates.append(
+                        or_(MemoryRecord.workspace == "", MemoryRecord.workspace.in_(ns.aliases))
+                    )
+                else:
+                    predicates.append(MemoryRecord.workspace == "")
+
+                count_rows = (
+                    await db.execute(
+                        select(MemoryRecord.kind, func.count(MemoryRecord.id))
+                        .where(*predicates)
+                        .group_by(MemoryRecord.kind)
+                    )
+                ).all()
+                counts_by_kind = {str(kind): int(cnt) for kind, cnt in count_rows}
+                total_records = sum(counts_by_kind.values())
+
+                records_query = (
+                    select(MemoryRecord)
+                    .where(*predicates)
+                    .order_by(
+                        MemoryRecord.importance_ppm.desc(),
+                        MemoryRecord.confidence_ppm.desc(),
+                        MemoryRecord.updated_at_ms.desc(),
+                    )
+                    .limit(safe_limit)
+                )
+                records = list((await db.scalars(records_query)).all())
+
+            compact_records = [
+                {
+                    "memory_id": r.id,
+                    "scope": r.scope,
+                    "kind": r.kind,
+                    "text": r.canonical_text[:300] + ("…" if len(r.canonical_text) > 300 else ""),
+                    "trust_level": r.trust_level,
+                    "confidence": float(r.confidence_ppm) / 1_000_000.0,
+                    "importance": float(r.importance_ppm) / 1_000_000.0,
+                    "created_at_ms": int(r.created_at_ms),
+                }
+                for r in records
+            ]
+
+            return {
+                "workspace_id": ns.workspace_id,
+                "workspace_path": ns.workspace_path,
+                "aliases": list(ns.aliases),
+                "memory_version": memory_version,
+                "latest_checkpoint": checkpoint,
+                "active_branch_id": active_scope.get("active_branch_id"),
+                "active_snapshot_id": active_scope.get("active_snapshot_id"),
+                "total_records": total_records,
+                "counts_by_kind": counts_by_kind,
+                "records": compact_records,
             }
 
 

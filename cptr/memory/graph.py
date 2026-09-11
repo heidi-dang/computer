@@ -9,6 +9,8 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
+from cptr.memory.workspace import resolve_workspace_namespace
+
 from cptr.models import MemoryEntity, MemoryRelationship
 from cptr.utils.db import get_session_factory
 from cptr.utils.redaction import redact_text
@@ -275,18 +277,18 @@ class MemoryGraphStore:
         query_terms = set(re.findall(r"[a-z0-9_.:/#-]+", normalized_query))
         if not normalized_query or not query_terms:
             return {}
-        workspace = str(workspace or "")
+        ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
         entity_predicates = [MemoryEntity.user_id == user_id, MemoryEntity.status == "active"]
         relationship_predicates = [
             MemoryRelationship.user_id == user_id,
             MemoryRelationship.status == "active",
         ]
-        if workspace:
+        if not ns.is_user_scope:
             entity_predicates.append(
-                or_(MemoryEntity.workspace == "", MemoryEntity.workspace == workspace)
+                or_(MemoryEntity.workspace == "", MemoryEntity.workspace.in_(ns.aliases))
             )
             relationship_predicates.append(
-                or_(MemoryRelationship.workspace == "", MemoryRelationship.workspace == workspace)
+                or_(MemoryRelationship.workspace == "", MemoryRelationship.workspace.in_(ns.aliases))
             )
         else:
             entity_predicates.append(MemoryEntity.workspace == "")
@@ -430,15 +432,15 @@ class MemoryGraphStore:
             MemoryRelationship.status == "active",
         ]
         if workspace is not None:
-            workspace_value = str(workspace or "")
-            if workspace_value:
+            ns = await resolve_workspace_namespace(user_id, workspace, session_factory=self._session_factory)
+            if not ns.is_user_scope:
                 predicates.append(
-                    or_(MemoryEntity.workspace == "", MemoryEntity.workspace == workspace_value)
+                    or_(MemoryEntity.workspace == "", MemoryEntity.workspace.in_(ns.aliases))
                 )
                 rel_predicates.append(
                     or_(
                         MemoryRelationship.workspace == "",
-                        MemoryRelationship.workspace == workspace_value,
+                        MemoryRelationship.workspace.in_(ns.aliases),
                     )
                 )
             else:

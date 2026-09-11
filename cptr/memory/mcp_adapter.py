@@ -134,6 +134,31 @@ class MemoryMcpAdapter:
                 "description": "Read sanitized memory gate, index, maintenance, and intelligence health.",
                 "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
+            {
+                "name": "memory.compact_summary",
+                "description": "Read a bounded compact summary of workspace persistent memory and latest checkpoint.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_key": {"type": "string", "maxLength": 200},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    },
+                    "additionalProperties": False,
+                },
+            },
+            {
+                "name": "memory.checkpoint",
+                "description": "Read or record a task-scoped memory checkpoint.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task_key": {"type": "string", "maxLength": 200},
+                        "stage": {"type": "string", "maxLength": 200},
+                        "state": {"type": "object"},
+                    },
+                    "additionalProperties": False,
+                },
+            },
         ]
 
     def _require_mutation(self) -> None:
@@ -284,4 +309,41 @@ class MemoryMcpAdapter:
             }
         if name == "memory.health":
             return await self.service.health(user_id=self.user_id, workspace=self.workspace)
+        if name in ("memory.compact_summary", "memory.summary"):
+            return await self.service.compact_summary(
+                self.user_id,
+                self.workspace,
+                task_key=str(args.get("task_key") or "").strip() or None,
+                limit=max(1, min(int(args.get("limit") or 10), 50)),
+            )
+        if name == "memory.checkpoint":
+            stage = args.get("stage")
+            if stage is not None:
+                self._require_mutation()
+                task_key = str(args.get("task_key") or "").strip()
+                if not task_key:
+                    raise ValueError("task_key is required to save checkpoint")
+                state = args.get("state") if isinstance(args.get("state"), dict) else {}
+                from cptr.memory.domain import CheckpointState
+                cp = await self.service.checkpoint(
+                    CheckpointState(
+                        user_id=self.user_id,
+                        workspace=self.workspace,
+                        task_key=task_key,
+                        stage=str(stage),
+                        state=state,
+                    )
+                )
+                return {
+                    "checkpoint_id": cp.checkpoint_id,
+                    "version": cp.version,
+                    "stage": cp.stage,
+                    "memory_version": cp.memory_version,
+                    "created_at_ms": cp.created_at_ms,
+                }
+            task_key = str(args.get("task_key") or "").strip() or None
+            latest = await self.service.store.latest_checkpoint(
+                self.user_id, self.workspace, task_key=task_key
+            )
+            return latest or {}
         raise KeyError(f"unknown memory MCP tool: {name}")

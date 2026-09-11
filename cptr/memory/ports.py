@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from cptr.memory.domain import (
     BranchRef,
@@ -116,6 +116,15 @@ class MemoryService(Protocol):
         name: str,
         from_snapshot_id: str | None = None,
     ) -> BranchRef: ...
+
+    async def compact_summary(
+        self,
+        user_id: str,
+        workspace: str,
+        *,
+        task_key: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]: ...
 
     async def restore_snapshot(
         self, user_id: str, workspace: str, snapshot_id: str
