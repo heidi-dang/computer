@@ -98,6 +98,7 @@ async def lifespan(app: FastAPI):
     app.state.workbench_sessions_archived = await workbench_session_store.archive_stale(
         idle_seconds=WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
     )
+    app.state.workbench_sessions_reconciled = await workbench_session_store.reconcile_restart()
 
     from cptr.services.factory_control import FactoryControlService
     from cptr.services.factory_production import FactoryProductionRunner

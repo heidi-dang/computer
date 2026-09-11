@@ -92,6 +92,61 @@ class WorkbenchSessionStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(session.active_workspace_id)
         db.commit.assert_awaited_once()
 
+    async def test_reconcile_restart_clears_transient_command_and_preserves_sticky_workspace(self):
+        session = SimpleNamespace(
+            id="wbs_restart",
+            user_id="user_1",
+            name="Restart Session",
+            workspace_id="ws_durable",
+            status="RUNNING",
+            active_target_type="command",
+            active_target_id="cmd_running",
+            active_workspace_id="ws_transient",
+            event_count=2,
+            environment_profile_id="env_durable",
+            environment_profile_override={"KEY": "VAL"},
+            admin_role="admin_durable",
+            role_context={"perm": "all"},
+            last_context_snapshot_id="snap_durable",
+            created_at=1,
+            updated_at=10,
+            last_event_at=10,
+            archived_at=None,
+            deleted_at=None,
+        )
+        db = AsyncMock()
+        db.__aenter__.return_value = db
+        db.__aexit__.return_value = False
+        db.scalars.return_value = SimpleNamespace(all=lambda: [session])
+        added = []
+        db.add = Mock(side_effect=added.append)
+
+        with patch(
+            "cptr.services.workbench_sessions.get_db",
+            new=AsyncMock(return_value=db),
+        ):
+            changed = await WorkbenchSessionStore().reconcile_restart(now_ms=50_000)
+
+        self.assertEqual(changed, 1)
+        self.assertEqual(session.status, "OPEN")
+        self.assertIsNone(session.active_target_type)
+        self.assertIsNone(session.active_target_id)
+        self.assertIsNone(session.active_workspace_id)
+        self.assertEqual(session.workspace_id, "ws_durable")
+        self.assertEqual(session.environment_profile_id, "env_durable")
+        self.assertEqual(session.environment_profile_override, {"KEY": "VAL"})
+        self.assertEqual(session.admin_role, "admin_durable")
+        self.assertEqual(session.role_context, {"perm": "all"})
+        self.assertEqual(session.last_context_snapshot_id, "snap_durable")
+        self.assertEqual(len(added), 1)
+        event = added[0]
+        self.assertEqual(event.event_type, "workbench.restart_reconciled")
+        self.assertEqual(event.state, "OPEN")
+        self.assertEqual(event.target_type, "command")
+        self.assertEqual(event.target_id, "cmd_running")
+        self.assertEqual(event.workspace_id, "ws_transient")
+        db.commit.assert_awaited_once()
+
     async def test_manual_archive_clears_active_target_projection(self):
         session = SimpleNamespace(
             id="wbs_archive",

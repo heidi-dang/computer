@@ -262,10 +262,18 @@ class WorkbenchSession(Base):
     delete_requested_at = Column(BigInteger, nullable=True)
     delete_confirmation_hash = Column(Text, nullable=True)
     delete_confirmation_expires_at = Column(BigInteger, nullable=True)
+    # Workspace OS v2 sticky binding extensions
+    environment_profile_id = Column(Text, nullable=True)
+    environment_profile_override = Column(JSON, nullable=True)
+    admin_role = Column(Text, nullable=True)
+    role_context = Column(JSON, nullable=True)
+    last_context_snapshot_id = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_workbench_session_user_status_updated", "user_id", "status", "updated_at"),
         Index("ix_workbench_session_user_last_event", "user_id", "last_event_at"),
+        Index("ix_workbench_session_user_workspace", "user_id", "workspace_id"),
+        Index("ix_workbench_session_snapshot", "last_context_snapshot_id"),
     )
 
 

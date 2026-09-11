@@ -276,6 +276,19 @@ async def _user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
 
 
+async def _are_workspaces_equivalent(user_id: str, ws_a: str, ws_b: str) -> bool:
+    if ws_a == ws_b:
+        return True
+    try:
+        from cptr.services.workspace_refs import resolve_workspace_ref
+
+        res_a = await resolve_workspace_ref(user_id=user_id, reference=ws_a)
+        res_b = await resolve_workspace_ref(user_id=user_id, reference=ws_b)
+        return str(res_a.workspace.id) == str(res_b.workspace.id)
+    except Exception:
+        return False
+
+
 async def _ensure_workbench_routing(
     *, user_id: str, workspace_id: str, session_id: str | None
 ) -> dict[str, Any] | None:
@@ -288,7 +301,8 @@ async def _ensure_workbench_routing(
         raise HTTPException(status_code=409, detail="workbench session is archived")
     bound_workspace = session.get("workspace_id")
     if bound_workspace and str(bound_workspace) != workspace_id:
-        raise HTTPException(status_code=404, detail="workbench session not found")
+        if not await _are_workspaces_equivalent(user_id, str(bound_workspace), workspace_id):
+            raise HTTPException(status_code=404, detail="workbench session not found")
     return session
 
 

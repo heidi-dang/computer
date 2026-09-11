@@ -406,6 +406,19 @@ async def _workspace(user_id: str, workspace_id: str) -> Workspace:
     return workspace
 
 
+async def _are_workspaces_equivalent(user_id: str, ws_a: str, ws_b: str) -> bool:
+    if ws_a == ws_b:
+        return True
+    try:
+        from cptr.services.workspace_refs import resolve_workspace_ref
+
+        res_a = await resolve_workspace_ref(user_id=user_id, reference=ws_a)
+        res_b = await resolve_workspace_ref(user_id=user_id, reference=ws_b)
+        return str(res_a.workspace.id) == str(res_b.workspace.id)
+    except Exception:
+        return False
+
+
 async def _validate_workbench_routing(
     *, user_id: str, workspace_id: str, session_id: str | None
 ) -> dict[str, Any] | None:
@@ -418,7 +431,8 @@ async def _validate_workbench_routing(
         raise HTTPException(status_code=409, detail="workbench session is archived")
     bound_workspace = session.get("workspace_id")
     if bound_workspace and str(bound_workspace) != workspace_id:
-        raise HTTPException(status_code=404, detail="workbench session not found")
+        if not await _are_workspaces_equivalent(user_id, str(bound_workspace), workspace_id):
+            raise HTTPException(status_code=404, detail="workbench session not found")
     return session
 
 
@@ -1844,9 +1858,7 @@ async def run_fdx_intelligence(request: Request, workspace_id: str, body: FdxInt
     return result
 
 
-async def _focused_node_test_argv(
-    request: Request, *, cwd: Path, test_file: Path
-) -> list[str]:
+async def _focused_node_test_argv(request: Request, *, cwd: Path, test_file: Path) -> list[str]:
     """Build a bounded focused Node test command without re-running broad npm globs."""
     try:
         relative_test = test_file.relative_to(cwd).as_posix()
