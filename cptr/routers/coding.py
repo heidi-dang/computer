@@ -64,6 +64,7 @@ from cptr.utils.identity import (
     env_for,
     expand_user_path,
     identity_for_context,
+    identity_for_request,
     preexec_for,
     unrestricted_root_identity,
 )
@@ -237,6 +238,7 @@ class WorkspaceInspectRequest(WorkerTargetRequest):
         "dependencies",
         "scripts",
         "release",
+        "health",
     ]
     path: str = Field(default=".", min_length=1, max_length=1_000)
     paths: list[str] = Field(default_factory=list, max_length=20)
@@ -1772,6 +1774,30 @@ async def direct_workers_overview(request: Request, workspace_id: str):
     }
 
 
+@router.get("/workspaces/{workspace_id}/coding/health")
+async def workspace_coding_health(request: Request, workspace_id: str):
+    user_id = await _user(request, "coding:read")
+    workspace = await _workspace(user_id, workspace_id)
+    identity = await identity_for_request(request)
+    return await direct_worker_service.classify_health(
+        user_id=user_id,
+        workspace=workspace,
+        identity=identity,
+    )
+
+
+@router.post("/workspaces/{workspace_id}/coding/reconcile")
+async def workspace_coding_reconcile(request: Request, workspace_id: str):
+    user_id = await _user(request, "coding:write")
+    workspace = await _workspace(user_id, workspace_id)
+    identity = await identity_for_request(request)
+    return await direct_worker_service.conservative_reconcile(
+        user_id=user_id,
+        workspace=workspace,
+        identity=identity,
+    )
+
+
 @router.post("/workspaces/{workspace_id}/coding/workers-integrate")
 async def integrate_direct_workers(
     request: Request, workspace_id: str, body: DirectWorkersIntegrateRequest
@@ -1810,6 +1836,14 @@ async def close_direct_worker(
 async def inspect_workspace(request: Request, workspace_id: str, body: WorkspaceInspectRequest):
     user_id = await _user(request, "coding:read")
     workspace = await _workspace(user_id, workspace_id)
+    if body.kind == "health":
+        identity = await identity_for_request(request)
+        report = await direct_worker_service.classify_health(
+            user_id=user_id,
+            workspace=workspace,
+            identity=identity,
+        )
+        return {"workspace_id": workspace_id, "kind": body.kind, **report}
     root = await _coding_root(user_id, workspace_id, workspace, body.worker_id)
     try:
         result = await _workspace_insight(request, root=root, body=body, user_id=user_id)

@@ -493,6 +493,44 @@ class DirectCodingWorkerService:
             "discarded": bool(dirty and worker.integrated_at is None and discard_changes),
         }
 
+    async def classify_health(
+        self,
+        *,
+        user_id: str,
+        workspace: Workspace,
+        identity: ExecutionIdentity | None = None,
+        stale_threshold_seconds: float = 300.0,
+        active_threshold_seconds: float = 120.0,
+    ) -> dict[str, Any]:
+        from cptr.services.workspace_health import classify_workspace_health
+
+        return await classify_workspace_health(
+            workspace=workspace,
+            user_id=user_id,
+            identity=identity,
+            stale_threshold_seconds=stale_threshold_seconds,
+            active_threshold_seconds=active_threshold_seconds,
+        )
+
+    async def conservative_reconcile(
+        self,
+        *,
+        user_id: str,
+        workspace: Workspace,
+        identity: ExecutionIdentity | None = None,
+        stale_threshold_seconds: float = 300.0,
+        active_threshold_seconds: float = 120.0,
+    ) -> dict[str, Any]:
+        from cptr.services.workspace_health import conservative_reconcile_workspace
+
+        return await conservative_reconcile_workspace(
+            workspace=workspace,
+            user_id=user_id,
+            identity=identity,
+            stale_threshold_seconds=stale_threshold_seconds,
+            active_threshold_seconds=active_threshold_seconds,
+        )
+
 
 service = DirectCodingWorkerService()
 
