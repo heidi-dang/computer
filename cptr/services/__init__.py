@@ -1,5 +1,17 @@
 """Application services shared by CPTR API surfaces."""
 
+from cptr.services.workspace_resolver import (
+    AmbiguousWorkspaceError,
+    ResolutionResult,
+    ResolutionStage,
+    UnsafeResolutionError,
+    WorkspaceNotFoundError,
+    WorkspaceResolver,
+    WorkspaceResolverError,
+    resolve_workspace,
+    resolve_workspace_for_user,
+)
+
 from cptr.services.workspace_context import (
     BoundedWorkersEvidence,
     CheckpointDivergence,
@@ -19,6 +31,7 @@ from cptr.services.workspace_context import (
 )
 
 __all__ = [
+    "AmbiguousWorkspaceError",
     "BoundedWorkersEvidence",
     "CheckpointDivergence",
     "EnvironmentEvidence",
@@ -27,11 +40,19 @@ __all__ = [
     "LspEvidence",
     "MemoryEvidence",
     "ProjectEvidence",
+    "ResolutionResult",
+    "ResolutionStage",
     "RepoEvidence",
+    "UnsafeResolutionError",
+    "WorkspaceNotFoundError",
+    "WorkspaceResolver",
+    "WorkspaceResolverError",
     "WorkspaceContextCompiler",
     "WorkspaceContextCompilerProtocol",
     "WorkspaceContextService",
     "WorkspaceContextSnapshot",
     "WorkspaceContextSnapshotService",
+    "resolve_workspace",
+    "resolve_workspace_for_user",
     "workspace_context_service",
 ]
