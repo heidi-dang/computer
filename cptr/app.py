@@ -50,6 +50,7 @@ from cptr.routers import (
     webhook_router,
     workspace_router,
     workspace_extended_router,
+    workspace_groups_router,
     workbench_router,
 )
 from cptr.utils.config import check_access, load_config, validate_auth_configuration
@@ -491,6 +492,7 @@ app.include_router(terminal_router)
 app.include_router(terminal_extended_router)
 app.include_router(workspace_router)
 app.include_router(workspace_extended_router)
+app.include_router(workspace_groups_router)
 app.include_router(workbench_router)
 
 

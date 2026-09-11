@@ -291,3 +291,86 @@ class WorkspaceAlias(Base):
         UniqueConstraint("user_id", "alias", name="uq_workspace_alias_user_alias"),
         UniqueConstraint("workspace_id", "alias", name="uq_workspace_alias_workspace_alias"),
     )
+
+
+async def _allocate_workspace_group_slug(db, user_id: str, name: str, group_id: str) -> str:
+    base = _slugify(name)
+    candidate = base
+    existing = set(
+        (
+            await db.scalars(
+                select(WorkspaceGroup.slug).where(
+                    WorkspaceGroup.user_id == user_id,
+                    WorkspaceGroup.slug.like(f"{base}%"),
+                )
+            )
+        ).all()
+    )
+    if candidate not in existing:
+        return candidate
+    suffix = group_id.replace("-", "")[:8] or "group"
+    candidate = f"{base[: max(1, 71 - len(suffix))]}-{suffix}"
+    serial = 2
+    while candidate in existing:
+        tail = f"-{serial}"
+        candidate = f"{base[: max(1, 80 - len(tail))]}{tail}"
+        serial += 1
+    return candidate
+
+
+class WorkspaceGroup(Base):
+    """First-class logical group of workspaces (e.g. cross-repo coordination).
+
+    WorkspaceGroup represents structural multi-repo/workspace relationships.
+    Its group identity and membership lifecycle are strictly separated from
+    task execution, ephemeral worker leases, and task aggregation states.
+    """
+
+    __tablename__ = "workspace_groups"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    name = Column(Text, nullable=False)
+    slug = Column(Text, nullable=False)
+    description = Column(Text, nullable=True)
+    group_type = Column(Text, nullable=False, default="cross-repo", server_default="cross-repo")
+    config = Column(JSON, nullable=False, default=dict)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_workspace_group_user_slug"),)
+
+
+class WorkspaceGroupMember(Base):
+    """Ordered member workspace in a WorkspaceGroup.
+
+    Maintains deterministic sort ordering and duplicate protection per group.
+    """
+
+    __tablename__ = "workspace_group_members"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    group_id = Column(
+        Text,
+        ForeignKey("workspace_groups.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workspace_id = Column(
+        Text,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sort_order = Column(BigInteger, nullable=False, default=0, server_default="0")
+    role = Column(Text, nullable=False, default="member", server_default="member")
+    primary = Column(Boolean, nullable=False, default=False, server_default="0")
+    alias = Column(Text, nullable=True)
+    enabled = Column(Boolean, nullable=False, default=True, server_default="1")
+    config = Column(JSON, nullable=False, default=dict)
+    created_at = Column(BigInteger, nullable=False)
+    updated_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id", "workspace_id", name="uq_workspace_group_member_group_workspace"
+        ),
+    )
