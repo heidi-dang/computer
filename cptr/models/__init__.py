@@ -91,7 +91,13 @@ from cptr.models.memory_core import (
 from cptr.models.memory_fabric import MemoryFabricEvent
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
-from cptr.models.workspaces import Workspace
+from cptr.models.workspaces import (
+    Repository,
+    RepositoryCheckout,
+    Workspace,
+    WorkspaceAlias,
+    WorkspaceRepository,
+)
 
 __all__ = [
     "Auth",
@@ -173,7 +179,11 @@ __all__ = [
     "MemorySnapshot",
     "User",
     "UserStates",
+    "Repository",
+    "RepositoryCheckout",
     "Workspace",
+    "WorkspaceAlias",
+    "WorkspaceRepository",
     "WorkbenchSession",
     "WorkbenchSessionEvent",
     "internal_status",
