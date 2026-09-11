@@ -385,6 +385,7 @@ class DirectWorkerCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     responsibility: str = Field(default="", max_length=500)
     repo_path: str = Field(default=".", min_length=1, max_length=1_000)
+    idempotency_key: str | None = Field(default=None, max_length=200)
 
 
 class DirectWorkersIntegrateRequest(BaseModel):
@@ -1733,6 +1734,7 @@ async def create_direct_worker(
             name=body.name,
             responsibility=body.responsibility,
             repo_path=body.repo_path,
+            idempotency_key=body.idempotency_key,
         )
     except DirectCodingWorkerError as exc:
         _raise_worker_error(exc)

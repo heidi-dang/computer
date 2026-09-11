@@ -115,6 +115,7 @@ class ReflectRequest(BaseModel):
 class SpawnMultipleSubagentsRequest(BaseModel):
     task_id: str = Field(min_length=1, max_length=200)
     objectives: list[str] = Field(min_length=2, max_length=10)
+    cohort_id: str | None = Field(default=None, max_length=200)
 
 
 async def _user(request: Request, scope: str) -> str:
@@ -552,6 +553,7 @@ async def spawn_multiple_subagents_capability_os(
                     user_id=user_id,
                     task_id=body.task_id,
                     objectives=tuple(body.objectives),
+                    cohort_id=body.cohort_id,
                 )
     except Exception as exc:
         raise _error(exc) from exc

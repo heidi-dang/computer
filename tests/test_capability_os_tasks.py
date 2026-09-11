@@ -1,5 +1,7 @@
+import asyncio
 import unittest
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from cptr.models import Base, FactoryRun, WorkbenchSession
@@ -84,14 +86,10 @@ class CapabilityOsTaskCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(task.active)
         self.assertTrue(task.execution_allowed)
 
-        resolved = await self.coordinator.require_active(
-            user_id="user-1", task_id=task.task_id
-        )
+        resolved = await self.coordinator.require_active(user_id="user-1", task_id=task.task_id)
         self.assertEqual(resolved, task)
         with self.assertRaises(CapabilityTaskNotFound):
-            await self.coordinator.require_active(
-                user_id="user-2", task_id=task.task_id
-            )
+            await self.coordinator.require_active(user_id="user-2", task_id=task.task_id)
 
     async def test_fork_many_creates_owner_bound_isolated_children_in_one_cohort(self):
         children = await self.coordinator.fork_many(
@@ -113,9 +111,77 @@ class CapabilityOsTaskCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(resolved.task_id, child.task_id)
             with self.assertRaises(CapabilityTaskNotFound):
-                await self.coordinator.require_active(
-                    user_id="user-2", task_id=child.task_id
+                await self.coordinator.require_active(user_id="user-2", task_id=child.task_id)
+
+    async def test_fork_many_reuses_deterministic_children_for_same_cohort(self):
+        first = await self.coordinator.fork_many(
+            user_id="user-1",
+            parent_task_id="wbs_active",
+            count=3,
+            cohort_id="logical-fanout-1",
+        )
+        second = await self.coordinator.fork_many(
+            user_id="user-1",
+            parent_task_id="wbs_active",
+            count=3,
+            cohort_id="logical-fanout-1",
+        )
+
+        self.assertEqual(
+            [child.task_id for child in first],
+            [child.task_id for child in second],
+        )
+        self.assertTrue(all(child.task_id.startswith("wbs_") for child in first))
+        async with self.sessions() as db:
+            rows = (
+                await db.scalars(
+                    select(WorkbenchSession).where(
+                        WorkbenchSession.name.like("Capability OS Subagent %")
+                    )
                 )
+            ).all()
+        self.assertEqual(len(rows), 3)
+
+    async def test_fork_many_concurrent_retries_recover_one_deterministic_cohort(self):
+        first, second = await asyncio.gather(
+            self.coordinator.fork_many(
+                user_id="user-1",
+                parent_task_id="wbs_active",
+                count=3,
+                cohort_id="concurrent-fanout",
+            ),
+            self.coordinator.fork_many(
+                user_id="user-1",
+                parent_task_id="wbs_active",
+                count=3,
+                cohort_id="concurrent-fanout",
+            ),
+        )
+
+        self.assertEqual(
+            [child.task_id for child in first],
+            [child.task_id for child in second],
+        )
+        async with self.sessions() as db:
+            rows = (
+                await db.scalars(
+                    select(WorkbenchSession).where(
+                        WorkbenchSession.name.like("Capability OS Subagent %")
+                    )
+                )
+            ).all()
+        self.assertEqual(len(rows), 3)
+
+    async def test_fork_many_uses_distinct_children_for_distinct_cohorts(self):
+        first = await self.coordinator.fork_many(
+            user_id="user-1", parent_task_id="wbs_active", count=2, cohort_id="one"
+        )
+        second = await self.coordinator.fork_many(
+            user_id="user-1", parent_task_id="wbs_active", count=2, cohort_id="two"
+        )
+        self.assertTrue(
+            {child.task_id for child in first}.isdisjoint({child.task_id for child in second})
+        )
 
     async def test_fork_many_rejects_invalid_cohort_sizes(self):
         for count in (1, 11):

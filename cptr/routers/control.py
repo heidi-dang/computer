@@ -179,12 +179,16 @@ def _is_quiesced_status(status: str) -> bool:
 
 
 class TaskExecutionPolicy(BaseModel):
-    """Server-enforced capability limits for one control-plane worker task."""
+    """Server-enforced capability and execution-root limits for one worker task."""
+
+    model_config = ConfigDict(extra="forbid")
 
     allow_file_writes: bool = True
     allow_commands: bool = True
     allow_network: bool = False
     allow_package_install: bool = False
+    isolation: Literal["workspace", "existing-worktree"] | None = None
+    worker_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class TaskCreateRequest(BaseModel):
@@ -1186,7 +1190,7 @@ async def create_task(request: Request, body: TaskCreateRequest):
             prompt=body.prompt,
             model_id=model_id,
             idempotency_key=body.idempotency_key,
-            execution_policy=body.execution_policy.model_dump(),
+            execution_policy=body.execution_policy.model_dump(exclude_none=True),
             request=request,
             **({"review_required": False} if not review_required else {}),
             **(
@@ -1197,6 +1201,15 @@ async def create_task(request: Request, body: TaskCreateRequest):
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="workspace not found") from exc
+    except DirectCodingWorkerError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "retriable": exc.status_code >= 409,
+            },
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1440,7 +1453,7 @@ async def create_autonomous(request: Request, body: AutonomousCreateRequest):
             acceptance_criteria=body.acceptance_criteria,
             model_id=model_id,
             idempotency_key=body.idempotency_key,
-            execution_policy=body.execution_policy.model_dump(),
+            execution_policy=body.execution_policy.model_dump(exclude_none=True),
             **(
                 {"workbench_session_id": body.workbench_session_id}
                 if body.workbench_session_id
