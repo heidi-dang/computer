@@ -382,6 +382,7 @@ class DirectWorkerCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     responsibility: str = Field(default="", max_length=500)
     repo_path: str = Field(default=".", min_length=1, max_length=1_000)
+    idempotency_key: str | None = Field(default=None, max_length=200)
 
 
 class DirectWorkersIntegrateRequest(BaseModel):
@@ -1716,6 +1717,7 @@ async def create_direct_worker(
             name=body.name,
             responsibility=body.responsibility,
             repo_path=body.repo_path,
+            idempotency_key=body.idempotency_key,
         )
     except DirectCodingWorkerError as exc:
         _raise_worker_error(exc)
@@ -1844,9 +1846,7 @@ async def run_fdx_intelligence(request: Request, workspace_id: str, body: FdxInt
     return result
 
 
-async def _focused_node_test_argv(
-    request: Request, *, cwd: Path, test_file: Path
-) -> list[str]:
+async def _focused_node_test_argv(request: Request, *, cwd: Path, test_file: Path) -> list[str]:
     """Build a bounded focused Node test command without re-running broad npm globs."""
     try:
         relative_test = test_file.relative_to(cwd).as_posix()

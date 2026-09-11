@@ -8,6 +8,7 @@ direct-coding endpoints.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import shutil
 import time
@@ -51,6 +52,13 @@ def _now_ms() -> int:
 
 def _worker_id() -> str:
     return f"dcw_{uuid.uuid4().hex}"
+
+
+def _idempotent_worker_id(*, user_id: str, workspace_id: str, key: str) -> str:
+    digest = hashlib.sha256(
+        f"cptr.direct-worker.v1\0{user_id}\0{workspace_id}\0{key}".encode("utf-8")
+    ).hexdigest()
+    return f"dcw_{digest[:32]}"
 
 
 def _safe_relative_path(value: str) -> str:
@@ -210,6 +218,9 @@ async def apply_worker_changes(
 
 
 class DirectCodingWorkerService:
+    def __init__(self) -> None:
+        self._idempotent_create_lock = asyncio.Lock()
+
     async def _get(self, *, user_id: str, workspace_id: str, worker_id: str) -> DirectCodingWorker:
         async with await get_db() as db:
             result = await db.execute(
@@ -234,15 +245,35 @@ class DirectCodingWorkerService:
         name: str,
         responsibility: str = "",
         repo_path: str = ".",
+        idempotency_key: str | None = None,
+        _idempotency_lock_held: bool = False,
     ) -> dict[str, Any]:
         name = name.strip()
         responsibility = responsibility.strip()
+        idempotency_key = str(idempotency_key or "").strip() or None
+        if idempotency_key is not None and len(idempotency_key) > 200:
+            raise DirectCodingWorkerError(
+                "DIRECT_WORKER_INVALID_IDEMPOTENCY_KEY",
+                "idempotency_key must be at most 200 characters",
+                status_code=422,
+            )
         if not name or len(name) > 80:
             raise DirectCodingWorkerError(
                 "DIRECT_WORKER_INVALID_NAME",
                 "worker name must contain 1-80 characters",
                 status_code=422,
             )
+        if idempotency_key and not _idempotency_lock_held:
+            async with self._idempotent_create_lock:
+                return await self.create(
+                    user_id=user_id,
+                    workspace=workspace,
+                    name=name,
+                    responsibility=responsibility,
+                    repo_path=repo_path,
+                    idempotency_key=idempotency_key,
+                    _idempotency_lock_held=True,
+                )
         normalized_repo_path = _safe_relative_path(repo_path)
         requested_root = _resolve_repo_path(workspace.path, normalized_repo_path)
         identity = await identity_for_user_id(user_id)
@@ -263,6 +294,43 @@ class DirectCodingWorkerService:
                 status_code=422,
             ) from exc
 
+        worker_id = (
+            _idempotent_worker_id(
+                user_id=user_id,
+                workspace_id=str(workspace.id),
+                key=idempotency_key,
+            )
+            if idempotency_key
+            else _worker_id()
+        )
+        if idempotency_key:
+            try:
+                existing = await self._get(
+                    user_id=user_id,
+                    workspace_id=str(workspace.id),
+                    worker_id=worker_id,
+                )
+            except DirectCodingWorkerError as exc:
+                if exc.code != "DIRECT_WORKER_NOT_FOUND":
+                    raise
+            else:
+                if (
+                    existing.name != name
+                    or existing.responsibility != responsibility
+                    or existing.repo_path != relative_repo
+                ):
+                    raise DirectCodingWorkerError(
+                        "DIRECT_WORKER_IDEMPOTENCY_CONFLICT",
+                        "idempotency_key is already bound to a different direct coding worker request",
+                    )
+                if existing.status == "CLOSED" or existing.closed_at is not None:
+                    raise DirectCodingWorkerError(
+                        "DIRECT_WORKER_IDEMPOTENCY_CLOSED",
+                        "idempotent direct coding worker has already been closed",
+                        status_code=410,
+                    )
+                return await self.summary(existing)
+
         async with await get_db() as db:
             result = await db.execute(
                 select(DirectCodingWorker).where(
@@ -279,7 +347,6 @@ class DirectCodingWorkerService:
                     status_code=429,
                 )
 
-        worker_id = _worker_id()
         branch = f"cptr/direct/{worker_id}"
         worker_root = _default_worker_root(repo_root, worker_id)
         created_root = await create_worker_worktree(
