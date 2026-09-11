@@ -262,10 +262,18 @@ class WorkbenchSession(Base):
     delete_requested_at = Column(BigInteger, nullable=True)
     delete_confirmation_hash = Column(Text, nullable=True)
     delete_confirmation_expires_at = Column(BigInteger, nullable=True)
+    # Workspace OS v2 sticky binding extensions
+    environment_profile_id = Column(Text, nullable=True)
+    environment_profile_override = Column(JSON, nullable=True)
+    admin_role = Column(Text, nullable=True)
+    role_context = Column(JSON, nullable=True)
+    last_context_snapshot_id = Column(Text, nullable=True)
 
     __table_args__ = (
         Index("ix_workbench_session_user_status_updated", "user_id", "status", "updated_at"),
         Index("ix_workbench_session_user_last_event", "user_id", "last_event_at"),
+        Index("ix_workbench_session_user_workspace", "user_id", "workspace_id"),
+        Index("ix_workbench_session_snapshot", "last_context_snapshot_id"),
     )
 
 
@@ -291,6 +299,55 @@ class LocalRootGrant(Base):
             "granted_at",
         ),
         Index("ix_local_root_grant_session_active", "workbench_session_id", "revoked_at"),
+    )
+
+
+class AdminSessionGrant(Base):
+    """Bounded owner grant for Workbench-scoped ADMIN privilege."""
+
+    __tablename__ = "admin_session_grants"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    workbench_session_id = Column(
+        Text, ForeignKey("workbench_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    granted_at = Column(BigInteger, nullable=False)
+    expires_at = Column(BigInteger, nullable=False)
+    revoked_at = Column(BigInteger, nullable=True)
+
+    __table_args__ = (
+        Index(
+            "ix_admin_session_grant_user_session_granted",
+            "user_id",
+            "workbench_session_id",
+            "granted_at",
+        ),
+        Index("ix_admin_session_grant_session_active", "workbench_session_id", "revoked_at"),
+    )
+
+
+class AdminSessionGrantEvent(Base):
+    """Append-only audit record for ADMIN grant lifecycle events."""
+
+    __tablename__ = "admin_session_grant_events"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    workbench_session_id = Column(
+        Text, ForeignKey("workbench_sessions.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    action = Column(Text, nullable=False)
+    details = Column(JSON, nullable=False, default=dict)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        Index("ix_admin_session_grant_events_user_created", "user_id", "created_at"),
+        Index(
+            "ix_admin_session_grant_events_session_created",
+            "workbench_session_id",
+            "created_at",
+        ),
     )
 
 

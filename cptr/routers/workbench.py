@@ -10,6 +10,14 @@ from pydantic import BaseModel, Field
 from cptr.models import AutonomousMonitor, ControlTask, Workspace
 from cptr.services.action_traces import action_trace_store, trace_context_from_request
 from cptr.services.control_auth import require_control_user
+from cptr.services.local_root_grants import local_root_grant_store, local_root_grants_enabled
+from cptr.services.privilege_broker import (
+    AdminSessionGrantDenied,
+    DEFAULT_ADMIN_TTL_SECONDS,
+    MAX_ADMIN_TTL_SECONDS,
+    admin_session_grant_store,
+    privilege_broker,
+)
 from cptr.services.workbench_sessions import MAX_EVENT_LIST_LIMIT, workbench_session_store
 from cptr.utils.db import get_db
 from cptr.utils.tools import get_command_session
@@ -20,16 +28,39 @@ router = APIRouter(prefix="/api/control/v1", tags=["workbench-sessions"])
 class CreateWorkbenchSessionRequest(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     workspace_id: str | None = Field(default=None, max_length=200)
+    workspace_ref: str | None = Field(default=None, max_length=200)
+    environment_profile_id: str | None = Field(default=None, max_length=200)
+    environment_profile_ref: str | None = Field(default=None, max_length=200)
+    environment_profile_override: dict[str, Any] | None = Field(default=None)
+    admin_role: str | None = Field(default=None, max_length=120)
+    admin_role_ref: str | None = Field(default=None, max_length=120)
+    role_context: dict[str, Any] | None = Field(default=None)
+    last_context_snapshot_id: str | None = Field(default=None, max_length=200)
 
 
 class RenameWorkbenchSessionRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=120)
+    name: str | None = Field(default=None, max_length=120)
+    workspace_id: str | None = Field(default=None, max_length=200)
+    workspace_ref: str | None = Field(default=None, max_length=200)
+    environment_profile_id: str | None = Field(default=None, max_length=200)
+    environment_profile_ref: str | None = Field(default=None, max_length=200)
+    environment_profile_override: dict[str, Any] | None = Field(default=None)
+    admin_role: str | None = Field(default=None, max_length=120)
+    admin_role_ref: str | None = Field(default=None, max_length=120)
+    role_context: dict[str, Any] | None = Field(default=None)
+    last_context_snapshot_id: str | None = Field(default=None, max_length=200)
+
+
+UpdateWorkbenchSessionRequest = RenameWorkbenchSessionRequest
 
 
 class BindWorkbenchSessionTargetRequest(BaseModel):
     target_type: Literal["task", "command", "monitor"]
     target_id: str = Field(min_length=1, max_length=200)
     workspace_id: str | None = Field(default=None, max_length=200)
+    workspace_ref: str | None = Field(default=None, max_length=200)
+    last_context_snapshot_id: str | None = Field(default=None, max_length=200)
+    make_sticky: bool = Field(default=False)
 
 
 class AppendWorkbenchSessionEventRequest(BaseModel):
@@ -49,6 +80,14 @@ class DeleteWorkbenchSessionRequest(BaseModel):
     confirmation_id: str = Field(min_length=16, max_length=200)
 
 
+class AdminGrantRequest(BaseModel):
+    ttl_seconds: int = Field(
+        default=DEFAULT_ADMIN_TTL_SECONDS,
+        ge=1,
+        le=MAX_ADMIN_TTL_SECONDS,
+    )
+
+
 async def _user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
 
@@ -56,11 +95,17 @@ async def _user(request: Request, scope: str) -> str:
 async def _ensure_workspace_owner(user_id: str, workspace_id: str | None) -> Workspace | None:
     if not workspace_id:
         return None
-    async with await get_db() as db:
-        workspace = await db.get(Workspace, workspace_id)
-    if workspace is None or workspace.user_id != user_id:
-        raise HTTPException(status_code=404, detail="workspace not found")
-    return workspace
+    try:
+        from cptr.services.workspace_refs import resolve_workspace_ref
+
+        resolution = await resolve_workspace_ref(user_id=user_id, reference=workspace_id)
+        return resolution.workspace
+    except Exception:
+        async with await get_db() as db:
+            workspace = await db.get(Workspace, workspace_id)
+        if workspace is None or workspace.user_id != user_id:
+            raise HTTPException(status_code=404, detail="workspace not found")
+        return workspace
 
 
 async def _ensure_target_owner(
@@ -88,7 +133,10 @@ async def _ensure_target_owner(
     if target is None or target.user_id != user_id:
         raise HTTPException(status_code=404, detail="target not found")
     if workspace_id and target.workspace_id != workspace_id:
-        raise HTTPException(status_code=404, detail="target not found")
+        from cptr.routers.control import _are_workspaces_equivalent
+
+        if not await _are_workspaces_equivalent(user_id, str(target.workspace_id), workspace_id):
+            raise HTTPException(status_code=404, detail="target not found")
 
 
 async def _trace_workbench_event(
@@ -169,10 +217,28 @@ async def _reconcile_terminal_command_if_needed(
 @router.post("/workbench-sessions")
 async def create_workbench_session(request: Request, body: CreateWorkbenchSessionRequest):
     user_id = await _user(request, "task:write")
-    await _ensure_workspace_owner(user_id, body.workspace_id)
-    session = await workbench_session_store.create(
-        owner_id=user_id, name=body.name, workspace_id=body.workspace_id
-    )
+    target_ref = body.workspace_ref or body.workspace_id
+    workspace = await _ensure_workspace_owner(user_id, target_ref) if target_ref else None
+    canonical_ws = getattr(workspace, "id", None) or target_ref
+    env_profile = body.environment_profile_id or body.environment_profile_ref
+    admin_role_val = body.admin_role or body.admin_role_ref
+    create_kwargs: dict[str, Any] = {
+        "owner_id": user_id,
+        "name": body.name,
+        "workspace_id": canonical_ws,
+    }
+    if env_profile is not None:
+        create_kwargs["environment_profile_id"] = env_profile
+    if body.environment_profile_override is not None:
+        create_kwargs["environment_profile_override"] = body.environment_profile_override
+    if admin_role_val is not None:
+        create_kwargs["admin_role"] = admin_role_val
+    if body.role_context is not None:
+        create_kwargs["role_context"] = body.role_context
+    if body.last_context_snapshot_id is not None:
+        create_kwargs["last_context_snapshot_id"] = body.last_context_snapshot_id
+
+    session = await workbench_session_store.create(**create_kwargs)
     await workbench_session_store.append_event(
         owner_id=user_id,
         session_id=session["session_id"],
@@ -180,7 +246,7 @@ async def create_workbench_session(request: Request, body: CreateWorkbenchSessio
         actor="chatgpt_plugin",
         event_type="workbench.opened",
         state="OPEN",
-        workspace_id=body.workspace_id,
+        workspace_id=canonical_ws,
         summary="CPTR Workbench Session is ready.",
     )
     await _trace_workbench_event(
@@ -189,7 +255,7 @@ async def create_workbench_session(request: Request, body: CreateWorkbenchSessio
         session_id=session["session_id"],
         event_type="workbench.opened",
         status="OPEN",
-        workspace_id=body.workspace_id,
+        workspace_id=canonical_ws,
     )
     current = await workbench_session_store.get(owner_id=user_id, session_id=session["session_id"])
     return current or session
@@ -243,14 +309,29 @@ async def bind_workbench_session(
     request: Request, session_id: str, body: BindWorkbenchSessionTargetRequest
 ):
     user_id = await _user(request, "task:write")
-    await _ensure_target_owner(user_id, body.target_type, body.target_id, body.workspace_id)
-    session = await workbench_session_store.bind_target(
-        owner_id=user_id,
-        session_id=session_id,
-        target_type=body.target_type,
-        target_id=body.target_id,
-        workspace_id=body.workspace_id,
-    )
+    target_ws = body.workspace_ref or body.workspace_id
+    if not target_ws:
+        existing = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
+        if existing and existing.get("workspace_id"):
+            target_ws = existing["workspace_id"]
+    canonical_ws = target_ws
+    if body.workspace_ref:
+        workspace = await _ensure_workspace_owner(user_id, body.workspace_ref)
+        canonical_ws = getattr(workspace, "id", None) or body.workspace_ref
+    await _ensure_target_owner(user_id, body.target_type, body.target_id, canonical_ws)
+    bind_kwargs: dict[str, Any] = {
+        "owner_id": user_id,
+        "session_id": session_id,
+        "target_type": body.target_type,
+        "target_id": body.target_id,
+        "workspace_id": canonical_ws,
+    }
+    if body.last_context_snapshot_id is not None:
+        bind_kwargs["last_context_snapshot_id"] = body.last_context_snapshot_id
+    if body.make_sticky:
+        bind_kwargs["make_sticky"] = True
+
+    session = await workbench_session_store.bind_target(**bind_kwargs)
     if session is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
     await workbench_session_store.append_event(
@@ -262,7 +343,7 @@ async def bind_workbench_session(
         state=session["status"],
         target_type=body.target_type,
         target_id=body.target_id,
-        workspace_id=body.workspace_id,
+        workspace_id=canonical_ws,
         summary=f"Workbench bound to {body.target_type} activity.",
     )
     await _trace_workbench_event(
@@ -273,13 +354,13 @@ async def bind_workbench_session(
         status=session["status"],
         target_type=body.target_type,
         target_id=body.target_id,
-        workspace_id=body.workspace_id,
+        workspace_id=canonical_ws,
     )
     if body.target_type == "command":
         await _reconcile_terminal_command_if_needed(
             user_id=user_id,
             command_id=body.target_id,
-            workspace_id=body.workspace_id,
+            workspace_id=canonical_ws,
         )
     return await workbench_session_store.get(owner_id=user_id, session_id=session_id) or session
 
@@ -289,14 +370,21 @@ async def append_workbench_session_event(
     request: Request, session_id: str, body: AppendWorkbenchSessionEventRequest
 ):
     user_id = await _user(request, "task:write")
+    target_ws = body.workspace_id
+    if not target_ws:
+        existing = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
+        if existing:
+            target_ws = existing.get("active_workspace_id") or existing.get("workspace_id")
+    canonical_ws = target_ws
     if bool(body.target_type) != bool(body.target_id):
         raise HTTPException(
             status_code=422, detail="target_type and target_id must be supplied together"
         )
     if body.target_type and body.target_id:
-        await _ensure_target_owner(user_id, body.target_type, body.target_id, body.workspace_id)
-    elif body.workspace_id:
-        await _ensure_workspace_owner(user_id, body.workspace_id)
+        await _ensure_target_owner(user_id, body.target_type, body.target_id, canonical_ws)
+    elif canonical_ws:
+        workspace = await _ensure_workspace_owner(user_id, canonical_ws)
+        canonical_ws = getattr(workspace, "id", None) or canonical_ws
     try:
         event = await workbench_session_store.append_event(
             owner_id=user_id,
@@ -306,7 +394,7 @@ async def append_workbench_session_event(
             state=body.state,
             target_type=body.target_type,
             target_id=body.target_id,
-            workspace_id=body.workspace_id,
+            workspace_id=canonical_ws,
             tool_name=body.tool_name,
             details=body.details,
             metrics=body.metrics,
@@ -324,14 +412,14 @@ async def append_workbench_session_event(
         status=body.state or "RUNNING",
         target_type=body.target_type,
         target_id=body.target_id,
-        workspace_id=body.workspace_id,
+        workspace_id=canonical_ws,
         tool_name=body.tool_name,
     )
     if body.target_type == "command" and body.event_type == "command.started":
         await _reconcile_terminal_command_if_needed(
             user_id=user_id,
             command_id=body.target_id or "",
-            workspace_id=body.workspace_id,
+            workspace_id=canonical_ws,
         )
     return event
 
@@ -341,12 +429,123 @@ async def rename_workbench_session(
     request: Request, session_id: str, body: RenameWorkbenchSessionRequest
 ):
     user_id = await _user(request, "task:write")
-    session = await workbench_session_store.rename(
-        owner_id=user_id, session_id=session_id, name=body.name
+    has_extended = any(
+        getattr(body, k, None) is not None
+        for k in (
+            "workspace_id",
+            "workspace_ref",
+            "environment_profile_id",
+            "environment_profile_ref",
+            "environment_profile_override",
+            "admin_role",
+            "admin_role_ref",
+            "role_context",
+            "last_context_snapshot_id",
+        )
+    )
+    if not has_extended and body.name is not None:
+        session = await workbench_session_store.rename(
+            owner_id=user_id, session_id=session_id, name=body.name
+        )
+        if session is None:
+            raise HTTPException(status_code=404, detail="workbench session not found")
+        return session
+
+    ws_ref = body.workspace_ref or body.workspace_id
+    canonical_ws = None
+    if ws_ref:
+        workspace = await _ensure_workspace_owner(user_id, ws_ref)
+        canonical_ws = getattr(workspace, "id", None) or ws_ref
+
+    from cptr.services.workbench_sessions import _UNSET
+
+    session = await workbench_session_store.update(
+        owner_id=user_id,
+        session_id=session_id,
+        name=body.name,
+        workspace_id=canonical_ws if (body.workspace_id or body.workspace_ref) else _UNSET,
+        environment_profile_id=(body.environment_profile_id or body.environment_profile_ref)
+        if (body.environment_profile_id or body.environment_profile_ref) is not None
+        else _UNSET,
+        environment_profile_override=body.environment_profile_override
+        if body.environment_profile_override is not None
+        else _UNSET,
+        admin_role=(body.admin_role or body.admin_role_ref)
+        if (body.admin_role or body.admin_role_ref) is not None
+        else _UNSET,
+        role_context=body.role_context if body.role_context is not None else _UNSET,
+        last_context_snapshot_id=body.last_context_snapshot_id
+        if body.last_context_snapshot_id is not None
+        else _UNSET,
     )
     if session is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
     return session
+
+
+@router.post("/workbench-sessions/{session_id}/admin-grant")
+async def grant_workbench_session_admin(
+    request: Request,
+    session_id: str,
+    body: AdminGrantRequest = AdminGrantRequest(),
+):
+    user_id = await _user(request, "task:write")
+    try:
+        return await admin_session_grant_store.grant(
+            owner_id=user_id,
+            session_id=session_id,
+            ttl_seconds=body.ttl_seconds,
+            actor="control_api",
+        )
+    except (AdminSessionGrantDenied, ValueError) as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+
+@router.post("/workbench-sessions/{session_id}/admin-revoke")
+async def revoke_workbench_session_admin(request: Request, session_id: str):
+    user_id = await _user(request, "task:write")
+    try:
+        count = await admin_session_grant_store.revoke(
+            owner_id=user_id,
+            session_id=session_id,
+            actor="control_api",
+        )
+    except AdminSessionGrantDenied as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "session_id": session_id,
+        "revoked": count > 0,
+        "revoked_count": count,
+    }
+
+
+@router.get("/workbench-sessions/{session_id}/privilege")
+async def get_workbench_session_privilege(request: Request, session_id: str):
+    user_id = await _user(request, "task:read")
+    session = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="workbench session not found")
+
+    admin_status = await admin_session_grant_store.status(
+        owner_id=user_id,
+        session_id=session_id,
+    )
+    root_active = bool(
+        local_root_grants_enabled()
+        and await local_root_grant_store.is_active(
+            owner_id=user_id,
+            session_id=session_id,
+        )
+    )
+    return {
+        "session_id": session_id,
+        "privilege": await privilege_broker.resolve_privilege(
+            owner_id=user_id,
+            session_id=session_id,
+        ),
+        "admin_grant": admin_status,
+        "local_root_grant_active": root_active,
+    }
 
 
 @router.post("/workbench-sessions/{session_id}/archive")

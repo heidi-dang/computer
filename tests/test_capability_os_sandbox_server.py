@@ -67,6 +67,8 @@ class CapabilityOsSandboxServerTests(unittest.TestCase):
         rootfs = root / "rootfs"
         python = rootfs / "usr" / "bin" / "python3"
         python.parent.mkdir(parents=True)
+        for directory in (rootfs, rootfs / "usr", rootfs / "usr" / "bin"):
+            os.chmod(directory, 0o755)
         python.write_text("fixture", encoding="utf-8")
         os.chmod(python, 0o755)
         state = root / "state-gvisor"

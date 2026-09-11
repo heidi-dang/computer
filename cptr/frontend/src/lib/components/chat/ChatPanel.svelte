@@ -1048,7 +1048,8 @@
 				parentId,
 				getChatSendParams(),
 				undefined,
-				files
+				files,
+				get(currentWorkspace)?.workspace_id
 			);
 
 			// Swap optimistic temp msg with real messages from backend.

@@ -2104,6 +2104,10 @@ async def run_chat_task(
             recent_messages=messages,
             mentioned_files=memory_files,
             memory_task_key=message_id,
+            workspace_id=(
+                str(chat_obj.workspace_id) if chat_obj and chat_obj.workspace_id else None
+            ),
+            chat_id=chat_id,
         )
         if loaded_summary:
             system += f"\n\n[CONVERSATION SUMMARY]\n{loaded_summary}"
@@ -2434,6 +2438,10 @@ async def run_chat_task(
             recent_messages=messages,
             mentioned_files=memory_files,
             memory_task_key=message_id,
+            workspace_id=(
+                str(chat_obj.workspace_id) if chat_obj and chat_obj.workspace_id else None
+            ),
+            chat_id=chat_id,
         )
         if loaded_summary:
             system += f"\n\n[CONVERSATION SUMMARY]\n{loaded_summary}"
@@ -2761,6 +2769,10 @@ async def run_chat_task(
                     recent_messages=keep_zone,
                     mentioned_files=memory_files,
                     memory_task_key=message_id,
+                    workspace_id=(
+                        str(chat_obj.workspace_id) if chat_obj and chat_obj.workspace_id else None
+                    ),
+                    chat_id=chat_id,
                 )
                 system += f"\n\n[CONVERSATION SUMMARY]\n{summary}"
                 # Re-inject attached skills after compaction (protect from pruning)

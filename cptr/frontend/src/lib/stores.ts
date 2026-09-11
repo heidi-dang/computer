@@ -110,7 +110,10 @@ export interface EditorSplit {
 }
 
 export interface WorkspaceState {
+	workspace_id?: string;
 	name: string;
+	slug?: string | null;
+	workspace_type?: string;
 	path: string;
 	groups: EditorGroup[];
 	activeGroupId: string;
@@ -307,7 +310,16 @@ export const homeState = writable<HomeState>({
 });
 
 /** List of all workspace summaries for the sidebar. */
-export const workspaceList = writable<{ path: string; name: string; unread_count: number }[]>([]);
+export const workspaceList = writable<
+	{
+		workspace_id: string;
+		path: string;
+		name: string;
+		slug: string | null;
+		workspace_type: string;
+		unread_count: number;
+	}[]
+>([]);
 
 /** Global user preferences. */
 export const sidebarOpen = writable(
@@ -917,7 +929,10 @@ export function addWorkspace(path: string): void {
 	// Update workspace list for sidebar
 	workspaceList.update((list) => {
 		if (list.some((w) => w.path === path)) return list;
-		return [...list, { path, name, unread_count: 0 }];
+		return [
+			...list,
+			{ workspace_id: '', path, name, slug: null, workspace_type: 'project', unread_count: 0 }
+		];
 	});
 
 	// Append to order

@@ -38,6 +38,70 @@ def _get_user(request: Request) -> str:
     return auth.user_id
 
 
+_PRIVILEGE_PARAM_KEYS = frozenset(
+    {
+        "admin_role",
+        "admin_role_ref",
+        "role_context",
+        "mode",
+        "privilege",
+        "workbench_session_id",
+        "local_root_unrestricted",
+        "root_workbench_session_id",
+    }
+)
+
+
+def _sanitize_chat_params(params: dict | None) -> dict:
+    """Keep chat generation settings data-only; privilege is server authority."""
+    raw = params if isinstance(params, dict) else {}
+    return {key: value for key, value in raw.items() if key not in _PRIVILEGE_PARAM_KEYS}
+
+
+async def _resolve_chat_workspace(
+    *,
+    user_id: str,
+    workspace_id: str | None,
+    workspace: str | None,
+) -> tuple[str | None, str | None]:
+    """Resolve stable Workspace identity and canonical legacy path for chat creation."""
+    stable_ref = str(workspace_id or "").strip()
+    legacy_ref = str(workspace or "").strip()
+    if not stable_ref and not legacy_ref:
+        return None, None
+
+    from cptr.services.workspace_refs import WorkspaceRefError, resolve_workspace_ref
+
+    try:
+        stable_resolution = (
+            await resolve_workspace_ref(user_id=user_id, reference=stable_ref)
+            if stable_ref
+            else None
+        )
+        legacy_resolution = (
+            await resolve_workspace_ref(user_id=user_id, reference=legacy_ref)
+            if legacy_ref
+            else None
+        )
+    except WorkspaceRefError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if (
+        stable_resolution is not None
+        and legacy_resolution is not None
+        and str(stable_resolution.workspace.id) != str(legacy_resolution.workspace.id)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="workspace_id and workspace path resolve to different Workspaces",
+        )
+
+    resolution = stable_resolution or legacy_resolution
+    if resolution is None:
+        return None, None
+    return str(resolution.workspace.id), str(resolution.workspace.path)
+
+
 # ── List chats for a workspace or Home ──────────────────────
 
 
@@ -179,6 +243,7 @@ async def list_chats(
         visible_chats.append(
             {
                 "id": chat.id,
+                "workspace_id": str(chat.workspace_id) if chat.workspace_id else None,
                 "title": chat.title,
                 "summary": chat.summary,
                 "folder": chat_file["folder"],
@@ -679,6 +744,7 @@ async def get_chat(
     return {
         "chat": {
             "id": chat.id,
+            "workspace_id": str(chat.workspace_id) if chat.workspace_id else None,
             "title": chat.title,
             "summary": chat.summary,
             "meta": chat.meta,
@@ -977,12 +1043,17 @@ async def fork_chat(request: Request, chat_id: str, body: ForkChatRequest | None
     meta = deepcopy(chat.meta or {})
     meta["forked_from"] = chat.id
     meta["forked_from_message_id"] = source_message.id
+    meta["workspace_role"] = "NORMAL"
+    for key in _PRIVILEGE_PARAM_KEYS:
+        meta.pop(key, None)
+    meta["params"] = _sanitize_chat_params(meta.get("params"))
     now = now_ms()
     fork = await Chat.create(
         user_id=user_id,
         title=f"{chat.title} (fork)",
         meta=meta,
         created_at=now,
+        workspace_id=str(chat.workspace_id) if chat.workspace_id else None,
     )
     if chat.summary:
         await Chat.update_summary(fork.id, chat.summary, now)
@@ -1020,6 +1091,7 @@ class SendMessageRequest(BaseModel):
     content: str = ""
     model_id: str
     workspace: Optional[str] = None
+    workspace_id: Optional[str] = None
     chat_id: Optional[str] = None
     parent_id: Optional[str] = None
     regeneration_prompt: Optional[str] = None
@@ -1048,19 +1120,25 @@ async def send_message(request: Request, body: SendMessageRequest):
         if not chat or chat.user_id != user_id:
             raise HTTPException(404, "chat not found")
         workspace = (chat.meta or {}).get("workspace") or None
-        # Sync params into chat meta
+        # Sync data-only generation params into chat meta. Privilege is never client metadata.
         if chat.meta is None:
             chat.meta = {}
-        if chat.meta.get("params") != body.params or chat.meta.get("last_model") != body.model_id:
-            chat.meta["params"] = body.params
+        safe_params = _sanitize_chat_params(body.params)
+        if chat.meta.get("params") != safe_params or chat.meta.get("last_model") != body.model_id:
+            chat.meta["params"] = safe_params
             chat.meta["last_model"] = body.model_id
             await Chat.update_meta(chat.id, chat.meta)
     else:
-        workspace = body.workspace or None
+        stable_workspace_id, workspace = await _resolve_chat_workspace(
+            user_id=user_id,
+            workspace_id=body.workspace_id,
+            workspace=body.workspace,
+        )
         title = body.content[:50].strip() or "New Chat"
         meta = {
-            "params": body.params,
+            "params": _sanitize_chat_params(body.params),
             "last_model": body.model_id,
+            "workspace_role": "NORMAL",
         }
         if workspace:
             meta["workspace"] = workspace
@@ -1069,6 +1147,7 @@ async def send_message(request: Request, body: SendMessageRequest):
             title=title,
             meta=meta,
             created_at=now_ms(),
+            workspace_id=stable_workspace_id,
         )
         if workspace:
             await Runtime.write_file(

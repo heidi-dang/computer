@@ -11,6 +11,8 @@ from typing import Any
 
 from sqlalchemy import delete, or_, select
 
+from cptr.memory.workspace import resolve_workspace_namespace
+
 from cptr.models import MemoryLexicalDocument, MemoryLexicalTerm
 from cptr.utils.db import get_session_factory
 
@@ -93,11 +95,14 @@ class MemoryLexicalIndex:
             MemoryLexicalDocument.memory_id.in_(candidates),
             MemoryLexicalDocument.user_id == user_id,
         ]
-        if workspace:
+        ns = await resolve_workspace_namespace(
+            user_id, workspace, session_factory=self._session_factory
+        )
+        if not ns.is_user_scope:
             document_predicates.append(
                 or_(
                     MemoryLexicalDocument.workspace == "",
-                    MemoryLexicalDocument.workspace == workspace,
+                    MemoryLexicalDocument.workspace.in_(ns.aliases),
                 )
             )
         else:
@@ -190,7 +195,13 @@ class MemoryLexicalIndex:
     async def coverage(self, *, user_id: str, workspace: str | None = None) -> int:
         predicates = [MemoryLexicalDocument.user_id == user_id]
         if workspace is not None:
-            predicates.append(MemoryLexicalDocument.workspace == str(workspace or ""))
+            ns = await resolve_workspace_namespace(
+                user_id, workspace, session_factory=self._session_factory
+            )
+            if not ns.is_user_scope:
+                predicates.append(MemoryLexicalDocument.workspace.in_(ns.aliases))
+            else:
+                predicates.append(MemoryLexicalDocument.workspace == "")
         async with self._session() as db:
             rows = list(
                 (await db.scalars(select(MemoryLexicalDocument.memory_id).where(*predicates))).all()

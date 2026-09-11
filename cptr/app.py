@@ -27,6 +27,7 @@ from cptr.routers import (
     control_router,
     control_stream_router,
     events_router,
+    environment_profiles_router,
     factory_router,
     files_router,
     gateway_router,
@@ -50,6 +51,8 @@ from cptr.routers import (
     webhook_router,
     workspace_router,
     workspace_extended_router,
+    workspace_groups_router,
+    workspace_instructions_router,
     workbench_router,
 )
 from cptr.utils.config import check_access, load_config, validate_auth_configuration
@@ -95,6 +98,7 @@ async def lifespan(app: FastAPI):
     app.state.workbench_sessions_archived = await workbench_session_store.archive_stale(
         idle_seconds=WORKBENCH_SESSION_IDLE_ARCHIVE_SECONDS
     )
+    app.state.workbench_sessions_reconciled = await workbench_session_store.reconcile_restart()
 
     from cptr.services.factory_control import FactoryControlService
     from cptr.services.factory_production import FactoryProductionRunner
@@ -469,6 +473,7 @@ app.include_router(coding_router)
 app.include_router(control_router)
 app.include_router(control_stream_router)
 app.include_router(events_router)
+app.include_router(environment_profiles_router)
 app.include_router(factory_router)
 app.include_router(files_router)
 app.include_router(gateway_router)
@@ -491,6 +496,8 @@ app.include_router(terminal_router)
 app.include_router(terminal_extended_router)
 app.include_router(workspace_router)
 app.include_router(workspace_extended_router)
+app.include_router(workspace_groups_router)
+app.include_router(workspace_instructions_router)
 app.include_router(workbench_router)
 
 

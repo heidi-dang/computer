@@ -18,6 +18,12 @@ from cptr.services.live_events import (
     command_target_key,
     live_event_hub,
     workbench_target_key,
+    workspace_target_key,
+)
+from cptr.services.workspace_observability import (
+    workspace_context_cache,
+    workspace_metrics,
+    workspace_projection_service,
 )
 from cptr.services.workbench_sessions import workbench_session_store
 from cptr.utils.redaction import redact_external_text
@@ -350,3 +356,109 @@ async def monitor_stream(request: Request, monitor_id: str):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/workspaces/{workspace_id}/projection")
+async def workspace_projection_endpoint(
+    request: Request,
+    workspace_id: str,
+):
+    user_id = await _user(request, "workspace:read")
+    try:
+        projection = await workspace_projection_service.get_projection(
+            workspace_id=workspace_id,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return projection
+
+
+@router.get("/workspaces/{workspace_id}/stream/snapshot")
+async def workspace_stream_snapshot_endpoint(
+    request: Request,
+    workspace_id: str,
+):
+    user_id = await _user(request, "workspace:read")
+    try:
+        projection = await workspace_projection_service.get_projection(
+            workspace_id=workspace_id,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return await _recovery_snapshot(
+        target_key=workspace_target_key(workspace_id),
+        target="workspace",
+        snapshot=projection,
+        after=_after_sequence(request),
+    )
+
+
+@router.get("/workspaces/{workspace_id}/stream")
+async def workspace_stream_endpoint(
+    request: Request,
+    workspace_id: str,
+):
+    user_id = await _user(request, "workspace:read")
+    try:
+        projection = await workspace_projection_service.get_projection(
+            workspace_id=workspace_id,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return StreamingResponse(
+        _stream(
+            request,
+            target_key=workspace_target_key(workspace_id),
+            snapshot={"target": "workspace", "workspace_id": workspace_id, "snapshot": projection},
+            after_sequence=_after_sequence(request),
+            stop_on_terminal=False,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-store",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.get("/workspaces/{workspace_id}/metrics")
+async def workspace_metrics_endpoint(
+    request: Request,
+    workspace_id: str,
+):
+    await _user(request, "workspace:read")
+    return workspace_metrics.snapshot()
+
+
+@router.post("/workspaces/{workspace_id}/context/invalidate")
+async def workspace_context_invalidate_endpoint(
+    request: Request,
+    workspace_id: str,
+):
+    user_id = await _user(request, "workspace:write")
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    reason = str((body or {}).get("reason") or "manual")
+    details = (body or {}).get("details")
+    invalidated = await workspace_context_cache.invalidate(
+        workspace_id=workspace_id,
+        reason=reason,
+        details=details,
+        user_id=user_id,
+    )
+    return {"workspace_id": workspace_id, "invalidated": invalidated, "reason": reason}
+
+
+@router.get("/workspaces/observability/stats")
+async def workspace_observability_stats_endpoint(
+    request: Request,
+):
+    await _user(request, "workspace:read")
+    return workspace_context_cache.stats()

@@ -257,6 +257,8 @@ def _build_template_variables(
     skills_enabled: bool = True,
     home: str | None = None,
     shell: str | None = None,
+    instructions_block: str | None = None,
+    workspace_context_block: str = "",
 ) -> dict[str, str]:
     """Build the dict of template variable values for the current context."""
     ws_path = Path(workspace) if workspace else None
@@ -264,16 +266,17 @@ def _build_template_variables(
     shell = shell or os.environ.get("SHELL") or os.environ.get("COMSPEC") or ""
     home = home or str(Path.home())
 
-    instructions = _load_instruction_files(workspace) if workspace else ""
-    if instructions:
-        instructions_block = (
-            f"<instructions>\n{instructions}\n</instructions>"
-            "\n\nThe above <instructions> were loaded from instruction files in the workspace root. "
-            "These files persist across sessions and are user-authored workspace instructions. "
-            "Managed memory is shown separately when available."
-        )
-    else:
-        instructions_block = ""
+    if instructions_block is None:
+        instructions = _load_instruction_files(workspace) if workspace else ""
+        if instructions:
+            instructions_block = (
+                f"<instructions>\n{instructions}\n</instructions>"
+                "\n\nThe above <instructions> were loaded from instruction files in the workspace root. "
+                "These files persist across sessions and are user-authored workspace instructions. "
+                "Managed memory is shown separately when available."
+            )
+        else:
+            instructions_block = ""
 
     skills_block = build_catalog_xml(discover_skills(workspace)) if skills_enabled else ""
 
@@ -283,6 +286,7 @@ def _build_template_variables(
         "FILE_TREE": _get_file_tree(workspace) if workspace else "",
         "INSTRUCTIONS": instructions_block,
         "MEMORY": memory,
+        "WORKSPACE_CONTEXT": workspace_context_block,
         "SKILLS": skills_block,
         "CPTR_CONTEXT": _format_cptr_context(workspace, model, home, shell) if workspace else "",
         "RUNTIME_ENV": _runtime_label(),
@@ -307,6 +311,8 @@ async def load_system_prompt(
     recent_messages: list[dict] | None = None,
     mentioned_files: list[str] | None = None,
     memory_task_key: str = "",
+    workspace_id: str | None = None,
+    chat_id: str | None = None,
 ) -> str:
     """Load and render the system prompt for a workspace/model.
 
@@ -352,7 +358,55 @@ async def load_system_prompt(
         template = DEFAULT_SYSTEM_PROMPT if workspace else HOME_SYSTEM_PROMPT
 
     memory = ""
-    if user_id:
+    instructions_block = None
+    workspace_context_block = ""
+    resolved_workspace_id = str(workspace_id or "").strip() or None
+
+    if user_id and workspace:
+        try:
+            if resolved_workspace_id is None:
+                from cptr.services.workspace_refs import resolve_workspace_ref
+
+                resolution = await resolve_workspace_ref(user_id=user_id, reference=workspace)
+                resolved_workspace_id = str(resolution.workspace.id)
+
+            from cptr.services.workspace_actions import workspace_action_service
+
+            context_result = await workspace_action_service.context_for_chat(
+                user_id=user_id,
+                workspace_id=resolved_workspace_id,
+                current_message=current_message,
+                recent_messages=recent_messages or [],
+                mentioned_files=mentioned_files or [],
+                memory_task_key=memory_task_key,
+            )
+            context_bundle = context_result.get("context") or {}
+            workspace_context_block = str(context_bundle.get("rendered") or "").strip()
+
+            if chat_id and workspace_context_block:
+                from cptr.models import Chat
+                from cptr.utils.config import now_ms
+
+                chat = await Chat.get_by_id(chat_id)
+                if chat is not None and str(chat.user_id) == str(user_id):
+                    meta = dict(chat.meta or {})
+                    meta["workspace_context"] = {
+                        "snapshot_id": context_bundle.get("snapshot_id"),
+                        "content_digest": context_bundle.get("content_digest"),
+                        "workspace_id": resolved_workspace_id,
+                        "created_at_ms": context_bundle.get("created_at_ms"),
+                        "role": "NORMAL",
+                    }
+                    meta["workspace_role"] = "NORMAL"
+                    await Chat.update_meta(chat_id, meta, now_ms())
+        except Exception:
+            logger.debug(
+                "[system_prompt] Authoritative Workspace context unavailable; using legacy prompt inputs",
+                exc_info=True,
+            )
+            workspace_context_block = ""
+
+    if not workspace_context_block and user_id:
         from cptr.memory.domain import PrepareContextInput
         from cptr.memory.service import get_memory_service
 
@@ -369,7 +423,9 @@ async def load_system_prompt(
         )
         memory = memory_bundle.rendered
 
-    if memory and "{{MEMORY}}" not in template:
+    if workspace_context_block and "{{WORKSPACE_CONTEXT}}" not in template:
+        template = template.rstrip() + "\n\n{{WORKSPACE_CONTEXT}}"
+    elif memory and "{{MEMORY}}" not in template:
         template = template.rstrip() + "\n\n{{MEMORY}}"
 
     try:
@@ -387,5 +443,30 @@ async def load_system_prompt(
         except Exception:
             logger.debug("[system_prompt] Failed to resolve user identity", exc_info=True)
 
-    variables = _build_template_variables(workspace, model, memory, skills_enabled, home, shell)
+    if not workspace_context_block and user_id and workspace:
+        try:
+            from cptr.services.workspace_instructions import (
+                service as workspace_instruction_service,
+            )
+
+            instruction_workspace_id = resolved_workspace_id or workspace
+            preview = await workspace_instruction_service.compile_preview(
+                user_id=user_id,
+                workspace_id=instruction_workspace_id,
+            )
+            if preview.compiled_instructions:
+                instructions_block = preview.compiled_instructions
+        except Exception:
+            logger.debug("[system_prompt] Failed to load workspace instructions", exc_info=True)
+
+    variables = _build_template_variables(
+        workspace,
+        model,
+        memory,
+        skills_enabled,
+        home,
+        shell,
+        instructions_block=instructions_block,
+        workspace_context_block=workspace_context_block,
+    )
     return _render_system_template(template, variables)

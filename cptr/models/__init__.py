@@ -2,6 +2,12 @@
 
 from cptr.models.automations import Automation, AutomationRun
 from cptr.models.base import Base
+from cptr.models.environment_profile import (
+    EnvironmentProfile,
+    EnvironmentProfileVersion,
+    EnvironmentProfileVersionImmutableError,
+    compute_version_digest,
+)
 from cptr.models.browser_device import (
     BrowserDevice,
     BrowserDeviceEvent,
@@ -46,6 +52,8 @@ from cptr.models.control import (
     ControlIdempotency,
     DirectCodingWorker,
     LocalRootGrant,
+    AdminSessionGrant,
+    AdminSessionGrantEvent,
     ControlLiveEvent,
     ControlMessage,
     ControlTask,
@@ -91,7 +99,34 @@ from cptr.models.memory_core import (
 from cptr.models.memory_fabric import MemoryFabricEvent
 from cptr.models.metrics import CodingBenchmarkRun, McpEngineeringSession, McpUsageEvent
 from cptr.models.users import Auth, User, UserStates
-from cptr.models.workspaces import Workspace
+from cptr.models.workspace_tasks import (
+    WorkspaceTask,
+    WorkspaceTaskEvidence,
+    WorkspaceTaskRepositoryPin,
+    WorkspaceTaskWorkerLink,
+)
+from cptr.models.workspace_context import (
+    BoundedWorkersEvidence,
+    CheckpointDivergence,
+    EnvironmentEvidence,
+    FdxEvidence,
+    InstructionContext,
+    LspEvidence,
+    MemoryEvidence,
+    ProjectEvidence,
+    RepoEvidence,
+    WorkspaceContextSnapshot,
+)
+from cptr.models.workspaces import (
+    Repository,
+    RepositoryCheckout,
+    Workspace,
+    WorkspaceAlias,
+    WorkspaceGroup,
+    WorkspaceGroupMember,
+    WorkspaceInstructionVersion,
+    WorkspaceRepository,
+)
 
 __all__ = [
     "Auth",
@@ -103,6 +138,13 @@ __all__ = [
     "AutonomousScope",
     "AutonomousWorkspaceLease",
     "Base",
+    "BoundedWorkersEvidence",
+    "CheckpointDivergence",
+    "EnvironmentEvidence",
+    "EnvironmentProfile",
+    "EnvironmentProfileVersion",
+    "EnvironmentProfileVersionImmutableError",
+    "compute_version_digest",
     "BrowserDevice",
     "BrowserDeviceEvent",
     "BrowserLease",
@@ -131,6 +173,8 @@ __all__ = [
     "ControlIdempotency",
     "DirectCodingWorker",
     "LocalRootGrant",
+    "AdminSessionGrant",
+    "AdminSessionGrantEvent",
     "ControlLiveEvent",
     "ControlMessage",
     "ControlTask",
@@ -149,9 +193,12 @@ __all__ = [
     "FactoryReasoningCall",
     "FactoryRun",
     "FactoryWorkerAssignment",
+    "FdxEvidence",
     "File",
     "GuardSetting",
     "GuardSettingEvent",
+    "InstructionContext",
+    "LspEvidence",
     "McpEngineeringSession",
     "McpUsageEvent",
     "MemoryBranch",
@@ -171,9 +218,24 @@ __all__ = [
     "MemoryRetrievalFeedback",
     "MemoryRetrievalProfile",
     "MemorySnapshot",
+    "MemoryEvidence",
+    "ProjectEvidence",
+    "RepoEvidence",
     "User",
     "UserStates",
+    "Repository",
+    "RepositoryCheckout",
     "Workspace",
+    "WorkspaceAlias",
+    "WorkspaceGroup",
+    "WorkspaceGroupMember",
+    "WorkspaceInstructionVersion",
+    "WorkspaceContextSnapshot",
+    "WorkspaceRepository",
+    "WorkspaceTask",
+    "WorkspaceTaskEvidence",
+    "WorkspaceTaskRepositoryPin",
+    "WorkspaceTaskWorkerLink",
     "WorkbenchSession",
     "WorkbenchSessionEvent",
     "internal_status",

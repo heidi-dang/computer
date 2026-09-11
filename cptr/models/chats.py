@@ -69,6 +69,7 @@ class Chat(Base):
 
     id = Column(Text, primary_key=True, default=_uuid)
     user_id = Column(Text, ForeignKey("users.id"), nullable=False)
+    workspace_id = Column(Text, ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True)
     title = Column(Text, nullable=False)
     summary = Column(Text, nullable=True)
     current_message_id = Column(Text, nullable=True)
@@ -165,10 +166,12 @@ class Chat(Base):
         title: str,
         meta: dict | None = None,
         created_at: int = 0,
+        workspace_id: str | None = None,
     ) -> Chat:
         async with await get_db() as db:
             chat = Chat(
                 user_id=user_id,
+                workspace_id=workspace_id,
                 title=title,
                 meta=meta,
                 created_at=created_at,

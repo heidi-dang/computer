@@ -18,6 +18,7 @@ from cptr.memory.domain import (
 )
 from cptr.memory.ports import MemoryService
 from cptr.memory.service import EmbeddedMemoryService, MemoryUnavailableError, get_memory_service
+from cptr.memory.workspace import WorkspaceNamespace, resolve_workspace_namespace
 
 __all__ = [
     "BranchRef",
@@ -37,5 +38,7 @@ __all__ = [
     "RetrievalFeedback",
     "SnapshotRef",
     "VerificationResult",
+    "WorkspaceNamespace",
     "get_memory_service",
+    "resolve_workspace_namespace",
 ]
