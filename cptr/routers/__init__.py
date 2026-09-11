@@ -47,6 +47,7 @@ from cptr.routers.terminal_extended import router as terminal_extended_router
 from cptr.routers.workspace import router as workspace_router
 from cptr.routers.workspace_extended import router as workspace_extended_router
 from cptr.routers.workspace_groups import router as workspace_groups_router
+from cptr.routers.workspace_instructions import router as workspace_instructions_router
 from cptr.routers.workbench import router as workbench_router
 
 __all__ = [
@@ -93,5 +94,6 @@ __all__ = [
     "workspace_router",
     "workspace_extended_router",
     "workspace_groups_router",
+    "workspace_instructions_router",
     "workbench_router",
 ]

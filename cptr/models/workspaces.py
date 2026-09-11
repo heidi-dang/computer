@@ -10,12 +10,14 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
     ForeignKey,
+    Index,
     Text,
     UniqueConstraint,
     delete,
@@ -72,6 +74,7 @@ class Workspace(Base):
     name = Column(Text, nullable=False)
     slug = Column(Text, nullable=True)
     workspace_type = Column(Text, nullable=False, default="project", server_default="project")
+    current_instruction_version_id = Column(Text, nullable=True)
     data = Column(JSON, nullable=False, default=dict)
     created_at = Column(BigInteger, nullable=False)
     updated_at = Column(BigInteger, nullable=True)
@@ -80,6 +83,11 @@ class Workspace(Base):
         UniqueConstraint("user_id", "path", name="uq_workspace_user_path"),
         UniqueConstraint("user_id", "slug", name="uq_workspace_user_slug"),
     )
+
+    @staticmethod
+    async def get_by_id(workspace_id: str) -> "Workspace | None":
+        async with await get_db() as db:
+            return await db.get(Workspace, workspace_id)
 
     @staticmethod
     async def get_by_user(user_id: str) -> list["Workspace"]:
@@ -374,3 +382,55 @@ class WorkspaceGroupMember(Base):
             "group_id", "workspace_id", name="uq_workspace_group_member_group_workspace"
         ),
     )
+
+
+class WorkspaceInstructionVersion(Base):
+    """Immutable versioned instruction record for a Workspace."""
+
+    __tablename__ = "workspace_instruction_versions"
+
+    id = Column(Text, primary_key=True, default=_uuid)
+    workspace_id = Column(
+        Text,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id = Column(
+        Text,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    version = Column(BigInteger, nullable=False)
+    content = Column(Text, nullable=False)
+    content_hash = Column(Text, nullable=False)
+    is_current = Column(Boolean, nullable=False, default=True, server_default="1")
+    change_summary = Column(Text, nullable=True)
+    created_at = Column(BigInteger, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "version", name="uq_workspace_instruction_version"),
+        Index(
+            "ix_workspace_instruction_versions_workspace_current",
+            "workspace_id",
+            "is_current",
+        ),
+        Index(
+            "ix_workspace_instruction_versions_workspace_version",
+            "workspace_id",
+            "version",
+        ),
+        Index("ix_workspace_instruction_versions_user_id", "user_id"),
+    )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "workspace_id": str(self.workspace_id),
+            "user_id": str(self.user_id),
+            "version": int(self.version),
+            "content": str(self.content),
+            "content_hash": str(self.content_hash),
+            "is_current": bool(self.is_current),
+            "change_summary": str(self.change_summary) if self.change_summary is not None else None,
+            "created_at": int(self.created_at),
+        }

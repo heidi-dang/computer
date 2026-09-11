@@ -257,6 +257,7 @@ def _build_template_variables(
     skills_enabled: bool = True,
     home: str | None = None,
     shell: str | None = None,
+    instructions_block: str | None = None,
 ) -> dict[str, str]:
     """Build the dict of template variable values for the current context."""
     ws_path = Path(workspace) if workspace else None
@@ -264,16 +265,17 @@ def _build_template_variables(
     shell = shell or os.environ.get("SHELL") or os.environ.get("COMSPEC") or ""
     home = home or str(Path.home())
 
-    instructions = _load_instruction_files(workspace) if workspace else ""
-    if instructions:
-        instructions_block = (
-            f"<instructions>\n{instructions}\n</instructions>"
-            "\n\nThe above <instructions> were loaded from instruction files in the workspace root. "
-            "These files persist across sessions and are user-authored workspace instructions. "
-            "Managed memory is shown separately when available."
-        )
-    else:
-        instructions_block = ""
+    if instructions_block is None:
+        instructions = _load_instruction_files(workspace) if workspace else ""
+        if instructions:
+            instructions_block = (
+                f"<instructions>\n{instructions}\n</instructions>"
+                "\n\nThe above <instructions> were loaded from instruction files in the workspace root. "
+                "These files persist across sessions and are user-authored workspace instructions. "
+                "Managed memory is shown separately when available."
+            )
+        else:
+            instructions_block = ""
 
     skills_block = build_catalog_xml(discover_skills(workspace)) if skills_enabled else ""
 
@@ -387,5 +389,29 @@ async def load_system_prompt(
         except Exception:
             logger.debug("[system_prompt] Failed to resolve user identity", exc_info=True)
 
-    variables = _build_template_variables(workspace, model, memory, skills_enabled, home, shell)
+    instructions_block = None
+    if user_id and workspace:
+        try:
+            from cptr.services.workspace_instructions import (
+                service as workspace_instruction_service,
+            )
+
+            preview = await workspace_instruction_service.compile_preview(
+                user_id=user_id,
+                workspace_id=workspace,
+            )
+            if preview.compiled_instructions:
+                instructions_block = preview.compiled_instructions
+        except Exception:
+            logger.debug("[system_prompt] Failed to load workspace instructions", exc_info=True)
+
+    variables = _build_template_variables(
+        workspace,
+        model,
+        memory,
+        skills_enabled,
+        home,
+        shell,
+        instructions_block=instructions_block,
+    )
     return _render_system_template(template, variables)

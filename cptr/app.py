@@ -52,6 +52,7 @@ from cptr.routers import (
     workspace_router,
     workspace_extended_router,
     workspace_groups_router,
+    workspace_instructions_router,
     workbench_router,
 )
 from cptr.utils.config import check_access, load_config, validate_auth_configuration
@@ -495,6 +496,7 @@ app.include_router(terminal_extended_router)
 app.include_router(workspace_router)
 app.include_router(workspace_extended_router)
 app.include_router(workspace_groups_router)
+app.include_router(workspace_instructions_router)
 app.include_router(workbench_router)
 
 
