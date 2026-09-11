@@ -12,6 +12,7 @@ from sqlalchemy import select
 from cptr.env import TASK_CANCELLATION_TIMEOUT_SECONDS
 from cptr.models import Chat, ChatMessage, ControlMessage, ControlTask, Workspace
 from cptr.services.control_store import ControlTaskStore
+from cptr.services.direct_coding_workers import resolve_direct_worker_root
 from cptr.services.task_integrity import (
     COMPLETE_WITH_TOOL_ERRORS,
     completion_integrity,
@@ -42,7 +43,7 @@ class AgentService:
         prompt: str,
         model_id: str,
         idempotency_key: str | None = None,
-        execution_policy: dict[str, bool] | None = None,
+        execution_policy: dict[str, Any] | None = None,
         request: Any | None = None,
         review_required: bool = True,
         workbench_session_id: str | None = None,
@@ -63,6 +64,26 @@ class AgentService:
             if workspace is None or workspace.user_id != user_id:
                 raise KeyError("workspace not found")
 
+        policy = dict(execution_policy or {})
+        isolation = str(policy.get("isolation") or "workspace")
+        worker_id = str(policy.get("worker_id") or "").strip() or None
+        if isolation == "existing-worktree" and worker_id is None:
+            raise ValueError("existing-worktree isolation requires worker_id")
+        if isolation not in {"workspace", "existing-worktree"}:
+            raise ValueError(f"unsupported delegated isolation mode: {isolation}")
+        effective_workspace = str(workspace.path)
+        if worker_id is not None:
+            effective_workspace = str(
+                await resolve_direct_worker_root(
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    worker_id=worker_id,
+                )
+            )
+            isolation = "existing-worktree"
+            policy["isolation"] = isolation
+            policy["worker_id"] = worker_id
+
         task_id = f"task_{uuid.uuid4().hex[:20]}"
         now = int(time.time() * 1000)
         assignment_meta: dict[str, Any] = {}
@@ -77,13 +98,16 @@ class AgentService:
             user_id=user_id,
             title=prompt[:80] or "Control task",
             meta={
-                "workspace": workspace.path,
+                "workspace": effective_workspace,
+                "canonical_workspace": str(workspace.path),
+                "worker_id": worker_id,
+                "isolation": isolation,
                 "control_task_id": task_id,
                 "internal": True,
                 "control_plane": True,
                 "review_required": review_required,
                 **({"workbench_session_id": workbench_session_id} if workbench_session_id else {}),
-                **({"execution_policy": dict(execution_policy)} if execution_policy else {}),
+                **({"execution_policy": policy} if policy else {}),
                 **assignment_meta,
             },
             created_at=now,
@@ -149,7 +173,7 @@ class AgentService:
                 message_id=assistant_message.id,
                 chat_id=chat.id,
                 user_id=user_id,
-                workspace=workspace.path,
+                workspace=effective_workspace,
                 target=target,
             )
         except Exception:
@@ -370,7 +394,14 @@ class AgentService:
         task = await self.get_task(task_id, user_id=user_id)
         review = task.get("review") or {"status": "NOT_REQUIRED"}
         review_status = str(review.get("status") or "NOT_REQUIRED")
-        diff = await self.get_diff(task["workspace_id"], user_id=user_id)
+        chat = await Chat.get_by_id(task["chat_id"])
+        chat_meta = chat.meta if chat and isinstance(chat.meta, dict) else {}
+        worker_id = str(chat_meta.get("worker_id") or "").strip() or None
+        diff = await self.get_diff(
+            task["workspace_id"],
+            user_id=user_id,
+            worker_id=worker_id,
+        )
         return {
             "task_id": task["id"],
             "workspace_id": task["workspace_id"],
@@ -691,7 +722,13 @@ class AgentService:
         )
         return result
 
-    async def get_diff(self, workspace_id: str, *, user_id: str) -> dict[str, Any]:
+    async def get_diff(
+        self,
+        workspace_id: str,
+        *,
+        user_id: str,
+        worker_id: str | None = None,
+    ) -> dict[str, Any]:
         async with await get_db() as db:
             workspace = await db.get(Workspace, workspace_id)
             if workspace is None or workspace.user_id != user_id:
@@ -699,10 +736,19 @@ class AgentService:
         from cptr.utils.git import diff, is_repo
         from cptr.utils.identity import identity_for_user_id
 
+        root = str(workspace.path)
+        if worker_id:
+            root = str(
+                await resolve_direct_worker_root(
+                    user_id=user_id,
+                    workspace_id=workspace_id,
+                    worker_id=worker_id,
+                )
+            )
         identity = await identity_for_user_id(user_id)
-        if not await is_repo(workspace.path, identity):
+        if not await is_repo(root, identity):
             return {"is_repo": False, "files": [], "diagnostic": "not a git repository"}
-        result = await diff(workspace.path, None, False, True, False, identity)
+        result = await diff(root, None, False, True, False, identity)
         result["is_repo"] = True
         return result
 

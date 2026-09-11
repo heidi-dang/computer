@@ -35,6 +35,7 @@ from cptr.utils.tools import command_sessions
 
 
 ACTIVE_WORKER_STATUSES = {"READY", "WORKING", "RUNNING", "INTEGRATED"}
+CAPACITY_WORKER_STATUSES = {"READY", "WORKING", "RUNNING"}
 
 
 class DirectCodingWorkerError(RuntimeError):
@@ -254,13 +255,14 @@ class DirectCodingWorkerService:
                 select(DirectCodingWorker).where(
                     DirectCodingWorker.user_id == user_id,
                     DirectCodingWorker.workspace_id == workspace.id,
-                    DirectCodingWorker.status.in_(ACTIVE_WORKER_STATUSES),
+                    DirectCodingWorker.status.in_(CAPACITY_WORKER_STATUSES),
                 )
             )
             if len(result.scalars().all()) >= DIRECT_WORKER_MAX_PER_WORKSPACE:
                 raise DirectCodingWorkerError(
                     "DIRECT_WORKER_LIMIT_REACHED",
-                    "direct coding worker limit reached for this workspace",
+                    "direct coding worker capacity reached for this workspace; "
+                    "integrated workers do not consume active capacity",
                     status_code=429,
                 )
 
