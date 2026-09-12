@@ -121,6 +121,17 @@ test('live reducer rejects duplicate and foreign events and marks affected domai
 	assert.equal(state.projection?.recent_events.at(-1)?.event_id, 'event-5');
 });
 
+test('task change events stale only projection and task surfaces', () => {
+	let state = hydrateWorkspaceProjection(createWorkspaceOsCoreState('ws-1'), projection());
+	state = applyWorkspaceLiveEvent(state, liveEvent(1, 'workspace.task.changed'));
+
+	assert.equal(state.connection.lastSequence, 1);
+	assert.ok(state.staleDomains.includes('projection'));
+	assert.ok(state.staleDomains.includes('tasks'));
+	assert.ok(!state.staleDomains.includes('instructions'));
+	assert.ok(!state.staleDomains.includes('environment'));
+});
+
 test('a sequence gap fails conservative by marking every Workspace OS domain stale', () => {
 	const state = hydrateWorkspaceProjection(createWorkspaceOsCoreState('ws-1'), projection());
 	const gapped = applyWorkspaceLiveEvent(state, liveEvent(3, 'workspace.environment.changed'));

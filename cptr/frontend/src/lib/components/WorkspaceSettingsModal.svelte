@@ -2,13 +2,17 @@
 	import { toast } from 'svelte-sonner';
 	import Modal from '$lib/components/Modal.svelte';
 	import WorkspaceActivity from '$lib/components/WorkspaceActivity.svelte';
+	import WorkspaceCheckpoints from '$lib/components/WorkspaceCheckpoints.svelte';
+	import WorkspaceContextMemory from '$lib/components/WorkspaceContextMemory.svelte';
+	import WorkspaceEnvironment from '$lib/components/WorkspaceEnvironment.svelte';
 	import WorkspaceGroups from '$lib/components/WorkspaceGroups.svelte';
 	import WorkspaceHealth from '$lib/components/WorkspaceHealth.svelte';
+	import WorkspaceInstructions from '$lib/components/WorkspaceInstructions.svelte';
 	import WorkspaceOverview from '$lib/components/WorkspaceOverview.svelte';
 	import WorkspaceRepositoryTopology from '$lib/components/WorkspaceRepositoryTopology.svelte';
+	import WorkspaceTasks from '$lib/components/WorkspaceTasks.svelte';
 	import {
 		addWorkspaceRepository,
-		createWorkspaceEnvironment,
 		getRepositoryCatalog,
 		getWorkspaceCheckpoints,
 		getWorkspaceContext,
@@ -20,13 +24,12 @@
 		getWorkspaceRepositories,
 		reconcileWorkspace,
 		removeWorkspaceRepository,
-		saveWorkspaceInstructions,
 		updateWorkspaceIdentity,
 		updateWorkspaceRepository,
-		workspaceOsAction,
 		type EnvironmentProfileView,
 		type RepositoryCatalogItem,
 		type WorkspaceCheckpointView,
+		type WorkspaceContextView,
 		type WorkspaceInstruction,
 		type WorkspaceProjection,
 		type WorkspaceRepositorySummary
@@ -44,6 +47,7 @@
 		| 'environment'
 		| 'memory'
 		| 'checkpoints'
+		| 'tasks'
 		| 'activity'
 		| 'health';
 
@@ -69,8 +73,9 @@
 		{ id: 'groups', label: 'Groups' },
 		{ id: 'instructions', label: 'Instructions' },
 		{ id: 'environment', label: 'Environment' },
-		{ id: 'memory', label: 'Memory' },
+		{ id: 'memory', label: 'Context & Memory' },
 		{ id: 'checkpoints', label: 'Checkpoints' },
+		{ id: 'tasks', label: 'Tasks' },
 		{ id: 'activity', label: 'Activity' },
 		{ id: 'health', label: 'Health' }
 	];
@@ -98,14 +103,10 @@
 
 	let instruction = $state<WorkspaceInstruction | null>(null);
 	let instructionHistory = $state<WorkspaceInstruction[]>([]);
-	let instructionText = $state('');
 
 	let environmentProfiles = $state<EnvironmentProfileView[]>([]);
-	let newEnvironmentName = $state('');
-	let newRuntimeProfile = $state('default');
-	let targetDrafts = $state<Record<string, string>>({});
 
-	let contextData = $state<Record<string, unknown> | null>(null);
+	let contextData = $state<WorkspaceContextView | null>(null);
 	let checkpoints = $state<WorkspaceCheckpointView[]>([]);
 	let checkpointMemoryVersion = $state(0);
 	let health = $state<Record<string, unknown> | null>(null);
@@ -153,6 +154,8 @@
 				return ['memory', 'context'];
 			case 'checkpoints':
 				return ['checkpoints'];
+			case 'tasks':
+				return ['tasks'];
 			case 'activity':
 				return ['projection'];
 			case 'health':
@@ -170,9 +173,9 @@
 		return domainsForTab(tab).some((domain) => stale.has(domain));
 	}
 
-	function markLoaded(tab: TabId) {
+	function markLoaded(tab: TabId, clearFresh = true) {
 		loadedTabs = new Set([...loadedTabs, tab]);
-		if (isLiveTarget) workspaceOsStore.markFresh(domainsForTab(tab));
+		if (clearFresh && isLiveTarget) workspaceOsStore.markFresh(domainsForTab(tab));
 	}
 
 	async function refreshProjectionSummary() {
@@ -223,22 +226,15 @@
 					]);
 					instruction = instructionResult.instruction;
 					instructionHistory = historyResult.instructions ?? [];
-					instructionText = instruction?.content ?? '';
 					break;
 				}
 				case 'environment': {
 					const envResult = await getWorkspaceEnvironmentProfiles(workspace.workspace_id);
 					environmentProfiles = envResult.profiles ?? [];
-					targetDrafts = Object.fromEntries(
-						environmentProfiles.map((profile) => [profile.profile_id, profile.target_name ?? ''])
-					);
 					break;
 				}
 				case 'memory':
-					contextData = (await getWorkspaceContext(workspace.workspace_id)) as unknown as Record<
-						string,
-						unknown
-					>;
+					contextData = await getWorkspaceContext(workspace.workspace_id);
 					break;
 				case 'checkpoints': {
 					const checkpointResult = await getWorkspaceCheckpoints(workspace.workspace_id);
@@ -246,6 +242,8 @@
 					checkpointMemoryVersion = checkpointResult.memory_version ?? 0;
 					break;
 				}
+				case 'tasks':
+					break;
 				case 'activity':
 					await refreshProjectionSummary();
 					break;
@@ -253,7 +251,7 @@
 					health = await getWorkspaceHealth(workspace.workspace_id);
 					break;
 			}
-			markLoaded(tab);
+			markLoaded(tab, tab !== 'tasks');
 		} catch (e) {
 			tabErrors = { ...tabErrors, [tab]: message(e) };
 		} finally {
@@ -367,76 +365,6 @@
 		}
 	}
 
-	async function saveInstructions() {
-		busy = true;
-		try {
-			const result = await saveWorkspaceInstructions(
-				workspace.workspace_id,
-				instructionText,
-				instruction?.version ?? null,
-				'Updated from native Workspace settings'
-			);
-			instruction = result.instruction;
-			instructionText = result.instruction.content;
-			const historyResult = await getWorkspaceInstructionHistory(workspace.workspace_id);
-			instructionHistory = historyResult.instructions ?? [];
-			refreshOverviewAfterMutation();
-			toast.success('Workspace instructions saved');
-		} catch (e) {
-			toast.error(message(e));
-		} finally {
-			busy = false;
-		}
-	}
-
-	async function createEnvironment() {
-		if (!newEnvironmentName.trim()) return;
-		busy = true;
-		try {
-			await createWorkspaceEnvironment(workspace.workspace_id, {
-				name: newEnvironmentName.trim(),
-				initial_spec: {
-					runtime_profile: newRuntimeProfile.trim() || 'default',
-					environment_variables: {},
-					packages: {},
-					settings: {},
-					credential_refs: []
-				}
-			});
-			const result = await getWorkspaceEnvironmentProfiles(workspace.workspace_id);
-			environmentProfiles = result.profiles ?? [];
-			targetDrafts = Object.fromEntries(
-				environmentProfiles.map((profile) => [profile.profile_id, profile.target_name ?? ''])
-			);
-			newEnvironmentName = '';
-			refreshOverviewAfterMutation();
-			toast.success('Environment profile created');
-		} catch (e) {
-			toast.error(message(e));
-		} finally {
-			busy = false;
-		}
-	}
-
-	async function saveEnvironmentTarget(profile: EnvironmentProfileView) {
-		busy = true;
-		try {
-			await workspaceOsAction('environment_set_target', {
-				workspace_id: workspace.workspace_id,
-				profile_id: profile.profile_id,
-				target_name: targetDrafts[profile.profile_id]?.trim() || null
-			});
-			const result = await getWorkspaceEnvironmentProfiles(workspace.workspace_id);
-			environmentProfiles = result.profiles ?? [];
-			refreshOverviewAfterMutation();
-			toast.success('Environment target updated');
-		} catch (e) {
-			toast.error(message(e));
-		} finally {
-			busy = false;
-		}
-	}
-
 	async function runReconcile() {
 		busy = true;
 		try {
@@ -449,10 +377,6 @@
 		} finally {
 			busy = false;
 		}
-	}
-
-	function pretty(value: unknown): string {
-		return JSON.stringify(value, null, 2);
 	}
 </script>
 
@@ -635,165 +559,49 @@
 				{:else if activeTab === 'groups'}
 					<WorkspaceGroups workspaceId={workspace.workspace_id} workspaceName={name} />
 				{:else if activeTab === 'instructions'}
-					<section class="space-y-4">
-						<div>
-							<h3 class="text-base font-semibold">Workspace instructions</h3>
-							<p class="mt-1 text-sm text-[var(--app-muted-fg)]">
-								Authoritative project instructions, loaded before Workspace memory.
-							</p>
-						</div>
-						<textarea
-							class="workspace-field min-h-64 resize-y font-mono text-xs"
-							bind:value={instructionText}
-						></textarea>
-						<div class="flex items-center justify-between gap-3">
-							<span class="text-xs text-[var(--app-muted-fg)]"
-								>Current version: {instruction?.version ?? 0}</span
-							>
-							<button class="workspace-primary" disabled={busy} onclick={saveInstructions}
-								>Save new version</button
-							>
-						</div>
-						<div>
-							<h4 class="mb-2 text-sm font-medium">History</h4>
-							<div class="space-y-2">
-								{#each instructionHistory.slice(0, 10) as item}
-									<div class="rounded-lg border border-[var(--app-border)] p-3 text-xs">
-										<div class="font-medium">
-											v{item.version}
-											{item.is_current ? '· current' : ''}
-										</div>
-										<div class="mt-1 text-[var(--app-muted-fg)]">
-											{item.change_summary || item.content_hash}
-										</div>
-									</div>
-								{/each}
-							</div>
-						</div>
-					</section>
+					<WorkspaceInstructions
+						workspaceId={workspace.workspace_id}
+						{instruction}
+						history={instructionHistory}
+						onrefresh={async () => {
+							await loadTab('instructions', true);
+							refreshOverviewAfterMutation();
+						}}
+					/>
 				{:else if activeTab === 'environment'}
-					<section class="space-y-4">
-						<div>
-							<h3 class="text-base font-semibold">Environment</h3>
-							<p class="mt-1 text-sm text-[var(--app-muted-fg)]">
-								Versioned runtime configuration. Secret material is never returned here.
-							</p>
-						</div>
-						<div class="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
-							<input
-								class="workspace-field"
-								placeholder="Profile name"
-								bind:value={newEnvironmentName}
-							/>
-							<input
-								class="workspace-field"
-								placeholder="Runtime profile"
-								bind:value={newRuntimeProfile}
-							/>
-							<button
-								class="workspace-primary"
-								disabled={busy || !newEnvironmentName.trim()}
-								onclick={createEnvironment}>Create</button
-							>
-						</div>
-						{#each environmentProfiles as profile}
-							<div class="rounded-xl border border-[var(--app-border)] p-4">
-								<div class="font-medium">{profile.name}</div>
-								<div class="mt-1 text-xs text-[var(--app-muted-fg)]">
-									{profile.active_version
-										? `v${profile.active_version.version_number} · ${profile.active_version.runtime_profile}`
-										: 'No active version'}
-								</div>
-								{#if profile.active_version}
-									<div class="mt-2 text-xs text-[var(--app-muted-fg)]">
-										{profile.active_version.environment_variable_names.length} non-sensitive env var(s)
-										·
-										{profile.active_version.credential_refs.length} credential reference(s)
-									</div>
-								{/if}
-								<div class="mt-3 flex gap-2">
-									<input
-										class="workspace-field flex-1"
-										placeholder="Target name (for example local or aws)"
-										value={targetDrafts[profile.profile_id] ?? ''}
-										oninput={(event) =>
-											(targetDrafts = {
-												...targetDrafts,
-												[profile.profile_id]: event.currentTarget.value
-											})}
-									/>
-									<button
-										class="workspace-secondary"
-										disabled={busy}
-										onclick={() => saveEnvironmentTarget(profile)}>Save target</button
-									>
-								</div>
-							</div>
-						{/each}
-					</section>
+					<WorkspaceEnvironment
+						workspaceId={workspace.workspace_id}
+						profiles={environmentProfiles}
+						onrefresh={async () => {
+							await loadTab('environment', true);
+							refreshOverviewAfterMutation();
+						}}
+					/>
 				{:else if activeTab === 'memory'}
-					<section class="space-y-4">
-						<div>
-							<h3 class="text-base font-semibold">Workspace memory</h3>
-							<p class="mt-1 text-sm text-[var(--app-muted-fg)]">
-								Stable UUID-scoped Memory Core context automatically loaded for this Workspace.
-							</p>
-						</div>
-						<div class="grid gap-3 sm:grid-cols-3">
-							<div class="workspace-stat">
-								<span>Memory version</span>
-								<strong>{String(contextData?.memory_version ?? 0)}</strong>
-							</div>
-							<div class="workspace-stat">
-								<span>Instruction version</span>
-								<strong>{String(contextData?.instruction_version ?? 0)}</strong>
-							</div>
-							<div class="workspace-stat">
-								<span>Context snapshot</span>
-								<strong class="truncate text-xs"
-									>{String(
-										(contextData?.context as Record<string, unknown> | undefined)?.snapshot_id ??
-											'ready'
-									)}</strong
-								>
-							</div>
-						</div>
-						<pre class="workspace-code">{pretty(
-								(contextData?.context as Record<string, unknown> | undefined)?.diagnostics ?? []
-							)}</pre>
-					</section>
+					<WorkspaceContextMemory
+						workspaceId={workspace.workspace_id}
+						workspacePath={workspace.path}
+						initialContext={contextData}
+						onrefresh={async () => {
+							await loadTab('memory', true);
+							refreshOverviewAfterMutation();
+						}}
+					/>
 				{:else if activeTab === 'checkpoints'}
-					<section class="space-y-4">
-						<div>
-							<h3 class="text-base font-semibold">Checkpoints</h3>
-							<p class="mt-1 text-sm text-[var(--app-muted-fg)]">
-								Memory/execution recovery checkpoints. Restoring one never performs Git rollback.
-							</p>
-						</div>
-						<div class="text-xs text-[var(--app-muted-fg)]">
-							Memory namespace version: {checkpointMemoryVersion}
-						</div>
-						{#if checkpoints.length === 0}
-							<p
-								class="rounded-xl border border-dashed border-[var(--app-border)] p-5 text-sm text-[var(--app-muted-fg)]"
-							>
-								No checkpoints yet.
-							</p>
-						{/if}
-						{#each checkpoints as checkpoint}
-							<div class="rounded-xl border border-[var(--app-border)] p-4">
-								<div class="flex items-center justify-between gap-3">
-									<div class="font-medium">#{checkpoint.version} · {checkpoint.stage}</div>
-									<div class="text-xs text-[var(--app-muted-fg)]">
-										{new Date(checkpoint.created_at_ms).toLocaleString()}
-									</div>
-								</div>
-								<div class="mt-1 text-xs text-[var(--app-muted-fg)]">
-									{checkpoint.task_key || 'workspace'} · memory v{checkpoint.memory_version}
-								</div>
-							</div>
-						{/each}
-					</section>
+					<WorkspaceCheckpoints
+						{checkpoints}
+						memoryVersion={checkpointMemoryVersion}
+						onrefresh={() => loadTab('checkpoints', true)}
+					/>
+				{:else if activeTab === 'tasks'}
+					<WorkspaceTasks
+						workspaceId={workspace.workspace_id}
+						stale={isTabStale('tasks')}
+						onfresh={() => {
+							markLoaded('tasks', true);
+							refreshOverviewAfterMutation();
+						}}
+					/>
 				{:else if activeTab === 'activity'}
 					<WorkspaceActivity
 						{projection}
@@ -855,34 +663,5 @@
 	.workspace-danger:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
-	}
-	.workspace-stat {
-		display: flex;
-		min-height: 5rem;
-		flex-direction: column;
-		justify-content: space-between;
-		border: 1px solid var(--app-border);
-		border-radius: 0.75rem;
-		padding: 0.8rem;
-	}
-	.workspace-stat span {
-		font-size: 0.72rem;
-		color: var(--app-muted-fg);
-	}
-	.workspace-stat strong {
-		margin-top: 0.5rem;
-		font-size: 1rem;
-	}
-	.workspace-code {
-		max-height: 18rem;
-		overflow: auto;
-		border: 1px solid var(--app-border);
-		border-radius: 0.75rem;
-		background: color-mix(in srgb, var(--app-bg) 94%, black);
-		padding: 0.8rem;
-		font-size: 0.72rem;
-		line-height: 1.45;
-		white-space: pre-wrap;
-		word-break: break-word;
 	}
 </style>

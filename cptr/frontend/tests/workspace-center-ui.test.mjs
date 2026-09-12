@@ -82,11 +82,11 @@ test('successful mutations refresh the Overview without making mutation success 
 	assert.match(modal, /refreshOverviewAfterMutation\(\);\s*toast\.success\('Repository added'\)/s);
 	assert.match(
 		modal,
-		/refreshOverviewAfterMutation\(\);\s*toast\.success\('Workspace instructions saved'\)/s
+		/<WorkspaceInstructions[\s\S]*onrefresh=\{async \(\) => \{[\s\S]*refreshOverviewAfterMutation\(\)/s
 	);
 	assert.match(
 		modal,
-		/refreshOverviewAfterMutation\(\);\s*toast\.success\('Environment profile created'\)/s
+		/<WorkspaceEnvironment[\s\S]*onrefresh=\{async \(\) => \{[\s\S]*refreshOverviewAfterMutation\(\)/s
 	);
 });
 

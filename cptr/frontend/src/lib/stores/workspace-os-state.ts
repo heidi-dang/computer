@@ -98,6 +98,8 @@ export function domainsForWorkspaceEvent(type: string): WorkspaceOsDomain[] {
 			return ['projection', 'memory', 'context'];
 		case 'workspace.checkpoint.changed':
 			return ['projection', 'checkpoints', 'context'];
+		case 'workspace.task.changed':
+			return ['projection', 'tasks'];
 		case 'workspace.revision.changed':
 		case 'workspace.role.changed':
 		case 'workspace.checkout.changed':
