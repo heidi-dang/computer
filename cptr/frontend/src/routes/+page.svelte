@@ -1547,6 +1547,7 @@
 					{#if LazyChatPanel}
 						<LazyChatPanel
 							workspace={$currentWorkspace!.path}
+							workspaceId={$currentWorkspace!.workspace_id}
 							chatId={tab.path?.startsWith('new-') || tab.path?.startsWith('pending-')
 								? undefined
 								: tab.path}

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import {
 		addWorkspaceTaskEvidence,
@@ -35,6 +35,9 @@
 	let evidenceSummary = $state('');
 	let evidenceCommand = $state('');
 	let evidenceRepoPath = $state('');
+	let loadGeneration = 0;
+	let summaryGeneration = 0;
+	let attemptedStaleRefresh = false;
 
 	const filteredTasks = $derived(
 		statusFilter === 'all' ? tasks : tasks.filter((task) => task.status === statusFilter)
@@ -47,10 +50,12 @@
 	}
 
 	async function loadTasks(preserveSelection = true) {
+		const generation = ++loadGeneration;
 		loading = true;
 		error = '';
 		try {
 			const result = await listWorkspaceTasks(workspaceId);
+			if (generation !== loadGeneration) return;
 			tasks = result.tasks;
 			const current = preserveSelection ? selectedTaskId : '';
 			selectedTaskId =
@@ -62,21 +67,25 @@
 			}
 			onfresh();
 		} catch (cause) {
+			if (generation !== loadGeneration) return;
 			error = message(cause);
 		} finally {
-			loading = false;
+			if (generation === loadGeneration) loading = false;
 		}
 	}
 
 	async function loadSummary(taskId: string) {
+		const generation = ++summaryGeneration;
 		if (!taskId) {
 			summary = null;
 			return;
 		}
 		try {
 			const result = await getWorkspaceTaskSummary(workspaceId, taskId);
+			if (generation !== summaryGeneration || selectedTaskId !== taskId) return;
 			summary = result.summary;
 		} catch (cause) {
+			if (generation !== summaryGeneration || selectedTaskId !== taskId) return;
 			error = message(cause);
 		}
 	}
@@ -161,13 +170,22 @@
 	}
 
 	$effect(() => {
-		if (stale && !loading && !busy) {
-			void loadTasks(true);
+		if (!stale) {
+			attemptedStaleRefresh = false;
+			return;
 		}
+		if (attemptedStaleRefresh || loading || busy) return;
+		attemptedStaleRefresh = true;
+		void loadTasks(true);
 	});
 
 	onMount(() => {
 		void loadTasks(false);
+	});
+
+	onDestroy(() => {
+		loadGeneration += 1;
+		summaryGeneration += 1;
 	});
 </script>
 

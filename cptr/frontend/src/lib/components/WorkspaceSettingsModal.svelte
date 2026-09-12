@@ -2,6 +2,7 @@
 	import { toast } from 'svelte-sonner';
 	import Modal from '$lib/components/Modal.svelte';
 	import WorkspaceActivity from '$lib/components/WorkspaceActivity.svelte';
+	import WorkspaceAdminPrivilege from '$lib/components/WorkspaceAdminPrivilege.svelte';
 	import WorkspaceCheckpoints from '$lib/components/WorkspaceCheckpoints.svelte';
 	import WorkspaceContextMemory from '$lib/components/WorkspaceContextMemory.svelte';
 	import WorkspaceEnvironment from '$lib/components/WorkspaceEnvironment.svelte';
@@ -11,6 +12,7 @@
 	import WorkspaceOverview from '$lib/components/WorkspaceOverview.svelte';
 	import WorkspaceRepositoryTopology from '$lib/components/WorkspaceRepositoryTopology.svelte';
 	import WorkspaceTasks from '$lib/components/WorkspaceTasks.svelte';
+	import WorkspaceWorkbench from '$lib/components/WorkspaceWorkbench.svelte';
 	import {
 		addWorkspaceRepository,
 		getRepositoryCatalog,
@@ -48,6 +50,8 @@
 		| 'memory'
 		| 'checkpoints'
 		| 'tasks'
+		| 'workbench'
+		| 'admin'
 		| 'activity'
 		| 'health';
 
@@ -76,6 +80,8 @@
 		{ id: 'memory', label: 'Context & Memory' },
 		{ id: 'checkpoints', label: 'Checkpoints' },
 		{ id: 'tasks', label: 'Tasks' },
+		{ id: 'workbench', label: 'Workbench' },
+		{ id: 'admin', label: 'Admin' },
 		{ id: 'activity', label: 'Activity' },
 		{ id: 'health', label: 'Health' }
 	];
@@ -156,6 +162,10 @@
 				return ['checkpoints'];
 			case 'tasks':
 				return ['tasks'];
+			case 'workbench':
+				return ['workbench'];
+			case 'admin':
+				return ['privilege'];
 			case 'activity':
 				return ['projection'];
 			case 'health':
@@ -171,6 +181,21 @@
 		if (!isLiveTarget) return false;
 		const stale = new Set(liveStaleDomains);
 		return domainsForTab(tab).some((domain) => stale.has(domain));
+	}
+
+	function handleTabKeydown(event: KeyboardEvent, index: number) {
+		let next = index;
+		if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+		else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft')
+			next = (index - 1 + tabs.length) % tabs.length;
+		else if (event.key === 'Home') next = 0;
+		else if (event.key === 'End') next = tabs.length - 1;
+		else return;
+		event.preventDefault();
+		activeTab = tabs[next].id;
+		const currentTarget = event.currentTarget as HTMLElement;
+		const tabButtons = currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="tab"]');
+		queueMicrotask(() => tabButtons?.[next]?.focus());
 	}
 
 	function markLoaded(tab: TabId, clearFresh = true) {
@@ -243,6 +268,8 @@
 					break;
 				}
 				case 'tasks':
+				case 'workbench':
+				case 'admin':
 					break;
 				case 'activity':
 					await refreshProjectionSummary();
@@ -251,7 +278,7 @@
 					health = await getWorkspaceHealth(workspace.workspace_id);
 					break;
 			}
-			markLoaded(tab, tab !== 'tasks');
+			markLoaded(tab, !['tasks', 'workbench', 'admin'].includes(tab));
 		} catch (e) {
 			tabErrors = { ...tabErrors, [tab]: message(e) };
 		} finally {
@@ -405,29 +432,47 @@
 					{workspace.slug || workspace.workspace_id} · {workspace.path}
 				</p>
 			</div>
-			<button class="rounded-lg px-3 py-1.5 text-sm hover:bg-[var(--app-hover)]" onclick={onclose}>
+			<button
+				class="min-h-11 min-w-11 rounded-lg px-3 py-1.5 text-sm hover:bg-[var(--app-hover)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2"
+				onclick={onclose}
+				aria-label="Close Workspace Center"
+			>
 				Close
 			</button>
 		</header>
 
 		<div class="flex min-h-0 flex-1 flex-col sm:flex-row">
-			<nav
-				class="flex shrink-0 gap-1 overflow-x-auto border-b border-[var(--app-border)] p-2 sm:w-44 sm:flex-col sm:border-b-0 sm:border-r"
+			<div
+				class="flex shrink-0 gap-1 overflow-x-auto overscroll-contain border-b border-[var(--app-border)] p-2 sm:w-44 sm:flex-col sm:border-b-0 sm:border-r"
+				role="tablist"
+				aria-label="Workspace Center sections"
 			>
-				{#each tabs as tab}
+				{#each tabs as tab, index}
 					<button
-						class="whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm transition-colors {activeTab ===
+						id={'workspace-tab-' + tab.id}
+						role="tab"
+						aria-selected={activeTab === tab.id}
+						aria-controls="workspace-center-panel"
+						tabindex={activeTab === tab.id ? 0 : -1}
+						class="min-h-11 whitespace-nowrap rounded-lg px-3 py-2 text-left text-sm transition-colors focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 {activeTab ===
 						tab.id
 							? 'bg-[var(--app-hover)] font-medium'
 							: 'text-[var(--app-muted-fg)] hover:bg-[var(--app-hover)]'}"
 						onclick={() => (activeTab = tab.id)}
+						onkeydown={(event) => handleTabKeydown(event, index)}
 					>
 						{tab.label}
 					</button>
 				{/each}
-			</nav>
+			</div>
 
-			<main class="min-h-0 flex-1 overflow-y-auto p-5">
+			<div
+				id="workspace-center-panel"
+				role="tabpanel"
+				aria-labelledby={'workspace-tab-' + activeTab}
+				tabindex="0"
+				class="min-h-0 flex-1 overflow-y-auto overscroll-contain p-3 sm:p-5 focus:outline-none"
+			>
 				{#if activeTabLoading && !loadedTabs.has(activeTab)}
 					<div class="flex min-h-48 items-center justify-center text-sm text-[var(--app-muted-fg)]">
 						Loading {tabs.find((tab) => tab.id === activeTab)?.label ?? 'Workspace'}…
@@ -602,6 +647,18 @@
 							refreshOverviewAfterMutation();
 						}}
 					/>
+				{:else if activeTab === 'workbench'}
+					<WorkspaceWorkbench
+						workspaceId={workspace.workspace_id}
+						stale={isTabStale('workbench')}
+						onfresh={() => markLoaded('workbench', true)}
+					/>
+				{:else if activeTab === 'admin'}
+					<WorkspaceAdminPrivilege
+						workspaceId={workspace.workspace_id}
+						stale={isTabStale('admin')}
+						onfresh={() => markLoaded('admin', true)}
+					/>
 				{:else if activeTab === 'activity'}
 					<WorkspaceActivity
 						{projection}
@@ -617,7 +674,7 @@
 						onreconcile={runReconcile}
 					/>
 				{/if}
-			</main>
+			</div>
 		</div>
 	</div>
 </Modal>
@@ -663,5 +720,13 @@
 	.workspace-danger:disabled {
 		opacity: 0.5;
 		cursor: not-allowed;
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.workspace-primary,
+		.workspace-secondary,
+		.workspace-danger {
+			transition: none;
+		}
 	}
 </style>

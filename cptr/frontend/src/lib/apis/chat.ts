@@ -18,6 +18,7 @@ export interface ChatMessageRow {
 
 export interface ChatInfo {
 	id: string;
+	workspace_id: string | null;
 	title: string;
 	summary: string | null;
 	folder: string;
