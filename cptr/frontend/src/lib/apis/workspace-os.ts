@@ -222,8 +222,6 @@ export interface WorkspaceProjection {
 	context_cache: WorkspaceContextCacheProjection;
 	recent_events: WorkspaceLiveEvent[];
 	metrics: WorkspaceMetricsProjection;
-	fingerprint: string;
-	generated_at_ms: number;
 }
 
 export interface WorkspaceLiveReplay {
