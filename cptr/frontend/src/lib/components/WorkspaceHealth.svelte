@@ -28,6 +28,28 @@
 	const diagnostics = $derived(
 		Array.isArray(health?.diagnostics) ? health.diagnostics.map((item) => String(item)) : []
 	);
+	const projectionChecks = $derived.by(() => {
+		const checks = projection?.health.checks;
+		if (!checks) return [];
+		return [
+			{ label: 'Path configured', value: Boolean(checks.path_configured), detail: null },
+			{ label: 'Path exists', value: Boolean(checks.path_exists), detail: null },
+			{ label: 'Primary repository', value: Boolean(checks.has_primary_repo), detail: null },
+			{ label: 'Context cached', value: Boolean(checks.context_cached), detail: null },
+			{
+				label: 'Repositories healthy',
+				value:
+					checks.repositories_total === 0 ||
+					checks.repositories_healthy >= checks.repositories_total,
+				detail: `${checks.repositories_healthy}/${checks.repositories_total}`
+			},
+			{
+				label: 'Workbench sessions',
+				value: true,
+				detail: String(checks.workbench_sessions_active)
+			}
+		];
+	});
 
 	const metrics = $derived([
 		{ label: 'Active workers', value: numberValue(summary.active_overlap), warn: false },
@@ -86,6 +108,20 @@
 			</button>
 		</div>
 	</div>
+
+	{#if projectionChecks.length > 0}
+		<div class="health-checks" aria-label="Workspace health checks">
+			{#each projectionChecks as check (check.label)}
+				<div class="health-check" data-ok={check.value}>
+					<span class="health-check-dot" aria-hidden="true"></span>
+					<div>
+						<strong>{check.label}</strong>
+						<small>{check.detail ?? (check.value ? 'Pass' : 'Needs attention')}</small>
+					</div>
+				</div>
+			{/each}
+		</div>
+	{/if}
 
 	<div class="grid gap-3 sm:grid-cols-3">
 		<div class="health-card">
@@ -213,6 +249,56 @@
 	.health-advanced {
 		border: 1px solid var(--app-border);
 		border-radius: 0.85rem;
+	}
+
+	.health-checks {
+		display: grid;
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		overflow: hidden;
+		border: 1px solid var(--app-border);
+		border-radius: 0.8rem;
+	}
+
+	.health-check {
+		display: flex;
+		align-items: center;
+		gap: 0.55rem;
+		padding: 0.65rem 0.75rem;
+	}
+
+	.health-check:nth-child(n + 4) {
+		border-top: 1px solid var(--app-border);
+	}
+
+	.health-check:not(:nth-child(3n + 1)) {
+		border-left: 1px solid var(--app-border);
+	}
+
+	.health-check-dot {
+		width: 0.48rem;
+		height: 0.48rem;
+		flex: none;
+		border-radius: 999px;
+		background: rgb(239 68 68);
+	}
+
+	.health-check[data-ok='true'] .health-check-dot {
+		background: rgb(34 197 94);
+	}
+
+	.health-check strong,
+	.health-check small {
+		display: block;
+	}
+
+	.health-check strong {
+		font-size: 0.68rem;
+	}
+
+	.health-check small {
+		margin-top: 0.15rem;
+		font-size: 0.6rem;
+		color: var(--app-muted-fg);
 	}
 
 	.health-card {
@@ -347,6 +433,22 @@
 	}
 
 	@media (max-width: 720px) {
+		.health-checks {
+			grid-template-columns: repeat(2, minmax(0, 1fr));
+		}
+
+		.health-check:nth-child(n + 3) {
+			border-top: 1px solid var(--app-border);
+		}
+
+		.health-check:not(:nth-child(3n + 1)) {
+			border-left: 0;
+		}
+
+		.health-check:nth-child(even) {
+			border-left: 1px solid var(--app-border);
+		}
+
 		.health-metrics {
 			grid-template-columns: repeat(2, minmax(0, 1fr));
 		}

@@ -17,6 +17,20 @@
 	const visibleEvents = $derived(
 		filter === 'all' ? events : events.filter((event) => event.type === filter)
 	);
+	const connectionNotice = $derived.by(() => {
+		switch (connectionStatus) {
+			case 'failed':
+				return 'Live Workspace events are offline. The last authoritative projection remains visible; retry synchronization before relying on recency.';
+			case 'reconnecting':
+				return 'The live event stream is reconnecting. Sequence replay will recover missed durable events before this surface is current.';
+			case 'connecting':
+				return 'Connecting to the Workspace event stream and recovering the durable replay cursor.';
+			case 'snapshot':
+				return 'This is an authoritative snapshot for a non-active Workspace; it is not a live subscription.';
+			default:
+				return '';
+		}
+	});
 
 	function label(type: string): string {
 		return type.replace(/^workspace\./, '').replaceAll('.', ' ');
@@ -51,6 +65,13 @@
 		</div>
 		<button class="workspace-secondary" onclick={() => void onrefresh()}>Refresh</button>
 	</div>
+
+	{#if connectionNotice}
+		<div class="activity-recovery" data-status={connectionStatus} role="status">
+			<p>{connectionNotice}</p>
+			<button onclick={() => void onrefresh()}>Retry sync</button>
+		</div>
+	{/if}
 
 	<div class="activity-toolbar">
 		<label>
@@ -157,6 +178,39 @@
 		color: rgb(239 68 68);
 		border-color: rgb(239 68 68 / 0.28);
 		background: rgb(239 68 68 / 0.07);
+	}
+
+	.activity-recovery {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 0.75rem;
+		border: 1px solid var(--app-border);
+		border-radius: 0.75rem;
+		padding: 0.65rem 0.75rem;
+		font-size: 0.7rem;
+		color: var(--app-muted-fg);
+	}
+
+	.activity-recovery[data-status='failed'] {
+		border-color: rgb(239 68 68 / 0.3);
+		background: rgb(239 68 68 / 0.04);
+	}
+
+	.activity-recovery[data-status='reconnecting'],
+	.activity-recovery[data-status='connecting'] {
+		border-color: rgb(234 179 8 / 0.3);
+		background: rgb(234 179 8 / 0.04);
+	}
+
+	.activity-recovery button {
+		min-height: 2.75rem;
+		flex: none;
+		border: 1px solid var(--app-border);
+		border-radius: 0.6rem;
+		padding: 0.4rem 0.65rem;
+		font-size: 0.66rem;
+		font-weight: 600;
 	}
 
 	.activity-toolbar {

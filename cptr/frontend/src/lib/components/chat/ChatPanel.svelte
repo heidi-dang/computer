@@ -77,6 +77,7 @@
 
 	interface Props {
 		workspace?: string;
+		workspaceId?: string;
 		chatId?: string;
 		tabId?: string;
 		active?: boolean;
@@ -85,6 +86,7 @@
 	}
 	let {
 		workspace = '',
+		workspaceId,
 		chatId: initialChatId,
 		tabId,
 		active = true,
@@ -139,6 +141,7 @@
 	let autoScroll = $state(true);
 	let cancelledMessageId: string | null = null;
 	let loading = $state(!!initialChat());
+	let workspaceBindingError = $state('');
 	let chatTitle = $state('');
 	let ttsQueue: string[] = [];
 	let ttsBuffer = '';
@@ -350,6 +353,9 @@
 	const workspaceDisplayName = $derived(
 		workspace ? getPathDisplayName(workspace, 'workspace') : 'Computer'
 	);
+	const workspaceBindingLabel = $derived(
+		workspaceId ? 'Workspace · ' + workspaceDisplayName : 'Computer'
+	);
 	const displayChatTitle = $derived(chatTitle || firstUserMessageTitle() || workspaceDisplayName);
 	const runningCommandSessions = $derived(commandSessions.filter((session) => !session.done));
 	const summaryCount = $derived(runningCommandSessions.length);
@@ -422,6 +428,16 @@
 			const data = await getChat(id);
 			// Discard stale response if a newer loadChat was called while we waited
 			if (gen !== loadGeneration) return;
+			if (workspaceId && data.chat.workspace_id && data.chat.workspace_id !== workspaceId) {
+				allMessages = [];
+				currentMessageId = null;
+				contextUsage = null;
+				chatTasks = [];
+				workspaceBindingError =
+					'This chat is bound to a different Workspace. Open it from its owning Workspace.';
+				return;
+			}
+			workspaceBindingError = '';
 			allMessages = data.messages;
 			loadChatSettings(data.chat.meta);
 			currentMessageId = data.chat.current_message_id;
@@ -912,6 +928,10 @@
 	}
 
 	async function send() {
+		if (workspaceBindingError) {
+			toast.error(workspaceBindingError);
+			return;
+		}
 		let text = inputText.trim();
 		if (!text || !selectedModel) return;
 		if (sending) return;
@@ -981,7 +1001,8 @@
 						parentId,
 						getChatSendParams(),
 						undefined,
-						files
+						files,
+						workspaceId
 					);
 					if (result.queued) {
 						// Add directly to allMessages so it appears in queue UI instantly
@@ -1049,7 +1070,7 @@
 				getChatSendParams(),
 				undefined,
 				files,
-				get(currentWorkspace)?.workspace_id
+				workspaceId
 			);
 
 			// Swap optimistic temp msg with real messages from backend.
@@ -1756,10 +1777,19 @@
 				class="pointer-events-none absolute inset-0 -bottom-10 -z-10"
 				style="background: linear-gradient(to bottom, var(--app-bg), color-mix(in oklab, var(--app-bg) 95%, transparent) 40%, transparent 97%);"
 			></div>
-			<div
-				class="min-w-0 flex-1 truncate text-[0.6875rem] font-medium text-gray-600 dark:text-gray-400"
-			>
-				{displayChatTitle}
+			<div class="flex min-w-0 flex-1 items-center gap-2">
+				<span class="truncate text-[0.6875rem] font-medium text-gray-600 dark:text-gray-400">
+					{displayChatTitle}
+				</span>
+				{#if workspaceId}
+					<span
+						class="workspace-binding-chip hidden max-w-44 truncate sm:inline-flex"
+						aria-label={'Bound to ' + workspaceDisplayName}
+						title={'Bound to Workspace ' + workspaceDisplayName}
+					>
+						{workspaceBindingLabel}
+					</span>
+				{/if}
 			</div>
 			<div class="flex shrink-0 items-center gap-0.5">
 				<button
@@ -1803,6 +1833,16 @@
 					>
 						{$t('chat.greeting')}
 					</h1>
+					{#if workspaceId}
+						<div class="mt-3 flex justify-center">
+							<span
+								class="workspace-binding-chip"
+								aria-label={'New chat bound to ' + workspaceDisplayName}
+							>
+								{workspaceBindingLabel}
+							</span>
+						</div>
+					{/if}
 				</div>
 
 				<ChatInput
@@ -1846,7 +1886,17 @@
 		</div>
 	{:else}
 		<!-- Conversation view -->
-		{#if loading}
+		{#if workspaceBindingError}
+			<div class="flex flex-1 items-center justify-center px-4">
+				<div class="workspace-binding-error" role="alert">
+					<strong>Workspace binding mismatch</strong>
+					<p>{workspaceBindingError}</p>
+					{#if workspaceId}
+						<small>Expected Workspace: {workspaceDisplayName}</small>
+					{/if}
+				</div>
+			</div>
+		{:else if loading}
 			<div class="flex-1 flex items-center justify-center text-gray-400 dark:text-gray-500">
 				<Spinner size={24} />
 			</div>
@@ -1943,7 +1993,7 @@
 					bind:planMode
 					bind:requestParams
 					bind:voiceModeEnabled
-					{sending}
+					sending={sending || Boolean(workspaceBindingError)}
 					{streaming}
 					{workspace}
 					{contextUsage}
@@ -1996,6 +2046,38 @@
 {/if}
 
 <style>
+	.workspace-binding-chip {
+		align-items: center;
+		border: 1px solid color-mix(in oklab, var(--app-accent) 22%, var(--app-border));
+		border-radius: 999px;
+		background: color-mix(in oklab, var(--app-accent) 7%, transparent);
+		padding: 0.2rem 0.55rem;
+		font-size: 0.625rem;
+		font-weight: 600;
+		color: var(--app-muted-fg);
+	}
+
+	.workspace-binding-error {
+		width: min(32rem, 100%);
+		border: 1px solid rgb(239 68 68 / 0.3);
+		border-radius: 0.9rem;
+		background: rgb(239 68 68 / 0.05);
+		padding: 1rem;
+		color: rgb(239 68 68);
+	}
+
+	.workspace-binding-error strong {
+		font-size: 0.85rem;
+	}
+
+	.workspace-binding-error p,
+	.workspace-binding-error small {
+		display: block;
+		margin-top: 0.35rem;
+		font-size: 0.72rem;
+		line-height: 1.45;
+	}
+
 	.chat-input-dock {
 		border-top: 1px solid color-mix(in oklab, var(--app-accent) 6%, transparent);
 		background: color-mix(in oklab, var(--app-bg) 96%, transparent) !important;

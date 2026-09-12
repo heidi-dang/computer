@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onDestroy, onMount } from 'svelte';
 	import { toast } from 'svelte-sonner';
 	import {
 		getMemory,
@@ -28,6 +28,8 @@
 	let writing = $state(false);
 	let searching = $state(false);
 	let error = $state('');
+	let loadGeneration = 0;
+	let searchGeneration = 0;
 
 	$effect(() => {
 		if (initialContext) context = initialContext;
@@ -43,6 +45,7 @@
 	}
 
 	async function load() {
+		const generation = ++loadGeneration;
 		loading = true;
 		error = '';
 		try {
@@ -50,12 +53,14 @@
 				getWorkspaceContext(workspaceId),
 				getMemory(workspacePath)
 			]);
+			if (generation !== loadGeneration) return;
 			context = contextResult;
 			memory = memoryResult;
 		} catch (cause) {
+			if (generation !== loadGeneration) return;
 			error = message(cause);
 		} finally {
-			loading = false;
+			if (generation === loadGeneration) loading = false;
 		}
 	}
 
@@ -76,6 +81,7 @@
 	}
 
 	async function runSearch() {
+		const generation = ++searchGeneration;
 		const query = searchQuery.trim();
 		if (!query) {
 			searchResults = [];
@@ -90,8 +96,10 @@
 				limit: 12,
 				expand_links: true
 			});
+			if (generation !== searchGeneration || searchQuery.trim() !== query) return;
 			searchResults = result.results;
 		} catch (cause) {
+			if (generation !== searchGeneration || searchQuery.trim() !== query) return;
 			toast.error(message(cause));
 		} finally {
 			searching = false;
@@ -100,6 +108,11 @@
 
 	onMount(() => {
 		void load();
+	});
+
+	onDestroy(() => {
+		loadGeneration += 1;
+		searchGeneration += 1;
 	});
 </script>
 

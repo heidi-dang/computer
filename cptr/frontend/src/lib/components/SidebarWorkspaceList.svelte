@@ -54,6 +54,12 @@
 	let currentChatId = $derived($activeTab?.type === 'chat' ? $activeTab.path : null);
 	let liveWorkspaceId = $derived(workspaceOsStore.workspaceId);
 	let liveWorkspaceStatus = $derived(workspaceOsStore.connection.status);
+	let liveWorkspaceProjection = $derived(workspaceOsStore.projection);
+	let liveWorkspaceStatusLabel = $derived.by(() => {
+		const health = liveWorkspaceProjection?.health.status ?? 'unknown';
+		const sessions = liveWorkspaceProjection?.workbench.active_sessions_count ?? 0;
+		return `Workspace OS ${liveWorkspaceStatus} · health ${health} · ${sessions} active Workbench session${sessions === 1 ? '' : 's'}`;
+	});
 	const WS_CHATS_PAGE_SIZE = 5;
 
 	function toggleWorkspaceExpand(path: string) {
@@ -408,9 +414,18 @@
 							class="workspace-live-indicator"
 							data-status={liveWorkspaceStatus}
 							role="status"
-							aria-label={`Workspace OS ${liveWorkspaceStatus}`}
-							title={`Workspace OS ${liveWorkspaceStatus}`}
+							aria-label={liveWorkspaceStatusLabel}
+							title={liveWorkspaceStatusLabel}
 						></span>
+						{#if (liveWorkspaceProjection?.workbench.active_sessions_count ?? 0) > 0}
+							<span
+								class="workspace-workbench-count"
+								title={liveWorkspaceStatusLabel}
+								aria-label={`${liveWorkspaceProjection?.workbench.active_sessions_count ?? 0} active Workbench sessions`}
+							>
+								WB {liveWorkspaceProjection?.workbench.active_sessions_count ?? 0}
+							</span>
+						{/if}
 					{/if}
 					{#if ws.unread_count > 0}
 						<span
@@ -577,6 +592,19 @@
 	.workspace-live-indicator[data-status='failed'] {
 		background: rgb(239 68 68);
 		opacity: 0.9;
+	}
+
+	.workspace-workbench-count {
+		display: inline-flex;
+		align-items: center;
+		min-height: 1.1rem;
+		border: 1px solid color-mix(in oklab, var(--app-accent) 18%, var(--app-border));
+		border-radius: 999px;
+		padding: 0 0.3rem;
+		font-size: 0.55rem;
+		font-weight: 650;
+		color: var(--app-muted-fg);
+		white-space: nowrap;
 	}
 
 	@media (max-width: 767px) {
