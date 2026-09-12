@@ -22,6 +22,7 @@
 	import KeyPill from './KeyPill.svelte';
 	import Spinner from './common/Spinner.svelte';
 	import { t } from '$lib/i18n';
+	import { setWorkspaceRouteForPath } from '$lib/utils/workspaceRoute';
 
 	interface Props {
 		onclose: () => void;
@@ -58,8 +59,10 @@
 	// Determine active workspace from the URL, not the store.
 	// When on /scheduled or other non-workspace pages, $currentWorkspace
 	// retains the last workspace but we should search across all.
-	const urlWorkspacePath = $derived($page.url.searchParams.get('workspace'));
-	const effectiveWorkspace = $derived(urlWorkspacePath ? $currentWorkspace : null);
+	const hasWorkspaceRoute = $derived(
+		Boolean($page.url.searchParams.get('workspaceId') || $page.url.searchParams.get('workspace'))
+	);
+	const effectiveWorkspace = $derived(hasWorkspaceRoute ? $currentWorkspace : null);
 
 	// Show recents when no query, search results when query exists
 	const showingRecents = $derived(!query.trim());
@@ -279,20 +282,17 @@
 
 	function selectChat(chat: ChatSearchResult) {
 		onclose();
-		goto(`/?workspace=${encodeURIComponent(chat.workspace)}&chatId=${encodeURIComponent(chat.id)}`);
+		const params = setWorkspaceRouteForPath(new URLSearchParams(), chat.workspace, $workspaceList);
+		params.set('chatId', chat.id);
+		goto(`/?${params.toString()}`);
 	}
 
 	function selectFile(file: FileSearchResult) {
 		onclose();
-		if (file.type === 'file') {
-			goto(
-				`/?workspace=${encodeURIComponent(file.workspace)}&file=${encodeURIComponent(file.path)}`
-			);
-		} else if (file.type === 'directory') {
-			goto(
-				`/?workspace=${encodeURIComponent(file.workspace)}&dir=${encodeURIComponent(file.path)}`
-			);
-		}
+		const params = setWorkspaceRouteForPath(new URLSearchParams(), file.workspace, $workspaceList);
+		if (file.type === 'file') params.set('file', file.path);
+		else if (file.type === 'directory') params.set('dir', file.path);
+		if (params.has('file') || params.has('dir')) goto(`/?${params.toString()}`);
 	}
 
 	function selectFileMatch(match: FileMatch) {

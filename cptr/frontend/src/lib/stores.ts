@@ -682,14 +682,26 @@ export async function loadWorkspaceList(): Promise<void> {
 
 // ── Load a specific workspace (called when URL changes) ─────────
 
+let workspaceLoadGeneration = 0;
+
+export function clearCurrentWorkspace(): void {
+	workspaceLoadGeneration += 1;
+	workspaceOsStore.disconnect();
+	currentWorkspace.set(null);
+}
+
 export async function loadWorkspace(path: string): Promise<void> {
+	const generation = ++workspaceLoadGeneration;
 	if (!isSupportedWorkspacePath(path)) {
-		workspaceOsStore.disconnect();
-		currentWorkspace.set(null);
+		if (generation === workspaceLoadGeneration) {
+			workspaceOsStore.disconnect();
+			currentWorkspace.set(null);
+		}
 		return;
 	}
 	try {
 		let wsData = await getWorkspaceState(path);
+		if (generation !== workspaceLoadGeneration) return;
 		let canonicalWorkspacePath = typeof wsData.path === 'string' ? wsData.path : path;
 		let workspaceId =
 			typeof wsData.workspace_id === 'string' && wsData.workspace_id.trim()
@@ -702,6 +714,7 @@ export async function loadWorkspace(path: string): Promise<void> {
 
 		if (!workspaceId) {
 			const created = await saveWorkspaceState(canonicalWorkspacePath, { name: workspaceName });
+			if (generation !== workspaceLoadGeneration) return;
 			if (created.status !== 'saved' || !created.workspace_id) {
 				throw new Error('Workspace identity could not be created');
 			}
@@ -723,11 +736,15 @@ export async function loadWorkspace(path: string): Promise<void> {
 			let aliveBrowserSessions: Set<string> = new Set();
 			try {
 				const sessions = await listSessions();
+				if (generation !== workspaceLoadGeneration) return;
 				aliveSessions = new Set(sessions.map((s) => s.session_id));
 			} catch {}
+			if (generation !== workspaceLoadGeneration) return;
 			try {
 				aliveBrowserSessions = new Set(await listBrowserSessions());
+				if (generation !== workspaceLoadGeneration) return;
 			} catch {}
+			if (generation !== workspaceLoadGeneration) return;
 
 			const ws = { ...wsData, workspace_id: workspaceId } as unknown as WorkspaceState;
 			ws.groups = await Promise.all(
@@ -736,11 +753,13 @@ export async function loadWorkspace(path: string): Promise<void> {
 					tabs: (
 						await Promise.all(
 							group.tabs.map(async (tab) => {
+								if (generation !== workspaceLoadGeneration) return null;
 								if (!isSupportedTab(tab)) return null;
 								if (tab.type !== 'preview' || !tab.port) return tab;
 								try {
 									const previewUrl = `http://localhost:${tab.port}/`;
 									const session = await createBrowserSession(previewUrl);
+									if (generation !== workspaceLoadGeneration) return null;
 									aliveBrowserSessions.add(session.session_id);
 									const { port, ...browserTab } = tab;
 									return {
@@ -785,6 +804,7 @@ export async function loadWorkspace(path: string): Promise<void> {
 				})
 				.filter((g) => g.tabs.length > 0);
 
+			if (generation !== workspaceLoadGeneration) return;
 			const groups = cleanedGroups.length > 0 ? cleanedGroups : [createDefaultGroup()];
 			const activeGroupId = groups.some((g) => g.id === ws.activeGroupId)
 				? ws.activeGroupId
@@ -807,6 +827,7 @@ export async function loadWorkspace(path: string): Promise<void> {
 				fileBrowserCwd: ws.fileBrowserCwd ?? canonicalWorkspacePath
 			});
 		} else {
+			if (generation !== workspaceLoadGeneration) return;
 			// First open still receives a durable UUID before the default UI state is exposed.
 			currentWorkspace.set(
 				createDefaultWorkspace({
@@ -819,8 +840,10 @@ export async function loadWorkspace(path: string): Promise<void> {
 				})
 			);
 		}
+		if (generation !== workspaceLoadGeneration) return;
 		void workspaceOsStore.connect(workspaceId);
 	} catch {
+		if (generation !== workspaceLoadGeneration) return;
 		workspaceOsStore.disconnect();
 		currentWorkspace.set(null);
 	}

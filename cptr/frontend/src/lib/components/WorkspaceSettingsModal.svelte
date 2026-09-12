@@ -65,10 +65,12 @@
 
 	interface Props {
 		workspace: WorkspaceTarget;
+		initialTab?: string;
 		onclose: () => void;
+		ontabchange?: (tab: string) => void;
 	}
 
-	let { workspace, onclose }: Props = $props();
+	let { workspace, initialTab = 'overview', onclose, ontabchange = () => {} }: Props = $props();
 
 	const tabs: Array<{ id: TabId; label: string }> = [
 		{ id: 'overview', label: 'Overview' },
@@ -86,7 +88,18 @@
 		{ id: 'health', label: 'Health' }
 	];
 
+	function isTabId(value: string): value is TabId {
+		return tabs.some((tab) => tab.id === value);
+	}
+
 	let activeTab = $state<TabId>('overview');
+	let appliedInitialTab = $state<string | null>(null);
+
+	$effect(() => {
+		if (initialTab === appliedInitialTab) return;
+		appliedInitialTab = initialTab;
+		activeTab = isTabId(initialTab) ? initialTab : 'overview';
+	});
 	let busy = $state(false);
 	let tabLoading = $state<Partial<Record<TabId, boolean>>>({});
 	let tabErrors = $state<Partial<Record<TabId, string>>>({});
@@ -183,6 +196,12 @@
 		return domainsForTab(tab).some((domain) => stale.has(domain));
 	}
 
+	function selectTab(tab: TabId) {
+		if (activeTab === tab) return;
+		activeTab = tab;
+		ontabchange(tab);
+	}
+
 	function handleTabKeydown(event: KeyboardEvent, index: number) {
 		let next = index;
 		if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = (index + 1) % tabs.length;
@@ -192,7 +211,7 @@
 		else if (event.key === 'End') next = tabs.length - 1;
 		else return;
 		event.preventDefault();
-		activeTab = tabs[next].id;
+		selectTab(tabs[next].id);
 		const currentTarget = event.currentTarget as HTMLElement;
 		const tabButtons = currentTarget.parentElement?.querySelectorAll<HTMLElement>('[role="tab"]');
 		queueMicrotask(() => tabButtons?.[next]?.focus());
@@ -458,7 +477,7 @@
 						tab.id
 							? 'bg-[var(--app-hover)] font-medium'
 							: 'text-[var(--app-muted-fg)] hover:bg-[var(--app-hover)]'}"
-						onclick={() => (activeTab = tab.id)}
+						onclick={() => selectTab(tab.id)}
 						onkeydown={(event) => handleTabKeydown(event, index)}
 					>
 						{tab.label}
