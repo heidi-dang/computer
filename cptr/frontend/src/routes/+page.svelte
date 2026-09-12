@@ -4,6 +4,8 @@
 	import {
 		currentWorkspace,
 		workspaceList,
+		stateLoaded,
+		clearCurrentWorkspace,
 		addWorkspace,
 		loadWorkspace,
 		gitReviewOpen,
@@ -46,6 +48,11 @@
 	import Spinner from '$lib/components/common/Spinner.svelte';
 	import { TAB_DRAG_MIME } from '$lib/constants';
 	import { isSupportedWorkspacePath } from '$lib/utils/paths';
+	import {
+		clearWorkspaceRoute,
+		resolveWorkspaceRoute,
+		setWorkspaceRouteForPath
+	} from '$lib/utils/workspaceRoute';
 
 	type FileBrowserComponent = typeof import('$lib/components/FileBrowser.svelte').default;
 	type GitViewComponent = typeof import('$lib/components/GitView.svelte').default;
@@ -315,11 +322,12 @@
 	];
 
 	// ── URL-driven workspace loading ───────────────────────────────
-	// The workspace path comes from the URL query param: ?workspace=/path/to/dir
-	// Each browser tab has its own URL → its own workspace.
+	// Internal navigation prefers ?workspaceId=<stable UUID>; legacy/external flows may still use
+	// ?workspace=<path>. Each browser tab has its own URL → its own workspace.
 	// Intent params (chatId, file, dir) are processed AFTER loading.
 
 	let lastLoadedPath = $state<string | null>(null);
+	let workspaceRouteGeneration = 0;
 	type LaunchQueueWindow = Window & {
 		__cptrLaunchQueueBound?: boolean;
 		launchQueue?: {
@@ -333,7 +341,12 @@
 		const protocol = webCptrIntent(url.searchParams.get('intent'));
 		const params = protocol?.params ?? url.searchParams;
 		const intent = protocol?.intent ?? url.searchParams.get('intent');
-		const workspace = params.get('workspace') || undefined;
+		const workspaceId = params.get('workspaceId')?.trim() || '';
+		const workspace =
+			params.get('workspace') ||
+			(workspaceId
+				? $workspaceList.find((item) => item.workspace_id === workspaceId)?.path
+				: undefined);
 		const chatId = params.get('chatId');
 		const filePath = params.get('file');
 		const dirPath = params.get('dir');
@@ -460,9 +473,13 @@
 					const chatWorkspace = chat?.chat.meta?.workspace;
 					if (typeof chatWorkspace === 'string' && chatWorkspace) {
 						addWorkspace(chatWorkspace);
-						await goto(
-							`/?workspace=${encodeURIComponent(chatWorkspace)}&chatId=${encodeURIComponent(intent.chatId)}`
+						const params = setWorkspaceRouteForPath(
+							new URLSearchParams(),
+							chatWorkspace,
+							$workspaceList
 						);
+						params.set('chatId', intent.chatId);
+						await goto(`/?${params.toString()}`);
 					} else {
 						openHomeChat(intent.chatId);
 					}
@@ -591,32 +608,62 @@
 	}
 
 	$effect(() => {
-		const workspacePath = $page.url.searchParams.get('workspace');
-		if (workspacePath && !isSupportedWorkspacePath(workspacePath)) {
+		const params = $page.url.searchParams;
+		const resolution = resolveWorkspaceRoute(params, $workspaceList);
+		if (resolution.unresolvedId) {
+			if (!$stateLoaded) return;
+			workspaceRouteGeneration += 1;
 			lastLoadedPath = null;
-			currentWorkspace.set(null);
-			goto('/', { replaceState: true });
+			clearCurrentWorkspace();
+			const next = clearWorkspaceRoute(params);
+			void goto(`/?${next.toString()}`, { replaceState: true });
 			return;
 		}
+
+		const workspacePath = resolution.path;
+		if (workspacePath && !isSupportedWorkspacePath(workspacePath)) {
+			workspaceRouteGeneration += 1;
+			lastLoadedPath = null;
+			clearCurrentWorkspace();
+			const next = clearWorkspaceRoute(params);
+			void goto(`/?${next.toString()}`, { replaceState: true });
+			return;
+		}
+
 		if (workspacePath && workspacePath !== lastLoadedPath) {
-			// New workspace — load then process intents
+			const generation = ++workspaceRouteGeneration;
 			lastLoadedPath = workspacePath;
-			loadWorkspace(workspacePath).then(async () => {
-				const canonicalWorkspacePath = get(currentWorkspace)?.path;
-				if (canonicalWorkspacePath && canonicalWorkspacePath !== workspacePath) {
-					const params = new URLSearchParams($page.url.searchParams);
-					params.set('workspace', canonicalWorkspacePath);
-					lastLoadedPath = canonicalWorkspacePath;
-					await goto(`/?${params.toString()}`, { replaceState: true });
+			void loadWorkspace(workspacePath).then(async () => {
+				if (generation !== workspaceRouteGeneration) return;
+				const loaded = get(currentWorkspace);
+				if (!loaded) return;
+				if (resolution.workspaceId && loaded.workspace_id !== resolution.workspaceId) {
+					lastLoadedPath = null;
+					clearCurrentWorkspace();
+					const next = clearWorkspaceRoute($page.url.searchParams);
+					await goto(`/?${next.toString()}`, { replaceState: true });
+					return;
 				}
-				processIntentParams();
+				if (resolution.source === 'path' && loaded.path !== workspacePath) {
+					const next = new URLSearchParams($page.url.searchParams);
+					next.set('workspace', loaded.path);
+					lastLoadedPath = loaded.path;
+					await goto(`/?${next.toString()}`, { replaceState: true });
+				}
+				if (generation === workspaceRouteGeneration) processIntentParams();
 			});
 		} else if (workspacePath && workspacePath === lastLoadedPath) {
-			// Same workspace — process intents immediately
-			if (get(currentWorkspace)?.path === workspacePath) processIntentParams();
-		} else if (!workspacePath) {
+			const loaded = get(currentWorkspace);
+			if (
+				loaded?.path === workspacePath &&
+				(!resolution.workspaceId || loaded.workspace_id === resolution.workspaceId)
+			) {
+				processIntentParams();
+			}
+		} else if (!workspacePath && resolution.source === 'none') {
+			workspaceRouteGeneration += 1;
 			lastLoadedPath = null;
-			currentWorkspace.set(null);
+			clearCurrentWorkspace();
 			processIntentParams();
 		}
 	});
@@ -843,9 +890,12 @@
 
 	function quickOpen(path: string) {
 		addWorkspace(path);
-		// Carry forward any pending intent params through workspace selection
-		const params = new URLSearchParams($page.url.searchParams);
-		params.set('workspace', path);
+		// Internal navigation prefers the durable Workspace UUID; unknown paths keep legacy compatibility.
+		const params = setWorkspaceRouteForPath(
+			new URLSearchParams($page.url.searchParams),
+			path,
+			$workspaceList
+		);
 		goto(`/?${params.toString()}`);
 	}
 

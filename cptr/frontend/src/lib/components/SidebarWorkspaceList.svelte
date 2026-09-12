@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/stores';
 	import {
 		workspaceList,
+		stateLoaded,
 		removeWorkspace,
 		reorderWorkspaces,
 		sidebarOpen,
@@ -24,13 +26,27 @@
 	import ChatItem from './common/ChatItem.svelte';
 	import DropdownMenu from './DropdownMenu.svelte';
 	import Icon from './Icon.svelte';
-	import WorkspaceSettingsModal from './WorkspaceSettingsModal.svelte';
+	import {
+		clearWorkspaceCenterRoute,
+		normalizeWorkspaceCenterTab,
+		setWorkspaceRouteForPath,
+		setWorkspaceCenterRoute,
+		WORKSPACE_CENTER_ID_PARAM,
+		WORKSPACE_CENTER_TAB_PARAM
+	} from '$lib/utils/workspaceRoute';
+
+	type WorkspaceSettingsModalComponent = typeof import('./WorkspaceSettingsModal.svelte').default;
 
 	interface Props {
 		onaddworkspace: () => void;
 	}
 
 	let { onaddworkspace }: Props = $props();
+	let LazyWorkspaceSettingsModal = $state<WorkspaceSettingsModalComponent | null>(null);
+	let workspaceSettingsLoad: Promise<void> | null = null;
+	let workspaceSettingsLoading = $state(false);
+	let workspaceSettingsLoadError = $state('');
+	let workspaceSettingsInitialTab = $state('overview');
 	let wsMenuPath = $state<string | null>(null);
 	let wsMenuAnchor = $state<HTMLElement | null>(null);
 	let workspaceSettingsTarget = $state<{
@@ -61,6 +77,42 @@
 		return `Workspace OS ${liveWorkspaceStatus} · health ${health} · ${sessions} active Workbench session${sessions === 1 ? '' : 's'}`;
 	});
 	const WS_CHATS_PAGE_SIZE = 5;
+
+	$effect(() => {
+		const workspaceId = $page.url.searchParams.get(WORKSPACE_CENTER_ID_PARAM)?.trim() || '';
+		if (!workspaceId) {
+			workspaceSettingsTarget = null;
+			return;
+		}
+		const target = $workspaceList.find((workspace) => workspace.workspace_id === workspaceId);
+		if (!target) {
+			if ($stateLoaded) {
+				workspaceSettingsTarget = null;
+				const params = clearWorkspaceCenterRoute($page.url.searchParams);
+				void goto(`/?${params.toString()}`, {
+					replaceState: true,
+					noScroll: true,
+					keepFocus: true
+				});
+			}
+			return;
+		}
+		const requestedTab = $page.url.searchParams.get(WORKSPACE_CENTER_TAB_PARAM);
+		const normalizedTab = normalizeWorkspaceCenterTab(requestedTab);
+		workspaceSettingsInitialTab = normalizedTab;
+		if (requestedTab !== normalizedTab) {
+			const params = setWorkspaceCenterRoute($page.url.searchParams, workspaceId, normalizedTab);
+			void goto(`/?${params.toString()}`, { replaceState: true, noScroll: true, keepFocus: true });
+		}
+		workspaceSettingsTarget = {
+			workspace_id: target.workspace_id,
+			path: target.path,
+			name: target.name,
+			slug: target.slug,
+			workspace_type: target.workspace_type
+		};
+		void ensureWorkspaceSettingsModal();
+	});
 
 	function toggleWorkspaceExpand(path: string) {
 		const next = new Set(expandedWorkspaces);
@@ -119,6 +171,32 @@
 		void fetchWorkspaceChats(path, false, Math.max(loadedCount, WS_CHATS_PAGE_SIZE));
 	}
 
+	function ensureWorkspaceSettingsModal(): Promise<void> {
+		if (LazyWorkspaceSettingsModal) return Promise.resolve();
+		if (workspaceSettingsLoad) return workspaceSettingsLoad;
+		workspaceSettingsLoading = true;
+		workspaceSettingsLoadError = '';
+		workspaceSettingsLoad = import('./WorkspaceSettingsModal.svelte')
+			.then(({ default: component }) => {
+				LazyWorkspaceSettingsModal = component;
+			})
+			.catch((error: unknown) => {
+				workspaceSettingsLoadError =
+					error instanceof Error ? error.message : 'Workspace Center failed to load';
+				workspaceSettingsLoad = null;
+			})
+			.finally(() => {
+				workspaceSettingsLoading = false;
+			});
+		return workspaceSettingsLoad;
+	}
+
+	function workspaceRoute(path: string, extra?: Record<string, string>): string {
+		let params = setWorkspaceRouteForPath(new URLSearchParams(), path, $workspaceList);
+		for (const [key, value] of Object.entries(extra ?? {})) params.set(key, value);
+		return `/?${params.toString()}`;
+	}
+
 	function closeMobileSidebar() {
 		if (typeof window !== 'undefined' && window.innerWidth < 768) sidebarOpen.set(false);
 	}
@@ -126,17 +204,17 @@
 	function openWorkspace(e: MouseEvent, path: string) {
 		if (e.metaKey || e.ctrlKey) return;
 		e.preventDefault();
-		goto(`/?workspace=${encodeURIComponent(path)}`);
+		goto(workspaceRoute(path));
 		closeMobileSidebar();
 	}
 
 	function openChat(chatId: string, wsPath: string) {
-		goto(`/?workspace=${encodeURIComponent(wsPath)}&chatId=${encodeURIComponent(chatId)}`);
+		goto(workspaceRoute(wsPath, { chatId }));
 		closeMobileSidebar();
 	}
 
 	function newChat(wsPath: string) {
-		goto(`/?workspace=${encodeURIComponent(wsPath)}&chatId`);
+		goto(workspaceRoute(wsPath, { chatId: '' }));
 		closeMobileSidebar();
 	}
 
@@ -163,17 +241,29 @@
 		chatMenu = null;
 	}
 
-	function openWorkspaceSettings(path: string) {
+	function openWorkspaceSettings(path: string, tab = 'overview') {
 		const target = $workspaceList.find((workspace) => workspace.path === path);
 		closeWsMenu();
 		if (!target?.workspace_id) return;
-		workspaceSettingsTarget = {
-			workspace_id: target.workspace_id,
-			path: target.path,
-			name: target.name,
-			slug: target.slug,
-			workspace_type: target.workspace_type
-		};
+		void ensureWorkspaceSettingsModal();
+		const params = setWorkspaceCenterRoute($page.url.searchParams, target.workspace_id, tab);
+		void goto(`/?${params.toString()}`);
+	}
+
+	function updateWorkspaceSettingsTab(tab: string) {
+		if (!workspaceSettingsTarget) return;
+		const params = setWorkspaceCenterRoute(
+			$page.url.searchParams,
+			workspaceSettingsTarget.workspace_id,
+			tab
+		);
+		void goto(`/?${params.toString()}`, { replaceState: true, noScroll: true, keepFocus: true });
+	}
+
+	function closeWorkspaceSettings() {
+		workspaceSettingsTarget = null;
+		const params = clearWorkspaceCenterRoute($page.url.searchParams);
+		void goto(`/?${params.toString()}`, { replaceState: true, noScroll: true, keepFocus: true });
 	}
 
 	async function handleRemoveWorkspace(path: string) {
@@ -190,7 +280,7 @@
 		const chats = wsChatsCache.get(wsPath) ?? [];
 		wsChatsCache = new Map([...wsChatsCache, [wsPath, chats.filter((chat) => chat.id !== chatId)]]);
 		if (currentPath === wsPath && currentChatId === chatId) {
-			goto(`/?workspace=${encodeURIComponent(wsPath)}`);
+			goto(workspaceRoute(wsPath));
 		}
 	}
 
@@ -375,7 +465,7 @@
 					: 'text-gray-500 hover:text-gray-700 dark:hover:text-gray-300'}"
 			>
 				<a
-					href="/?workspace={encodeURIComponent(ws.path)}"
+					href={workspaceRoute(ws.path)}
 					class="flex items-center gap-1.5 flex-1 min-w-0 no-underline text-inherit"
 					onclick={(e) => openWorkspace(e, ws.path)}
 				>
@@ -525,11 +615,55 @@
 	/>
 {/if}
 
-{#if workspaceSettingsTarget}
-	<WorkspaceSettingsModal
-		workspace={workspaceSettingsTarget}
-		onclose={() => (workspaceSettingsTarget = null)}
-	/>
+{#if workspaceSettingsTarget && LazyWorkspaceSettingsModal}
+	{#key workspaceSettingsTarget.workspace_id}
+		<LazyWorkspaceSettingsModal
+			workspace={workspaceSettingsTarget}
+			initialTab={workspaceSettingsInitialTab}
+			onclose={closeWorkspaceSettings}
+			ontabchange={updateWorkspaceSettingsTab}
+		/>
+	{/key}
+{:else if workspaceSettingsTarget}
+	<div
+		class="fixed inset-0 z-[80] grid place-items-center bg-black/35 p-4 backdrop-blur-[1px]"
+		role="dialog"
+		aria-modal="true"
+		aria-label="Workspace Center loading"
+	>
+		<div
+			class="w-full max-w-sm rounded-2xl border border-[var(--app-border)] bg-[var(--app-bg)] p-5 shadow-2xl"
+		>
+			{#if workspaceSettingsLoadError}
+				<h2 class="text-sm font-semibold">Workspace Center could not load</h2>
+				<p class="mt-2 break-words text-xs text-[var(--app-muted-fg)]">
+					{workspaceSettingsLoadError}
+				</p>
+				<div class="mt-4 flex justify-end gap-2">
+					<button class="min-h-11 rounded-lg px-3 text-xs" onclick={closeWorkspaceSettings}
+						>Close</button
+					>
+					<button
+						class="min-h-11 rounded-lg bg-[var(--app-fg)] px-3 text-xs font-semibold text-[var(--app-bg)]"
+						disabled={workspaceSettingsLoading}
+						onclick={() => void ensureWorkspaceSettingsModal()}>Retry</button
+					>
+				</div>
+			{:else}
+				<div class="flex items-center gap-3" role="status">
+					<span
+						class="h-4 w-4 animate-spin rounded-full border-2 border-current border-r-transparent motion-reduce:animate-none"
+					></span>
+					<div>
+						<strong class="text-sm">Loading Workspace Center…</strong>
+						<p class="mt-1 text-xs text-[var(--app-muted-fg)]">
+							Loading only the Workspace management bundle.
+						</p>
+					</div>
+				</div>
+			{/if}
+		</div>
+	</div>
 {/if}
 
 {#if chatMenu}
