@@ -387,13 +387,22 @@ class WorkspaceObservabilityTests(unittest.IsolatedAsyncioTestCase):
 
         request = SimpleNamespace(
             headers={},
+            state=SimpleNamespace(auth=SimpleNamespace(user_id="user-stream-test")),
             query_params={},
             is_disconnected=AsyncMock(return_value=False),
         )
 
         with (
             patch.object(control_stream, "live_event_hub", self.hub),
-            patch.object(control_stream, "_user", new=AsyncMock(return_value="user-stream-test")),
+            patch(
+                "cptr.services.control_auth.require_control_action_memory",
+                new=AsyncMock(return_value=SimpleNamespace(context_id="memctx-stream")),
+            ) as memory_gate,
+            patch.object(
+                control_stream,
+                "_user",
+                new=AsyncMock(return_value="user-stream-test"),
+            ) as strict_auth,
             patch.object(control_stream, "workspace_projection_service", self.projection_service),
             patch.object(control_stream, "workspace_context_cache", self.cache),
             patch.object(control_stream, "workspace_metrics", self.metrics),
@@ -429,6 +438,9 @@ class WorkspaceObservabilityTests(unittest.IsolatedAsyncioTestCase):
             live_evt = await iterator.__anext__()
             self.assertIn(EVENTS.WORKSPACE_REVISION_CHANGED.name, live_evt)
             self.assertIn("rev-999", live_evt)
+
+        self.assertEqual(memory_gate.await_count, 3)
+        strict_auth.assert_awaited_once_with(request, "workspace:read")
 
     # -------------------------------------------------------------------------
     # Multi-Workspace Invalidation & Repository Scoping

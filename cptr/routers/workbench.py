@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 from cptr.models import AutonomousMonitor, ControlTask, Workspace
 from cptr.services.action_traces import action_trace_store, trace_context_from_request
-from cptr.services.control_auth import require_control_user
+from cptr.services.control_auth import require_control_user, require_owner_session_or_control_user
 from cptr.services.local_root_grants import local_root_grant_store, local_root_grants_enabled
 from cptr.services.privilege_broker import (
     AdminSessionGrantDenied,
@@ -90,6 +90,10 @@ class AdminGrantRequest(BaseModel):
 
 async def _user(request: Request, scope: str) -> str:
     return await require_control_user(request, scope)
+
+
+async def _ui_user(request: Request, scope: str) -> str:
+    return await require_owner_session_or_control_user(request, scope)
 
 
 async def _ensure_workspace_owner(user_id: str, workspace_id: str | None) -> Workspace | None:
@@ -265,7 +269,7 @@ async def create_workbench_session(request: Request, body: CreateWorkbenchSessio
 async def list_workbench_sessions(
     request: Request, limit: int = 50, include_archived: bool = False
 ):
-    user_id = await _user(request, "task:read")
+    user_id = await _ui_user(request, "task:read")
     return {
         "sessions": await workbench_session_store.list(
             owner_id=user_id,
@@ -277,7 +281,7 @@ async def list_workbench_sessions(
 
 @router.get("/workbench-sessions/{session_id}")
 async def get_workbench_session(request: Request, session_id: str):
-    user_id = await _user(request, "task:read")
+    user_id = await _ui_user(request, "task:read")
     session = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
@@ -291,7 +295,7 @@ async def get_workbench_session_events(
     after_sequence: int = 0,
     limit: int = 100,
 ):
-    user_id = await _user(request, "task:read")
+    user_id = await _ui_user(request, "task:read")
     events = await workbench_session_store.events(
         owner_id=user_id,
         session_id=session_id,
@@ -428,7 +432,7 @@ async def append_workbench_session_event(
 async def rename_workbench_session(
     request: Request, session_id: str, body: RenameWorkbenchSessionRequest
 ):
-    user_id = await _user(request, "task:write")
+    user_id = await _ui_user(request, "task:write")
     has_extended = any(
         getattr(body, k, None) is not None
         for k in (
@@ -489,7 +493,7 @@ async def grant_workbench_session_admin(
     session_id: str,
     body: AdminGrantRequest = AdminGrantRequest(),
 ):
-    user_id = await _user(request, "task:write")
+    user_id = await _ui_user(request, "task:write")
     try:
         return await admin_session_grant_store.grant(
             owner_id=user_id,
@@ -503,7 +507,7 @@ async def grant_workbench_session_admin(
 
 @router.post("/workbench-sessions/{session_id}/admin-revoke")
 async def revoke_workbench_session_admin(request: Request, session_id: str):
-    user_id = await _user(request, "task:write")
+    user_id = await _ui_user(request, "task:write")
     try:
         count = await admin_session_grant_store.revoke(
             owner_id=user_id,
@@ -521,7 +525,7 @@ async def revoke_workbench_session_admin(request: Request, session_id: str):
 
 @router.get("/workbench-sessions/{session_id}/privilege")
 async def get_workbench_session_privilege(request: Request, session_id: str):
-    user_id = await _user(request, "task:read")
+    user_id = await _ui_user(request, "task:read")
     session = await workbench_session_store.get(owner_id=user_id, session_id=session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="workbench session not found")
@@ -550,7 +554,7 @@ async def get_workbench_session_privilege(request: Request, session_id: str):
 
 @router.post("/workbench-sessions/{session_id}/archive")
 async def archive_workbench_session(request: Request, session_id: str):
-    user_id = await _user(request, "task:write")
+    user_id = await _ui_user(request, "task:write")
     session = await workbench_session_store.archive(owner_id=user_id, session_id=session_id)
     if session is None:
         raise HTTPException(status_code=404, detail="workbench session not found")

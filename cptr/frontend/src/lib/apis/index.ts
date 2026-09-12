@@ -4,15 +4,40 @@
  */
 import { clearSession } from '$lib/session';
 
-/** fetch() with credentials: 'include'. Auto-clears session on 401. */
+let sessionValidation: Promise<boolean> | null = null;
+
+async function browserSessionIsInvalid(): Promise<boolean> {
+	if (!sessionValidation) {
+		sessionValidation = fetch('/api/auth', { credentials: 'include' })
+			.then(async (response) => {
+				if (!response.ok) return response.status === 401;
+				const payload = (await response.json().catch(() => null)) as {
+					authenticated?: boolean;
+				} | null;
+				return payload?.authenticated === false;
+			})
+			.catch(() => false)
+			.finally(() => {
+				sessionValidation = null;
+			});
+	}
+	return sessionValidation;
+}
+
+/** fetch() with credentials: 'include'. Clears only a confirmed-invalid browser session. */
 export async function fetchHandler(path: string, init?: RequestInit): Promise<Response> {
 	const res = await fetch(path, {
 		...init,
 		credentials: 'include'
 	});
-	// 401 on non-auth endpoints means the session expired; auto-logout.
-	// Auth endpoints (login, session check) naturally return 401; don't intercept those.
-	if (res.status === 401 && !path.startsWith('/api/auth') && !path.startsWith('/api/config')) {
+	// Secondary APIs can have their own authentication boundary (for example Control API
+	// bearer scopes). A 401 there must not destroy a still-valid browser session.
+	if (
+		res.status === 401 &&
+		!path.startsWith('/api/auth') &&
+		!path.startsWith('/api/config') &&
+		(await browserSessionIsInvalid())
+	) {
 		clearSession();
 	}
 	return res;

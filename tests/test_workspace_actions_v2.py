@@ -144,11 +144,11 @@ class WorkspaceActionServiceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WorkspaceActionRouterTests(unittest.IsolatedAsyncioTestCase):
-    async def test_read_action_requires_workspace_read_scope(self):
+    async def test_read_action_accepts_owner_session_or_workspace_read_scope(self):
         request = SimpleNamespace()
         with (
             patch(
-                "cptr.routers.control._user",
+                "cptr.routers.control.require_owner_session_or_control_user",
                 new=AsyncMock(return_value="user-1"),
             ) as auth,
             patch(
@@ -172,11 +172,11 @@ class WorkspaceActionRouterTests(unittest.IsolatedAsyncioTestCase):
             payload={"workspace_id": "ws-1"},
         )
 
-    async def test_metadata_mutation_requires_workspace_write_scope(self):
+    async def test_metadata_mutation_accepts_owner_session_or_workspace_write_scope(self):
         request = SimpleNamespace()
         with (
             patch(
-                "cptr.routers.control._user",
+                "cptr.routers.control.require_owner_session_or_control_user",
                 new=AsyncMock(return_value="user-1"),
             ) as auth,
             patch(
@@ -197,7 +197,7 @@ class WorkspaceActionRouterTests(unittest.IsolatedAsyncioTestCase):
     async def test_unsupported_action_is_rejected_before_authentication(self):
         request = SimpleNamespace()
         with patch(
-            "cptr.routers.control._user",
+            "cptr.routers.control.require_owner_session_or_control_user",
             new=AsyncMock(return_value="user-1"),
         ) as auth:
             with self.assertRaises(HTTPException) as caught:

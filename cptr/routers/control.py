@@ -30,7 +30,7 @@ from cptr.services.workspace_availability import is_workspace_available
 from cptr.services.workbench_sessions import workbench_session_store
 from cptr.routers.state import _resolve_request_workspace_path
 from cptr.services.agent_service import AgentService
-from cptr.services.control_auth import require_control_user
+from cptr.services.control_auth import require_control_user, require_owner_session_or_control_user
 from cptr.services.control_store import SqlSupervisorStore
 from cptr.services.direct_coding_workers import DirectCodingWorkerError, resolve_direct_worker_root
 from cptr.services.guard_controls import guard_policy_service
@@ -609,7 +609,7 @@ async def workspace_os_action(request: Request, body: WorkspaceActionRequest):
             },
         )
 
-    user_id = await _user(request, scope)
+    user_id = await require_owner_session_or_control_user(request, scope)
     try:
         return await workspace_action_service.execute(
             user_id=user_id,

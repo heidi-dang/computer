@@ -56,6 +56,38 @@ async def require_control_user(request: Any, required_scope: str | None = None) 
         raise_control_auth_error(exc)
 
 
+async def require_owner_session_or_control_user(
+    request: Any, required_scope: str | None = None
+) -> str:
+    """Authenticate an owner web session or fall back to scoped Control bearer auth.
+
+    Browser-session access is intentionally opt-in at individual owner UI routes.
+    Any explicit Authorization header remains on the strict Control API path so an
+    invalid or under-scoped bearer token cannot fall back to cookie authority.
+    """
+
+    authorization = str(request.headers.get("Authorization", "") or "").strip()
+    if authorization:
+        return await require_control_user(request, required_scope)
+
+    auth = getattr(getattr(request, "state", None), "auth", None)
+    user_id = str(getattr(auth, "user_id", "") or "").strip()
+    if user_id:
+        try:
+            await require_control_action_memory(
+                request,
+                user_id=user_id,
+                required_scope=required_scope,
+            )
+        except MemoryUnavailableError:
+            raise_control_auth_error(
+                ControlMemoryUnavailable("required CPTR memory context is unavailable")
+            )
+        return user_id
+
+    return await require_control_user(request, required_scope)
+
+
 def _hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 

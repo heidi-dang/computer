@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse
 
 from cptr.routers.coding import _coding_root, _command_snapshot, _workspace
 from cptr.routers.control import _services, _user
+from cptr.services.control_auth import require_owner_session_or_control_user
 from cptr.services.live_events import (
     LiveEventEnvelope,
     command_target_key,
@@ -363,7 +364,7 @@ async def workspace_projection_endpoint(
     request: Request,
     workspace_id: str,
 ):
-    user_id = await _user(request, "workspace:read")
+    user_id = await require_owner_session_or_control_user(request, "workspace:read")
     try:
         projection = await workspace_projection_service.get_projection(
             workspace_id=workspace_id,
@@ -379,7 +380,7 @@ async def workspace_stream_snapshot_endpoint(
     request: Request,
     workspace_id: str,
 ):
-    user_id = await _user(request, "workspace:read")
+    user_id = await require_owner_session_or_control_user(request, "workspace:read")
     try:
         projection = await workspace_projection_service.get_projection(
             workspace_id=workspace_id,
@@ -400,7 +401,7 @@ async def workspace_stream_endpoint(
     request: Request,
     workspace_id: str,
 ):
-    user_id = await _user(request, "workspace:read")
+    user_id = await require_owner_session_or_control_user(request, "workspace:read")
     try:
         projection = await workspace_projection_service.get_projection(
             workspace_id=workspace_id,
