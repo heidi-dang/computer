@@ -4,10 +4,51 @@ from unittest.mock import AsyncMock, patch
 
 from cptr.services.api_keys import ApiKeyPrincipal
 from cptr.memory.service import MemoryUnavailableError
-from cptr.services.control_auth import ControlMemoryUnavailable, authenticate_control_request
+from cptr.services.control_auth import (
+    ControlMemoryUnavailable,
+    authenticate_control_request,
+    require_owner_session_or_control_user,
+)
 
 
 class ControlAuthTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_browser_session_is_accepted_without_control_bearer(self):
+        request = SimpleNamespace(
+            headers={},
+            state=SimpleNamespace(auth=SimpleNamespace(user_id="user-web")),
+        )
+        gate = AsyncMock(return_value=SimpleNamespace(context_id="memctx-web"))
+        with (
+            patch(
+                "cptr.services.control_auth.require_control_user",
+                new=AsyncMock(return_value="unexpected"),
+            ) as strict_auth,
+            patch("cptr.services.control_auth.require_control_action_memory", new=gate),
+        ):
+            user_id = await require_owner_session_or_control_user(request, "workspace:read")
+
+        self.assertEqual(user_id, "user-web")
+        strict_auth.assert_not_awaited()
+        gate.assert_awaited_once_with(
+            request,
+            user_id="user-web",
+            required_scope="workspace:read",
+        )
+
+    async def test_explicit_authorization_header_stays_on_strict_control_path(self):
+        request = SimpleNamespace(
+            headers={"Authorization": "Bearer scoped-token"},
+            state=SimpleNamespace(auth=SimpleNamespace(user_id="user-web")),
+        )
+        with patch(
+            "cptr.services.control_auth.require_control_user",
+            new=AsyncMock(return_value="user-control"),
+        ) as strict_auth:
+            user_id = await require_owner_session_or_control_user(request, "workspace:write")
+
+        self.assertEqual(user_id, "user-control")
+        strict_auth.assert_awaited_once_with(request, "workspace:write")
+
     async def test_scoped_bearer_token_is_accepted(self):
         request = SimpleNamespace(
             headers={"Authorization": "Bearer secret-token"},

@@ -349,6 +349,54 @@ class ControlStreamTests(unittest.IsolatedAsyncioTestCase):
 
         workspace_lookup.assert_awaited_once_with("user-1", "ws-1")
 
+    async def test_workspace_snapshot_http_accepts_authenticated_browser_session_without_bearer(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        app = FastAPI()
+
+        @app.middleware("http")
+        async def browser_session(request, call_next):
+            request.state.auth = SimpleNamespace(user_id="user-web")
+            return await call_next(request)
+
+        app.include_router(control_stream.router)
+
+        projection = {
+            "workspace_id": "ws-browser",
+            "name": "Browser Workspace",
+            "status": "active",
+        }
+        get_projection = AsyncMock(return_value=projection)
+        memory_gate = AsyncMock(return_value=SimpleNamespace(context_id="memctx-browser"))
+        hub = LiveEventHub(store=LiveEventStore(persistent=False))
+
+        with (
+            patch.object(control_stream, "live_event_hub", hub),
+            patch.object(
+                control_stream.workspace_projection_service,
+                "get_projection",
+                new=get_projection,
+            ),
+            patch(
+                "cptr.services.control_auth.require_control_action_memory",
+                new=memory_gate,
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                "/api/control/v1/workspaces/ws-browser/stream/snapshot",
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["snapshot"]["workspace_id"], "ws-browser")
+        get_projection.assert_awaited_once_with(
+            workspace_id="ws-browser",
+            user_id="user-web",
+        )
+        memory_gate.assert_awaited_once()
+        self.assertNotIn("authorization", {key.lower() for key in response.request.headers})
+
 
 if __name__ == "__main__":
     unittest.main()

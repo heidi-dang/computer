@@ -739,7 +739,7 @@ class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace()
         events = [{"sequence": 3, "summary": "done"}]
         with (
-            patch("cptr.routers.workbench._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.workbench._ui_user", new=AsyncMock(return_value="user_1")),
             patch(
                 "cptr.routers.workbench.workbench_session_store.events",
                 new=AsyncMock(return_value=events),
@@ -756,7 +756,7 @@ class WorkbenchSessionRouterTests(unittest.IsolatedAsyncioTestCase):
         request = SimpleNamespace()
         renamed = {"session_id": "wbs_1", "name": "New name", "status": "OPEN"}
         with (
-            patch("cptr.routers.workbench._user", new=AsyncMock(return_value="user_1")),
+            patch("cptr.routers.workbench._ui_user", new=AsyncMock(return_value="user_1")),
             patch(
                 "cptr.routers.workbench.workbench_session_store.rename",
                 new=AsyncMock(return_value=renamed),

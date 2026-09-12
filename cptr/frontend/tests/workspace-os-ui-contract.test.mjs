@@ -45,3 +45,14 @@ test('WorkspaceOsStore performs explicit replay recovery and sequence-aware hydr
 	assert.match(reducer, /event\.sequence <= state\.connection\.lastSequence/);
 	assert.match(reducer, /recovery\.replay\.events.*sort/s);
 });
+
+test('secondary API 401 cannot blindly logout a still-authenticated browser session', async () => {
+	const api = await read('lib/apis/index.ts');
+
+	assert.match(api, /browserSessionIsInvalid/);
+	assert.match(api, /fetch\('\/api\/auth', \{ credentials: 'include' \}\)/);
+	assert.match(api, /payload\?\.authenticated === false/);
+	assert.match(api, /await browserSessionIsInvalid\(\)/);
+	assert.match(api, /clearSession\(\)/);
+	assert.doesNotMatch(api, /if \(res\.status === 401[^}]*\{\s*clearSession\(\);\s*\}/s);
+});
