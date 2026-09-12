@@ -213,6 +213,16 @@ export function markWorkspaceDomainsStale(
 	};
 }
 
+export function markWorkspaceDomainsFresh(
+	state: WorkspaceOsCoreState,
+	domains: readonly WorkspaceOsDomain[]
+): WorkspaceOsCoreState {
+	return {
+		...state,
+		staleDomains: clearDomains(state.staleDomains, domains)
+	};
+}
+
 export function markWorkspaceConnection(
 	state: WorkspaceOsCoreState,
 	status: WorkspaceOsConnectionStatus,

@@ -21,7 +21,8 @@ const {
 	applyWorkspaceLiveEvent,
 	applyWorkspaceRecovery,
 	createWorkspaceOsCoreState,
-	hydrateWorkspaceProjection
+	hydrateWorkspaceProjection,
+	markWorkspaceDomainsFresh
 } = stateModule;
 
 function liveEvent(sequence, type, workspaceId = 'ws-1') {
@@ -128,6 +129,17 @@ test('a sequence gap fails conservative by marking every Workspace OS domain sta
 	assert.ok(gapped.staleDomains.includes('environment'));
 	assert.ok(gapped.staleDomains.includes('tasks'));
 	assert.ok(gapped.staleDomains.includes('privilege'));
+});
+
+test('loaded Workspace Center sections can clear only their own stale domains', () => {
+	let state = hydrateWorkspaceProjection(createWorkspaceOsCoreState('ws-1'), projection());
+	state = applyWorkspaceLiveEvent(state, liveEvent(2, 'workspace.instructions.changed'));
+	assert.ok(state.staleDomains.includes('instructions'));
+	assert.ok(state.staleDomains.includes('context'));
+
+	state = markWorkspaceDomainsFresh(state, ['instructions']);
+	assert.ok(!state.staleDomains.includes('instructions'));
+	assert.ok(state.staleDomains.includes('context'));
 });
 
 test('recovery sorts durable replay, applies each missing event once, and trusts replay cursor', () => {
