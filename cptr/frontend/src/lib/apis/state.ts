@@ -30,11 +30,31 @@ export const getWorkspaceList = () => fetchJSON<WorkspaceListItem[]>('/api/state
 
 // ── Single workspace CRUD ───────────────────────────────────────
 
+export type WorkspaceStateResponse = Record<string, unknown> & {
+	workspace_id?: string;
+	path?: string;
+	name?: string;
+	slug?: string | null;
+	workspace_type?: string;
+};
+
+export type WorkspaceSaveResponse =
+	| {
+			status: 'saved';
+			workspace_id: string;
+			slug: string | null;
+			workspace_type: string;
+			path: string;
+	  }
+	| {
+			status: 'skipped';
+	  };
+
 export const getWorkspaceState = (path: string) =>
-	fetchJSON<Record<string, unknown>>(`/api/state/workspace?path=${encodeURIComponent(path)}`);
+	fetchJSON<WorkspaceStateResponse>(`/api/state/workspace?path=${encodeURIComponent(path)}`);
 
 export const saveWorkspaceState = (path: string, data: Record<string, unknown>) =>
-	fetchHandler(`/api/state/workspace?path=${encodeURIComponent(path)}`, {
+	fetchJSON<WorkspaceSaveResponse>(`/api/state/workspace?path=${encodeURIComponent(path)}`, {
 		...jsonBody(data),
 		method: 'PUT'
 	});
