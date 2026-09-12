@@ -32,6 +32,46 @@ export interface WorkspaceSummary {
 	last_used_at?: number | null;
 }
 
+export interface WorkspaceGroupWorkspace {
+	id: string;
+	name: string;
+	slug: string | null;
+	path: string;
+	workspace_type: string;
+	available: boolean;
+	created_at: number;
+	updated_at: number | null;
+}
+
+export interface WorkspaceGroupMember {
+	id: string;
+	group_id: string;
+	workspace_id: string;
+	sort_order: number;
+	role: string;
+	primary: boolean;
+	alias: string | null;
+	enabled: boolean;
+	config: Record<string, unknown>;
+	created_at: number;
+	updated_at: number;
+	workspace: WorkspaceGroupWorkspace | null;
+}
+
+export interface WorkspaceGroup {
+	id: string;
+	user_id: string;
+	name: string;
+	slug: string;
+	description: string | null;
+	group_type: string;
+	config: Record<string, unknown>;
+	created_at: number;
+	updated_at: number;
+	member_count: number;
+	members: WorkspaceGroupMember[];
+}
+
 export interface WorkspaceRepositorySummary {
 	repository_id: string;
 	name: string;
@@ -311,6 +351,97 @@ export function openWorkspaceStream(
 	source.onerror = (event) => callbacks.onError?.(event);
 	return source;
 }
+
+export const listWorkspaceGroups = () =>
+	fetchJSON<{ groups: WorkspaceGroup[]; total: number }>('/api/workspace-groups');
+
+export const createWorkspaceGroup = (input: {
+	name: string;
+	slug?: string | null;
+	description?: string | null;
+	group_type?: string;
+	members?: Array<{
+		workspace_id: string;
+		role?: string;
+		primary?: boolean;
+		alias?: string | null;
+		sort_order?: number;
+		enabled?: boolean;
+	}>;
+}) =>
+	fetchJSON<WorkspaceGroup>('/api/workspace-groups', {
+		...jsonBody(input),
+		method: 'POST'
+	});
+
+export const updateWorkspaceGroup = (
+	groupId: string,
+	input: {
+		name?: string;
+		slug?: string;
+		description?: string | null;
+		group_type?: string;
+	}
+) =>
+	fetchJSON<WorkspaceGroup>(`/api/workspace-groups/${encodeURIComponent(groupId)}`, {
+		...jsonBody(input),
+		method: 'PATCH'
+	});
+
+export const deleteWorkspaceGroup = (groupId: string) =>
+	fetchJSON<{ deleted: boolean; id: string }>(
+		`/api/workspace-groups/${encodeURIComponent(groupId)}`,
+		{
+			method: 'DELETE'
+		}
+	);
+
+export const addWorkspaceGroupMember = (
+	groupId: string,
+	input: {
+		workspace_id: string;
+		role?: string;
+		primary?: boolean;
+		alias?: string | null;
+		sort_order?: number;
+		enabled?: boolean;
+	}
+) =>
+	fetchJSON<WorkspaceGroup>(`/api/workspace-groups/${encodeURIComponent(groupId)}/members`, {
+		...jsonBody(input),
+		method: 'POST'
+	});
+
+export const updateWorkspaceGroupMember = (
+	groupId: string,
+	workspaceId: string,
+	input: {
+		role?: string;
+		primary?: boolean;
+		alias?: string | null;
+		sort_order?: number;
+		enabled?: boolean;
+	}
+) =>
+	fetchJSON<WorkspaceGroup>(
+		`/api/workspace-groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(workspaceId)}`,
+		{
+			...jsonBody(input),
+			method: 'PATCH'
+		}
+	);
+
+export const removeWorkspaceGroupMember = (groupId: string, workspaceId: string) =>
+	fetchJSON<WorkspaceGroup>(
+		`/api/workspace-groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(workspaceId)}`,
+		{ method: 'DELETE' }
+	);
+
+export const reorderWorkspaceGroupMembers = (groupId: string, workspaceIds: string[]) =>
+	fetchJSON<WorkspaceGroup>(`/api/workspace-groups/${encodeURIComponent(groupId)}/order`, {
+		...jsonBody({ workspace_ids: workspaceIds }),
+		method: 'PUT'
+	});
 
 export const getWorkspaceHealth = (workspaceId: string) =>
 	workspaceOsAction<Record<string, unknown>>('health', { workspace_id: workspaceId });

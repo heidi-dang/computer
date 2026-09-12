@@ -2,8 +2,10 @@
 	import { toast } from 'svelte-sonner';
 	import Modal from '$lib/components/Modal.svelte';
 	import WorkspaceActivity from '$lib/components/WorkspaceActivity.svelte';
+	import WorkspaceGroups from '$lib/components/WorkspaceGroups.svelte';
 	import WorkspaceHealth from '$lib/components/WorkspaceHealth.svelte';
 	import WorkspaceOverview from '$lib/components/WorkspaceOverview.svelte';
+	import WorkspaceRepositoryTopology from '$lib/components/WorkspaceRepositoryTopology.svelte';
 	import {
 		addWorkspaceRepository,
 		createWorkspaceEnvironment,
@@ -37,6 +39,7 @@
 		| 'overview'
 		| 'general'
 		| 'repositories'
+		| 'groups'
 		| 'instructions'
 		| 'environment'
 		| 'memory'
@@ -63,6 +66,7 @@
 		{ id: 'overview', label: 'Overview' },
 		{ id: 'general', label: 'General' },
 		{ id: 'repositories', label: 'Repositories' },
+		{ id: 'groups', label: 'Groups' },
 		{ id: 'instructions', label: 'Instructions' },
 		{ id: 'environment', label: 'Environment' },
 		{ id: 'memory', label: 'Memory' },
@@ -139,6 +143,8 @@
 		switch (tab) {
 			case 'repositories':
 				return ['repositories'];
+			case 'groups':
+				return [];
 			case 'instructions':
 				return ['instructions'];
 			case 'environment':
@@ -198,6 +204,8 @@
 					await refreshProjectionSummary();
 					break;
 				case 'general':
+					break;
+				case 'groups':
 					break;
 				case 'repositories': {
 					const [repoResult, catalogResult] = await Promise.all([
@@ -563,6 +571,7 @@
 								Explicit logical repository membership. Worker worktrees remain ephemeral.
 							</p>
 						</div>
+						<WorkspaceRepositoryTopology workspaceName={name} {repositories} />
 						<div class="flex flex-col gap-2 sm:flex-row">
 							<select class="workspace-field flex-1" bind:value={selectedRepository}>
 								<option value="">Add an existing repository…</option>
@@ -623,6 +632,8 @@
 							</div>
 						{/each}
 					</section>
+				{:else if activeTab === 'groups'}
+					<WorkspaceGroups workspaceId={workspace.workspace_id} workspaceName={name} />
 				{:else if activeTab === 'instructions'}
 					<section class="space-y-4">
 						<div>
