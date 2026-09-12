@@ -114,11 +114,204 @@ export interface WorkspaceCheckpointView {
 	created_at_ms: number;
 }
 
+export const WORKSPACE_LIVE_EVENT_TYPES = [
+	'workspace.created',
+	'workspace.updated',
+	'workspace.deleted',
+	'workspace.context.updated',
+	'workspace.context.invalidated',
+	'workspace.projection.updated',
+	'workspace.revision.changed',
+	'workspace.role.changed',
+	'workspace.checkout.changed',
+	'workspace.checkpoint.changed',
+	'workspace.memory.changed',
+	'workspace.environment.changed',
+	'workspace.instructions.changed'
+] as const;
+
+export type WorkspaceLiveEventType = (typeof WORKSPACE_LIVE_EVENT_TYPES)[number];
+
+export interface WorkspaceLiveEvent {
+	version: number;
+	event_id: string;
+	sequence: number;
+	timestamp: string;
+	target: { type: string; id: string };
+	task_id: string | null;
+	monitor_id: string | null;
+	worker_task_id: string | null;
+	type: WorkspaceLiveEventType | string;
+	payload: Record<string, unknown>;
+	redaction_applied: boolean;
+}
+
+export interface WorkspaceProjectionRepository {
+	repository_id: string;
+	name: string;
+	role: string;
+	primary: boolean;
+	canonical_remote: string;
+	default_branch: string | null;
+	checkout: null | {
+		id: string;
+		path: string;
+		branch: string | null;
+		revision: string | null;
+		available: boolean;
+	};
+}
+
+export interface WorkspaceProjectionWorkbenchSession {
+	session_id: string;
+	name: string;
+	workspace_id: string | null;
+	active_workspace_id: string | null;
+	active_target_type: string | null;
+	active_target_id: string | null;
+	event_count: number;
+	updated_at: number;
+}
+
+export interface WorkspaceContextCacheProjection {
+	is_cached: boolean;
+	fingerprint: string | null;
+	cached_at_ms: number | null;
+	expires_at_ms: number | null;
+	access_count: number;
+	tokens: Record<string, string>;
+}
+
+export interface WorkspaceMetricsProjection {
+	hits: number;
+	misses: number;
+	hit_ratio: number;
+	evictions: number;
+	total_invalidations: number;
+	invalidations_by_reason: Record<string, number>;
+	events_published: Record<string, number>;
+	projections_generated: number;
+}
+
+export interface WorkspaceProjection {
+	version: number;
+	workspace_id: string;
+	user_id: string;
+	name: string;
+	slug: string | null;
+	path: string;
+	workspace_type: string;
+	status: string;
+	health: {
+		status: string;
+		checks: {
+			path_configured: boolean;
+			path_exists: boolean;
+			repositories_total: number;
+			repositories_healthy: number;
+			has_primary_repo: boolean;
+			context_cached: boolean;
+			workbench_sessions_active: number;
+		};
+	};
+	repositories: WorkspaceProjectionRepository[];
+	workbench: {
+		active_sessions_count: number;
+		sessions: WorkspaceProjectionWorkbenchSession[];
+	};
+	context_cache: WorkspaceContextCacheProjection;
+	recent_events: WorkspaceLiveEvent[];
+	metrics: WorkspaceMetricsProjection;
+	fingerprint: string;
+	generated_at_ms: number;
+}
+
+export interface WorkspaceLiveReplay {
+	target_key: string;
+	after_sequence: number;
+	last_sequence: number;
+	events: WorkspaceLiveEvent[];
+}
+
+export interface WorkspaceStreamSnapshot {
+	version: number;
+	target: 'workspace';
+	snapshot: WorkspaceProjection;
+	replay: WorkspaceLiveReplay;
+}
+
+export interface WorkspaceStreamCallbacks {
+	onOpen?: () => void;
+	onSnapshot?: (projection: WorkspaceProjection) => void;
+	onEvent?: (event: WorkspaceLiveEvent) => void;
+	onError?: (event: Event) => void;
+	onProtocolError?: (error: unknown) => void;
+}
+
 export async function workspaceOsAction<T>(
 	action: WorkspaceOsAction,
 	payload: Record<string, unknown> = {}
 ): Promise<T> {
 	return fetchJSON<T>('/api/control/v1/workspace-os/action', jsonBody({ action, payload }));
+}
+
+export const getWorkspaceProjection = (workspaceId: string) =>
+	fetchJSON<WorkspaceProjection>(
+		`/api/control/v1/workspaces/${encodeURIComponent(workspaceId)}/projection`
+	);
+
+export const getWorkspaceStreamSnapshot = (workspaceId: string, afterSequence = 0) =>
+	fetchJSON<WorkspaceStreamSnapshot>(
+		`/api/control/v1/workspaces/${encodeURIComponent(workspaceId)}/stream/snapshot?after=${Math.max(0, Math.trunc(afterSequence))}`
+	);
+
+export function openWorkspaceStream(
+	workspaceId: string,
+	afterSequence: number,
+	callbacks: WorkspaceStreamCallbacks
+): EventSource {
+	if (typeof EventSource === 'undefined') {
+		throw new Error('Workspace live stream requires EventSource support');
+	}
+	const source = new EventSource(
+		`/api/control/v1/workspaces/${encodeURIComponent(workspaceId)}/stream?after=${Math.max(0, Math.trunc(afterSequence))}`
+	);
+
+	const parseSnapshot = (message: MessageEvent<string>) => {
+		try {
+			const data = JSON.parse(message.data) as {
+				target?: string;
+				workspace_id?: string;
+				snapshot?: WorkspaceProjection;
+			};
+			if (!data.snapshot || data.workspace_id !== workspaceId) {
+				throw new Error('Workspace stream snapshot does not match the requested workspace');
+			}
+			callbacks.onSnapshot?.(data.snapshot);
+		} catch (error) {
+			callbacks.onProtocolError?.(error);
+		}
+	};
+
+	const parseEvent = (message: MessageEvent<string>) => {
+		try {
+			const event = JSON.parse(message.data) as WorkspaceLiveEvent;
+			if (event.target?.type !== 'workspace' || event.target.id !== workspaceId) {
+				throw new Error('Workspace live event target does not match the requested workspace');
+			}
+			callbacks.onEvent?.(event);
+		} catch (error) {
+			callbacks.onProtocolError?.(error);
+		}
+	};
+
+	source.addEventListener('snapshot', (event) => parseSnapshot(event as MessageEvent<string>));
+	for (const eventType of WORKSPACE_LIVE_EVENT_TYPES) {
+		source.addEventListener(eventType, (event) => parseEvent(event as MessageEvent<string>));
+	}
+	source.onopen = () => callbacks.onOpen?.();
+	source.onerror = (event) => callbacks.onError?.(event);
+	return source;
 }
 
 export const getWorkspaceHealth = (workspaceId: string) =>

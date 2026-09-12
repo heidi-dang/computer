@@ -31,6 +31,7 @@ import { createBrowserSession, deleteBrowserSession, listBrowserSessions } from 
 import { changeLocale, i18next } from '$lib/i18n';
 import { requestConfirm } from '$lib/stores/confirm';
 import { streamingChatTabs } from '$lib/stores/chat';
+import { workspaceOsStore } from '$lib/stores/workspace-os.svelte';
 import { keybindings, loadKeybindings } from '$lib/stores/keybindings';
 import { defaultPwaPreferences, type PwaPreferences } from '$lib/intents/types';
 import { getPathDisplayName, isSupportedWorkspacePath } from '$lib/utils/paths';
@@ -110,7 +111,7 @@ export interface EditorSplit {
 }
 
 export interface WorkspaceState {
-	workspace_id?: string;
+	workspace_id: string;
 	name: string;
 	slug?: string | null;
 	workspace_type?: string;
@@ -174,17 +175,17 @@ function createDefaultGroup(): EditorGroup {
 	};
 }
 
-function createDefaultWorkspace(path: string): WorkspaceState {
-	const name = getPathDisplayName(path);
+function createDefaultWorkspace(
+	identity: Pick<WorkspaceState, 'workspace_id' | 'path' | 'name' | 'slug' | 'workspace_type'>
+): WorkspaceState {
 	return {
-		name,
-		path,
+		...identity,
 		groups: [createDefaultGroup()],
 		activeGroupId: 'default',
 		layout: { type: 'group', groupId: 'default' },
 		splitDirection: 'horizontal',
 		splitRatio: 0.5,
-		fileBrowserCwd: path
+		fileBrowserCwd: identity.path
 	};
 }
 
@@ -683,14 +684,40 @@ export async function loadWorkspaceList(): Promise<void> {
 
 export async function loadWorkspace(path: string): Promise<void> {
 	if (!isSupportedWorkspacePath(path)) {
+		workspaceOsStore.disconnect();
 		currentWorkspace.set(null);
 		return;
 	}
 	try {
-		const wsData = await getWorkspaceState(path);
-		const canonicalWorkspacePath = typeof wsData.path === 'string' ? wsData.path : path;
+		let wsData = await getWorkspaceState(path);
+		let canonicalWorkspacePath = typeof wsData.path === 'string' ? wsData.path : path;
+		let workspaceId =
+			typeof wsData.workspace_id === 'string' && wsData.workspace_id.trim()
+				? wsData.workspace_id.trim()
+				: '';
+		const workspaceName =
+			typeof wsData.name === 'string' && wsData.name.trim()
+				? wsData.name
+				: getPathDisplayName(canonicalWorkspacePath);
 
-		if (wsData && wsData.groups && (wsData.groups as EditorGroup[]).length > 0) {
+		if (!workspaceId) {
+			const created = await saveWorkspaceState(canonicalWorkspacePath, { name: workspaceName });
+			if (created.status !== 'saved' || !created.workspace_id) {
+				throw new Error('Workspace identity could not be created');
+			}
+			workspaceId = created.workspace_id;
+			canonicalWorkspacePath = created.path;
+			wsData = {
+				...wsData,
+				workspace_id: created.workspace_id,
+				path: created.path,
+				name: workspaceName,
+				slug: created.slug,
+				workspace_type: created.workspace_type
+			};
+		}
+
+		if (wsData.groups && (wsData.groups as EditorGroup[]).length > 0) {
 			// Validate terminal sessions are still alive
 			let aliveSessions: Set<string> = new Set();
 			let aliveBrowserSessions: Set<string> = new Set();
@@ -702,7 +729,7 @@ export async function loadWorkspace(path: string): Promise<void> {
 				aliveBrowserSessions = new Set(await listBrowserSessions());
 			} catch {}
 
-			const ws = wsData as unknown as WorkspaceState;
+			const ws = { ...wsData, workspace_id: workspaceId } as unknown as WorkspaceState;
 			ws.groups = await Promise.all(
 				ws.groups.map(async (group) => ({
 					...group,
@@ -765,6 +792,7 @@ export async function loadWorkspace(path: string): Promise<void> {
 
 			currentWorkspace.set({
 				...ws,
+				workspace_id: workspaceId,
 				path: canonicalWorkspacePath,
 				groups,
 				activeGroupId,
@@ -779,10 +807,21 @@ export async function loadWorkspace(path: string): Promise<void> {
 				fileBrowserCwd: ws.fileBrowserCwd ?? canonicalWorkspacePath
 			});
 		} else {
-			// First time opening this workspace, create defaults
-			currentWorkspace.set(createDefaultWorkspace(canonicalWorkspacePath));
+			// First open still receives a durable UUID before the default UI state is exposed.
+			currentWorkspace.set(
+				createDefaultWorkspace({
+					workspace_id: workspaceId,
+					path: canonicalWorkspacePath,
+					name: workspaceName,
+					slug: typeof wsData.slug === 'string' ? wsData.slug : null,
+					workspace_type:
+						typeof wsData.workspace_type === 'string' ? wsData.workspace_type : 'project'
+				})
+			);
 		}
+		void workspaceOsStore.connect(workspaceId);
 	} catch {
+		workspaceOsStore.disconnect();
 		currentWorkspace.set(null);
 	}
 }
@@ -950,6 +989,7 @@ export async function removeWorkspace(path: string): Promise<void> {
 	// If this was the current workspace, clear it
 	const ws = get(currentWorkspace);
 	if (ws?.path === path) {
+		workspaceOsStore.disconnect();
 		currentWorkspace.set(null);
 	}
 }
