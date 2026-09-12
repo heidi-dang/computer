@@ -17,11 +17,18 @@ export type WorkspaceOsAction =
 	| 'instruction_preview'
 	| 'instruction_save'
 	| 'environment_profiles'
+	| 'environment_versions'
 	| 'environment_create'
 	| 'environment_version_create'
 	| 'environment_set_active_version'
 	| 'environment_set_target'
-	| 'checkpoints';
+	| 'checkpoints'
+	| 'tasks'
+	| 'task_summary'
+	| 'task_create'
+	| 'task_update_status'
+	| 'task_pin_repository'
+	| 'task_add_evidence';
 
 export interface WorkspaceSummary {
 	workspace_id: string;
@@ -103,6 +110,17 @@ export interface RepositoryCatalogItem {
 	default_branch: string | null;
 }
 
+export interface WorkspaceInstructionPreview {
+	workspace_id: string;
+	version: number | null;
+	content: string;
+	content_hash: string | null;
+	compiled_instructions: string;
+	source: 'workspace_instruction' | 'instruction_files' | 'candidate' | 'none' | string;
+	char_count: number;
+	estimated_tokens: number;
+}
+
 export interface WorkspaceInstruction {
 	id: string;
 	workspace_id: string;
@@ -112,6 +130,24 @@ export interface WorkspaceInstruction {
 	is_current: boolean;
 	change_summary: string | null;
 	created_at: number;
+}
+
+export interface EnvironmentVersionView {
+	version_id: string;
+	version_number: number;
+	digest: string;
+	runtime_profile: string;
+	environment_variable_names: string[];
+	package_count: number;
+	setting_keys: string[];
+	credential_refs: Array<{
+		logical_name?: string;
+		source_type?: string;
+		target_env_var?: string;
+		consumers?: string[];
+	}>;
+	parent_version_id: string | null;
+	created_at_ms: number;
 }
 
 export interface EnvironmentProfileView {
@@ -124,22 +160,77 @@ export interface EnvironmentProfileView {
 	is_archived: boolean;
 	created_at_ms: number;
 	updated_at_ms: number;
-	active_version: null | {
-		version_id: string;
-		version_number: number;
-		digest: string;
-		runtime_profile: string;
-		environment_variable_names: string[];
-		package_count: number;
-		setting_keys: string[];
-		credential_refs: Array<{
-			logical_name?: string;
-			source_type?: string;
-			target_env_var?: string;
-			consumers?: string[];
-		}>;
-		parent_version_id: string | null;
-		created_at_ms: number;
+	active_version: EnvironmentVersionView | null;
+}
+
+export interface WorkspaceTaskView {
+	id: string;
+	user_id: string;
+	workspace_id: string;
+	title: string;
+	description: string;
+	status: 'OPEN' | 'IN_PROGRESS' | 'VERIFIED' | 'INTEGRATED' | 'CLOSED' | 'FAILED' | string;
+	metadata: Record<string, unknown>;
+	created_at: number;
+	updated_at: number;
+	closed_at: number | null;
+}
+
+export interface WorkspaceTaskRepositoryState {
+	repo_path: string;
+	pinned_revision: string;
+	head_revision: string;
+	current_revision?: string;
+	branch: string | null;
+	current_branch?: string | null;
+	is_diverged?: boolean;
+	[key: string]: unknown;
+}
+
+export interface WorkspaceTaskEvidenceView {
+	id: string;
+	task_id: string;
+	worker_id: string | null;
+	repo_path: string | null;
+	kind: string;
+	status: string;
+	summary: string;
+	command: string | null;
+	details: Record<string, unknown>;
+	fingerprint: string | null;
+	created_at: number;
+}
+
+export interface WorkspaceTaskSummaryView {
+	task: WorkspaceTaskView;
+	repositories: WorkspaceTaskRepositoryState[];
+	workers: Array<Record<string, unknown>>;
+	verification: {
+		task_id: string;
+		total: number;
+		passed: number;
+		failed: number;
+		pending: number;
+		observed: number;
+		verified: boolean;
+		by_kind: Record<string, Record<string, number>>;
+		failures: string[];
+	};
+	has_divergence: boolean;
+	all_workers_clean: boolean;
+	all_passed: boolean;
+}
+
+export interface WorkspaceContextView {
+	workspace: WorkspaceSummary;
+	instruction_version: number | null;
+	memory_version: number;
+	environment_profile: Record<string, unknown> | null;
+	context: {
+		snapshot_id?: string;
+		content_digest?: string;
+		diagnostics?: string[];
+		[key: string]: unknown;
 	};
 }
 
@@ -167,7 +258,8 @@ export const WORKSPACE_LIVE_EVENT_TYPES = [
 	'workspace.checkpoint.changed',
 	'workspace.memory.changed',
 	'workspace.environment.changed',
-	'workspace.instructions.changed'
+	'workspace.instructions.changed',
+	'workspace.task.changed'
 ] as const;
 
 export type WorkspaceLiveEventType = (typeof WORKSPACE_LIVE_EVENT_TYPES)[number];
@@ -517,6 +609,15 @@ export const getWorkspaceInstructionHistory = (workspaceId: string, limit = 50) 
 		total: number;
 	}>('instruction_history', { workspace_id: workspaceId, limit });
 
+export const previewWorkspaceInstructions = (workspaceId: string, candidateContent?: string) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; preview: WorkspaceInstructionPreview }>(
+		'instruction_preview',
+		{
+			workspace_id: workspaceId,
+			candidate_content: candidateContent
+		}
+	);
+
 export const saveWorkspaceInstructions = (
 	workspaceId: string,
 	content: string,
@@ -539,6 +640,21 @@ export const getWorkspaceEnvironmentProfiles = (workspaceId: string) =>
 		{ workspace_id: workspaceId }
 	);
 
+export const getWorkspaceEnvironmentVersions = (
+	workspaceId: string,
+	profileId: string,
+	limit = 100
+) =>
+	workspaceOsAction<{
+		workspace: WorkspaceSummary;
+		profile: EnvironmentProfileView;
+		versions: EnvironmentVersionView[];
+	}>('environment_versions', {
+		workspace_id: workspaceId,
+		profile_id: profileId,
+		limit
+	});
+
 export const createWorkspaceEnvironment = (
 	workspaceId: string,
 	input: { name: string; description?: string; initial_spec?: Record<string, unknown> }
@@ -548,23 +664,122 @@ export const createWorkspaceEnvironment = (
 		{ workspace_id: workspaceId, ...input }
 	);
 
-export const getWorkspaceCheckpoints = (workspaceId: string, limit = 50) =>
+export const createWorkspaceEnvironmentVersion = (
+	workspaceId: string,
+	profileId: string,
+	spec: Record<string, unknown>,
+	makeActive = true
+) =>
+	workspaceOsAction<{
+		workspace: WorkspaceSummary;
+		profile: EnvironmentProfileView;
+		version: EnvironmentVersionView;
+	}>('environment_version_create', {
+		workspace_id: workspaceId,
+		profile_id: profileId,
+		spec,
+		make_active: makeActive
+	});
+
+export const setWorkspaceEnvironmentActiveVersion = (
+	workspaceId: string,
+	profileId: string,
+	versionId: string
+) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; profile: EnvironmentProfileView }>(
+		'environment_set_active_version',
+		{
+			workspace_id: workspaceId,
+			profile_id: profileId,
+			version_id: versionId
+		}
+	);
+
+export const setWorkspaceEnvironmentTarget = (
+	workspaceId: string,
+	profileId: string,
+	targetName: string | null
+) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; profile: EnvironmentProfileView }>(
+		'environment_set_target',
+		{
+			workspace_id: workspaceId,
+			profile_id: profileId,
+			target_name: targetName
+		}
+	);
+
+export const getWorkspaceCheckpoints = (workspaceId: string, limit = 50, taskKey?: string) =>
 	workspaceOsAction<{
 		workspace: WorkspaceSummary;
 		memory_version: number;
 		checkpoints: WorkspaceCheckpointView[];
-	}>('checkpoints', { workspace_id: workspaceId, limit });
+	}>('checkpoints', { workspace_id: workspaceId, limit, task_key: taskKey });
+
+export const listWorkspaceTasks = (workspaceId: string, status?: string) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; tasks: WorkspaceTaskView[] }>('tasks', {
+		workspace_id: workspaceId,
+		status
+	});
+
+export const getWorkspaceTaskSummary = (workspaceId: string, taskId: string) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; summary: WorkspaceTaskSummaryView }>(
+		'task_summary',
+		{ workspace_id: workspaceId, task_id: taskId }
+	);
+
+export const createWorkspaceTask = (
+	workspaceId: string,
+	input: { title: string; description?: string; metadata?: Record<string, unknown> }
+) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; task: WorkspaceTaskView }>('task_create', {
+		workspace_id: workspaceId,
+		...input
+	});
+
+export const updateWorkspaceTaskStatus = (
+	workspaceId: string,
+	taskId: string,
+	status: string,
+	input: { description?: string; metadata?: Record<string, unknown> } = {}
+) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; task: WorkspaceTaskView }>(
+		'task_update_status',
+		{ workspace_id: workspaceId, task_id: taskId, status, ...input }
+	);
+
+export const pinWorkspaceTaskRepository = (
+	workspaceId: string,
+	taskId: string,
+	input: { repo_path?: string; pinned_revision?: string; branch?: string } = {}
+) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; pin: WorkspaceTaskRepositoryState }>(
+		'task_pin_repository',
+		{ workspace_id: workspaceId, task_id: taskId, ...input }
+	);
+
+export const addWorkspaceTaskEvidence = (
+	workspaceId: string,
+	taskId: string,
+	input: {
+		kind: string;
+		status: string;
+		summary: string;
+		worker_id?: string;
+		repo_path?: string;
+		command?: string;
+		details?: Record<string, unknown>;
+		fingerprint?: string;
+	}
+) =>
+	workspaceOsAction<{ workspace: WorkspaceSummary; evidence: WorkspaceTaskEvidenceView }>(
+		'task_add_evidence',
+		{ workspace_id: workspaceId, task_id: taskId, ...input }
+	);
 
 export const getWorkspaceContext = (workspaceId: string) =>
-	workspaceOsAction<{
-		workspace: WorkspaceSummary;
-		instruction_version: number | null;
-		memory_version: number;
-		environment_profile: Record<string, unknown> | null;
-		context: {
-			snapshot_id?: string;
-			content_digest?: string;
-			diagnostics?: string[];
-			[key: string]: unknown;
-		};
-	}>('context', { workspace_id: workspaceId, max_chars: 9000, memory_max_chars: 3000 });
+	workspaceOsAction<WorkspaceContextView>('context', {
+		workspace_id: workspaceId,
+		max_chars: 9000,
+		memory_max_chars: 3000
+	});

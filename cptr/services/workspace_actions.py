@@ -15,6 +15,7 @@ from sqlalchemy import select
 from cptr.memory.domain import PrepareContextInput
 from cptr.memory.service import MemoryUnavailableError, get_memory_service
 from cptr.memory.workspace import resolve_workspace_namespace
+from cptr.models.environment_profile import EnvironmentProfileVersion
 from cptr.models.workspaces import (
     Repository,
     RepositoryCheckout,
@@ -54,6 +55,7 @@ from cptr.services.workspace_resolver import (
     WorkspaceResolver,
 )
 from cptr.services.workbench_sessions import workbench_session_store
+from cptr.services.workspace_tasks import WorkspaceTaskError, workspace_task_service
 from cptr.utils.db import get_db
 from cptr.utils.identity import identity_for_user_id
 from cptr.utils.redaction import redact_sensitive
@@ -71,7 +73,10 @@ READ_ACTIONS = frozenset(
         "instruction_history",
         "instruction_preview",
         "environment_profiles",
+        "environment_versions",
         "checkpoints",
+        "tasks",
+        "task_summary",
     }
 )
 WRITE_ACTIONS = frozenset(
@@ -88,6 +93,10 @@ WRITE_ACTIONS = frozenset(
         "environment_version_create",
         "environment_set_active_version",
         "environment_set_target",
+        "task_create",
+        "task_update_status",
+        "task_pin_repository",
+        "task_add_evidence",
         "workspace_update",
         "repository_add",
         "repository_update",
@@ -550,6 +559,7 @@ class WorkspaceActionService:
             "revision": EVENTS.WORKSPACE_REVISION_CHANGED.name,
             "role": EVENTS.WORKSPACE_ROLE_CHANGED.name,
             "canonical_checkout": EVENTS.WORKSPACE_CHECKOUT_CHANGED.name,
+            "task": EVENTS.WORKSPACE_TASK_CHANGED.name,
         }
         await workspace_context_cache.invalidate(
             workspace_id,
@@ -1042,6 +1052,45 @@ class WorkspaceActionService:
             "profiles": result,
         }
 
+    async def environment_versions(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        profile_id: str,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        async with await get_db() as db:
+            profile = await self._owned_environment_profile(
+                db=db,
+                user_id=user_id,
+                workspace_id=str(workspace.id),
+                profile_id=profile_id,
+            )
+            stmt = (
+                select(EnvironmentProfileVersion)
+                .where(EnvironmentProfileVersion.profile_id == str(profile.id))
+                .order_by(EnvironmentProfileVersion.version_number.desc())
+                .limit(max(1, min(int(limit), 200)))
+            )
+            versions = list((await db.scalars(stmt)).all())
+            active = (
+                await EnvironmentProfileService.get_version(db, str(profile.active_version_id))
+                if profile.active_version_id
+                else None
+            )
+            safe_profile = _safe_environment_profile(profile, active)
+        return {
+            "workspace": _workspace_summary(workspace),
+            "profile": safe_profile,
+            "versions": [_safe_environment_version(version) for version in versions],
+        }
+
     async def _owned_environment_profile(
         self,
         *,
@@ -1225,6 +1274,172 @@ class WorkspaceActionService:
             axis="environment",
         )
         return {"workspace": _workspace_summary(workspace), "profile": safe}
+
+    async def tasks(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        status: str | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        rows = await workspace_task_service.list_tasks(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            status=status,
+        )
+        return {"workspace": _workspace_summary(workspace), "tasks": rows}
+
+    async def task_summary(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        task_id: str,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        summary = await workspace_task_service.summary(
+            user_id=user_id,
+            workspace=workspace,
+            task_id=task_id,
+        )
+        return {"workspace": _workspace_summary(workspace), "summary": summary}
+
+    async def task_create(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        title: str,
+        description: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        task = await workspace_task_service.create_task(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            title=title,
+            description=description,
+            metadata=metadata,
+        )
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="task",
+        )
+        return {"workspace": _workspace_summary(workspace), "task": task}
+
+    async def task_update_status(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        task_id: str,
+        status: str,
+        description: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        task = await workspace_task_service.update_task_status(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            task_id=task_id,
+            status=status,
+            description=description,
+            metadata=metadata,
+        )
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="task",
+        )
+        return {"workspace": _workspace_summary(workspace), "task": task}
+
+    async def task_pin_repository(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        task_id: str,
+        repo_path: str = ".",
+        pinned_revision: str | None = None,
+        branch: str | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        pin = await workspace_task_service.pin_repository(
+            user_id=user_id,
+            workspace=workspace,
+            task_id=task_id,
+            repo_path=repo_path,
+            pinned_revision=pinned_revision,
+            branch=branch,
+        )
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="task",
+        )
+        return {"workspace": _workspace_summary(workspace), "pin": pin}
+
+    async def task_add_evidence(
+        self,
+        *,
+        user_id: str,
+        reference: str,
+        task_id: str,
+        kind: str,
+        status: str,
+        summary: str,
+        worker_id: str | None = None,
+        repo_path: str | None = None,
+        command: str | None = None,
+        details: dict[str, Any] | None = None,
+        fingerprint: str | None = None,
+    ) -> dict[str, Any]:
+        workspace = await self._resolve(
+            user_id=user_id,
+            reference=reference,
+            allow_fuzzy=False,
+        )
+        evidence = await workspace_task_service.add_evidence(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            task_id=task_id,
+            kind=kind,
+            status=status,
+            summary=summary,
+            worker_id=worker_id,
+            repo_path=repo_path,
+            command=command,
+            details=details,
+            fingerprint=fingerprint,
+        )
+        await self._invalidate_axis(
+            user_id=user_id,
+            workspace_id=str(workspace.id),
+            axis="task",
+        )
+        return {"workspace": _workspace_summary(workspace), "evidence": evidence}
 
     async def checkpoints(
         self,
@@ -1483,11 +1698,18 @@ class WorkspaceActionService:
             "instruction_preview",
             "instruction_save",
             "environment_profiles",
+            "environment_versions",
             "environment_create",
             "environment_version_create",
             "environment_set_active_version",
             "environment_set_target",
             "checkpoints",
+            "tasks",
+            "task_summary",
+            "task_create",
+            "task_update_status",
+            "task_pin_repository",
+            "task_add_evidence",
             "workspace_update",
             "repository_add",
             "repository_update",
@@ -1521,6 +1743,8 @@ class WorkspaceActionService:
                 return await self.instruction_save(user_id=user_id, **body)
             if op == "environment_profiles":
                 return await self.environment_profiles(user_id=user_id, **body)
+            if op == "environment_versions":
+                return await self.environment_versions(user_id=user_id, **body)
             if op == "environment_create":
                 return await self.environment_create(user_id=user_id, **body)
             if op == "environment_version_create":
@@ -1531,6 +1755,18 @@ class WorkspaceActionService:
                 return await self.environment_set_target(user_id=user_id, **body)
             if op == "checkpoints":
                 return await self.checkpoints(user_id=user_id, **body)
+            if op == "tasks":
+                return await self.tasks(user_id=user_id, **body)
+            if op == "task_summary":
+                return await self.task_summary(user_id=user_id, **body)
+            if op == "task_create":
+                return await self.task_create(user_id=user_id, **body)
+            if op == "task_update_status":
+                return await self.task_update_status(user_id=user_id, **body)
+            if op == "task_pin_repository":
+                return await self.task_pin_repository(user_id=user_id, **body)
+            if op == "task_add_evidence":
+                return await self.task_add_evidence(user_id=user_id, **body)
             if op == "workspace_update":
                 return await self.workspace_update(user_id=user_id, **body)
             if op == "groups":
@@ -1584,6 +1820,12 @@ class WorkspaceActionService:
                 str(getattr(exc, "code", "WORKSPACE_INSTRUCTION_ERROR")),
                 str(exc),
                 status_code=int(getattr(exc, "status_code", 400)),
+            ) from exc
+        except WorkspaceTaskError as exc:
+            raise WorkspaceActionError(
+                str(exc.code),
+                str(exc),
+                status_code=int(exc.status_code),
             ) from exc
         except EnvironmentProfileNotFoundError as exc:
             raise WorkspaceActionError(

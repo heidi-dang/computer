@@ -123,6 +123,11 @@ class EventDefinitions:
         "Workspace steering or system instructions were changed.",
         "Workspace instructions changed",
     )
+    WORKSPACE_TASK_CHANGED = EventDefinition(
+        "workspace.task.changed",
+        "A Workspace Task or its verification state was changed.",
+        "Workspace task changed",
+    )
 
 
 EVENTS = EventDefinitions()
