@@ -10,6 +10,7 @@
 	} from '$lib/stores';
 	import { chatEnabled, updateChatStatuses } from '$lib/stores/chat';
 	import { socketStore } from '$lib/stores/socket.svelte';
+	import { workspaceOsStore } from '$lib/stores/workspace-os.svelte';
 	import {
 		deleteChat as apiDeleteChat,
 		getChats,
@@ -51,6 +52,8 @@
 	let wsChatsLoading = $state<Set<string>>(new Set());
 	let currentPath = $derived($currentWorkspace?.path ?? null);
 	let currentChatId = $derived($activeTab?.type === 'chat' ? $activeTab.path : null);
+	let liveWorkspaceId = $derived(workspaceOsStore.workspaceId);
+	let liveWorkspaceStatus = $derived(workspaceOsStore.connection.status);
 	const WS_CHATS_PAGE_SIZE = 5;
 
 	function toggleWorkspaceExpand(path: string) {
@@ -400,6 +403,15 @@
 						<Icon name="folder" size={14} />
 					{/if}
 					<span class="min-w-0 truncate text-left">{ws.name}</span>
+					{#if ws.workspace_id === liveWorkspaceId}
+						<span
+							class="workspace-live-indicator"
+							data-status={liveWorkspaceStatus}
+							role="status"
+							aria-label={`Workspace OS ${liveWorkspaceStatus}`}
+							title={`Workspace OS ${liveWorkspaceStatus}`}
+						></span>
+					{/if}
 					{#if ws.unread_count > 0}
 						<span
 							class="inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-md bg-sky-500/10 px-1 text-[0.625rem] font-semibold text-sky-600 dark:bg-sky-400/10 dark:text-sky-300"
@@ -484,7 +496,7 @@
 		anchor={wsMenuAnchor}
 		items={[
 			{
-				label: 'Workspace settings',
+				label: 'Workspace Center',
 				icon: 'settings',
 				onclick: () => openWorkspaceSettings(wsMenuPath!)
 			},
@@ -539,6 +551,32 @@
 
 	.workspace-row:hover {
 		background: var(--app-hover);
+	}
+
+	.workspace-live-indicator {
+		width: 0.42rem;
+		height: 0.42rem;
+		flex: none;
+		border-radius: 999px;
+		background: var(--app-fg-subtle);
+		opacity: 0.5;
+	}
+
+	.workspace-live-indicator[data-status='live'] {
+		background: rgb(34 197 94);
+		opacity: 0.9;
+		box-shadow: 0 0 0 0.15rem rgb(34 197 94 / 0.12);
+	}
+
+	.workspace-live-indicator[data-status='connecting'],
+	.workspace-live-indicator[data-status='reconnecting'] {
+		background: rgb(234 179 8);
+		opacity: 0.85;
+	}
+
+	.workspace-live-indicator[data-status='failed'] {
+		background: rgb(239 68 68);
+		opacity: 0.9;
 	}
 
 	@media (max-width: 767px) {

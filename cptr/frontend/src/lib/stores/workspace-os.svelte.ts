@@ -9,8 +9,10 @@ import {
 	createWorkspaceOsCoreState,
 	hydrateWorkspaceProjection,
 	markWorkspaceConnection,
+	markWorkspaceDomainsFresh,
 	markWorkspaceDomainsStale,
-	type WorkspaceOsCoreState
+	type WorkspaceOsCoreState,
+	type WorkspaceOsDomain
 } from '$lib/stores/workspace-os-state';
 
 const RECOVERY_PAGE_SIZE = 200;
@@ -241,5 +243,9 @@ export const workspaceOsStore = {
 		const workspaceId = _state.workspaceId;
 		if (!workspaceId) return Promise.resolve();
 		return refreshProjectionFor(workspaceId, _generation);
+	},
+
+	markFresh(domains: readonly WorkspaceOsDomain[]) {
+		_state = markWorkspaceDomainsFresh(_state, domains);
 	}
 };
